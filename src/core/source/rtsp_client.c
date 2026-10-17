@@ -268,7 +268,7 @@ static int send_request(rtsp_t *r, const char *method, const char *uri, const ch
     char auth[768], req[2048];
     auth_header(r, method, uri, auth, sizeof auth);
     int n = snprintf(req, sizeof req,
-                     "%s %s RTSP/1.0\r\nCSeq: %d\r\nUser-Agent: dvr_home\r\n%s%s%s%s%s\r\n",
+                     "%s %s RTSP/1.0\r\nCSeq: %d\r\nUser-Agent: vigil\r\n%s%s%s%s%s\r\n",
                      method, uri, ++r->cseq, auth,
                      r->session[0] ? "Session: " : "", r->session,
                      r->session[0] ? "\r\n" : "", extra ? extra : "");

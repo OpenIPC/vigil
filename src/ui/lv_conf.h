@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
- * lv_conf.h — minimal LVGL v9.2 config for the DVR home screen.
+ * lv_conf.h — minimal LVGL v9.2 config for vigild's quad view.
  *
- * Target: 1280x720 on /dev/fb0 via the upstream lv_linux_fbdev driver —
- * RGB565 on hi3520dv200, ARGB8888 on hi3536dv100 (the Makefile passes
- * -DLV_COLOR_DEPTH=32 there).
+ * Target: 1280x720 on the platform's UI layer (hal_ui.h). The colour depth
+ * comes from the platform's CMake file (VIGIL_UI_COLOR_DEPTH, passed as
+ * LV_COLOR_DEPTH): 16 (RGB565) on hi3520dv200, 32 (ARGB8888) elsewhere.
  * No input devices (signage mode). The tick comes from frontend_ui.c
  * (lv_tick_set_cb on CLOCK_MONOTONIC).
  */

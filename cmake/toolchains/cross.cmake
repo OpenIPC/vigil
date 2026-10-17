@@ -1,6 +1,6 @@
 # Cross-compile with a GCC toolchain given by its prefix, e.g.
 #   cmake -B build-hi3536 --toolchain cmake/toolchains/cross.cmake \
-#         -DCROSS_PREFIX=$HOME/git/firmware/output-hi3536dv100/host/bin/arm-openipc-linux-gnueabi- \
+#         -DCROSS_PREFIX=<toolchain>/bin/arm-openipc-linux-gnueabi- \
 #         -DVIGIL_PLATFORM=hi3536dv100
 set(CMAKE_SYSTEM_NAME Linux)
 if(NOT CROSS_PREFIX)
