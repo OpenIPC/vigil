@@ -23,6 +23,15 @@
 
 /* ---- small helpers ------------------------------------------------------ */
 
+/* Case-insensitive strstr: strcasestr is a GNU extension (musl hides it). */
+static const char *ci_strstr(const char *hay, const char *needle)
+{
+    size_t n = strlen(needle);
+    for (; *hay; ++hay)
+        if (strncasecmp(hay, needle, n) == 0) return hay;
+    return NULL;
+}
+
 static void set_err(rtsp_t *r, const char *fmt, const char *arg)
 {
     snprintf(r->err, sizeof r->err, fmt, arg ? arg : "");
@@ -97,7 +106,7 @@ static void auth_param(const char *h, const char *key, char *out, size_t cap)
 {
     out[0] = 0;
     size_t kl = strlen(key);
-    for (const char *p = h; (p = strcasestr(p, key)) != NULL; p += kl) {
+    for (const char *p = h; (p = ci_strstr(p, key)) != NULL; p += kl) {
         if (p > h && isalnum((unsigned char)p[-1])) continue;
         const char *v = p + kl;
         while (*v == ' ') ++v;
@@ -322,7 +331,7 @@ static int request(rtsp_t *r, const char *method, const char *uri, const char *e
         /* Prefer Digest when the camera offers both. */
         char www[512] = "";
         const char *p = head, *dig = NULL;
-        while ((p = strcasestr(p, "\nWWW-Authenticate:")) != NULL) {
+        while ((p = ci_strstr(p, "\nWWW-Authenticate:")) != NULL) {
             p += 18;
             while (*p == ' ') ++p;
             if (strncasecmp(p, "Digest", 6) == 0) { dig = p; break; }
