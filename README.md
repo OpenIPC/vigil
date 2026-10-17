@@ -7,8 +7,8 @@ runs on HiSilicon and Rockchip boards today; SigmaStar and plain Linux /
 cloud hosts are part of the design.
 
 - **Network cameras** over RTSP or Xiongmai NETIP (DVRIP), H.264 and
-  H.265. They are decoded in hardware for display and recorded exactly as
-  received, with no re-encoding.
+  H.265. They are decoded in hardware for display and recorded without
+  re-encoding.
 - **Local analog inputs** on DVR boards: shown, then encoded in hardware
   for recording.
 - **Recording** into self-contained segments that play on their own, with

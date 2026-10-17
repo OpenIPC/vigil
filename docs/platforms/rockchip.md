@@ -3,7 +3,7 @@
 `VIGIL_PLATFORM=rockchip` targets RK3588 (Orange Pi 5 / 5 Plus, Rock 5,
 …) and, by design, RK356x, running Rockchip's vendor kernel (for example
 the Armbian "vendor" images with kernel 6.1). It is an NVR: network
-cameras are decoded and shown on HDMI and recorded as received.
+cameras are decoded and shown on HDMI and recorded without re-encoding.
 
 ## How it works
 

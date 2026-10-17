@@ -13,7 +13,7 @@ explains how the code is split so that this works.
   shows and *encodes* the video.
 - **NVR** (network video recorder): cameras are on the network and already
   send compressed H.264/H.265; the board *decodes* them for display and
-  stores the stream exactly as received.
+  stores the compressed stream without re-encoding.
 - **Access unit (AU)**: one compressed picture plus the units that belong
   with it, in Annex-B form (each unit prefixed by `00 00 00 01`).
 - **Keyframe**: an AU that decodes on its own (IDR). Every other picture
@@ -112,10 +112,14 @@ pictures after it would refer to a picture the decoder never got.
 
 ### Recording
 
-`seg_writer.c` writes the elementary stream exactly as received (no
-re-encoding, no container) into segments of `-S` seconds. Every segment
-starts at a keyframe with its parameter sets, so each file plays on its
-own (`ffplay CAM1_….h265`). `-K` limits how many segments each camera
+`seg_writer.c` writes the compressed elementary stream (no re-encoding,
+no container) into segments of `-S` seconds. What it writes is the
+normalizer's output, so it is not a byte-for-byte copy of the network
+data: cached parameter sets are added to keyframes that lack them,
+picture-less units are merged into the next picture, and anything before
+the first keyframe is dropped. The pictures themselves are untouched.
+Every segment starts at a keyframe with its parameter sets, so each file
+plays on its own (`ffplay CAM1_….h265`). `-K` limits how many segments each camera
 keeps. Independently, the writer keeps 10% of the filesystem (at least
 8 MiB) free: below that it deletes the oldest finished recording in the
 directory, so a full disk rolls recordings over instead of stopping them.

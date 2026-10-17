@@ -17,15 +17,16 @@
 set -eu
 BOARD=${1:?usage: $0 root@board}
 HERE=$(cd "$(dirname "$0")" && pwd)
-KMOD_DIR=${KMOD_DIR:?set KMOD_DIR to the openhisilicon kernel/ build}
-VFMW_KO=${VFMW_KO:-${HI3536DV100_SDK:?set HI3536DV100_SDK or VFMW_KO}/mpp/ko/hi3536dv100_vfmw.ko}
-VDEC_KO=${VDEC_KO:?set VDEC_KO to the revision-patched hi3536dv100_vdec.ko}
-CROSS_PREFIX=${CROSS_PREFIX:?set CROSS_PREFIX to the toolchain prefix (.../bin/arm-openipc-linux-gnueabi-)}
 
 if ssh "$BOARD" test -e /dev/fb0; then
     echo "MPP already loaded on $BOARD"
     exit 0
 fi
+
+KMOD_DIR=${KMOD_DIR:?set KMOD_DIR to the openhisilicon kernel/ build}
+VFMW_KO=${VFMW_KO:-${HI3536DV100_SDK:?set HI3536DV100_SDK or VFMW_KO}/mpp/ko/hi3536dv100_vfmw.ko}
+VDEC_KO=${VDEC_KO:?set VDEC_KO to the revision-patched hi3536dv100_vdec.ko}
+CROSS_PREFIX=${CROSS_PREFIX:?set CROSS_PREFIX to the toolchain prefix (.../bin/arm-openipc-linux-gnueabi-)}
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 for m in osal base sys jpegd tde region vgs vpss vou hifb hdmi; do

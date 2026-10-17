@@ -2,7 +2,7 @@
 
 `VIGIL_PLATFORM=generic` is the default. It has no media hardware: no
 decoder, no display, no capture inputs. `vigild` connects to the cameras,
-records their streams exactly as received, and prints each channel's status
+records their streams without re-encoding, and prints each channel's status
 to the log instead of drawing a UI.
 
 It serves three purposes:
