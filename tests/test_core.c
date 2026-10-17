@@ -357,6 +357,31 @@ static void test_rtsp_read(void)
     rtsp_free(&r);
 }
 
+/* ---- RTSP request headers ------------------------------------------------------------ */
+
+static void test_rtsp_request(void)
+{
+    int sv[2];
+    socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    rtsp_t r;
+    rtsp_init(&r, "rtsp://cam:8554/live");
+    r.fd = sv[0];
+    snprintf(r.session, sizeof r.session, "12345678");
+    CHECK(rtsp_keepalive(&r) == 0, "keepalive sent");
+    char req[1024];
+    ssize_t n = read(sv[1], req, sizeof req - 1);
+    req[n > 0 ? n : 0] = 0;
+    CHECK(strncmp(req, "OPTIONS rtsp://cam:8554/live RTSP/1.0\r\n", 39) == 0, "request line: %.40s", req);
+    CHECK(strstr(req, "\r\nCSeq: 1\r\n") != NULL, "CSeq");
+    CHECK(strstr(req, "\r\nUser-Agent: vigil\r\n") != NULL, "User-Agent");
+    CHECK(strstr(req, "\r\nSession: 12345678\r\n") != NULL, "Session");
+    CHECK(n > 4 && strcmp(req + n - 4, "\r\n\r\n") == 0, "request ends with an empty line");
+    close(sv[1]);
+    r.fd = -1;
+    close(sv[0]);
+    rtsp_free(&r);
+}
+
 /* ---- RTSP helpers ------------------------------------------------------------------- */
 
 static void test_rtsp_helpers(void)
@@ -490,6 +515,7 @@ int main(int argc, char **argv)
     test_au_norm();
     test_depay();
     test_rtsp_read();
+    test_rtsp_request();
     test_rtsp_helpers();
     test_capture_source();
     test_seg_writer();

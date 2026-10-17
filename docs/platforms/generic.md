@@ -19,7 +19,7 @@ It serves three purposes:
 ```sh
 git clone --recursive <repo> vigil && cd vigil
 cmake -B build && cmake --build build -j
-cd build && ctest --output-on-failure
+(cd build && ctest --output-on-failure)
 ```
 
 The end-to-end tests need Python 3 and ffmpeg. The RTSP tests also need
@@ -59,6 +59,8 @@ H.265 file. It is useful for trying vigil, or another NETIP client,
 without an XM camera:
 
 ```sh
+# terminal 1: the emulated camera (stop it with Ctrl-C)
 python3 tests/netip_server.py tests/data/testsrc_640x360.h264 --port 34567
+# terminal 2, from the repository root
 ./build/vigild -t 20 -c netip://admin:@127.0.0.1:34567/
 ```

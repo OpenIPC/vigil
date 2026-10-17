@@ -49,15 +49,18 @@ Neither MPP nor RGA is in the stock Debian/Ubuntu repositories, so a
 script builds both from pinned source revisions, natively on the board,
 into `/usr/local`:
 
-```sh
-apt install cmake meson ninja-build pkg-config libdrm-dev git build-essential
-scripts/rockchip/build-deps.sh             # PREFIX=/usr/local, WORK=/tmp/vigil-deps
-```
-
 - rockchip-linux/mpp (Apache-2.0)
 - librga from the `jellyfin-rga` branch of nyanmisaka/rk-mirrors
   (Apache-2.0). This is the source Jellyfin's ffmpeg builds use; the
   airockchip/librga repository ships binaries only.
+
+```sh
+sudo apt install cmake meson ninja-build pkg-config libdrm-dev git build-essential
+sudo scripts/rockchip/build-deps.sh        # PREFIX=/usr/local, WORK=/tmp/vigil-deps
+```
+
+The script installs into `PREFIX` and runs `ldconfig`, so it needs root
+for the default `/usr/local`.
 
 CI runs the same script on a GitHub arm64 runner and compiles the platform
 there. CI cannot run it: the runners have no VPU, RGA or display.
