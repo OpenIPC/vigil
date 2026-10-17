@@ -143,7 +143,10 @@ Only for boards with local video inputs; otherwise leave the stubs. Set
 - `hal_cap_signal(in)`: 1 while the input sees a video signal.
 - `hal_cap_stop(in)`.
 
-Users then add `-c capture:0 … -c capture:3`.
+Users then add one `-c capture:N` per input, N from 0 to `.capture` − 1
+(`capture:0` … `capture:3` on a four-input board). A `capture:N` beyond the
+board's inputs fails to start and keeps retrying, like an unreachable
+camera.
 
 ## 7. Bring-up scripts
 

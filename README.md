@@ -11,8 +11,8 @@ cloud hosts are part of the design.
   re-encoding.
 - **Local analog inputs** on DVR boards: shown, then encoded in hardware
   for recording.
-- **Recording** into self-contained segments that play on their own, with
-  a free-space reserve, so a full disk rolls over instead of stopping.
+- **Recording** into segments that play on their own, with a free-space
+  reserve: the oldest recordings are deleted when the disk fills up.
 
 ## Platforms
 

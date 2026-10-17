@@ -92,9 +92,10 @@ Each channel runs on its own thread (`src/core/channel.c`). The thread:
    access units.
 4. Runs each AU through the **normalizer** (`au_norm.c`). It makes AUs from
    every protocol look the same:
-   - Each keyframe carries all parameter sets. Some cameras send them only
-     once or out of band (in the RTSP SDP), so the normalizer caches them
-     and adds the missing ones.
+   - Each keyframe gets every parameter set seen so far. Some cameras send
+     them only once or out of band (in the RTSP SDP), so the normalizer
+     caches them and adds the ones a keyframe lacks. It cannot invent sets
+     the camera has not sent yet.
    - Units without a picture, which some cameras send as their own
      "frame", are merged into the next picture.
    - Nothing is passed on before the first keyframe, or after a gap until
@@ -118,11 +119,17 @@ normalizer's output, so it is not a byte-for-byte copy of the network
 data: cached parameter sets are added to keyframes that lack them,
 picture-less units are merged into the next picture, and anything before
 the first keyframe is dropped. The pictures themselves are untouched.
-Every segment starts at a keyframe with its parameter sets, so each file
-plays on its own (`ffplay CAM1_….h265`). `-K` limits how many segments each camera
-keeps. Independently, the writer keeps 10% of the filesystem (at least
-8 MiB) free: below that it deletes the oldest finished recording in the
-directory, so a full disk rolls recordings over instead of stopping them.
+Every segment starts at a keyframe, carrying all the parameter sets the
+camera has sent by then. So once a camera has supplied them, which is
+normally with its first keyframe or in the SDP, each file plays on its own
+(`ffplay CAM1_….h265`). `-K` limits how many segments each camera keeps.
+
+Independently, the writer tries to keep 10% of the filesystem (at least
+8 MiB) free. Below that it deletes the oldest finished recording in the
+directory, so a disk filled by recordings rolls over instead of stopping
+them. If nothing can be deleted (there are no finished recordings, or the
+space is used by other files), writing fails: the channel reports the
+failure and retries at the next keyframe.
 
 ### Status and events
 
