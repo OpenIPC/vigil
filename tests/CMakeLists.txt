@@ -13,6 +13,11 @@ if(Python3_FOUND)
   add_test(NAME netip_bad_password
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_netip.sh $<TARGET_FILE:vigild>
                    ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264 badpass)
+  foreach(case chatty stall audioonly shutdown)
+    add_test(NAME fault_${case}
+             COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_faults.sh $<TARGET_FILE:vigild>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264 ${case})
+  endforeach()
   foreach(case h264:none h264:digest h264:basic h265:none h264:wrong)
     string(REPLACE ":" "_" name ${case})
     add_test(NAME rtsp_${name}

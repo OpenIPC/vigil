@@ -3,12 +3,45 @@
 #define _DEFAULT_SOURCE
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
 
 #include "seg_writer.h"
+
+/* Segments currently open, across all writers of the process: the space
+ * guard never deletes one of these, however long it has been idle. */
+#define OPEN_MAX 64
+static char            g_open[OPEN_MAX][320];
+static pthread_mutex_t g_open_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void open_add(const char *path)
+{
+    pthread_mutex_lock(&g_open_lock);
+    for (int i = 0; i < OPEN_MAX; ++i)
+        if (!g_open[i][0]) { snprintf(g_open[i], sizeof g_open[i], "%s", path); break; }
+    pthread_mutex_unlock(&g_open_lock);
+}
+
+static void open_del(const char *path)
+{
+    pthread_mutex_lock(&g_open_lock);
+    for (int i = 0; i < OPEN_MAX; ++i)
+        if (g_open[i][0] && strcmp(g_open[i], path) == 0) { g_open[i][0] = 0; break; }
+    pthread_mutex_unlock(&g_open_lock);
+}
+
+static int is_open(const char *path)
+{
+    int found = 0;
+    pthread_mutex_lock(&g_open_lock);
+    for (int i = 0; i < OPEN_MAX && !found; ++i) found = g_open[i][0] && strcmp(g_open[i], path) == 0;
+    pthread_mutex_unlock(&g_open_lock);
+    return found;
+}
 
 static int mkdir_p(const char *path)
 {
@@ -47,15 +80,26 @@ void seg_set_ext(seg_writer_t *w, const char *ext)
     snprintf(w->ext, sizeof w->ext, "%s", ext);
 }
 
-void seg_close(seg_writer_t *w)
+/* The newest segment name (the open one while w->f is set). */
+static const char *last_name(const seg_writer_t *w)
 {
-    if (w->f) fclose(w->f);
-    w->f = NULL;
+    return w->names[(w->head + SEG_KEEP_MAX - 1) % SEG_KEEP_MAX];
 }
 
 const char *seg_current(const seg_writer_t *w)
 {
-    return w->f ? w->names[(w->head + SEG_KEEP_MAX - 1) % SEG_KEEP_MAX] : "";
+    return w->f ? last_name(w) : "";
+}
+
+int seg_close(seg_writer_t *w)
+{
+    if (!w->f) return 0;
+    /* fclose flushes the stdio buffer: its error is the segment's tail. */
+    int rc = fclose(w->f) == 0 ? 0 : -1;
+    w->f = NULL;
+    open_del(last_name(w));
+    if (rc < 0) w->failed = 1;
+    return rc;
 }
 
 static uint64_t free_bytes(const seg_writer_t *w)
@@ -72,20 +116,20 @@ static int drop_oldest(seg_writer_t *w)
     int closed = w->f ? 1 : 0;              /* the newest entry is open */
     if (w->n_names - closed <= 0) return -1;
     int oldest = (w->head + SEG_KEEP_MAX - w->n_names) % SEG_KEEP_MAX;
-    unlink(w->names[oldest]);
+    if (!is_open(w->names[oldest])) unlink(w->names[oldest]);
     --w->n_names;
     return 0;
 }
 
 /* Low on space: delete the oldest finished recording in the directory,
- * whichever camera made it (CAM*_*.h26x, last written more than 2 s ago,
- * so not an open segment). Returns 0 if one was deleted. */
+ * whichever camera made it (CAM*_*.h26x not open in this process).
+ * Returns 0 if one was deleted. */
 static int drop_oldest_in_dir(const seg_writer_t *w)
 {
     DIR *d = opendir(w->dir);
     if (!d) return -1;
     char oldest[sizeof w->dir + 256 + 2] = "";
-    time_t oldest_t = 0, now = time(NULL);
+    time_t oldest_t = 0;
     struct dirent *e;
     while ((e = readdir(d)) != NULL) {
         const char *n = e->d_name, *dot = strrchr(n, '.');
@@ -93,7 +137,7 @@ static int drop_oldest_in_dir(const seg_writer_t *w)
         char path[sizeof oldest];
         struct stat st;
         snprintf(path, sizeof path, "%s/%s", w->dir, n);
-        if (stat(path, &st) < 0 || !S_ISREG(st.st_mode) || now - st.st_mtime < 2) continue;
+        if (stat(path, &st) < 0 || !S_ISREG(st.st_mode) || is_open(path)) continue;
         if (!oldest[0] || st.st_mtime < oldest_t) {
             snprintf(oldest, sizeof oldest, "%s", path);
             oldest_t = st.st_mtime;
@@ -103,17 +147,21 @@ static int drop_oldest_in_dir(const seg_writer_t *w)
     return oldest[0] ? unlink(oldest) : -1;
 }
 
-/* Keep the reserve free; checked once a second. */
+/* Keep the reserve free. Checked once a second, and at most one file is
+ * deleted per check: if deleting does not bring the space back (a file
+ * still held by a reader, a disk filled by something else), the guard
+ * must not go on to wipe every recording in one pass. */
 static void guard_space(seg_writer_t *w)
 {
     time_t now = time(NULL);
     if (now == w->space_checked) return;
     w->space_checked = now;
-    while (free_bytes(w) < w->reserve) {
-        if (drop_oldest_in_dir(w) == 0) continue;
-        seg_close(w);                       /* nothing finished left: roll over */
-        break;
-    }
+    uint64_t before = free_bytes(w);
+    if (before >= w->reserve) return;
+    if (drop_oldest_in_dir(w) == 0 && free_bytes(w) > before) return;
+    /* Nothing finished to delete, or deleting did not help: roll the open
+     * segment over so it becomes deletable at the next check. */
+    seg_close(w);
 }
 
 static int seg_open(seg_writer_t *w)
@@ -124,17 +172,27 @@ static int seg_open(seg_writer_t *w)
     char stamp[32];
     strftime(stamp, sizeof stamp, "%Y%m%d_%H%M%S", &tm);
 
-    /* Retention: drop the oldest of our segments before adding one. */
+    /* Retention: drop the oldest of our segments before adding one. (Low
+     * space is guard_space's job, which runs before every write.) */
     if (w->keep && w->n_names >= w->keep) drop_oldest(w);
-    if (free_bytes(w) < w->reserve) drop_oldest_in_dir(w);
+
+    /* A unique name: a segment closed and reopened within the same second
+     * (codec change, roll-over) must not truncate the previous one. */
     char name[sizeof w->names[0]];
-    snprintf(name, sizeof name, "%s/%s_%s.%s", w->dir, w->prefix, stamp, w->ext);
-    snprintf(w->names[w->head], sizeof w->names[0], "%s", name);
-    w->f = fopen(name, "wb");
-    if (!w->f) {
+    int fd = -1;
+    for (int n = 0; n < 100 && fd < 0; ++n) {
+        if (n == 0) snprintf(name, sizeof name, "%s/%s_%s.%s", w->dir, w->prefix, stamp, w->ext);
+        else        snprintf(name, sizeof name, "%s/%s_%s_%d.%s", w->dir, w->prefix, stamp, n, w->ext);
+        fd = open(name, O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (fd < 0 && errno != EEXIST) break;
+    }
+    if (fd < 0 || !(w->f = fdopen(fd, "wb"))) {
+        if (fd >= 0) close(fd);
         w->failed = 1;
         return -1;
     }
+    snprintf(w->names[w->head], sizeof w->names[0], "%s", name);
+    open_add(name);
     w->head = (w->head + 1) % SEG_KEEP_MAX;
     if (w->n_names < SEG_KEEP_MAX) ++w->n_names;
     w->seg_start = now;
@@ -144,17 +202,18 @@ static int seg_open(seg_writer_t *w)
 
 int seg_write(seg_writer_t *w, const uint8_t *data, size_t len, int key)
 {
+    int rc = 0;
     guard_space(w);
     if (key && (!w->f || time(NULL) - w->seg_start >= w->seg_secs)) {
-        seg_close(w);
+        if (seg_close(w) < 0) rc = -1;               /* the old tail is lost; go on */
         if (seg_open(w) < 0) return -1;
     }
-    if (!w->f) return 0;                /* waiting for the first keyframe */
+    if (!w->f) return rc;                            /* waiting for the first keyframe */
     if (fwrite(data, 1, len, w->f) != len) {
         w->failed = 1;
         seg_close(w);
         return -1;
     }
     w->bytes += len;
-    return 0;
+    return rc;
 }

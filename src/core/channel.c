@@ -19,7 +19,7 @@
 #include "seg_writer.h"
 #include "source.h"
 
-#define NO_DATA_SECS       5        /* reconnect after this long without data */
+#define NO_DATA_SECS       5        /* reconnect after this long without video */
 #define RECONNECT_MAX_SECS 10
 #define DEC_RETRY_SECS     10       /* retry a failed decoder setup */
 
@@ -43,11 +43,12 @@ typedef struct {
     pthread_mutex_t lock;
     channel_status_t st;
     unsigned        frames;
+    time_t          last_video;     /* last access unit from the source */
 } channel_t;
 
 static channel_t     g_ch[CHANNEL_MAX];
 static int           g_n;
-static volatile int  g_stop;
+static volatile int  g_stop;        /* sources watch it too (source_t.stop) */
 static int           g_can_decode;
 
 static void set_state(channel_t *c, int live, const char *fmt, ...)
@@ -116,6 +117,15 @@ static int decoder_ensure(channel_t *c, vg_codec_t codec)
     return 1;
 }
 
+/* Close the open segment (caller holds c->lock); report a lost tail. */
+static void rec_close(channel_t *c)
+{
+    if (seg_close(&c->seg) < 0) {
+        vg_log("CAM%d: closing a recording failed; its last data is lost", c->idx + 1);
+        events_push(c->idx + 1, "REC failed");
+    }
+}
+
 /* ---- per-channel thread --------------------------------------------------- */
 
 static void on_au(void *user, const vg_au_t *au)
@@ -154,12 +164,15 @@ static void on_raw_au(void *user, const vg_au_t *au)
 {
     channel_t *c = user;
     if (au->codec == VG_CODEC_NONE) return;
+    /* Only video counts as "the camera is alive": RTCP, audio or info
+     * packets must not hold off the no-data reconnect. */
+    c->last_video = time(NULL);
     if (au->codec != c->norm.codec) {
         au_norm_free(&c->norm);
         au_norm_init(&c->norm, au->codec);
         const char *ext = au->codec == VG_CODEC_H264 ? "h264" : "h265";
         pthread_mutex_lock(&c->lock);
-        seg_close(&c->seg);
+        rec_close(c);
         seg_set_ext(&c->seg, ext);
         c->st.codec = au->codec;
         pthread_mutex_unlock(&c->lock);
@@ -215,7 +228,8 @@ static void *channel_thread(void *arg)
         events_push(ch, "online");
         set_state(c, 1, "");
 
-        time_t last_rx = time(NULL), sec = last_rx;
+        time_t sec = time(NULL);
+        c->last_video = sec;
         while (!g_stop) {
             int rc = c->src->ops->poll(c->src, on_raw_au, c);
             time_t now = time(NULL);
@@ -224,8 +238,7 @@ static void *channel_thread(void *arg)
                 events_push(ch, "offline");
                 break;
             }
-            if (rc > 0) last_rx = now;
-            else if (now - last_rx >= NO_DATA_SECS) {
+            if (now - c->last_video >= NO_DATA_SECS) {
                 vg_log("CAM%d %s: no data for %d s", ch, c->src->host, NO_DATA_SECS);
                 events_push(ch, "offline");
                 break;
@@ -240,7 +253,7 @@ static void *channel_thread(void *arg)
         }
         c->src->ops->close(c->src);
         pthread_mutex_lock(&c->lock);
-        seg_close(&c->seg);
+        rec_close(c);
         c->st.fps = 0;
         c->st.live = 0;
         pthread_mutex_unlock(&c->lock);
@@ -268,6 +281,7 @@ int channels_start(const channels_config_t *cfg, const vg_rect_t *tiles)
         c->idx = i;
         pthread_mutex_init(&c->lock, NULL);
         c->src = source_create(cfg->urls[i], i);
+        if (c->src) c->src->stop = &g_stop;
         if (!c->src) {
             vg_log("CAM%d: cannot use '%s' (schemes: %s)", i + 1, cfg->urls[i], source_schemes());
             g_n = i;
@@ -288,9 +302,14 @@ int channels_start(const channels_config_t *cfg, const vg_rect_t *tiles)
         if (tiles && caps->display && !c->src->ops->self_displayed)
             hal_display_set_tile(i, &tiles[i]);
     }
-    for (int i = 0; i < g_n; ++i)
-        if (pthread_create(&g_ch[i].thread, NULL, channel_thread, &g_ch[i]) == 0)
-            g_ch[i].thread_up = 1;
+    for (int i = 0; i < g_n; ++i) {
+        if (pthread_create(&g_ch[i].thread, NULL, channel_thread, &g_ch[i]) != 0) {
+            vg_log("CAM%d: cannot start its thread", i + 1);
+            channels_stop();
+            return -1;
+        }
+        g_ch[i].thread_up = 1;
+    }
     return 0;
 }
 
@@ -303,7 +322,7 @@ void channels_stop(void)
         c->thread_up = 0;
         decoder_close(c);
         if (c->src && !c->src->ops->self_displayed && hal_caps()->display) hal_display_clear_tile(i);
-        seg_close(&c->seg);
+        rec_close(c);
         source_destroy(c->src);
         c->src = NULL;
         au_norm_free(&c->norm);

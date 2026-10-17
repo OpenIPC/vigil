@@ -30,7 +30,11 @@ typedef struct {
     char session[128];
     int  session_timeout;           /* seconds, from the Session header */
     int  auth;                      /* 0 none, 1 Basic, 2 Digest */
-    char realm[128], nonce[128];
+    char realm[128], nonce[128], opaque[128];
+    int  qop_auth;                  /* Digest challenge asked for qop=auth */
+    unsigned nc;                    /* Digest nonce count */
+    int  rtp_channel;               /* interleaved channel of RTP (SETUP reply) */
+    const volatile int *stop;       /* optional: abandon waits when *stop is set */
 
     /* From the SDP. */
     vg_codec_t codec;
@@ -67,5 +71,15 @@ int rtsp_keepalive(rtsp_t *r);
 void rtsp_close(rtsp_t *r);
 
 void rtsp_free(rtsp_t *r);
+
+/* RFC 2617 Digest response (MD5). qop NULL/"" = legacy form without
+ * nc/cnonce. Exposed for tests. */
+void rtsp_digest_response(const char *user, const char *realm, const char *pass,
+                          const char *method, const char *uri, const char *nonce,
+                          const char *nc, const char *cnonce, const char *qop,
+                          char out[33]);
+
+/* RTP channel from a Transport header's "interleaved=a-b" (a), or 0. */
+int rtsp_transport_channel(const char *transport);
 
 #endif /* RTSP_CLIENT_H */

@@ -102,38 +102,53 @@ static int send_msg(netip_t *n, int msgid, const char *json)
     return send(n->fd, buf, total, MSG_NOSIGNAL) == (ssize_t)total ? 0 : -1;
 }
 
-/* Read exactly `len` bytes, waiting up to `secs` (1 s socket timeout per
- * read). Used only during login/claim. */
-static int recv_all(netip_t *n, uint8_t *buf, size_t len, int secs)
+#define TRANSACT_SECS 10           /* a whole login/claim exchange */
+
+/* Read exactly `len` bytes before `deadline` (1 s socket timeout per
+ * read), giving up early when the channel is stopping. Login/claim only.
+ * Returns 0, -1 on a broken connection, -2 on timeout or stop. */
+static int recv_all(source_t *s, uint8_t *buf, size_t len, time_t deadline)
 {
+    netip_t *n = s->priv;
     size_t got = 0;
-    for (int waited = 0; got < len; ) {
+    while (got < len) {
+        if ((s->stop && *s->stop) || time(NULL) >= deadline) return -2;
         ssize_t r = recv(n->fd, buf + got, len - got, 0);
         if (r > 0) { got += (size_t)r; continue; }
-        if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) && ++waited < secs) continue;
+        if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) continue;
         return -1;
     }
     return 0;
 }
 
-/* Request/response for the login and claim steps. */
+/* Request/response for the login and claim steps: the reply must arrive
+ * within TRANSACT_SECS, however many unrelated messages come first. */
 static int transact(source_t *s, int msgid, const char *json, char *reply, size_t cap)
 {
     netip_t *n = s->priv;
+    time_t deadline = time(NULL) + TRANSACT_SECS;
     if (send_msg(n, msgid, json) < 0) {
         snprintf(s->err, sizeof s->err, "send failed");
         return -1;
     }
     for (;;) {
         uint8_t h[20];
-        if (recv_all(n, h, 20, 5) < 0 || h[0] != 0xff) {
-            snprintf(s->err, sizeof s->err, "no reply (msg %d)", msgid);
+        int rc = recv_all(s, h, 20, deadline);
+        if (rc == 0 && h[0] != 0xff) {
+            snprintf(s->err, sizeof s->err, "protocol error (msg %d)", msgid);
             return -1;
         }
-        uint32_t len = get32(h + 16);
+        uint32_t len = rc == 0 ? get32(h + 16) : 0;
         if (len > 64 * 1024) { snprintf(s->err, sizeof s->err, "bad reply"); return -1; }
-        uint8_t *b = malloc(len + 1);
-        if (!b || recv_all(n, b, len, 5) < 0) { free(b); snprintf(s->err, sizeof s->err, "short reply"); return -1; }
+        uint8_t *b = rc == 0 ? malloc(len + 1) : NULL;
+        if (rc == 0 && !b) { snprintf(s->err, sizeof s->err, "out of memory"); return -1; }
+        if (rc == 0) rc = recv_all(s, b, len, deadline);
+        if (rc < 0) {
+            free(b);
+            snprintf(s->err, sizeof s->err, rc == -2 ? "no reply to msg %d within %d s" : "connection closed (msg %d)",
+                     msgid, TRANSACT_SECS);
+            return -1;
+        }
         b[len] = 0;
         int rid = h[14] | h[15] << 8;
         if (rid == msgid + 1 || msgid == MSG_MONITOR_CLAIM) {
@@ -340,9 +355,13 @@ static int netip_poll(source_t *s, au_emit_fn emit, void *user)
         send_msg(n, MSG_KEEPALIVE, req);
         n->last_ka = now;
     }
+    /* The first read of each call waits (1 s socket timeout), whether it is
+     * for a header or for the rest of a body; later ones only drain what is
+     * already there. Never a busy loop. */
     for (int reads = 0; reads < 64; ++reads) {
+        int flags = reads ? MSG_DONTWAIT : 0;
         if (n->hdr_got < 20) {
-            ssize_t r = recv(n->fd, n->hdr + n->hdr_got, 20 - n->hdr_got, reads ? MSG_DONTWAIT : 0);
+            ssize_t r = recv(n->fd, n->hdr + n->hdr_got, 20 - n->hdr_got, flags);
             if (r == 0) { snprintf(s->err, sizeof s->err, "connection closed"); return -1; }
             if (r < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return got;
@@ -363,7 +382,7 @@ static int netip_poll(source_t *s, au_emit_fn emit, void *user)
             }
         }
         if (n->body_got < n->body_len) {
-            ssize_t r = recv(n->fd, n->body + n->body_got, n->body_len - n->body_got, MSG_DONTWAIT);
+            ssize_t r = recv(n->fd, n->body + n->body_got, n->body_len - n->body_got, flags);
             if (r == 0) { snprintf(s->err, sizeof s->err, "connection closed"); return -1; }
             if (r < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return got;

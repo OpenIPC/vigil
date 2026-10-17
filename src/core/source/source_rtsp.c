@@ -35,6 +35,7 @@ static int rtsp_src_create(source_t *s)
 static int rtsp_src_open(source_t *s)
 {
     rtsp_src_t *r = s->priv;
+    r->rtsp.stop = s->stop;
     if (rtsp_open(&r->rtsp, 3000) < 0) {
         snprintf(s->err, sizeof s->err, "%s", r->rtsp.err);
         return -1;
@@ -66,7 +67,8 @@ static int rtsp_src_poll(source_t *s, au_emit_fn emit, void *user)
         snprintf(s->err, sizeof s->err, "%s", r->rtsp.err);
         return -1;
     }
-    if (rc == 1 && chan == 0) depay_push(&r->depay, p, n, (depay_au_cb)emit, user);
+    /* RTP arrives on the channel SETUP assigned; RTCP on the next one. */
+    if (rc == 1 && chan == r->rtsp.rtp_channel) depay_push(&r->depay, p, n, emit, user);
 
     time_t now = time(NULL);
     if (now - r->last_ka >= r->rtsp.session_timeout / 2) {

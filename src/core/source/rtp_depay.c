@@ -161,15 +161,21 @@ int depay_push(depay_t *d, const uint8_t *pkt, size_t len, depay_au_cb cb, void 
     uint32_t ts     = ((uint32_t)pkt[4] << 24) | ((uint32_t)pkt[5] << 16) |
                       ((uint32_t)pkt[6] << 8) | pkt[7];
 
-    if (d->have_seq && seq != (uint16_t)(d->seq + 1)) {
-        d->lost += (uint16_t)(seq - d->seq - 1);
-        d->au_broken = 1;
-    }
+    int gap = d->have_seq && seq != (uint16_t)(d->seq + 1);
+    if (gap) d->lost += (uint16_t)(seq - d->seq - 1);
     d->seq = seq;
     d->have_seq = 1;
 
-    /* Marker bit lost with the previous packet: a new timestamp ends the AU. */
-    if (d->have_ts && ts != d->ts && (d->au_len || d->au_broken)) au_flush(d, cb, user);
+    /* A new timestamp ends the previous AU when its marker bit was lost.
+     * If packets went missing too, they were its tail or this AU's head —
+     * there is no telling which, so neither is trusted. */
+    if (d->have_ts && ts != d->ts && (d->au_len || d->au_broken)) {
+        if (gap) d->au_broken = 1;
+        au_flush(d, cb, user);
+    }
+    /* After any flush: the gap breaks the AU this packet belongs to (e.g.
+     * the first slice of a multi-slice IDR went missing). */
+    if (gap) d->au_broken = 1;
     d->ts = ts;
     d->have_ts = 1;
 

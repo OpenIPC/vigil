@@ -29,7 +29,7 @@ void au_norm_reset(au_norm_t *n)
 {
     n->need_key = 1;
     n->pend_len = 0;
-    n->pend_sps = 0;
+    n->pend_ps = 0;
 }
 
 const uint8_t *au_next_nal(const uint8_t *buf, size_t len, size_t *pos, size_t *nal_len)
@@ -118,49 +118,57 @@ static int grow(uint8_t **buf, size_t *cap, size_t need)
 
 void au_norm_push(au_norm_t *n, const vg_au_t *in, au_emit_fn emit, void *user)
 {
-    int vcl = 0, key = 0, sps = 0;
+    int vcl = 0, key = 0;
+    unsigned have = 0;                      /* parameter-set slots this AU carries */
     size_t pos = 0, nl;
     const uint8_t *nal;
     while ((nal = au_next_nal(in->data, in->len, &pos, &nl)) != NULL) {
         if (nl < 2) continue;
         int kind = nal_ps(n->codec, nal);
-        if (kind != NAL_OTHER) cache_ps(n, nal, nl, kind);
-        if (kind == NAL_SPS) sps = 1;
+        if (kind != NAL_OTHER) {
+            cache_ps(n, nal, nl, kind);
+            int s = ps_slot(n->codec, kind);
+            if (s >= 0) have |= 1u << s;
+        }
         if (nal_vcl(n->codec, nal)) vcl = 1;
         if (nal_key(n->codec, nal)) key = 1;
     }
     if (in->discont) {
         n->need_key = 1;
         n->pend_len = 0;
-        n->pend_sps = 0;
+        n->pend_ps = 0;
     }
 
     if (!vcl) {
         /* Parameter sets / SEI on their own: keep them for the next picture. */
         if (n->pend_len + in->len > PEND_MAX || grow(&n->pend, &n->pend_cap, n->pend_len + in->len) < 0) {
             n->pend_len = 0;
-            n->pend_sps = 0;
+            n->pend_ps = 0;
             return;
         }
         memcpy(n->pend + n->pend_len, in->data, in->len);
         n->pend_len += in->len;
-        n->pend_sps |= sps;
+        n->pend_ps |= have;
         return;
     }
     if (n->need_key && !key) {
         n->pend_len = 0;
-        n->pend_sps = 0;
+        n->pend_ps = 0;
         return;
     }
     n->need_key = 0;
 
-    /* Output: [cached parameter sets, for a keyframe that lacks them]
+    /* Output: [cached parameter sets this keyframe lacks]
      *         + [carried picture-less units] + the AU. */
+    have |= n->pend_ps;
+    unsigned add = 0;
     size_t ps = 0;
-    int add_ps = key && !sps && !n->pend_sps;
-    if (add_ps)
+    if (key)
         for (int i = 0; i < AU_NORM_PS_MAX; ++i)
-            if (n->ps_len[i]) ps += sizeof START_CODE + n->ps_len[i];
+            if (n->ps_len[i] && !(have & (1u << i))) {
+                add |= 1u << i;
+                ps += sizeof START_CODE + n->ps_len[i];
+            }
 
     vg_au_t out = *in;
     out.key = key;
@@ -169,14 +177,13 @@ void au_norm_push(au_norm_t *n, const vg_au_t *in, au_emit_fn emit, void *user)
         size_t total = ps + n->pend_len + in->len;
         if (grow(&n->out, &n->out_cap, total) < 0) return;
         size_t o = 0;
-        if (add_ps)
-            for (int i = 0; i < AU_NORM_PS_MAX; ++i) {
-                if (!n->ps_len[i]) continue;
-                memcpy(n->out + o, START_CODE, sizeof START_CODE);
-                o += sizeof START_CODE;
-                memcpy(n->out + o, n->ps[i], n->ps_len[i]);
-                o += n->ps_len[i];
-            }
+        for (int i = 0; i < AU_NORM_PS_MAX; ++i) {
+            if (!(add & (1u << i))) continue;
+            memcpy(n->out + o, START_CODE, sizeof START_CODE);
+            o += sizeof START_CODE;
+            memcpy(n->out + o, n->ps[i], n->ps_len[i]);
+            o += n->ps_len[i];
+        }
         memcpy(n->out + o, n->pend, n->pend_len);
         o += n->pend_len;
         memcpy(n->out + o, in->data, in->len);
@@ -184,6 +191,6 @@ void au_norm_push(au_norm_t *n, const vg_au_t *in, au_emit_fn emit, void *user)
         out.len = total;
     }
     n->pend_len = 0;
-    n->pend_sps = 0;
+    n->pend_ps = 0;
     emit(user, &out);
 }

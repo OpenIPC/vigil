@@ -52,6 +52,9 @@ struct source {
     size_t      ps_len[SOURCE_PS_MAX];
     int         ps_n;
     int         index;              /* channel index (capture sources use it) */
+    /* Set by the channel: drivers abandon connects and waits when *stop is
+     * set, so a stop never waits for a slow camera. */
+    const volatile int *stop;
     void       *priv;
 };
 

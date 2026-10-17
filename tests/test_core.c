@@ -10,8 +10,12 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 
+#include <pthread.h>
+
 #include "au_norm.h"
+#include "hal_capture.h"
 #include "rtp_depay.h"
+#include "source.h"
 #include "rtsp_client.h"
 #include "seg_writer.h"
 #include "sps.h"
@@ -169,6 +173,23 @@ static void test_au_norm(void)
     CHECK(s.n == 4 && s.keys == 3, "keyframe after discontinuity");
     CHECK(a.info_gen == 1, "info_gen stable for the same SPS");
 
+    /* A keyframe that carries its SPS but not its VPS/PPS gets the cached
+     * VPS and PPS (not "has an SPS, so it has them all"). */
+    nalref_t sps_idr[2] = { nals[1], nals[3] };
+    au = make_au(VG_CODEC_H265, sps_idr, 2, buf);
+    au_norm_push(&a, &au, sink, &s);
+    {
+        size_t pos = 0, nl;
+        const uint8_t *nal;
+        int vps = 0, pps = 0;
+        while ((nal = au_next_nal(s.last, s.len, &pos, &nl)) != NULL) {
+            vps += nal_type(VG_CODEC_H265, nal) == 32;
+            pps += nal_type(VG_CODEC_H265, nal) == 34;
+        }
+        CHECK(s.n == 5 && s.sps_count == 1 && vps == 1 && pps == 1,
+              "SPS-only keyframe: sps=%d vps=%d pps=%d", s.sps_count, vps, pps);
+    }
+
     au_norm_free(&a);
     free(b);
 }
@@ -286,6 +307,15 @@ static void depay_case(const char *file, vg_codec_t c)
     for (int i = 0; i < np; ++i) depay_push(&d, pkts[i], plen[i], dsink, &s);
     CHECK(s.n == 2 && s.discont == 1 && d.lost == 1, "%s: discontinuity flagged (n=%d discont=%d lost=%llu)",
           file, s.n, s.discont, (unsigned long long)d.lost);
+
+    /* Lose the FIRST packet of an AU whose timestamp is new: the packet that
+     * reveals the gap also starts the AU, and that AU must still be dropped. */
+    np = packetize(c, nals, cnt, &seq, 19800, pkts, plen, 512, 1400);
+    for (int i = 1; i < np; ++i) depay_push(&d, pkts[i], plen[i], dsink, &s);
+    CHECK(s.n == 2, "%s: AU missing its first packet emitted", file);
+    np = packetize(c, nals, cnt, &seq, 23400, pkts, plen, 512, 1400);
+    for (int i = 0; i < np; ++i) depay_push(&d, pkts[i], plen[i], dsink, &s);
+    CHECK(s.n == 3 && s.discont == 2, "%s: next AU flagged (n=%d discont=%d)", file, s.n, s.discont);
     depay_free(&d);
     free(b);
 }
@@ -327,6 +357,68 @@ static void test_rtsp_read(void)
     rtsp_free(&r);
 }
 
+/* ---- RTSP helpers ------------------------------------------------------------------- */
+
+static void test_rtsp_helpers(void)
+{
+    /* RFC 2617 section 3.5 example (qop=auth). */
+    char r[33];
+    rtsp_digest_response("Mufasa", "testrealm@host.com", "Circle Of Life", "GET", "/dir/index.html",
+                         "dcd98b7102dd2f0e8b11d0f600bfb0c093", "00000001", "0a4f113b", "auth", r);
+    CHECK(strcmp(r, "6629fae49393a05397450978507c4ef1") == 0, "digest qop=auth: %s", r);
+    rtsp_digest_response("u", "r", "p", "DESCRIBE", "rtsp://h/s", "n", "", "", NULL, r);
+    CHECK(strlen(r) == 32, "legacy digest");
+    CHECK(rtsp_transport_channel("RTP/AVP/TCP;unicast;interleaved=2-3;ssrc=1234") == 2, "interleaved=2-3");
+    CHECK(rtsp_transport_channel("RTP/AVP/TCP;unicast") == 0, "no interleaved");
+}
+
+/* ---- capture source (fake HAL) ------------------------------------------------------- */
+
+static hal_cap_cb g_cap_cb;
+static void      *g_cap_user;
+int  hal_cap_start(int in, int ch, hal_cap_cb cb, void *user) { (void)ch; if (in != 0) return -1; g_cap_cb = cb; g_cap_user = user; return 0; }
+void hal_cap_stop(int in) { (void)in; g_cap_cb = NULL; }
+int  hal_cap_signal(int in) { return in == 0; }
+
+typedef struct { int n, discont, first_discont_at; uint8_t first[8]; } csink_t;
+
+static void csink(void *user, const vg_au_t *au)
+{
+    csink_t *s = user;
+    if (au->discont && s->first_discont_at < 0) s->first_discont_at = s->n;
+    if (s->n == 0) memcpy(s->first, au->data, 4);
+    s->discont += au->discont;
+    ++s->n;
+}
+
+static void test_capture_source(void)
+{
+    static const volatile int stop = 0;
+    CHECK(source_create("capture:x", 0) == NULL, "bad capture URL accepted");
+    source_t *src = source_create("capture:0", 2);
+    CHECK(src && src->ops->self_displayed, "capture source");
+    if (!src) return;
+    src->stop = &stop;
+    CHECK(src->ops->open(src) == 0 && g_cap_cb, "capture open");
+
+    /* 40 AUs into a 32-deep queue: the 8 oldest are dropped, and the gap is
+     * marked on the first AU that survives it. */
+    uint8_t data[4];
+    for (int i = 0; i < 40; ++i) {
+        memcpy(data, &i, sizeof i);
+        vg_au_t au = { .codec = VG_CODEC_H264, .data = data, .len = 4, .key = i == 0 };
+        g_cap_cb(g_cap_user, &au);
+    }
+    csink_t cs = { .first_discont_at = -1 };
+    CHECK(src->ops->poll(src, csink, &cs) == 1, "capture poll");
+    int first;
+    memcpy(&first, cs.first, sizeof first);
+    CHECK(cs.n == 32 && first == 8 && cs.discont == 1 && cs.first_discont_at == 0,
+          "overflow: n=%d first=%d discont=%d at=%d", cs.n, first, cs.discont, cs.first_discont_at);
+    source_destroy(src);
+    CHECK(g_cap_cb == NULL, "capture stopped on destroy");
+}
+
 /* ---- segment writer ---------------------------------------------------------------- */
 
 static int count_files(const char *dir)
@@ -351,12 +443,41 @@ static void test_seg_writer(void)
     CHECK(count_files(dir) == 0 && w.bytes == 0, "written before the first keyframe");
     seg_write(&w, data, sizeof data, 1);
     CHECK(count_files(dir) == 1 && w.bytes == 1000, "first segment");
-    for (int i = 0; i < 4; ++i) {
+
+    /* Closed and reopened within the same second: a second file, not a
+     * truncated first one. */
+    seg_close(&w);
+    seg_write(&w, data, sizeof data, 1);
+    CHECK(count_files(dir) == 2, "same-second reopen: %d files", count_files(dir));
+    for (int i = 0; i < 3; ++i) {
         sleep(1);
         seg_write(&w, data, sizeof data, 1);           /* rotates every second */
     }
     seg_close(&w);
     CHECK(count_files(dir) == 2, "keep=2 left %d files", count_files(dir));
+
+    /* Space guard: an idle open segment of another writer is never deleted,
+     * and one check deletes at most one finished file. */
+    seg_writer_t idle, busy;
+    seg_init(&idle, dir, "CAM2", 3600, 0);
+    seg_set_ext(&idle, "h265");
+    seg_write(&idle, data, sizeof data, 1);
+    fflush(idle.f);
+    char idle_name[320];
+    snprintf(idle_name, sizeof idle_name, "%s", seg_current(&idle));
+    sleep(3);                                       /* older than any mtime heuristic */
+    seg_init(&busy, dir, "CAM3", 3600, 0);
+    seg_set_ext(&busy, "h265");
+    busy.reserve = UINT64_MAX;                      /* always "low on space" */
+    int before = count_files(dir);
+    seg_write(&busy, data, sizeof data, 1);
+    struct stat st;
+    CHECK(stat(idle_name, &st) == 0, "the guard deleted another writer's open segment");
+    CHECK(count_files(dir) >= before - 1 + 1, "one check deleted more than one file (%d -> %d)",
+          before, count_files(dir));
+    seg_close(&idle);
+    seg_close(&busy);
+
     char cmd[64];
     snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
     if (system(cmd)) {}
@@ -369,6 +490,8 @@ int main(int argc, char **argv)
     test_au_norm();
     test_depay();
     test_rtsp_read();
+    test_rtsp_helpers();
+    test_capture_source();
     test_seg_writer();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;

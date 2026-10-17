@@ -3,7 +3,7 @@
  * hal_capture.h. The platform shows the input in the channel's tile and
  * encodes it; its encoded access units arrive on a platform thread and
  * are queued here for the channel thread (bounded: on overflow the
- * oldest are dropped and the next AU is flagged as a discontinuity). */
+ * oldest are dropped and the oldest AU left is flagged as a discontinuity). */
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,8 +30,6 @@ typedef struct {
     qitem_t         q[QLEN];
     int             head, n;
     size_t          bytes;
-    int             dropped;
-    uint8_t        *cur;            /* item being emitted */
 } cap_t;
 
 static void cap_cb(void *user, const vg_au_t *au)
@@ -41,23 +39,26 @@ static void cap_cb(void *user, const vg_au_t *au)
     if (!copy) return;
     memcpy(copy, au->data, au->len);
     pthread_mutex_lock(&c->lock);
+    int dropped = 0;
     while (c->n && (c->n == QLEN || c->bytes + au->len > QBYTES_MAX)) {
         qitem_t *old = &c->q[c->head];
         c->bytes -= old->len;
         free(old->data);
         c->head = (c->head + 1) % QLEN;
         --c->n;
-        c->dropped = 1;
+        dropped = 1;
     }
     qitem_t *it = &c->q[(c->head + c->n) % QLEN];
     it->data = copy;
     it->len = au->len;
     it->au = *au;
     it->au.data = copy;
-    it->au.discont = au->discont || c->dropped;
-    c->dropped = 0;
+    it->au.discont = au->discont;
     c->bytes += au->len;
     ++c->n;
+    /* The gap is right before the oldest AU still queued: that is the one
+     * to flag, so nothing after the gap is used before a keyframe. */
+    if (dropped) c->q[c->head].au.discont = 1;
     pthread_cond_signal(&c->cond);
     pthread_mutex_unlock(&c->lock);
 }

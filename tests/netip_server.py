@@ -9,6 +9,13 @@ messages carrying 0x1FC (I-frame) / 0x1FD (P-frame) frames, split over
 several messages like real devices do.
 
     netip_server.py FILE [--port 34567] [--user admin] [--password ''] [--fps 25]
+                    [--chatty] [--stall] [--video-frames N]
+
+Fault modes for tests:
+  --chatty          never answer the login; send unrelated messages instead
+  --stall           after Start, send one media header and part of its body,
+                    then nothing
+  --video-frames N  after N video frames, send only audio (0x1FA) chunks
 """
 import argparse
 import hashlib
@@ -86,11 +93,24 @@ class Client(threading.Thread):
     def stream(self):
         fps = self.args.fps
         w, h = self.args.width // 8, self.args.height // 8
+        if self.args.stall:
+            with self.lock:
+                self.s.sendall(HDR.pack(0xFF, 1, self.session, 0, 1412, 1000) + b"\0" * 10)
+            while self.streaming:
+                time.sleep(0.5)
+            return
         t_next = time.monotonic()
+        sent = 0
         while self.streaming:
             for key, au in self.aus:
                 if not self.streaming:
                     return
+                if self.args.video_frames and sent >= self.args.video_frames:
+                    audio = struct.pack(">I", 0x1FA) + struct.pack("<BBH", 0xE, 2, 320) + b"\xd5" * 320
+                    self.send(1412, audio, raw=True)
+                    time.sleep(0.04)
+                    continue
+                sent += 1
                 if key:
                     head = struct.pack(">I", 0x1FC) + struct.pack("<BBBBII", 3 if self.h265 else 2, fps, w, h, 0, len(au))
                 else:
@@ -107,6 +127,10 @@ class Client(threading.Thread):
                 head, ver, sess, seq, msgid, length = HDR.unpack(self.recv_exact(20))
                 body = self.recv_exact(length)
                 req = json.loads(body.rstrip(b"\x00\x0a") or b"{}")
+                if msgid == 1000 and self.args.chatty:
+                    while True:
+                        self.send(1007, {"Ret": 100, "Name": "KeepAlive"})
+                        time.sleep(0.2)
                 if msgid == 1000:
                     ok = req.get("UserName") == self.args.user and req.get("PassWord") == sofia(self.args.password)
                     self.send(1001, {"Ret": 100, "SessionID": "0x%08X" % self.session,
@@ -136,6 +160,9 @@ def main():
     ap.add_argument("--fps", type=int, default=25)
     ap.add_argument("--width", type=int, default=640)
     ap.add_argument("--height", type=int, default=360)
+    ap.add_argument("--chatty", action="store_true")
+    ap.add_argument("--stall", action="store_true")
+    ap.add_argument("--video-frames", type=int, default=0)
     args = ap.parse_args()
     h265 = args.file.endswith((".h265", ".hevc", ".265"))
     aus = access_units(open(args.file, "rb").read(), h265)

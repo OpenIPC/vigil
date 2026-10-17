@@ -6,8 +6,8 @@
  * recorder:
  *
  *   - parameter sets (H.264 SPS/PPS, H.265 VPS/SPS/PPS) are cached from
- *     the stream and from out-of-band sources (SDP), and put in front of a
- *     keyframe that arrives without them, so every keyframe can start a
+ *     the stream and from out-of-band sources (SDP); a keyframe gets every
+ *     cached set it does not carry itself, so each keyframe can start a
  *     decoder or a recorded file on its own;
  *   - units without a picture (parameter sets or SEI that some cameras send
  *     as their own "frame") are carried into the next picture;
@@ -32,7 +32,7 @@ typedef struct {
     size_t     ps_len[AU_NORM_PS_MAX];
     uint8_t   *pend;                    /* picture-less units awaiting a picture */
     size_t     pend_len, pend_cap;
-    int        pend_sps;
+    unsigned   pend_ps;                 /* parameter-set kinds among them (bit per slot) */
     uint8_t   *out;
     size_t     out_cap;
     int        need_key;

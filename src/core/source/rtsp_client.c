@@ -7,6 +7,7 @@
 #include <strings.h>
 #include <ctype.h>
 #include <errno.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/socket.h>
 
@@ -201,6 +202,29 @@ static size_t message_len(rtsp_t *r, size_t *head_len)
     return 0;
 }
 
+void rtsp_digest_response(const char *user, const char *realm, const char *pass,
+                          const char *method, const char *uri, const char *nonce,
+                          const char *nc, const char *cnonce, const char *qop,
+                          char out[33])
+{
+    char a1[512], a2[640], ha1[33], ha2[33], all[512];
+    snprintf(a1, sizeof a1, "%s:%s:%s", user, realm, pass);
+    snprintf(a2, sizeof a2, "%s:%s", method, uri);
+    md5_hex(a1, strlen(a1), ha1);
+    md5_hex(a2, strlen(a2), ha2);
+    if (qop && qop[0])
+        snprintf(all, sizeof all, "%s:%s:%s:%s:%s:%s", ha1, nonce, nc, cnonce, qop, ha2);
+    else
+        snprintf(all, sizeof all, "%s:%s:%s", ha1, nonce, ha2);
+    md5_hex(all, strlen(all), out);
+}
+
+int rtsp_transport_channel(const char *transport)
+{
+    const char *p = strstr(transport, "interleaved=");
+    return p ? atoi(p + 12) : 0;
+}
+
 static void auth_header(rtsp_t *r, const char *method, const char *uri, char *out, size_t cap)
 {
     out[0] = 0;
@@ -210,17 +234,23 @@ static void auth_header(rtsp_t *r, const char *method, const char *uri, char *ou
         b64_encode(cred, b64, sizeof b64);
         snprintf(out, cap, "Authorization: Basic %s\r\n", b64);
     } else if (r->auth == 2) {
-        char a1[512], a2[640], ha1[33], ha2[33], resp[33], all[256];
-        snprintf(a1, sizeof a1, "%s:%s:%s", r->user, r->realm, r->pass);
-        snprintf(a2, sizeof a2, "%s:%s", method, uri);
-        md5_hex(a1, strlen(a1), ha1);
-        md5_hex(a2, strlen(a2), ha2);
-        snprintf(all, sizeof all, "%s:%s:%s", ha1, r->nonce, ha2);
-        md5_hex(all, strlen(all), resp);
-        snprintf(out, cap,
-                 "Authorization: Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", "
-                 "uri=\"%s\", response=\"%s\"\r\n",
-                 r->user, r->realm, r->nonce, uri, resp);
+        char resp[33], nc[9] = "", cnonce[17] = "", extra[256] = "";
+        if (r->qop_auth) {
+            snprintf(nc, sizeof nc, "%08x", ++r->nc);
+            snprintf(cnonce, sizeof cnonce, "%08lx%08lx",
+                     (unsigned long)random() ^ (unsigned long)time(NULL),
+                     (unsigned long)random() ^ ((unsigned long)getpid() << 8));
+            snprintf(extra, sizeof extra, ", qop=auth, nc=%s, cnonce=\"%s\"", nc, cnonce);
+        }
+        rtsp_digest_response(r->user, r->realm, r->pass, method, uri, r->nonce,
+                             nc, cnonce, r->qop_auth ? "auth" : NULL, resp);
+        int n = snprintf(out, cap,
+                         "Authorization: Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", "
+                         "uri=\"%s\", response=\"%s\"%s",
+                         r->user, r->realm, r->nonce, uri, resp, extra);
+        if (n > 0 && (size_t)n < cap && r->opaque[0])
+            n += snprintf(out + n, cap - (size_t)n, ", opaque=\"%s\"", r->opaque);
+        if (n > 0 && (size_t)n < cap) snprintf(out + n, cap - (size_t)n, "\r\n");
     }
 }
 
@@ -268,6 +298,10 @@ static int read_reply(rtsp_t *r, char *head, size_t head_cap, char *body, size_t
                 return atoi(head + 9);
             }
         }
+        if (r->stop && *r->stop) {
+            set_err(r, "stopped%s", NULL);
+            return -1;
+        }
         int f = fill(r);
         if (f < 0) return -1;
         if (f == 0) ++waited;
@@ -298,8 +332,14 @@ static int request(rtsp_t *r, const char *method, const char *uri, const char *e
             while (dig[i] && dig[i] != '\r' && dig[i] != '\n' && i + 1 < sizeof www) { www[i] = dig[i]; ++i; }
             www[i] = 0;
             r->auth = 2;
+            r->nc = 0;
             auth_param(www, "realm", r->realm, sizeof r->realm);
             auth_param(www, "nonce", r->nonce, sizeof r->nonce);
+            auth_param(www, "opaque", r->opaque, sizeof r->opaque);
+            char qop[64];
+            auth_param(www, "qop", qop, sizeof qop);
+            /* "auth" or a list such as "auth,auth-int": we do auth. */
+            r->qop_auth = strstr(qop, "auth") != NULL;
         } else {
             r->auth = 1;
         }
@@ -386,6 +426,7 @@ int rtsp_open(rtsp_t *r, int connect_ms)
     r->session[0] = 0;
     r->session_timeout = 60;
     r->buf_off = r->buf_len = 0;
+    r->rtp_channel = 0;
     r->codec = VG_CODEC_NONE;
     r->sprop_n = 0;
     r->err[0] = 0;
@@ -412,6 +453,9 @@ int rtsp_open(rtsp_t *r, int connect_ms)
         if (st > 0) snprintf(r->err, sizeof r->err, "SETUP: %d", st);
         goto fail;
     }
+    char transport[256];
+    r->rtp_channel = header_get(h, "Transport", transport, sizeof transport)
+                         ? rtsp_transport_channel(transport) : 0;
     char sess[sizeof r->session];
     if (header_get(h, "Session", sess, sizeof sess)) {
         char *semi = strchr(sess, ';');

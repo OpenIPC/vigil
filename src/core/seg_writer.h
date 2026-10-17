@@ -9,9 +9,13 @@
  *
  * Whatever `keep` says, the filesystem keeps a reserve free (10%, at least
  * 8 MiB): below it the oldest finished recording in the directory goes,
- * whichever camera made it; with none left, the current segment is closed
- * and a new one starts at the next keyframe. Recording rolls over instead
- * of failing on a full disk.
+ * whichever camera made it — one per second at most, and never a segment
+ * another writer has open. With none left, or when deleting does not free
+ * space, the current segment is closed and a new one starts at the next
+ * keyframe. Recording rolls over instead of failing on a full disk.
+ *
+ * Names never collide: a segment reopened within the same second gets a
+ * _N suffix, and files are created with O_EXCL.
  */
 #ifndef SEG_WRITER_H
 #define SEG_WRITER_H
@@ -46,11 +50,13 @@ int seg_init(seg_writer_t *w, const char *dir, const char *prefix,
 void seg_set_ext(seg_writer_t *w, const char *ext);
 
 /* Append one access unit. Nothing is written until the first keyframe.
- * Returns 0, or -1 on a write error (the segment is closed). */
+ * Returns 0, or -1 on a write error or when closing the previous segment
+ * failed to flush it (w->failed is set). */
 int seg_write(seg_writer_t *w, const uint8_t *data, size_t len, int key);
 
-/* Close the current segment; the next keyframe starts a new one. */
-void seg_close(seg_writer_t *w);
+/* Close the current segment; the next keyframe starts a new one.
+ * Returns -1 if flushing it failed (its tail is lost). */
+int seg_close(seg_writer_t *w);
 
 /* Name of the open segment, or "" when none. */
 const char *seg_current(const seg_writer_t *w);
