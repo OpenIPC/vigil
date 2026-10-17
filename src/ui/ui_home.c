@@ -291,6 +291,11 @@ static lv_obj_t *make_quad(lv_obj_t *parent)
     lv_obj_set_style_bg_color(quad, COL_BG, 0);
     lv_obj_clear_flag(quad, LV_OBJ_FLAG_SCROLLABLE);
 
+    /* No gap between cells: the tiles must cover exactly the quadrants the
+     * video is placed in (frontend_tiles), or video shows in the gaps. */
+    lv_obj_set_style_pad_row(quad, 0, 0);
+    lv_obj_set_style_pad_column(quad, 0, 0);
+
     static lv_coord_t cols[] = {LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
     static lv_coord_t rows[] = {LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
     lv_obj_set_grid_dsc_array(quad, cols, rows);
@@ -315,7 +320,18 @@ void ui_home_create(const char *role, ui_status_fn status)
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
     make_header(scr);
-    make_quad(scr);
+    lv_obj_t *quad = make_quad(scr);
+
+    /* With alpha holes (not a colorkey), whatever lies under a tile must be
+     * transparent too, or it would paint over the video: the screen and
+     * the quad background. */
+    lv_color_t hole;
+    lv_opa_t hole_opa;
+    hal_ui_hole(&hole, &hole_opa);
+    if (hole_opa < LV_OPA_COVER) {
+        lv_obj_set_style_bg_opa(scr, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_bg_opa(quad, LV_OPA_TRANSP, 0);
+    }
     ui_events_create(scr, STRIP_HEIGHT);
 
     /* Spotlight overlay — owned by the screen, parked off-screen until

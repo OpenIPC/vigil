@@ -28,12 +28,12 @@ typedef struct {
 
 typedef struct {
     int        configured;          /* a source is set for this tile */
-    int        live;                /* frames are arriving */
+    int        live;                /* video arrived within the last 3 s */
     int        decoding;            /* a decoder is running */
     int        recording;           /* a segment is open */
     uint64_t   rec_bytes;
     vg_codec_t codec;
-    unsigned   width, height, fps;
+    unsigned   width, height, fps;  /* fps averaged over 2 s */
     char       host[64];
     char       state[48];           /* "CONNECTING", the last error, ... */
 } channel_status_t;

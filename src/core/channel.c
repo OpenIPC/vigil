@@ -20,6 +20,7 @@
 #include "source.h"
 
 #define NO_DATA_SECS       5        /* reconnect after this long without video */
+#define LIVE_SECS          3        /* "live" while video arrived this recently */
 #define RECONNECT_MAX_SECS 10
 #define DEC_RETRY_SECS     10       /* retry a failed decoder setup */
 
@@ -134,7 +135,9 @@ static void on_au(void *user, const vg_au_t *au)
 
     if (g_can_decode && !c->src->ops->self_displayed) {
         if (au->key) c->dec_ok = decoder_ensure(c, au->codec);
-        if (c->dec_ok) hal_dec_send(c->idx, au);
+        /* A dropped AU breaks the reference chain: wait for the next
+         * keyframe instead of feeding pictures that cannot decode. */
+        if (c->dec_ok && hal_dec_send(c->idx, au) < 0) c->dec_ok = 0;
     } else if (au->key && c->norm.info_gen) {
         pthread_mutex_lock(&c->lock);
         c->st.width = c->norm.info.width;
@@ -243,12 +246,21 @@ static void *channel_thread(void *arg)
                 events_push(ch, "offline");
                 break;
             }
-            if (now != sec) {
+            /* Rate over 2 s: cameras deliver in bursts over TCP, so a
+             * one-second sample reads 0 or half the rate now and then. */
+            if (now - sec >= 2) {
                 pthread_mutex_lock(&c->lock);
-                c->st.fps = c->frames / (unsigned)(now - sec);
+                c->st.fps = (c->frames + (unsigned)(now - sec) / 2) / (unsigned)(now - sec);
                 c->frames = 0;
                 pthread_mutex_unlock(&c->lock);
                 sec = now;
+            }
+            /* Live = video within the last LIVE_SECS, not "fps > 0". */
+            int live = now - c->last_video < LIVE_SECS;
+            if (live != c->st.live) {
+                pthread_mutex_lock(&c->lock);
+                c->st.live = live;
+                pthread_mutex_unlock(&c->lock);
             }
         }
         c->src->ops->close(c->src);
