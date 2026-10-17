@@ -18,3 +18,21 @@ jobs:
         run: cmake -S . -B build -DVIGIL_PLATFORM=generic && cmake --build build -j
       - name: Test
         run: cd build && ctest --output-on-failure
+
+  rockchip:
+    # The rockchip platform (MPP + RGA + DRM + LVGL UI) on an arm64 runner:
+    # the libraries are built from source by the same script the boards use.
+    # Compile-only — runners have no VPU, RGA or display.
+    name: Rockchip build
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake meson ninja-build pkg-config libdrm-dev
+          sudo WORK=/tmp/vigil-deps scripts/rockchip/build-deps.sh
+      - name: Build
+        run: cmake -S . -B build -DVIGIL_PLATFORM=rockchip -DBUILD_TESTING=OFF && cmake --build build -j

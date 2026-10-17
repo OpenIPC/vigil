@@ -30,7 +30,7 @@ static void status_cb(int idx, ui_chan_status_t *st)
 {
     channel_status_t cs;
     channels_status(idx, &cs);
-    st->live = cs.live && cs.fps > 0;
+    st->live = cs.live;
     st->recording = cs.recording;
     st->rec_bytes = cs.rec_bytes;
     if (!cs.configured)
