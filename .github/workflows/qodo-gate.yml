@@ -251,9 +251,15 @@ jobs:
           # The listing is guarded too, not just the reruns: with an unguarded
           # pipeline a transient list failure would be the step's exit code —
           # exactly the PASS-into-FAIL this step promises not to produce.
-          if ! ids=$(gh run list --repo "$REPO" --workflow qodo-gate \
-              --commit "$HEAD_SHA" --json databaseId,conclusion \
-              --jq '.[] | select(.conclusion == "failure") | .databaseId'); then
+          # Every failed run of this workflow on the head commit, paginated.
+          # Not `gh run list`: it returns the 20 most recent runs by default
+          # (any --limit is still a window), and every review reply adds a
+          # run, so a busy PR's oldest red runs — the ones that need
+          # sweeping — fall outside it. Seen on #1: 30 runs on the head and 8
+          # stale red ones left behind.
+          if ! ids=$(gh api --paginate \
+              "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&status=failure&per_page=100" \
+              --jq '.workflow_runs[] | select(.path == ".github/workflows/qodo-gate.yml") | .id'); then
             echo "sweep skipped: could not list this workflow's runs"
             exit 0
           fi
