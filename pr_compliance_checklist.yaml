@@ -1,0 +1,81 @@
+# Hard gates for vigil pull requests.
+#
+# Binary pass/fail checks, deliberately narrow and objective. Judgement-based
+# review standards live in best_practices.md.
+#
+# Schema: https://docs.qodo.ai/v1/features/custom-compliance
+
+pr_compliances:
+  - title: "No vendor code in the hardware-agnostic layers"
+    compliance_label: true
+    objective: >
+      The core, the UI and the application must build and run on any host, so that one
+      code base serves every board and the host tests exercise the real code.
+    success_criteria: >
+      Files under src/core/, src/ui/ and src/app/ (frontend_ui.c excepted) include no
+      vendor SDK header (hi_*.h, mpi_*.h, rk_mpi.h, rga.h, mi_*.h and the like) and add
+      no #if/#ifdef on a platform macro. Hardware access goes through src/hal/*.h.
+    failure_criteria: >
+      The diff adds a vendor include, a vendor type, or a platform conditional to those
+      directories.
+
+  - title: "No vendor SDK files in the repository"
+    compliance_label: true
+    objective: >
+      Vendor SDKs carry their own licences and cannot be redistributed under GPL-3.0.
+      They are referenced from outside the tree.
+    success_criteria: >
+      Vendor headers, libraries and kernel modules are located through CMake cache
+      variables (SDK paths, toolchains) and are not added to the repository. Files under
+      tests/data/ are generated test media.
+    failure_criteria: >
+      The diff adds a vendor header, a .a/.so/.ko, or source copied from a vendor sample
+      that carries a proprietary notice. Judge binaries by the diff marker ("Binary
+      files ... differ"), not by the extension.
+
+  - title: "No library injection or blob patching in shipped code"
+    compliance_label: true
+    objective: >
+      Shims forced in through the dynamic linker's environment, and runtime patching of
+      vendor blobs, are tied to one exact build of one blob and fail silently at the next
+      vendor drop.
+    success_criteria: >
+      The diff ships no wrapper that forces a library ahead of another through the
+      linker's environment, and no code that rewrites a vendor module or library in
+      memory or on disk.
+    failure_criteria: >
+      A script, service file or source file added by the diff does either of the above.
+
+  - title: "New sources are built"
+    compliance_label: true
+    objective: >
+      Code that no build compiles is never checked by CI and rots.
+    success_criteria: >
+      Every added .c file is listed in CMakeLists.txt, tests/CMakeLists.txt or a
+      cmake/platforms/*.cmake file.
+    failure_criteria: >
+      The diff adds a source file that no CMake file references.
+
+  - title: "Parser and protocol fixes come with a test"
+    compliance_label: true
+    objective: >
+      Media-path parsers (RTSP, RTP depacketization, NETIP, SPS, au_norm, seg_writer)
+      regress silently; a host test is what keeps a fixed case fixed.
+    success_criteria: >
+      A change to the behaviour of a file under src/core/ adds or updates a case in
+      tests/ that fails without the change.
+    failure_criteria: >
+      The diff changes how core code parses, assembles or records data, and no test
+      in the diff covers it.
+
+  - title: "Platform changes name the board and show its output"
+    compliance_label: true
+    objective: >
+      Only a board proves that platform code initialises its media hardware, decodes,
+      displays and records.
+    success_criteria: >
+      A diff touching src/platform/<vendor>/ (other than generic/) names the board it was
+      run on in the PR description and includes output from that run.
+    failure_criteria: >
+      The PR changes platform code without naming a board, or with a test plan whose
+      steps were not run.

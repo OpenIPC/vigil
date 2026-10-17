@@ -1,0 +1,82 @@
+# Qodo code-review configuration.
+#
+# Review standards live in two companion files at the repo root:
+#   best_practices.md            - judgement-based rules, imported as Review Standards
+#   pr_compliance_checklist.yaml - binary hard gates
+#
+# Reference: https://docs.qodo.ai/install-and-configure/configuration-overview/configuration-file
+#
+# CAUTION (learned on OpenIPC/firmware#2268): PR-Agent loads this file with a
+# hardened Dynaconf loader that rejects directives able to run code or read
+# files, matching on bare tokens even inside prose. If the bot answers
+# "failed to apply 'local' repo settings / Forbidden directive", it reviews
+# with its stock prompt and every guideline below is silently ignored. Keep
+# prose that names loader or linker internals in best_practices.md instead.
+
+[github_app]
+pr_commands = [
+    "/agentic_describe",
+    "/agentic_review",
+]
+
+[review_agent]
+comments_location_policy = "both"
+
+# 1 = all severities inline, 2 = high+medium, 3 = high only.
+inline_comments_severity_threshold = 2
+
+issues_user_guidelines = """
+vigil is a DVR/NVR application for cheap recorder hardware on OpenIPC. One code base
+serves every board: a hardware-agnostic core (src/core, src/ui, src/app) and one HAL
+implementation per platform (src/platform/<vendor>/...), chosen at link time by CMake.
+Recorders run unattended for months; a leak, a deadlock or a stuck reconnect is found
+only when someone needs footage that was never written. Weight findings by what they
+cost a running recorder, not by diff size.
+
+Prioritise, in order:
+
+1. Correctness of the media path. A wrong NAL boundary, a missed RTP sequence gap, a
+   parameter set lost at a segment boundary or a decoder fed before its keyframe
+   produces recordings that do not play or video that freezes. These are the bugs this
+   project exists to avoid; look hard at parsers (RTSP, RTP depay, NETIP, SPS) and at
+   au_norm and seg_writer.
+
+2. Concurrency. Each channel runs on its own thread; the UI runs LVGL on the main
+   thread; capture sources deliver frames from platform threads. Shared state crosses
+   threads only under a lock, LVGL is called only from the UI thread (events go through
+   events.c), and every thread can be stopped within about a second.
+
+3. Resource bounds. Buffers that grow with input need a cap; files on a recorder's
+   disk need retention; reconnect loops need back-off. Unbounded growth on a 128 MB
+   board is a crash, not a slowdown.
+
+4. The hardware boundary. No vendor header, vendor type or platform #ifdef in
+   src/core, src/ui or src/app (frontends excepted). Platform code implements the
+   hal_*.h interfaces and reports what it cannot do through hal_caps(). A feature that
+   only works by special-casing a platform in the core belongs behind a HAL call.
+
+5. Provenance and licence. The repository is GPL-3.0-or-later. Vendor SDK headers,
+   libraries and kernel modules stay outside it and are referenced by CMake cache
+   paths. Code copied from vendor samples or other projects needs a compatible licence
+   and attribution; vendor sample code with a proprietary notice cannot be copied in.
+
+6. Evidence. Platform code (src/platform/**) changes what runs on a board and needs
+   the board named and output from it: logs, /proc/umap counters, captured frames.
+   Core changes need the host tests (ctest) to pass and, for parsers, a test that
+   covers the case being fixed. Claiming hardware testing that did not happen is a
+   finding whatever the diff touches.
+
+7. Dead code and scope. New sources must be compiled by some VIGIL_PLATFORM, and a
+   diff must do what its title says.
+
+Do not report: speculation about whether a change was written with AI assistance -
+judge the diff on correctness, concurrency, bounds, boundaries, provenance and
+evidence, never on writing style, comment density, formatting or phrasing; style
+preferences the compiler accepts; missing unit tests for vendor-platform code that
+cannot run off-target.
+"""
+
+compliance_user_guidelines = """
+Apply pr_compliance_checklist.yaml literally and only to lines the diff adds or changes.
+Do not raise a finding for pre-existing code that the diff merely moves or reindents.
+"""
