@@ -2,10 +2,15 @@
 # VO), UI on hifb in ARGB8888. Vendor SDK: Hi3536DV100_SDK_V2.0.2.0, linked
 # statically, so the binary needs only glibc on the board. Kernel modules:
 # scripts/hisilicon/load_mpp_hi3536dv100.sh.
-set(HI3536DV100_SDK "$ENV{HOME}/projects/cameras/sdk/Hi3536DV100_SDK_V2.0.2.0"
-    CACHE PATH "Hi3536DV100 SDK root (mpp/include, mpp/lib)")
-if(NOT EXISTS ${HI3536DV100_SDK}/mpp/include/mpi_vdec.h)
-  message(FATAL_ERROR "HI3536DV100_SDK=${HI3536DV100_SDK} has no mpp/include")
+# -DHI3536DV100_SDK=… wins; otherwise the environment, also on a re-run after a
+# configure that failed for want of it (the cache then holds "").
+set(HI3536DV100_SDK "" CACHE PATH "Hi3536DV100 SDK root (mpp/include, mpp/lib)")
+if(NOT HI3536DV100_SDK AND NOT "$ENV{HI3536DV100_SDK}" STREQUAL "")
+  set(HI3536DV100_SDK "$ENV{HI3536DV100_SDK}" CACHE PATH "Hi3536DV100 SDK root (mpp/include, mpp/lib)" FORCE)
+endif()
+if(NOT EXISTS "${HI3536DV100_SDK}/mpp/include/mpi_vdec.h")
+  message(FATAL_ERROR "set HI3536DV100_SDK to the Hi3536DV100_SDK_V2.0.2.0 root "
+                      "(the directory holding mpp/include); now '${HI3536DV100_SDK}'")
 endif()
 
 set(VIGIL_HAS_UI ON)

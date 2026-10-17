@@ -35,7 +35,7 @@ insmod open_osal.ko mmz=anonymous,0,$mmz_start,$mmz_size anony=1
 insmod open_base.ko
 insmod open_sys.ko mem_total=$mem_total
 # VBSource=1: each VDEC channel has a private picture pool, sized by
-# dvr_home from the camera's SPS (HI_MPI_VDEC_SetChnVBCnt).
+# vigild from the camera's SPS (HI_MPI_VDEC_SetChnVBCnt).
 insmod hi3536dv100_vdec.ko VBSource=1 u32ProtocolSwitch=0 StreamCompaMode=1 MiniBufMode=0
 insmod hi3536dv100_vfmw.ko
 insmod open_jpegd.ko

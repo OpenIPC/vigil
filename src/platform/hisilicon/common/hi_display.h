@@ -1,11 +1,11 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* hi_display.h — per-SoC MPP display bring-up shared by hifb_demo and
- * dvr_home: SYS/VB init, VO device + video layer, HDMI, and the hifb
- * pixel format.
+/* hi_display.h — per-SoC MPP display bring-up shared by fbtest and the
+ * HiSilicon platforms: SYS/VB init, VO device + video layer, HDMI, and the
+ * hifb pixel format.
  *
  * Everything that differs between the supported SoCs lives behind this
- * interface (hi_display.c), selected at build time by the Makefile's
- * PLATFORM= (-DVG_HI3520DV200 / -DVG_HI3536DV100).
+ * interface (hi_display.c), selected at build time by the platform's CMake
+ * file (-DVG_HI3520DV200 / -DVG_HI3536DV100).
  */
 #ifndef HI_DISPLAY_H
 #define HI_DISPLAY_H

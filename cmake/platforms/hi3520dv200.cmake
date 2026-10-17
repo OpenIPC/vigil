@@ -3,10 +3,15 @@
 # Toolchain + MPP: the OpenIPC hi3520dv200 SDK toolchain (musl), whose
 # sdk/include and sdk/lib carry MPP V2.0.5.1 (openipc/firmware#2108, #2120)
 # and libglibc-compat-static.a (#2110/#2119).
-set(HI3520DV200_TOOLCHAIN_SDK "$ENV{HOME}/toolchains/v3/arm-openipc-linux-musleabi_sdk-buildroot"
-    CACHE PATH "OpenIPC hi3520dv200 toolchain root (sdk/include, sdk/lib)")
-if(NOT EXISTS ${HI3520DV200_TOOLCHAIN_SDK}/sdk/include/mpi_vi.h)
-  message(FATAL_ERROR "HI3520DV200_TOOLCHAIN_SDK=${HI3520DV200_TOOLCHAIN_SDK} has no sdk/include")
+# -DHI3520DV200_TOOLCHAIN_SDK=… wins; otherwise the environment, also on a re-run after a
+# configure that failed for want of it (the cache then holds "").
+set(HI3520DV200_TOOLCHAIN_SDK "" CACHE PATH "OpenIPC hi3520dv200 toolchain root (sdk/include, sdk/lib)")
+if(NOT HI3520DV200_TOOLCHAIN_SDK AND NOT "$ENV{HI3520DV200_TOOLCHAIN_SDK}" STREQUAL "")
+  set(HI3520DV200_TOOLCHAIN_SDK "$ENV{HI3520DV200_TOOLCHAIN_SDK}" CACHE PATH "OpenIPC hi3520dv200 toolchain root (sdk/include, sdk/lib)" FORCE)
+endif()
+if(NOT EXISTS "${HI3520DV200_TOOLCHAIN_SDK}/sdk/include/mpi_vi.h")
+  message(FATAL_ERROR "set HI3520DV200_TOOLCHAIN_SDK to the OpenIPC hi3520dv200 toolchain root "
+                      "(the directory holding sdk/include); now '${HI3520DV200_TOOLCHAIN_SDK}'")
 endif()
 
 set(VIGIL_HAS_UI ON)
