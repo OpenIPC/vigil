@@ -129,6 +129,7 @@ static void *compositor(void *arg)
 {
     (void)arg;
     const char *shot = getenv("VIGIL_SNAPSHOT");
+    int flip_errs = 0;
     struct timespec next;
     clock_gettime(CLOCK_MONOTONIC, &next);
     while (!g_comp_stop) {
@@ -151,7 +152,11 @@ static void *compositor(void *arg)
             g_shot = 0;
             rk_display_request_shot(shot ? shot : "/tmp/vigil-snapshot.argb");
         }
-        rk_display_flip();
+        if (rk_display_flip() < 0) {
+            /* Keep composing; say so at most every 10 s. */
+            if (++flip_errs == 1 || flip_errs % (COMPOSE_HZ * 10) == 0)
+                fprintf(stderr, "rockchip: display flip failed (%d so far)\n", flip_errs);
+        }
         next.tv_nsec += 1000000000L / COMPOSE_HZ;
         if (next.tv_nsec >= 1000000000L) { next.tv_nsec -= 1000000000L; ++next.tv_sec; }
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
@@ -313,7 +318,15 @@ int hal_dec_send(int ch, const vg_au_t *au)
 void hal_dec_reset(int ch)
 {
     if (ch < 0 || ch >= MAX_CH || !g_ch[ch].ctx) return;
-    g_ch[ch].mpi->reset(g_ch[ch].ctx);
+    chan_t *c = &g_ch[ch];
+    c->mpi->reset(c->ctx);
+    /* Do not keep showing the picture from before the reconnect. */
+    pthread_mutex_lock(&c->lock);
+    if (c->frame) mpp_frame_deinit(&c->frame);
+    c->frame = NULL;
+    c->fresh = 0;
+    c->clear = 2;                                   /* both mosaic buffers */
+    pthread_mutex_unlock(&c->lock);
 }
 
 /* ---- capture: none --------------------------------------------------------------- */

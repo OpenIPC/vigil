@@ -135,7 +135,9 @@ static void on_au(void *user, const vg_au_t *au)
 
     if (g_can_decode && !c->src->ops->self_displayed) {
         if (au->key) c->dec_ok = decoder_ensure(c, au->codec);
-        if (c->dec_ok) hal_dec_send(c->idx, au);
+        /* A dropped AU breaks the reference chain: wait for the next
+         * keyframe instead of feeding pictures that cannot decode. */
+        if (c->dec_ok && hal_dec_send(c->idx, au) < 0) c->dec_ok = 0;
     } else if (au->key && c->norm.info_gen) {
         pthread_mutex_lock(&c->lock);
         c->st.width = c->norm.info.width;

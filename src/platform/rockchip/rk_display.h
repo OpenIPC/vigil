@@ -26,8 +26,12 @@ rk_buf_t *rk_display_back(void);
 /* Show the back buffer (blocks until the next vblank). */
 int  rk_display_flip(void);
 
-/* The UI plane's buffer (single-buffered, always on screen). */
-rk_buf_t *rk_display_ui(void);
+/* The UI plane's two buffers (double-buffered: draw into the one not on
+ * screen, then show it). */
+rk_buf_t *rk_display_ui_buf(int i);
+/* Put UI buffer i on screen (atomic commit of the UI plane alone, blocks
+ * until the next vblank). Returns 0 or -1. */
+int rk_display_ui_show(int i);
 
 /* Capture the composed output of the next flip through the writeback
  * connector into `path` (raw ARGB8888, width*height*4). Returns 0 once

@@ -41,8 +41,8 @@ static struct {
     rk_buf_t  mosaic[2];
     uint32_t  mosaic_fb[2], mosaic_handle[2];
     int       front;
-    rk_buf_t  ui;
-    uint32_t  ui_fb, ui_handle;
+    rk_buf_t  ui[2];
+    uint32_t  ui_fb[2], ui_handle[2];
     pthread_mutex_t shot_lock;
     char      shot_path[256];
 } g = { .fd = -1, .shot_lock = PTHREAD_MUTEX_INITIALIZER };
@@ -123,13 +123,23 @@ static int mosaic_create(int i)
     return drmModeAddFB2(g.fd, g.w, g.h, DRM_FORMAT_NV12, handles, pitches, offsets, &g.mosaic_fb[i], 0);
 }
 
-static int ui_create(void)
+static void dumb_destroy(uint32_t handle, rk_buf_t *b, size_t size)
 {
-    if (dumb_create(g.w, g.h, 32, &g.ui_handle, &g.ui) < 0) return -1;
-    g.ui.height = g.h;
-    memset(g.ui.map, 0, (size_t)g.ui.pitch * g.h);                    /* fully transparent */
-    uint32_t handles[4] = { g.ui_handle }, pitches[4] = { g.ui.pitch }, offsets[4] = { 0 };
-    return drmModeAddFB2(g.fd, g.w, g.h, DRM_FORMAT_ARGB8888, handles, pitches, offsets, &g.ui_fb, 0);
+    if (b->map) munmap(b->map, size);
+    if (b->fd >= 0) close(b->fd);
+    struct drm_mode_destroy_dumb d = { .handle = handle };
+    drmIoctl(g.fd, DRM_IOCTL_MODE_DESTROY_DUMB, &d);
+    b->map = NULL;
+    b->fd = -1;
+}
+
+static int ui_create(int i)
+{
+    if (dumb_create(g.w, g.h, 32, &g.ui_handle[i], &g.ui[i]) < 0) return -1;
+    g.ui[i].height = g.h;
+    memset(g.ui[i].map, 0, (size_t)g.ui[i].pitch * g.h);              /* fully transparent */
+    uint32_t handles[4] = { g.ui_handle[i] }, pitches[4] = { g.ui[i].pitch }, offsets[4] = { 0 };
+    return drmModeAddFB2(g.fd, g.w, g.h, DRM_FORMAT_ARGB8888, handles, pitches, offsets, &g.ui_fb[i], 0);
 }
 
 /* ---- setup ------------------------------------------------------------------ */
@@ -189,13 +199,22 @@ int rk_display_open(unsigned w, unsigned h)
     if (!res) return -1;
     drmModeModeInfo mode;
     int have_mode = 0;
+    uint32_t conn_crtcs = 0, wb_crtcs = 0;      /* CRTCs each connector can use */
     for (int i = 0; i < res->count_connectors; ++i) {
         drmModeConnector *c = drmModeGetConnector(g.fd, res->connectors[i]);
         if (!c) continue;
+        uint32_t crtcs = 0;
+        for (int e = 0; e < c->count_encoders; ++e) {
+            drmModeEncoder *enc = drmModeGetEncoder(g.fd, c->encoders[e]);
+            if (enc) crtcs |= enc->possible_crtcs;
+            drmModeFreeEncoder(enc);
+        }
         if (c->connector_type == DRM_MODE_CONNECTOR_WRITEBACK) {
             g.wb_id = c->connector_id;
+            wb_crtcs = crtcs;
         } else if (!g.conn_id && c->connection == DRM_MODE_CONNECTED && c->count_modes > 0) {
             g.conn_id = c->connector_id;
+            conn_crtcs = crtcs;
             mode = c->modes[0];                                     /* preferred */
             for (int m = 0; m < c->count_modes; ++m)
                 if (c->modes[m].hdisplay == w && c->modes[m].vdisplay == h && c->modes[m].vrefresh == 60) {
@@ -213,11 +232,19 @@ int rk_display_open(unsigned w, unsigned h)
         drmModeFreeResources(res);
         return -1;
     }
-    /* The first CRTC (video port 0) carries the primary planes we want. */
-    g.crtc_idx = 0;
-    g.crtc_id = res->crtcs[0];
-    if (pick_planes(res) < 0) {
-        fprintf(stderr, "rockchip: no NV12 overlay + ARGB primary plane on CRTC %u\n", g.crtc_id);
+    /* A CRTC the output can be driven from that also has an NV12 overlay
+     * and an ARGB primary plane. */
+    uint32_t usable = g.conn_id ? conn_crtcs : wb_crtcs;
+    int found = 0;
+    for (int i = 0; i < res->count_crtcs && !found; ++i) {
+        if (!(usable & (1u << i))) continue;
+        g.crtc_idx = (uint32_t)i;
+        g.crtc_id = res->crtcs[i];
+        g.video_plane = g.ui_plane = 0;
+        found = pick_planes(res) == 0;
+    }
+    if (!found) {
+        fprintf(stderr, "rockchip: no CRTC for this output with an NV12 overlay + ARGB primary plane\n");
         drmModeFreeResources(res);
         return -1;
     }
@@ -226,7 +253,7 @@ int rk_display_open(unsigned w, unsigned h)
         fprintf(stderr, "rockchip: monitor mode is %ux%u; the UI is %ux%u and is scaled\n",
                 mode.hdisplay, mode.vdisplay, w, h);
 
-    if (mosaic_create(0) < 0 || mosaic_create(1) < 0 || ui_create() < 0) {
+    if (mosaic_create(0) < 0 || mosaic_create(1) < 0 || ui_create(0) < 0 || ui_create(1) < 0) {
         fprintf(stderr, "rockchip: cannot allocate scan-out buffers\n");
         return -1;
     }
@@ -236,7 +263,7 @@ int rk_display_open(unsigned w, unsigned h)
     add(req, g.crtc_id, DRM_MODE_OBJECT_CRTC, "MODE_ID", g.mode_blob);
     add(req, g.crtc_id, DRM_MODE_OBJECT_CRTC, "ACTIVE", 1);
     add(req, g.conn_id ? g.conn_id : g.wb_id, DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID", g.crtc_id);
-    uint32_t planes[2] = { g.video_plane, g.ui_plane }, fbs[2] = { g.mosaic_fb[0], g.ui_fb };
+    uint32_t planes[2] = { g.video_plane, g.ui_plane }, fbs[2] = { g.mosaic_fb[0], g.ui_fb[0] };
     for (int i = 0; i < 2; ++i) {
         uint32_t p = planes[i];
         add(req, p, DRM_MODE_OBJECT_PLANE, "FB_ID", fbs[i]);
@@ -268,7 +295,18 @@ int rk_display_open(unsigned w, unsigned h)
 }
 
 rk_buf_t *rk_display_back(void) { return &g.mosaic[!g.front]; }
-rk_buf_t *rk_display_ui(void) { return &g.ui; }
+rk_buf_t *rk_display_ui_buf(int i) { return i == 0 || i == 1 ? &g.ui[i] : NULL; }
+
+int rk_display_ui_show(int i)
+{
+    if (i != 0 && i != 1) return -1;
+    drmModeAtomicReq *req = drmModeAtomicAlloc();
+    add(req, g.ui_plane, DRM_MODE_OBJECT_PLANE, "FB_ID", g.ui_fb[i]);
+    int rc = drmModeAtomicCommit(g.fd, req, 0, NULL);      /* blocks to vblank */
+    drmModeAtomicFree(req);
+    if (rc < 0) fprintf(stderr, "rockchip: UI flip failed: %s\n", strerror(errno));
+    return rc;
+}
 
 void rk_display_request_shot(const char *path)
 {
@@ -280,22 +318,26 @@ void rk_display_request_shot(const char *path)
 /* One writeback job: ARGB8888 buffer, attached for this commit only. */
 static int shot_commit(drmModeAtomicReq *req, const char *path, int back)
 {
-    rk_buf_t wb;
-    uint32_t handle, fb;
-    if (dumb_create(g.w, g.h, 32, &handle, &wb) < 0) return -1;
+    rk_buf_t wb = { .fd = -1 };
+    uint32_t handle = 0, fb = 0;
+    int rc = -1;
+    if (dumb_create(g.w, g.h, 32, &handle, &wb) < 0) {
+        fprintf(stderr, "rockchip: writeback buffer: %s\n", strerror(errno));
+        goto out;
+    }
     uint32_t handles[4] = { handle }, pitches[4] = { wb.pitch }, offsets[4] = { 0 };
     /* VOP2 writeback takes BGR888, ARGB8888, RGB565, NV12 — not XRGB8888. */
-    if (drmModeAddFB2(g.fd, g.w, g.h, DRM_FORMAT_ARGB8888, handles, pitches, offsets, &fb, 0) < 0) return -1;
-    int32_t fence = -1;
-    if (!g.connected) {
-        /* the writeback connector is already the CRTC's connector */
-    } else {
-        add(req, g.wb_id, DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID", g.crtc_id);
+    if (drmModeAddFB2(g.fd, g.w, g.h, DRM_FORMAT_ARGB8888, handles, pitches, offsets, &fb, 0) < 0) {
+        fprintf(stderr, "rockchip: writeback framebuffer: %s\n", strerror(errno));
+        goto out;
     }
+    int32_t fence = -1;
+    if (g.connected)                                /* headless: already the CRTC's connector */
+        add(req, g.wb_id, DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID", g.crtc_id);
     add(req, g.wb_id, DRM_MODE_OBJECT_CONNECTOR, "WRITEBACK_FB_ID", fb);
     add(req, g.wb_id, DRM_MODE_OBJECT_CONNECTOR, "WRITEBACK_OUT_FENCE_PTR", (uint64_t)(uintptr_t)&fence);
     add(req, g.video_plane, DRM_MODE_OBJECT_PLANE, "FB_ID", g.mosaic_fb[back]);
-    int rc = drmModeAtomicCommit(g.fd, req, g.connected ? DRM_MODE_ATOMIC_ALLOW_MODESET : 0, NULL);
+    rc = drmModeAtomicCommit(g.fd, req, g.connected ? DRM_MODE_ATOMIC_ALLOW_MODESET : 0, NULL);
     if (rc == 0 && fence >= 0) {
         struct pollfd pf = { .fd = fence, .events = POLLIN };
         poll(&pf, 1, 1000);
@@ -305,6 +347,8 @@ static int shot_commit(drmModeAtomicReq *req, const char *path, int back)
             for (uint32_t y = 0; y < g.h; ++y) fwrite(wb.map + (size_t)y * wb.pitch, 4, g.w, f);
             fclose(f);
             fprintf(stderr, "rockchip: writeback capture -> %s\n", path);
+        } else {
+            fprintf(stderr, "rockchip: writeback capture: cannot write %s\n", path);
         }
     } else {
         fprintf(stderr, "rockchip: writeback commit failed: %s\n", rc < 0 ? strerror(errno) : "no fence");
@@ -315,11 +359,9 @@ static int shot_commit(drmModeAtomicReq *req, const char *path, int back)
         drmModeAtomicCommit(g.fd, off, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
         drmModeAtomicFree(off);
     }
-    drmModeRmFB(g.fd, fb);
-    munmap(wb.map, (size_t)wb.pitch * g.h);
-    if (wb.fd >= 0) close(wb.fd);
-    struct drm_mode_destroy_dumb d = { .handle = handle };
-    drmIoctl(g.fd, DRM_IOCTL_MODE_DESTROY_DUMB, &d);
+out:
+    if (fb) drmModeRmFB(g.fd, fb);
+    if (handle) dumb_destroy(handle, &wb, (size_t)wb.pitch * g.h);
     return rc;
 }
 
@@ -331,6 +373,9 @@ int rk_display_flip(void)
     snprintf(path, sizeof path, "%s", g.shot_path);
     g.shot_path[0] = 0;
     pthread_mutex_unlock(&g.shot_lock);
+
+    if (path[0] && !g.wb_id)
+        fprintf(stderr, "rockchip: capture of %s skipped: this display has no writeback connector\n", path);
 
     drmModeAtomicReq *req = drmModeAtomicAlloc();
     int rc;
@@ -359,7 +404,7 @@ void rk_display_close(void)
     drmModeAtomicCommit(g.fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
     drmModeAtomicFree(req);
     for (int i = 0; i < 2; ++i) if (g.mosaic_fb[i]) drmModeRmFB(g.fd, g.mosaic_fb[i]);
-    if (g.ui_fb) drmModeRmFB(g.fd, g.ui_fb);
+    for (int i = 0; i < 2; ++i) if (g.ui_fb[i]) drmModeRmFB(g.fd, g.ui_fb[i]);
     if (g.mode_blob) drmModeDestroyPropertyBlob(g.fd, g.mode_blob);
     close(g.fd);
     g.fd = -1;
