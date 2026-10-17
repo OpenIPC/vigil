@@ -28,10 +28,11 @@ set(VIGIL_PLATFORM_LIBS
   -L${_sdk} -lmpi -lhdmi -Wl,--unresolved-symbols=ignore-in-shared-libs
   -Wl,-u,mmap -Wl,-u,mmap64 -lglibc-compat-static
   -Wl,--export-dynamic-symbol=mmap -Wl,--export-dynamic-symbol=mmap64 m)
+# EXPERIMENTAL: see src/platform/hisilicon/hi3520dv200/hal_hi3520dv200.c.
 
 function(vigil_platform_extras)
   add_executable(fbtest ${CMAKE_SOURCE_DIR}/tools/fbtest/fbtest.c ${_hi}/common/hi_display.c)
   target_include_directories(fbtest PRIVATE ${VIGIL_PLATFORM_INCLUDES})
   target_compile_definitions(fbtest PRIVATE ${VIGIL_PLATFORM_DEFS})
-  target_link_libraries(fbtest PRIVATE -L${_sdk} -lmpi -lhdmi -Wl,--unresolved-symbols=ignore-in-shared-libs m)
+  target_link_libraries(fbtest PRIVATE ${VIGIL_PLATFORM_LIBS})
 endfunction()

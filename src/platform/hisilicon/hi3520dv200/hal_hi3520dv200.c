@@ -6,8 +6,13 @@
  * but not displayed on this SoC.
  *
  * Builds against the OpenIPC hi3520dv200 toolchain (musl) and its MPP
- * V2.0.5.1 headers/libraries. Not yet re-verified on hardware after the
- * move into vigil.
+ * V2.0.5.1 headers/libraries.
+ *
+ * EXPERIMENTAL — not run on hardware since the move into vigil, and local
+ * recording is known not to work yet: VENC channel creation fails with
+ * 0xa007800c (NOMEM) on the lab DVR (hi_video_pipe.c, venc_bringup), so the
+ * capture inputs show video but deliver no encoded frames. hal_init says so
+ * in the log.
  */
 #include <stdio.h>
 
@@ -39,10 +44,11 @@ int hal_init(unsigned w, unsigned h, unsigned fps)
 {
     (void)fps;
     /* u32MaxPoolCnt MUST be the vendor's 128: libmpi indexes pool storage
-     * past the configured astCommPool[] entries. D1 sp420 blocks. */
+     * past the configured astCommPool[] entries. VI captures 1280x720
+     * sp420 (1280 * 720 * 3/2 bytes, already 64-aligned) into this pool. */
     VB_CONF_S vb = {
         .u32MaxPoolCnt = 128,
-        .astCommPool   = { { .u32BlkSize = 768 * 1024, .u32BlkCnt = 24, .acMmzName = "" } },
+        .astCommPool   = { { .u32BlkSize = 1280 * 720 * 3 / 2, .u32BlkCnt = 16, .acMmzName = "" } },
     };
     if (hi_display_start(&vb, VO_INTF_HDMI, VO_OUTPUT_720P60, w, h) < 0) return -1;
 
@@ -53,6 +59,8 @@ int hal_init(unsigned w, unsigned h, unsigned fps)
 
     if (hi_video_pipe_start((int)w, (int)h, UI_HEADER_H, UI_STRIP_H) < 0)
         fprintf(stderr, "hi3520dv200: video pipeline failed; continuing without capture\n");
+    fprintf(stderr, "hi3520dv200: EXPERIMENTAL platform — capture inputs are shown, but local "
+                    "recording is known to fail (VENC_CreateChn NOMEM on MPP V2.0.5.1)\n");
     return 0;
 }
 

@@ -5,11 +5,14 @@
  * LVGL home screen so live (or no-signal) camera output appears under
  * the LVGL graphics overlay via VOU hardware compositing.
  *
- * Configuration mirrors the working SAMPLE_VI_MODE_8_720P case from
- * the upstream Hisilicon sample tree (github.com/Mihawk086/HI3520DVR
- * @ hisi/common/sample_comm_vi.c), trimmed to the single case our
- * board actually uses (4 cameras × 720p25 via NVP6114 in BT656 2MUX
- * mode, channels 0/2/4/6 across VI devices 0 and 1).
+ * Written for vigil against the MPP V2.0.5.1 API. It handles the one case
+ * this board uses: 4 cameras x 720p25 through the NVP6114 in BT656 2-mux
+ * mode, channels 0/2/4/6 across VI devices 0 and 1. The VI device values
+ * are the NVP6114's hardware parameters for that mode; the vendor's
+ * SAMPLE_VI_MODE_8_720P is where they are documented.
+ *
+ * Status: builds; not run on hardware since the move into vigil, and VENC
+ * channel creation is known to fail on the lab DVR (see venc_bringup).
  */
 #define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
@@ -49,9 +52,8 @@ static const int g_vi_chn[HI_VIDEO_PIPE_CHANNELS] = { 0, 2, 4, 6 };
 static const int g_vpss_grp[HI_VIDEO_PIPE_CHANNELS] = { 0, 1, 2, 3 };
 #define VPSS_CHN_OUT    0      /* one output channel per group */
 
-/* Mirror of the upstream `DEV_ATTR_6114_720P_2MUX_BASE` adapted to the
- * V2.0.5.1 VI_DEV_ATTR_S layout (no enClkEdge, single s32AdChnId[4]).
- * Static because HI_MPI_VI_SetDevAttr takes a pointer + makes its own copy. */
+/* NVP6114 720p BT656 2-mux device attributes in the V2.0.5.1
+ * VI_DEV_ATTR_S layout (no enClkEdge, single s32AdChnId[4]). */
 static const VI_DEV_ATTR_S DEV_ATTR_NVP6114_720P_2MUX = {
     .enIntfMode    = VI_MODE_BT656,
     .enWorkMode    = VI_WORK_MODE_2Multiplex,
@@ -88,12 +90,11 @@ static struct {
 } g_state;
 
 #define VPSS_CHN_ENC    1      /* encode-output channel per group */
-/* VENC frame size must match the VPSS chn output that feeds it via the
- * SYS_Bind fan-out — V2 VENC has no internal scaler, so the chn input
- * pic size has to equal the upstream VPSS chn output size. We also
- * need 16-pixel alignment for H.264 macroblocks. The default tile
- * geometry below comes out to 640×300; round H down to 288 (= 16×18)
- * so VPSS_CHN_OUT delivers 640×288 frames that VENC can take directly. */
+/* One VPSS channel feeds both the VO tile and VENC (SYS_Bind fan-out), and
+ * V2 VENC has no scaler: both receivers must take the same size. H.264
+ * needs 16-pixel alignment, so the encode size is the tile rounded down
+ * to 16 (640x288 for a 640x300 slot), and the VO tile is set to exactly
+ * that, centred in its slot (compute_tile_rect). */
 #define ENCODE_W        640
 #define ENCODE_H        288
 #define ENCODE_FPS      25
@@ -202,9 +203,8 @@ static int vpss_bringup(int tile_w, int tile_h)
         }
         g_state.vpss_grps_up |= (1 << i);
 
-        /* Vendor sample_comm_vpss.c only calls SetChnAttr + EnableChn,
-         * never SetChnMode — calling SetChnMode on V2 silently corrupts
-         * libmpi internal state and later VENC_CreateGroup segfaults. */
+        /* SetChnAttr + EnableChn only: SetChnMode on V2 was seen to corrupt
+         * libmpi state, and a later VENC_CreateGroup then segfaulted. */
         VPSS_CHN_ATTR_S ca = {0};
         ca.bSpEn      = HI_FALSE;
         ca.bFrameEn   = HI_FALSE;
@@ -251,12 +251,14 @@ static int venc_bringup(void)
         a.stVeAttr.enType = (PAYLOAD_TYPE_E)PT_H264;
         a.stVeAttr.stAttrH264e = (VENC_ATTR_H264_S){
             /* MaxPic must match PicWidth/Height for this kmod or CreateChn
-             * returns EN_ERR_ILLEGAL_PARAM. u32BufSize must be ≤ 164 KB,
-             * the "model buf" MMB size that libmpi auto-mmaps as the
-             * stream destination on this firmware. */
+             * returns EN_ERR_ILLEGAL_PARAM.
+             * KNOWN BLOCKER on the lab DVR: CreateChn fails 0xa007800c
+             * (NOMEM) for every u32BufSize tried (86 KB .. 1 MiB) — libmpi
+             * mmaps a buffer the h264e module allocated without the
+             * user-mappable flag. Buffer size is not the cause. */
             .u32MaxPicWidth  = ENCODE_W,
             .u32MaxPicHeight = ENCODE_H,
-            .u32BufSize      = ENCODE_W * ENCODE_H * 2,  /* 112640 < 164 KB */
+            .u32BufSize      = ENCODE_W * ENCODE_H * 2,
             .u32Profile      = 0,                         /* baseline */
             .bByFrame        = HI_TRUE,
             .bField          = HI_FALSE,
@@ -276,26 +278,22 @@ static int venc_bringup(void)
             .u32FluctuateLevel = 0,
         };
 
-        /* V2 hi3520dv200 pipeline gates VENC behind an intermediate
-         * HI_ID_GROUP dispatcher; the SYS_Bind destination is
-         * HI_ID_GROUP[grp], not HI_ID_VENC[chn]. Canonical sequence
-         * lifted from sample_comm_venc.c is:
+        /* V2 hi3520dv200 gates VENC behind an intermediate HI_ID_GROUP
+         * dispatcher; the SYS_Bind destination is HI_ID_GROUP[grp], not
+         * HI_ID_VENC[chn]. The order the MPP API requires is:
          *   VENC_CreateGroup → CreateChn → RegisterChn(grp,chn) →
          *   SYS_Bind(VPSS, HI_ID_GROUP[grp]) → StartRecvPic
          * VENC_CreateGroup requires VB_CONF.u32MaxPoolCnt to be high
          * (vendor uses 128) — small caps OOB-segfault inside libmpi. */
         #define DVR_VENC_EXIST 0xA0078004
-        fprintf(stderr, "VENC[%d]: CG\n", i); fflush(stderr);
         rc = HI_MPI_VENC_CreateGroup(i);
-        fprintf(stderr, "VENC[%d]: CG -> 0x%x\n", i, rc); fflush(stderr);
+        if (rc != HI_SUCCESS && rc != DVR_VENC_EXIST) fprintf(stderr, "VENC_CreateGroup(%d) 0x%x\n", i, rc);
         if (rc != HI_SUCCESS && rc != DVR_VENC_EXIST) continue;
-        fprintf(stderr, "VENC[%d]: CC\n", i); fflush(stderr);
         rc = HI_MPI_VENC_CreateChn(i, &a);
-        fprintf(stderr, "VENC[%d]: CC -> 0x%x\n", i, rc); fflush(stderr);
+        if (rc != HI_SUCCESS && rc != DVR_VENC_EXIST) fprintf(stderr, "VENC_CreateChn(%d) 0x%x\n", i, rc);
         if (rc != HI_SUCCESS && rc != DVR_VENC_EXIST) continue;
-        fprintf(stderr, "VENC[%d]: RC\n", i); fflush(stderr);
         rc = HI_MPI_VENC_RegisterChn(i, i);
-        fprintf(stderr, "VENC[%d]: RC -> 0x%x\n", i, rc); fflush(stderr);
+        if (rc != HI_SUCCESS && rc != DVR_VENC_EXIST) fprintf(stderr, "VENC_RegisterChn(%d) 0x%x\n", i, rc);
         if (rc != HI_SUCCESS && rc != DVR_VENC_EXIST) continue;
         /* StartRecvPic is deferred to venc_start_recv() after VPSS->VENC bind. */
         g_state.venc_chns_up |= (1 << i);
@@ -326,10 +324,12 @@ static void compute_tile_rect(int tile_idx, int screen_w, int header_h, int stri
     int half_h  = avail_h / 2;
     int gx = tile_idx % 2;
     int gy = tile_idx / 2;
-    *x = gx * half_w;
-    *y = header_h + gy * half_h;
-    *w = half_w;
-    *h = half_h;
+    /* The encoder's size (16-aligned), centred in the slot, so VPSS sends
+     * the same picture size to VO and VENC. */
+    *w = half_w & ~15;
+    *h = half_h & ~15;
+    *x = gx * half_w + (half_w - *w) / 2;
+    *y = header_h + gy * half_h + (half_h - *h) / 2;
 }
 
 static int vo_chn_bringup(int screen_w, int header_h, int strip_h)

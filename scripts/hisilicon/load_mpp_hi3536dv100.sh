@@ -22,7 +22,9 @@ if [ -e /dev/fb0 ]; then
 	exit 0
 fi
 
-mem_total=$(fw_printenv -n totalmem | tr -d M)
+# set -e must not end the script when an env variable is missing: the
+# defaults below apply then.
+mem_total=$(fw_printenv -n totalmem 2>/dev/null | tr -d M || true)
 os_mem=$(awk 'BEGIN{RS=" "} /^mem=[0-9]+M/{gsub(/^mem=|M.*$/,""); print; exit}' /proc/cmdline)
 : "${mem_total:=256}" "${os_mem:=128}"
 mmz_start=$(printf '0x%x' $((0x80000000 + os_mem * 1024 * 1024)))

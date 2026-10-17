@@ -32,8 +32,10 @@
 #define AU_MAX     (2u << 20)
 
 typedef struct {
+    pthread_mutex_t lock;           /* start/stop of this reader */
     pthread_t       thr;
     int             running;
+    int             discont;        /* an AU was dropped: flag the next one */
     volatile int    stop;
     hal_cap_cb      cb;
     void           *user;
@@ -42,7 +44,9 @@ typedef struct {
     volatile time_t last_data;
 } reader_t;
 
-static reader_t g_r[VENC_READER_CHANNELS];
+static reader_t g_r[VENC_READER_CHANNELS] = {
+    [0 ... VENC_READER_CHANNELS - 1] = { .lock = PTHREAD_MUTEX_INITIALIZER },
+};
 
 static void drain_one(int chn, reader_t *r)
 {
@@ -61,17 +65,19 @@ static void drain_one(int chn, reader_t *r)
 
     size_t len = 0;
     uint64_t pts = 0;
-    for (HI_U32 i = 0; i < stream.u32PackCount; ++i) {
+    int whole = 1;                  /* every pack fitted */
+    for (HI_U32 i = 0; i < stream.u32PackCount && whole; ++i) {
         VENC_PACK_S *p = &stream.pstPack[i];
         const uint8_t *seg[2] = { p->pu8Addr[0] + p->u32Offset, p->pu8Addr[1] };
         size_t seg_len[2] = { p->u32Len[0] - p->u32Offset, p->pu8Addr[1] ? p->u32Len[1] : 0 };
-        for (int k = 0; k < 2; ++k) {
-            if (!seg[k] || !seg_len[k] || len + seg_len[k] > AU_MAX) continue;
+        for (int k = 0; k < 2 && whole; ++k) {
+            if (!seg[k] || !seg_len[k]) continue;
+            if (len + seg_len[k] > AU_MAX) { whole = 0; break; }
             if (len + seg_len[k] > r->cap) {
                 size_t c = r->cap ? r->cap : 256 * 1024;
                 while (c < len + seg_len[k]) c *= 2;
                 uint8_t *b = realloc(r->buf, c);
-                if (!b) continue;
+                if (!b) { whole = 0; break; }
                 r->buf = b;
                 r->cap = c;
             }
@@ -83,8 +89,16 @@ static void drain_one(int chn, reader_t *r)
     HI_MPI_VENC_ReleaseStream(chn, &stream);
     free(stream.pstPack);
 
+    /* A frame missing a pack is not a frame: drop it, and flag the next one
+     * so nothing that depends on it is used before a keyframe. */
+    if (!whole) {
+        r->discont = 1;
+        return;
+    }
     if (len) {
-        vg_au_t au = { .codec = VG_CODEC_H264, .data = r->buf, .len = len, .pts_us = pts };
+        vg_au_t au = { .codec = VG_CODEC_H264, .data = r->buf, .len = len, .pts_us = pts,
+                       .discont = r->discont };
+        r->discont = 0;
         r->last_data = time(NULL);
         r->cb(r->user, &au);
     }
@@ -113,25 +127,40 @@ static void *reader_main(void *arg)
 
 int venc_reader_start(int chn, hal_cap_cb cb, void *user)
 {
-    if (chn < 0 || chn >= VENC_READER_CHANNELS || g_r[chn].running) return -1;
+    if (chn < 0 || chn >= VENC_READER_CHANNELS) return -1;
     reader_t *r = &g_r[chn];
-    r->cb = cb;
-    r->user = user;
-    r->stop = 0;
-    if (pthread_create(&r->thr, NULL, reader_main, (void *)(intptr_t)chn) != 0) return -1;
-    r->running = 1;
-    return 0;
+    pthread_mutex_lock(&r->lock);
+    int rc = -1;
+    if (!r->running) {
+        r->cb = cb;
+        r->user = user;
+        r->stop = 0;
+        r->discont = 0;
+        if (pthread_create(&r->thr, NULL, reader_main, (void *)(intptr_t)chn) == 0) {
+            r->running = 1;
+            rc = 0;
+        }
+    }
+    pthread_mutex_unlock(&r->lock);
+    return rc;
 }
 
 void venc_reader_stop(int chn)
 {
-    if (chn < 0 || chn >= VENC_READER_CHANNELS || !g_r[chn].running) return;
-    g_r[chn].stop = 1;
-    pthread_join(g_r[chn].thr, NULL);
-    g_r[chn].running = 0;
-    free(g_r[chn].buf);
-    g_r[chn].buf = NULL;
-    g_r[chn].cap = 0;
+    if (chn < 0 || chn >= VENC_READER_CHANNELS) return;
+    reader_t *r = &g_r[chn];
+    /* Under the lock: a stop that races a start waits for it, then joins
+     * the thread it created, so the callback never outlives its source. */
+    pthread_mutex_lock(&r->lock);
+    if (r->running) {
+        r->stop = 1;
+        pthread_join(r->thr, NULL);
+        r->running = 0;
+        free(r->buf);
+        r->buf = NULL;
+        r->cap = 0;
+    }
+    pthread_mutex_unlock(&r->lock);
 }
 
 int venc_reader_active(int chn)
