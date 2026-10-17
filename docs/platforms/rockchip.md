@@ -34,9 +34,11 @@ UI (main):       LVGL -> ARGB8888 buffer -> flip onto the UI plane above
 
 Display selection at start:
 
-- If an HDMI or DP connector reports a monitor, vigil sets 1280×720@60 on
-  it, using a CRTC (display pipe) that the connector can be driven from and
-  that has the planes it needs.
+- If an HDMI or DP connector reports a monitor, vigil uses 1280×720@60
+  when the monitor offers that mode, and otherwise the monitor's preferred
+  mode. In that case the 1280×720 video and UI planes are scaled to fill
+  the screen, and the log says so. The CRTC (display pipe) is one that the
+  connector can be driven from and that has the planes vigil needs.
 - With no monitor, vigil drives the writeback connector alone ("headless").
   Everything is composed as usual and can be captured.
 
@@ -90,7 +92,8 @@ connector. It is saved as raw ARGB8888 to `$VIGIL_SNAPSHOT` (default
 
 ```sh
 kill -USR1 $(pidof vigild)
-ffmpeg -f rawvideo -pix_fmt bgra -s 1280x720 -i /tmp/vigil-snapshot.argb snapshot.png
+ffmpeg -f rawvideo -pix_fmt bgra -s 1280x720 \
+       -i "${VIGIL_SNAPSHOT:-/tmp/vigil-snapshot.argb}" snapshot.png
 ```
 
 On boards without a writeback connector, the request is logged as skipped.
