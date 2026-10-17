@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: ci
+on: [push, pull_request]
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ffmpeg python3-gi gir1.2-gst-rtsp-server-1.0 \
+            gstreamer1.0-plugins-ugly gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+      - name: Build
+        run: cmake -S . -B build -DVIGIL_PLATFORM=generic && cmake --build build -j
+      - name: Test
+        run: cd build && ctest --output-on-failure
