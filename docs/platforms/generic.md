@@ -35,7 +35,8 @@ Without the GStreamer server, the RTSP tests are reported as skipped.
 ## Run
 
 ```sh
-./build/vigild -o /srv/rec -S 300 -K 0 \
+mkdir -p ~/rec
+./build/vigild -o ~/rec -S 300 -K 0 \
     -c rtsp://user:pass@cam1/stream=0 \
     -c 'netip://admin:@dvr:34567/?ch=1&stream=extra'
 ```
