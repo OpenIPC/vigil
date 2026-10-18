@@ -48,6 +48,7 @@ mkdir -p ~/rec
 | `-S SECS` | Segment length (default 60) |
 | `-K N` | Segments kept per camera (default 3; 0 keeps all, limited only by the free-space reserve) |
 | `-t SECS` | Exit after SECS seconds (default: run until SIGINT/SIGTERM) |
+| `-s` | Log to syslog (tag `vigil`, facility daemon) instead of stderr, including what the platform and vendor libraries print |
 
 Recordings are named `CAM<n>_<YYYYmmdd>_<HHMMSS>.h264` or `.h265`. They
 are raw elementary streams that ffmpeg and VLC play directly, and that
