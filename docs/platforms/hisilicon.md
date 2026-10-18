@@ -53,6 +53,22 @@ This gives `vigild` and `fbtest`, a framebuffer smoke test that draws
 colour bars through hifb. Both link the SDK statically, so the board only
 needs glibc.
 
+Alternatively, build against the headers and the shared `libmpi.so`
+family, as the OpenIPC firmware ships them. The firmware ships the libraries
+in `/usr/lib` (`hisilicon-osdrv-hi3536dv100`), and openhisilicon carries the
+SDK headers (`kernel/include/hi3536dv100`):
+
+```sh
+cmake -B build-hi3536 --toolchain cmake/toolchains/cross.cmake \
+      -DCROSS_PREFIX=<toolchain>/bin/arm-openipc-linux-gnueabi- \
+      -DVIGIL_PLATFORM=hi3536dv100 \
+      -DHI3536DV100_INCLUDE_DIR=<openhisilicon>/kernel/include/hi3536dv100 \
+      -DHI3536DV100_LIB_DIR=<firmware>/general/package/hisilicon-osdrv-hi3536dv100/files/lib
+```
+
+`vigild` then links `libmpi.so`, `libhdmi.so`, `libjpeg.so` and the three
+audio libraries dynamically.
+
 ### Load the modules
 
 From the build machine:
