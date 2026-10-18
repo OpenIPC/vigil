@@ -6,7 +6,6 @@
  *   -> frontend_run (LVGL quad view, or status lines when headless)
  *   -> SIGINT/SIGTERM: channels_stop, hal_shutdown.
  */
-#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -31,6 +30,7 @@ static void on_signal(int s) { (void)s; g_stop = 1; }
  * script runs vigild with -s and its stdio on /dev/null, as majestic. */
 
 static int       g_log_fd = -1;
+static int       g_saved_out = -1, g_saved_err = -1;     /* the original stdio */
 static pthread_t g_log_thread;
 
 static void *log_reader(void *arg)
@@ -67,42 +67,54 @@ static void *log_reader(void *arg)
     return NULL;
 }
 
+/* Put the original stdout/stderr back. This is also what ends the reader:
+ * the pipe's last write ends were descriptors 1 and 2. */
+static void restore_stdio(void)
+{
+    fflush(stdout);
+    fflush(stderr);
+    if (g_saved_out >= 0) { dup2(g_saved_out, STDOUT_FILENO); close(g_saved_out); g_saved_out = -1; }
+    if (g_saved_err >= 0) { dup2(g_saved_err, STDERR_FILENO); close(g_saved_err); g_saved_err = -1; }
+}
+
 static int log_to_syslog_start(void)
 {
     int p[2];
-    if (pipe(p) < 0) return -1;
-    openlog("vigil", LOG_PID, LOG_DAEMON);
+    g_saved_out = dup(STDOUT_FILENO);
+    g_saved_err = dup(STDERR_FILENO);
+    if (g_saved_out < 0 || g_saved_err < 0 || pipe(p) < 0) {
+        if (g_saved_out >= 0) close(g_saved_out);
+        if (g_saved_err >= 0) close(g_saved_err);
+        g_saved_out = g_saved_err = -1;
+        return -1;
+    }
     fflush(stdout);
     fflush(stderr);
     if (dup2(p[1], STDOUT_FILENO) < 0 || dup2(p[1], STDERR_FILENO) < 0) {
         close(p[0]);
         close(p[1]);
+        restore_stdio();
         return -1;
     }
     close(p[1]);
-    setvbuf(stdout, NULL, _IOLBF, 0);
-    setvbuf(stderr, NULL, _IOLBF, 0);
     g_log_fd = p[0];
     if (pthread_create(&g_log_thread, NULL, log_reader, NULL) != 0) {
+        restore_stdio();                /* before anyone writes into a pipe nobody reads */
         close(g_log_fd);
         g_log_fd = -1;
         return -1;
     }
+    openlog("vigil", LOG_PID, LOG_DAEMON);
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
     return 0;
 }
 
-/* Flush what is left: closing our ends of the pipe ends the reader. */
+/* Flush what is left and wait for the reader to log it. */
 static void log_to_syslog_stop(void)
 {
     if (g_log_fd < 0) return;
-    fflush(stdout);
-    fflush(stderr);
-    int null = open("/dev/null", O_WRONLY);
-    if (null >= 0) {
-        dup2(null, STDOUT_FILENO);
-        dup2(null, STDERR_FILENO);
-        close(null);
-    }
+    restore_stdio();
     pthread_join(g_log_thread, NULL);
     close(g_log_fd);
     g_log_fd = -1;
@@ -153,12 +165,12 @@ int main(int argc, char **argv)
         ++i;
     }
 
-    if (use_syslog && log_to_syslog_start() < 0)
-        perror("vigild: syslog");
-
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
     signal(SIGPIPE, SIG_IGN);
+
+    if (use_syslog && log_to_syslog_start() < 0)
+        perror("vigild: cannot log to syslog, logging to stderr");
 
     if (hal_init(SCREEN_W, SCREEN_H, 60) < 0) {
         vg_log("platform init failed");
