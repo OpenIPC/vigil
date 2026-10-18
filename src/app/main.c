@@ -6,6 +6,7 @@
  *   -> frontend_run (LVGL quad view, or status lines when headless)
  *   -> SIGINT/SIGTERM: channels_stop, hal_shutdown.
  */
+#include <errno.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -69,12 +70,23 @@ static void *log_reader(void *arg)
 
 /* Put the original stdout/stderr back. This is also what ends the reader:
  * the pipe's last write ends were descriptors 1 and 2. */
+static void restore_fd(int *saved, int fd)
+{
+    if (*saved < 0) return;
+    int rc;
+    while ((rc = dup2(*saved, fd)) < 0 && errno == EINTR)
+        ;
+    if (rc < 0) close(fd);              /* at least release the pipe's write end */
+    close(*saved);
+    *saved = -1;
+}
+
 static void restore_stdio(void)
 {
     fflush(stdout);
     fflush(stderr);
-    if (g_saved_out >= 0) { dup2(g_saved_out, STDOUT_FILENO); close(g_saved_out); g_saved_out = -1; }
-    if (g_saved_err >= 0) { dup2(g_saved_err, STDERR_FILENO); close(g_saved_err); g_saved_err = -1; }
+    restore_fd(&g_saved_out, STDOUT_FILENO);
+    restore_fd(&g_saved_err, STDERR_FILENO);
 }
 
 static int log_to_syslog_start(void)

@@ -10,8 +10,11 @@
 #                                headers and the shared libmpi.so & co, as
 #                                the OpenIPC firmware ships them (its vigil
 #                                package uses this).
-# -D… wins; otherwise the environment, also on a re-run after a configure
-# that failed for want of it (the cache then holds "").
+# If HI3536DV100_SDK is set, it is used (static), whatever else is cached; to
+# switch a build directory to the shared form, clear it:
+# -DHI3536DV100_SDK= -DHI3536DV100_INCLUDE_DIR=… -DHI3536DV100_LIB_DIR=….
+# Each variable takes -D… first, otherwise the environment, also on a re-run
+# after a configure that failed for want of it (the cache then holds "").
 foreach(_v HI3536DV100_SDK HI3536DV100_INCLUDE_DIR HI3536DV100_LIB_DIR)
   set(${_v} "" CACHE PATH "Hi3536DV100 MPP: see cmake/platforms/hi3536dv100.cmake")
   if(NOT ${_v} AND NOT "$ENV{${_v}}" STREQUAL "")
@@ -19,7 +22,7 @@ foreach(_v HI3536DV100_SDK HI3536DV100_INCLUDE_DIR HI3536DV100_LIB_DIR)
   endif()
 endforeach()
 
-if(HI3536DV100_INCLUDE_DIR OR HI3536DV100_LIB_DIR)
+if(NOT HI3536DV100_SDK AND (HI3536DV100_INCLUDE_DIR OR HI3536DV100_LIB_DIR))
   if(NOT EXISTS "${HI3536DV100_INCLUDE_DIR}/mpi_vdec.h" OR NOT EXISTS "${HI3536DV100_LIB_DIR}/libmpi.so")
     message(FATAL_ERROR "HI3536DV100_INCLUDE_DIR must hold mpi_vdec.h and HI3536DV100_LIB_DIR "
                         "libmpi.so; now '${HI3536DV100_INCLUDE_DIR}' and '${HI3536DV100_LIB_DIR}'")
