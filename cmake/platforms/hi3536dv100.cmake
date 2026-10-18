@@ -10,17 +10,26 @@
 #                                headers and the shared libmpi.so & co, as
 #                                the OpenIPC firmware ships them (its vigil
 #                                package uses this).
-# If HI3536DV100_SDK is set, it is used (static), whatever else is cached; to
-# switch a build directory to the shared form, clear it:
+# Which one: a HI3536DV100_SDK given with -D (or already in the cache) means
+# the static build, whatever else is cached. Otherwise the shared form if its
+# two paths are given, and only then the HI3536DV100_SDK environment
+# variable. To switch a build directory to the shared form:
 # -DHI3536DV100_SDK= -DHI3536DV100_INCLUDE_DIR=… -DHI3536DV100_LIB_DIR=….
 # Each variable takes -D… first, otherwise the environment, also on a re-run
 # after a configure that failed for want of it (the cache then holds "").
+set(_doc "Hi3536DV100 MPP: see cmake/platforms/hi3536dv100.cmake")
 foreach(_v HI3536DV100_SDK HI3536DV100_INCLUDE_DIR HI3536DV100_LIB_DIR)
-  set(${_v} "" CACHE PATH "Hi3536DV100 MPP: see cmake/platforms/hi3536dv100.cmake")
+  set(${_v} "" CACHE PATH "${_doc}")
+endforeach()
+foreach(_v HI3536DV100_INCLUDE_DIR HI3536DV100_LIB_DIR)
   if(NOT ${_v} AND NOT "$ENV{${_v}}" STREQUAL "")
-    set(${_v} "$ENV{${_v}}" CACHE PATH "Hi3536DV100 MPP: see cmake/platforms/hi3536dv100.cmake" FORCE)
+    set(${_v} "$ENV{${_v}}" CACHE PATH "${_doc}" FORCE)
   endif()
 endforeach()
+if(NOT HI3536DV100_SDK AND NOT HI3536DV100_INCLUDE_DIR AND NOT HI3536DV100_LIB_DIR
+   AND NOT "$ENV{HI3536DV100_SDK}" STREQUAL "")
+  set(HI3536DV100_SDK "$ENV{HI3536DV100_SDK}" CACHE PATH "${_doc}" FORCE)
+endif()
 
 if(NOT HI3536DV100_SDK AND (HI3536DV100_INCLUDE_DIR OR HI3536DV100_LIB_DIR))
   if(NOT EXISTS "${HI3536DV100_INCLUDE_DIR}/mpi_vdec.h" OR NOT EXISTS "${HI3536DV100_LIB_DIR}/libmpi.so")
