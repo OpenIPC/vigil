@@ -40,8 +40,14 @@ static void *log_reader(void *arg)
     char buf[1024];
     size_t have = 0;
     for (;;) {
+        if (have == sizeof buf - 1) {                       /* overlong line */
+            buf[have] = 0;
+            syslog(LOG_INFO, "%s", buf);
+            have = 0;
+        }
         ssize_t n = read(g_log_fd, buf + have, sizeof buf - 1 - have);
-        if (n <= 0) break;
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;                                  /* EOF: every writer is gone */
         have += (size_t)n;
         size_t start = 0;
         for (size_t i = 0; i < have; ++i) {
@@ -52,14 +58,8 @@ static void *log_reader(void *arg)
             if (*line) syslog(LOG_INFO, "%s", line);
             start = i + 1;
         }
-        if (start == 0 && have == sizeof buf - 1) {         /* overlong line */
-            buf[have] = 0;
-            syslog(LOG_INFO, "%s", buf);
-            have = 0;
-        } else {
-            memmove(buf, buf + start, have - start);
-            have -= start;
-        }
+        memmove(buf, buf + start, have - start);
+        have -= start;
     }
     if (have) {
         buf[have] = 0;
