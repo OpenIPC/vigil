@@ -153,14 +153,33 @@ int main(int argc, char **argv)
     channels_config_t cfg = { .rec_dir = "/tmp/rec", .seg_secs = 60, .keep = 3 };
     int run_secs = 0, use_syslog = 0;
 
+    /* -s first, so that what parsing the rest has to say (a bad option, too
+     * many cameras) reaches syslog too: at boot stdio is /dev/null. */
+    for (int i = 1; i < argc; ++i) {
+        const char *a = argv[i];
+        if (!strcmp(a, "-s"))
+            use_syslog = 1;
+        else if (a[0] == '-' && a[1] && !a[2] && strchr("coSKt", a[1]))
+            ++i;                                    /* skip the option's value */
+    }
+
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+    signal(SIGPIPE, SIG_IGN);
+
+    if (use_syslog && log_to_syslog_start() < 0)
+        perror("vigild: cannot log to syslog, logging to stderr");
+
     for (int i = 1; i < argc; ++i) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
-        if (!strcmp(a, "-s")) {
-            use_syslog = 1;
+        if (!strcmp(a, "-s"))
             continue;
-        }
         if (!strcmp(a, "-c") && v) {
-            if (cfg.n == CHANNEL_MAX) { fprintf(stderr, "at most %d cameras\n", CHANNEL_MAX); return 2; }
+            if (cfg.n == CHANNEL_MAX) {
+                fprintf(stderr, "at most %d cameras\n", CHANNEL_MAX);
+                log_to_syslog_stop();
+                return 2;
+            }
             cfg.urls[cfg.n++] = v;
         } else if (!strcmp(a, "-o") && v) {
             cfg.rec_dir = strcmp(v, "none") ? v : NULL;
@@ -172,17 +191,11 @@ int main(int argc, char **argv)
             run_secs = atoi(v);
         } else {
             usage(argv[0]);
+            log_to_syslog_stop();
             return strcmp(a, "-h") && strcmp(a, "--help") ? 2 : 0;
         }
         ++i;
     }
-
-    signal(SIGINT, on_signal);
-    signal(SIGTERM, on_signal);
-    signal(SIGPIPE, SIG_IGN);
-
-    if (use_syslog && log_to_syslog_start() < 0)
-        perror("vigild: cannot log to syslog, logging to stderr");
 
     if (hal_init(SCREEN_W, SCREEN_H, 60) < 0) {
         vg_log("platform init failed");
