@@ -17,6 +17,13 @@ if(TARGET vigil_ui)
   target_include_directories(test_ui PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
   target_compile_definitions(test_ui PRIVATE VIGIL_VERSION="${PROJECT_VERSION}")
   target_link_libraries(test_ui PRIVATE vigil_ui vigil_core)
+  # Every screen as PNGs into build/screenshots, for looking at (not a test):
+  # cmake --build build --target screenshots
+  add_custom_target(screenshots
+                    COMMAND ${CMAKE_SOURCE_DIR}/scripts/screenshots.sh ${CMAKE_BINARY_DIR}
+                    DEPENDS test_ui USES_TERMINAL)
+  # ... and that it still walks through every screen.
+  add_test(NAME ui_screenshots COMMAND test_ui --shots ${CMAKE_CURRENT_BINARY_DIR}/shots)
 endif()
 
 add_test(NAME cli_too_long COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_cli.sh $<TARGET_FILE:vigild>)

@@ -15,6 +15,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <linux/input.h>
 
@@ -64,6 +65,8 @@ void hal_ui_hole(lv_color_t *c, lv_opa_t *o)
 
 static ui_model_t g_model;
 static int        g_channels = 4;       /* the platform's, as the model says */
+static int        g_shots;              /* --shots: every screen, not the tests */
+static void shots_status(int idx, ui_chan_t *st);
 static ui_rect_t  g_tiles[UI_MAX_CHANNELS];
 static int        g_tile_calls;
 
@@ -1125,15 +1128,16 @@ static void test_split64(void)
     shot("split64");
 }
 
-/* The UI on a platform with `channels` channels (a fresh process). */
-static int run_split(int channels)
+/* The UI with `channels` channels, a configuration `json`, a mouse and a
+ * keyboard (in a fresh process). Returns 0 when set up. */
+static int setup(int channels, const char *json, char *path, size_t cap)
 {
     g_channels = channels;
-    char path[512];
-    snprintf(path, sizeof path, "%s/vigil-%d.json", g_out, channels);
+    snprintf(path, cap, "%s/vigil-%d.json", g_out, channels);
     unlink(path);
     FILE *f = fopen(path, "w");
-    fputs("{\"version\":1,\"cameras\":[{\"url\":\"rtsp://192.168.1.10/s\",\"name\":\"Gate\"}]}", f);
+    if (!f) return -1;
+    fputs(json, f);
     fclose(f);
     CHECK(config_init(path) == 0, "config");
     lv_init();
@@ -1142,13 +1146,14 @@ static int run_split(int channels)
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_XRGB8888);
     lv_display_set_buffers(disp, g_fb, NULL, sizeof g_fb, LV_DISPLAY_RENDER_MODE_DIRECT);
     lv_display_set_flush_cb(disp, flush_cb);
-    if (ui_bridge_init(&g_model) < 0) return 1;
+    if (ui_bridge_init(&g_model) < 0) return -1;
     g_model.channels = channels;
-    g_model.chan_status = fake_status;
+    g_model.chan_status = g_shots ? shots_status : fake_status;
     g_model.show_tiles = fake_tiles;
     g_model.now = fake_now;
+    g_model.system_info = fake_info;
     ui_app_create(&g_model);
-    if (pipe(g_mouse) < 0 || pipe(g_kbd) < 0) return 1;
+    if (pipe(g_mouse) < 0 || pipe(g_kbd) < 0) return -1;
     fcntl(g_mouse[0], F_SETFL, O_NONBLOCK);
     fcntl(g_kbd[0], F_SETFL, O_NONBLOCK);
     static const input_hooks_t hooks = { ui_app_back, ui_app_key, ui_app_keyboards };
@@ -1157,6 +1162,16 @@ static int run_split(int channels)
     input_evdev_attach(g_mouse[0], "test mouse", 0, 0, 0, 0, 0);
     input_evdev_attach_keyboard(g_kbd[0], "test keyboard");
     run(300);
+    return 0;
+}
+
+/* The UI on a platform with `channels` channels (a fresh process). */
+static int run_split(int channels)
+{
+    char path[512];
+    if (setup(channels, "{\"version\":1,\"cameras\":[{\"url\":\"rtsp://192.168.1.10/s\",\"name\":\"Gate\"}]}",
+              path, sizeof path) < 0)
+        return 1;
     if (channels == 16) test_split16();
     else test_split64();
     input_evdev_delete();
@@ -1166,8 +1181,181 @@ static int run_split(int channels)
     return g_fail ? 1 : 0;
 }
 
+/* ---- every screen, for people (test_ui --shots DIR, scripts/screenshots.sh) ----------- */
+
+static const char k_shots_json[] =
+    "{\"version\":1,\"cameras\":["
+    "{\"url\":\"rtsp://admin:secret@192.168.1.10/stream1\",\"name\":\"Front gate\"},"
+    "{\"url\":\"rtsp://192.168.1.11/stream1\",\"name\":\"Yard\"},"
+    "{\"url\":\"netip://admin:@192.168.1.12/?ch=0&stream=main\",\"name\":\"Garage\"},"
+    "{\"url\":\"rtsp://192.168.1.13/live\",\"name\":\"Back door\"}],"
+    "\"record\":{\"path\":\"/mnt/disk/rec\",\"segment\":300,\"keep\":48}}";
+
+static void shots_status(int idx, ui_chan_t *st)
+{
+    static const char *const names[] = { "Front gate", "Yard", "Garage", "Back door", "Parking", "Lobby",
+                                         "Office", "Warehouse", "Loading bay", "Roof", "Side street",
+                                         "Reception", "Stairs", "Corridor", "Server room", "Fence" };
+    *st = (ui_chan_t){ .configured = 1, .live = 1, .codec = "H.264", .width = 1920, .height = 1080, .fps = 25 };
+    snprintf(st->name, sizeof st->name, "%s", names[idx % 16]);
+    snprintf(st->rec_state, sizeof st->rec_state, "recording");
+    st->recording = idx % 3 != 2;
+    if (!st->recording) snprintf(st->rec_state, sizeof st->rec_state, "waiting for disk");
+    st->motion = idx == 1 || idx == 6;
+    if (idx == 2) {
+        st->codec[0] = 0;
+        st->live = 0;
+        snprintf(st->state, sizeof st->state, "CONNECTING");
+    } else if (idx == 5) {
+        st->live = 0;
+        snprintf(st->state, sizeof st->state, "connect: No route to host");
+    } else if (idx == 0) {
+        snprintf(st->codec, sizeof st->codec, "H.265");
+    }
+}
+
+static void quiet(void) { run(VG_DURATION_TOAST + 100); }
+
+static int shots_4(void)
+{
+    char path[512];
+    if (setup(4, k_shots_json, path, sizeof path) < 0) return 1;
+    shot("live-2x2");
+    move_to(300, 200);
+    button(BTN_RIGHT);
+    shot("context-menu");
+    click_text("Split");
+    shot("context-split");
+    click_text("1 window");
+    shot("live-1x1");
+    move_to(W / 2, H - 1);
+    run(300);
+    shot("live-navbar");
+    move_to(300, 200);
+    button(BTN_RIGHT);
+    click_text("Split");
+    click_text("4 windows");
+    move_to(W / 2, H / 2);
+    run(VG_DURATION_NAVBAR_HIDE + 300);
+    click_at(300, 200);
+    run(100);
+    click_at(300, 200);                         /* double click: the camera full screen */
+    shot("live-overlays");
+    click_at(640, 300);
+    run(100);
+    click_at(640, 300);
+    move_to(W / 2, H - 1);
+    run(300);
+    click_text("Main menu");
+    shot("menu-p1");
+    click_text("BACKUP");
+    shot("not-available");
+    button(BTN_RIGHT);
+    click_text("CAMERA");
+    shot("cameras");
+    lv_obj_t *edit = find("Edit", 1);
+    int x, y;
+    if (edit) {
+        center_of(edit, &x, &y);
+        click_at(x, y);
+    }
+    shot("camera-form");
+    lv_obj_t *name = textarea(1);
+    if (name) {
+        center_of(name, &x, &y);
+        click_at(x, y);
+    }
+    shot("camera-form-keyboard");
+    button(BTN_RIGHT);                          /* the on-screen keyboard */
+    if (name) lv_textarea_set_text(name, "Front gate 2");
+    button(BTN_RIGHT);
+    shot("confirm-discard");
+    click_text("Discard");
+    button(BTN_RIGHT);
+    click_text("STORAGE");
+    shot("record");
+    lv_obj_t *p = textarea(0);
+    if (p) lv_textarea_set_text(p, "rec");
+    click_text(SAVE);
+    shot("validation-error");
+    button(BTN_RIGHT);
+    click_text("Discard");
+    quiet();
+    click_text("NETWORK");
+    shot("network");
+    button(BTN_RIGHT);
+    click_text("DISPLAY");
+    shot("display");
+    button(BTN_RIGHT);
+    click_text("SYSTEM");
+    shot("system");
+    button(BTN_RIGHT);
+    button(BTN_RIGHT);
+
+    /* With the keyboard: the focus shows. */
+    key(KEY_RIGHT);
+    shot("live-focus");
+    key(KEY_F1);
+    shot("help-f1");
+    key(KEY_ESC);
+    key(KEY_M);
+    key(KEY_DOWN);
+    shot("menu-focus");
+    key(KEY_TAB);
+    key(KEY_RIGHT);
+    key(KEY_RIGHT);
+    key(KEY_ENTER);
+    key(KEY_DOWN);
+    shot("record-focus");
+    input_evdev_delete();
+    unlink(path);
+    return g_fail ? 1 : 0;
+}
+
+static int shots_16(void)
+{
+    char path[512];
+    if (setup(16, k_shots_json, path, sizeof path) < 0) return 1;
+    move_to(300, 200);
+    button(BTN_RIGHT);
+    click_text("Split");
+    shot("context-split-16");
+    click_text("8 windows");
+    move_to(W / 2, H / 2);
+    shot("live-8");
+    key(KEY_9);
+    shot("live-9");
+    key(KEY_0);
+    shot("live-16");
+    input_evdev_delete();
+    unlink(path);
+    return g_fail ? 1 : 0;
+}
+
+static int shots(void)
+{
+    int (*const run_one[])(void) = { shots_4, shots_16 };
+    int rc = 0;
+    for (size_t i = 0; i < sizeof run_one / sizeof run_one[0]; ++i) {
+        fflush(NULL);
+        pid_t pid = fork();
+        if (pid == 0) _exit(run_one[i]());
+        int st = 0;
+        if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st)) rc = 1;
+    }
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 2 && !strcmp(argv[1], "--shots")) {
+        g_out = argv[2];
+        g_shots = 1;
+        mkdir(g_out, 0755);                     /* may be there */
+        setenv("TZ", "UTC", 1);
+        tzset();
+        return shots();
+    }
     g_out = argc > 1 ? argv[1] : ".";
     setenv("TZ", "UTC", 1);
     tzset();

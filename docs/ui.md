@@ -376,6 +376,23 @@ cmake --build build && (cd build && UPDATE=1 ctest -R ui_screens)
 git add tests/ui
 ```
 
+**Every screen, to look at.** `scripts/screenshots.sh BUILD [OUT]` (or
+`cmake --build build --target screenshots`, into `build/screenshots/`)
+writes a PNG of every screen and menu state with made-up but realistic
+cameras (named, recording, one with motion, one connecting, one failing;
+16 channels faked for the larger layouts): `live-2x2.png`,
+`live-1x1.png`, `live-8.png`, `live-9.png`, `live-16.png`,
+`live-navbar.png`, `live-overlays.png`, `live-focus.png`,
+`context-menu.png`, `context-split.png`, `context-split-16.png`,
+`menu-p1.png`, `menu-focus.png`, `not-available.png`, `cameras.png`,
+`camera-form.png`, `camera-form-keyboard.png`, `confirm-discard.png`,
+`record.png`, `record-focus.png`, `validation-error.png`, `network.png`,
+`display.png`, `system.png`, `help-f1.png`. They are for people reviewing
+a change to the UI, not committed: run it after changing a screen or a
+menu and look at the set. The `ui_screenshots` test only checks that the
+walk still gets through every screen; the references above guard the
+look.
+
 The screenshots on this page are those references. No display, SDL or GPU
 is needed, so this runs in CI. There is no interactive desktop simulator
 yet: an LVGL SDL window (`hal_ui` for the generic platform) is the
