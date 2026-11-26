@@ -1191,9 +1191,29 @@ out:
     free(list);
 }
 
+/* The configuration's discovery settings under the request's: its
+ * interfaces when the request names none, its targets as well, its
+ * protocol order. */
+static void with_config(job_args_t *a)
+{
+    vigil_config_t *c = malloc(sizeof *c);
+    if (!c) return;
+    config_get(c);
+    if (c->discovery.prefer[0]) disc_set_prefer(c->discovery.prefer);
+    disc_scan_opts_t *o = &a->scan;
+    if (!o->ifaces[0]) snprintf(o->ifaces, sizeof o->ifaces, "%s", c->discovery.interfaces);
+    if (c->discovery.targets[0]) {
+        size_t n = strlen(o->targets);
+        if (n + 1 + strlen(c->discovery.targets) < sizeof o->targets)
+            snprintf(o->targets + n, sizeof o->targets - n, "%s%s", n ? "," : "", c->discovery.targets);
+    }
+    free(c);
+}
+
 static void *job_main(void *arg)
 {
     job_args_t *a = arg;
+    with_config(a);
     switch (a->kind) {
     case DISC_JOB_SCAN:    run_scan(a); break;
     case DISC_JOB_IP:      run_ip(a); break;

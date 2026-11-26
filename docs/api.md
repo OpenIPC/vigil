@@ -81,6 +81,9 @@ defaults, commented.
 | `api.auth` | boolean | `true` | Require the system account's password. See [Authentication](#authentication). |
 | `api.user` | string | `"root"` | The account whose password the API asks for. |
 | `api.shadow` | absolute path | `"/etc/shadow"` | The shadow file holding that account's password hash. |
+| `discovery.interfaces` | string | `""` | Interfaces to search for cameras on, comma separated; empty: every IPv4 interface ([Discovery](#discovery)). |
+| `discovery.targets` | IPv4 addresses, comma separated | `""` | Also searched by unicast: cameras on a routed subnet. |
+| `discovery.prefer` | `netip`, `onvif`, `dhip`, comma separated | `"netip,onvif,dhip"` | The protocol a camera that answers several is added with. |
 
 `GET /api/v1/schema` returns this table as data (below), so it is never out
 of date for a client.
@@ -237,7 +240,7 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `GET /api/v1/status` | Platform, uptime, configuration generation, one entry per camera. |
 | `GET /api/v1/config` | The configuration in force, passwords redacted. |
 | `PUT /api/v1/config` | Replace the whole configuration. Sections and keys it omits get their defaults. |
-| `GET /api/v1/config/<section>` | One section: `cameras`, `record` or `api`. |
+| `GET /api/v1/config/<section>` | One section: `cameras`, `record`, `api` or `discovery`. |
 | `PUT /api/v1/config/<section>` | Replace one section; the others stay. |
 | `GET /api/v1/schema` | Every setting: type, default, limits, label, help. |
 | `GET /api/v1/ws` | WebSocket: pushed status, events and configuration changes. |
@@ -398,7 +401,8 @@ has to be reachable (on this subnet, or routed); NETIP's broadcast set does
 not. A device that answers more than one protocol is one entry (merged by
 MAC, else by address). When it can be added more than one way, the URL
 comes from NETIP first (both streams without guessing a path), then ONVIF
-(the device names its own streams), then DHIP (Dahua's fixed RTSP path).
+(the device names its own streams), then DHIP (Dahua's fixed RTSP path);
+`discovery.prefer` changes the order.
 
 Everything that touches the network is a **job** on discovery's own
 thread, one at a time (another request gets `409`): `scan` returns at once
@@ -437,8 +441,9 @@ a camera's password at speed or to lock its account.
 
 All optional: `protocols` (or `"all"`, the default), `seconds` 1..15
 (default 3; the searches go out three times, a second apart),
-`interfaces` (default every IPv4 interface that is up, not loopback),
-`targets`: addresses also asked by unicast (cameras on a routed subnet),
+`interfaces` (default `discovery.interfaces`, or every IPv4 interface that
+is up, not loopback), `targets`: addresses also asked by unicast (cameras
+on a routed subnet; `discovery.targets` are asked too),
 `broadcast: false` asks only those, and `ports` the UDP ports asked (devices
 behind port forwarding, test responders). Devices are kept 10 minutes after
 they last answered, 64 at most.
