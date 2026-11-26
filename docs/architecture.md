@@ -176,6 +176,21 @@ flashes, toasts) and the API's WebSocket feed both see every event, and a reader
 falls behind skips ahead and is told how many it missed. Without a display,
 `frontend_headless.c` prints the status to the log.
 
+## Management
+
+The management pages (network, time, host name, disks, network storage,
+mail, users) change the operating system, not only vigild's settings.
+`src/sys` does that the OpenIPC firmware's way ([management.md](management.md)):
+each backend (`sys_net`, `sys_time`, `sys_disk`, `sys_nas`, `sys_curl`) is
+one kind of change, reading and writing files under a root and running
+commands through replaceable actions (`sys.h`), so `test_sys` exercises
+them on a fake system. `mgmt.c` sits between them and the two front ends:
+slow changes run as jobs on worker threads (the API answers 202 and a job
+id, the UI polls), and a timer thread undoes a network change nobody
+confirmed, keeps NTP, DDNS and the network storage going and passes events
+to the alarm center and the mail. It holds recording off a disk before it
+is unmounted or formatted (`channels_rec_hold`).
+
 ## Configuration
 
 The settings live in one YAML file (`/etc/vigil.yaml`, `-f FILE`; format

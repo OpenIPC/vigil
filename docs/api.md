@@ -77,6 +77,21 @@ defaults, commented.
 | `record.segment` | integer 10..3600 | 60 | Segment length in seconds. |
 | `record.keep` | integer 0..64 | 3 | Segments kept per camera; 0 keeps all (the free-space reserve still applies). 64 is what the segment writer can track. |
 | `record.allow_rootfs` | boolean | `false` | Count the root filesystem as a disk. For a host whose root filesystem is one; never on a board, where it is the flash. |
+| `record.on_full` | `overwrite` or `stop` | `overwrite` | A full disk: the oldest recordings make room, or recording stops (`REC disk full`) until there is room. |
+| `schedule[]` | array, up to 16 | `[]` | A week per camera ([management.md](management.md#recording-policies)); a camera without one records all the time. |
+| `schedule[].camera` | integer 1..16, required | | The camera's channel. |
+| `schedule[].mon` … `sun` | 48 letters of `C`, `M`, `-` | all `C` | One per half hour from 00:00 local time: continuous, motion only, off. |
+| `quota[]` | array, up to 16 | `[]` | Per camera limits. |
+| `quota[].camera` | integer 1..16, required | | The camera's channel. |
+| `quota[].max_gb`, `max_days` | integer | 0 | The most gigabytes / days of its recordings; 0: no limit. |
+| `nas.type` | `none`, `cifs`, `nfs` | `none` | Network storage mounted at `/mnt/nas`. |
+| `nas.server`, `share`, `user`, `password`, `options` | strings | `""` | The share; the password is shown as `***`. |
+| `ddns.enabled`, `provider`, `host`, `user`, `password`, `url`, `interval` | | off, `dyndns`, 10 min | Dynamic DNS: `dyndns`, `noip` or `custom` (`url` with `{host}`, `{user}`, `{password}`). |
+| `upnp.enabled`, `http_port`, `rtsp_port` | | off | Kept; no UPnP client yet. |
+| `smtp.enabled`, `server`, `port`, `security`, `user`, `password`, `from`, `to` | | off, 587, `starttls` | Mail: trouble events, and a test mail. `to` is a comma-separated list. |
+| `alarm.enabled`, `protocol`, `host`, `port`, `path`, `interval` | | off, `http`, 80, `/`, 60 s | Every event POSTed as JSON, and a heartbeat. |
+| `time.ntp`, `time.ntp_interval` | boolean, minutes 10..1440 | `true`, 60 | NTP on (the firmware's ntpd, with the servers of `/etc/ntp.conf`), and how often vigild checks itself. |
+| `ui.language`, `date_format`, `time_format` | enums | `en`, `YYYY-MM-DD`, `24h` | The on-screen UI. |
 | `api.listen` | `"port"` or `"a.b.c.d:port"` | `"0.0.0.0:8080"` | Where the API listens (IPv4). Empty: no API. Read at start only. |
 | `api.auth` | boolean | `true` | Require a login. See [Authentication](#authentication). |
 | `api.user` | string | `"root"` | The system account: it logs in with every permission (and as `admin` while no user of that name exists). |
@@ -319,7 +334,7 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `GET /api/v1/status` | Platform, uptime, configuration generation, one entry per camera. |
 | `GET /api/v1/config` | The configuration in force, passwords redacted. |
 | `PUT /api/v1/config` | Replace the whole configuration. Sections and keys it omits get their defaults. |
-| `GET /api/v1/config/<section>` | One section: `cameras`, `record` or `api`. |
+| `GET /api/v1/config/<section>` | One section (`cameras`, `record`, `schedule`, `quota`, `nas`, `ddns`, `upnp`, `smtp`, `alarm`, `time`, `ui`, `api`). |
 | `PUT /api/v1/config/<section>` | Replace one section; the others stay. |
 | `GET /api/v1/schema` | Every setting: type, default, limits, label, help. |
 | `GET /api/v1/ws` | WebSocket: pushed status, events and configuration changes. |
@@ -456,6 +471,45 @@ the `PUT`).
 # with websocat
 websocat -H "Authorization: Basic $(printf root:PASSWORD | base64)" ws://192.168.1.20:8080/api/v1/ws
 ```
+
+## Management
+
+The management pages ([management.md](management.md)) over HTTP. They change
+the system, not only `vigil.yaml`, and only on OpenIPC firmware: elsewhere
+every change answers `409` ("vigild does not manage this system") and the
+`GET`s show what there is. Changes that take a while answer `202` with a job:
+
+```json
+{ "job": 7 }
+```
+
+and `GET /api/v1/jobs/7` says how it goes:
+`{"id": 7, "kind": "format", "target": "sda", "state": "running", "message": "", "started": 1795700819, "finished": null}`
+(`state`: `queued`, `running`, `done`, `failed`; the last 16 jobs are kept).
+
+| Method and path | |
+|---|---|
+| `GET /api/v1/network/ethernet` | `{"managed", "config": {"dhcp", "address", "netmask", "gateway", "dns1", "dns2", "mtu"}, "status": {"interface", "present", "up", "link", "speed", "duplex", "mac", "mtu", "address", "netmask", "gateway", "dns": [...]}, "pending": {"interface", "seconds"} \| null}` |
+| `PUT /api/v1/network/ethernet` | Any of the `config` keys (the others stay) → `202` `{"job", "confirm_within": 60}`. Undone after 60 s unless confirmed; `"confirm": false` skips that. `400` with the field on a bad address, netmask, gateway, DNS or MTU. |
+| `POST /api/v1/network/ethernet/confirm` | Keep the change; `409` when none waits. |
+| `POST /api/v1/network/ethernet/revert` | Undo it now. |
+| `GET /api/v1/network/wifi` | `{"present": false}`, or the interface, `ssid`, `password_set`, `can_scan` and its `status`. |
+| `PUT /api/v1/network/wifi` | `{"ssid", "password"}` → `202`; `409` without an adapter. |
+| `GET /api/v1/network/wifi/scan` | `{"networks": [{"ssid", "signal", "secured"}]}`; `501` without `iw`. |
+| `GET /api/v1/network/lte` | `{"present", "interface", "driver", "profile", "status"}` |
+| `GET /api/v1/network/services` | The last DDNS update, mail and alarm post (`{"enabled", "last", "ok", "result"}`), `upnp` (`"active": false`), `p2p` (`"available": false`), and whether `curl` is there. |
+| `POST /api/v1/network/ddns/update`, `/network/smtp/test` | `202`: an update now, a test mail with the settings in force. |
+| `GET /api/v1/system/time` | `{"time", "local", "zone", "tz", "rule": {"std_offset", "dst", "dst_offset", "start": {"month", "week", "wday", "minute"}, "end": {…}}, "rtc", "ntp": {"enabled", "interval", "servers", "last_try", "last_ok", "result"}}`; offsets in minutes east of UTC. |
+| `PUT /api/v1/system/time` | Any of `"zone"` (a name from `/system/zones`), `"tz"` (a POSIX string) or `"rule"` (as above: built into a POSIX string), `"time"` (Unix time: set the clock), `"ntp": {"enabled", "servers", "interval"}`. |
+| `POST /api/v1/system/time/sync` | `202`: synchronise with the NTP servers now. |
+| `GET /api/v1/system/zones` | `[{"name": "Europe/Berlin", "tz": "CET-1CEST,M3.5.0,M10.5.0/3"}, …]` |
+| `GET`/`PUT /api/v1/system/hostname` | `{"hostname"}`; also in `GET /api/v1/status`. |
+| `GET /api/v1/disks` | `{"managed", "disks": [{"name", "parent", "partition", "size", "model", "removable", "read_only", "fs", "mount", "total", "free", "system", "state"}], "formats": ["exfat", "vfat"]}` |
+| `POST /api/v1/disks/<name>/format` | `{"fs": "exfat", "confirm": "<name>"}` → `202`. A system device, or a wrong `confirm`, is `400`. |
+| `POST /api/v1/disks/<name>/mount`, `/unmount` | `202`. |
+| `GET /api/v1/storage/nas` | `{"support": {"cifs": {"ok", "why"}, "nfs": {…}}, "mount": "/mnt/nas", "mounted", "status"}` |
+| `POST /api/v1/storage/nas/test` | `202`: mount the share in force at a test directory, write and read a file, unmount. |
+| `GET /api/v1/jobs/<id>` | A job, as above. |
 
 ## Inside
 
