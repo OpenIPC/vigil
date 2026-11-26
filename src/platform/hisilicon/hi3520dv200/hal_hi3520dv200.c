@@ -36,6 +36,7 @@
 static const hal_caps_t g_caps = {
     .name = "hi3520dv200", .display = 1, .decoder = 0,
     .max_channels = VENC_READER_CHANNELS, .capture = VENC_READER_CHANNELS,
+    .fixed_tiles = 1,               /* hi_video_pipe.c lays out the VI tiles */
 };
 
 const hal_caps_t *hal_caps(void) { return &g_caps; }

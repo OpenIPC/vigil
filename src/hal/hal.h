@@ -18,6 +18,9 @@ typedef struct {
     unsigned dec_max_w, dec_max_h;
     int      max_channels;      /* tiles / decoder channels */
     int      capture;           /* local video inputs (capture:N sources) */
+    int      fixed_tiles;       /* the platform places the tiles itself, in the
+                                 * quad view: hal_display_set_tile cannot move
+                                 * them (no other layouts, no full screen) */
 } hal_caps_t;
 
 /* Bring up the media system and the display (w x h @ fps when the

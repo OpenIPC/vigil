@@ -59,6 +59,13 @@ int  channels_start(const channels_config_t *cfg, const vg_rect_t *tiles);
 int  channels_apply(const channels_config_t *cfg);
 void channels_stop(void);
 
+/* Show channel i's picture in tiles[i] (CHANNEL_MAX of them; w == 0: not
+ * shown), e.g. for another layout or one channel full screen. From the
+ * thread that calls channels_apply. Running channels move at once, the
+ * others start in their tile; sources the platform shows itself (local
+ * capture) stay where the platform put them. */
+void channels_set_tiles(const vg_rect_t *tiles);
+
 /* Snapshot of channel `idx` (0-based). Any thread, at any time. */
 void channels_status(int idx, channel_status_t *st);
 /* Tiles in use: the last configured channel + 1. */

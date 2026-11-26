@@ -456,7 +456,7 @@ static int slot_start(int i, const channels_config_t *cfg)
         rec_setup(c, VG_CODEC_NONE);
         if (!c->rec_on) c->rec_retry_at = time(NULL);
     }
-    if (g_have_tiles && hal_caps()->display && !c->src->ops->self_displayed)
+    if (g_have_tiles && hal_caps()->display && !c->src->ops->self_displayed && g_tiles[i].w > 0)
         hal_display_set_tile(i, &g_tiles[i]);
     if (pthread_create(&c->thread, NULL, channel_thread, c) != 0) {
         vg_log("CAM%d: cannot start its thread", i + 1);
@@ -532,6 +532,23 @@ int channels_start(const channels_config_t *cfg, const vg_rect_t *tiles)
         return -1;
     }
     return 0;
+}
+
+void channels_set_tiles(const vg_rect_t *tiles)
+{
+    if (!hal_caps()->display) return;
+    memcpy(g_tiles, tiles, sizeof g_tiles);
+    g_have_tiles = 1;
+    for (int i = 0; i < CHANNEL_MAX; ++i) {
+        channel_t *c = &g_ch[i];
+        /* Only this thread starts and stops channels: active and src are
+         * stable here. */
+        if (!c->active || !c->src || c->src->ops->self_displayed) continue;
+        if (g_tiles[i].w > 0 && g_tiles[i].h > 0)
+            hal_display_set_tile(i, &g_tiles[i]);
+        else
+            hal_display_clear_tile(i);
+    }
 }
 
 void channels_stop(void)
