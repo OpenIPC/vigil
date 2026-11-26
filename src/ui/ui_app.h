@@ -103,6 +103,10 @@ ui_page_t *ui_page_top(void);       /* NULL on the live view */
 
 typedef enum { UI_TOAST_OK, UI_TOAST_WARN, UI_TOAST_BAD } ui_toast_t;
 void ui_toast(ui_toast_t kind, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+/* A toast about an event: after those already waiting (a few are kept,
+ * the newest), or in place of the one shown or waiting with the same
+ * `key` (the same trouble, now on more cameras). */
+void ui_toast_event(ui_toast_t kind, const char *key, const char *text);
 
 /* A modal question on top of everything: `on_yes(user)` if confirmed. */
 void ui_confirm(const char *text, const char *yes, void (*on_yes)(void *), void *user);

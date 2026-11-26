@@ -29,10 +29,9 @@
 #include "hi_video_pipe.h"
 #include "venc_reader.h"
 
-/* The live view has no header or footer bar: the VI tiles fill the screen,
- * as ui_layout.c lays the tiles out on the other platforms. */
-#define UI_HEADER_H 0
-#define UI_STRIP_H  0
+/* Header and footer heights of the quad view; the VI tiles sit between. */
+#define UI_HEADER_H 40
+#define UI_STRIP_H  80
 
 static const hal_caps_t g_caps = {
     .name = "hi3520dv200", .display = 1, .decoder = 0,

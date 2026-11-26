@@ -434,6 +434,7 @@ static void test_context_and_full_screen(void)
     push_event(4, "offline");                   /* CAM4 is not on the screen */
     ui_app_refresh();
     CHECK(find("CAM 4: offline", 1), "toast for a camera off the screen");
+    run(VG_DURATION_TOAST + 50);
     push_event(2, "REC waiting for disk");
     push_event(3, "REC waiting for disk");
     push_event(1, "REC on");
@@ -441,6 +442,22 @@ static void test_context_and_full_screen(void)
     CHECK(find("2 cameras: REC waiting for disk", 1), "one toast for the same trouble on two cameras");
     shot("toast");
     run(VG_DURATION_TOAST);                     /* gone before the next screens */
+
+    /* Different trouble at once: one after the other, none lost. The same
+     * camera twice is still one camera. A camera off the screen failing
+     * to connect ("down") is said too. */
+    push_event(1, "REC failed");
+    push_event(1, "REC failed");
+    push_event(2, "no decoder");
+    push_event(3, "down");
+    ui_app_refresh();
+    CHECK(find("Gate: REC failed", 1) && !find("no decoder", 1), "the first toast, one camera");
+    run(VG_DURATION_TOAST + 50);
+    CHECK(find("Yard: no decoder", 1), "then the second");
+    run(VG_DURATION_TOAST + 50);
+    CHECK(find("CAM 3: down", 1), "then the third");
+    run(VG_DURATION_TOAST + 50);
+    CHECK(!find("down", 1), "all shown");
     button(BTN_RIGHT);
     click_text("Next page");
     CHECK(g_tiles[1].w == W && g_tiles[0].w == 0, "next page shows CAM2");
@@ -1017,6 +1034,15 @@ static void test_keyboard_plug(void)
     CHECK(!strcmp(lv_textarea_get_text(ta), "Ab5+Xx"), "Shift from either keyboard, gone with it: '%s'",
           lv_textarea_get_text(ta));
     CHECK(ui_keyboard_in_use(), "a keyboard is left");
+    /* A burst of more keys than the reader queues: none lost. */
+    size_t before = strlen(lv_textarea_get_text(ta));
+    for (int i = 0; i < 40; ++i) {
+        kev(k2[1], KEY_A, 1);
+        kev(k2[1], KEY_A, 0);
+    }
+    run(3000);
+    CHECK(strlen(lv_textarea_get_text(ta)) == before + 40, "40 keys at once: %zu typed",
+          strlen(lv_textarea_get_text(ta)) - before);
     kev(k2[1], KEY_ESC, 1);
     kev(k2[1], KEY_ESC, 0);
     run(100);
@@ -1025,6 +1051,17 @@ static void test_keyboard_plug(void)
     run(100);
     CHECK(!ui_keyboard_in_use(), "no keyboard: the UI is for the mouse again");
     g_kbd[1] = -1;
+
+    /* A keyboard unplugged with a key still unread: the key goes with it. */
+    int k3[2];
+    if (pipe(k3) < 0) abort();
+    fcntl(k3[0], F_SETFL, O_NONBLOCK);
+    input_evdev_attach_keyboard(k3[0], "third keyboard");
+    kev(k3[1], KEY_DOWN, 1);
+    kev(k3[1], KEY_DOWN, 0);
+    close(k3[1]);
+    run(200);
+    CHECK(!ui_keyboard_in_use(), "a key read with the unplug does not bring the keyboard UI back");
 }
 
 static int rect_is(int ch, int x, int y, int w, int h)

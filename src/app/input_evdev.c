@@ -211,9 +211,11 @@ static void leds_all(void)
         if (g.dev[i].kbd) leds_write(g.dev[i].fd);
 }
 
+/* Never full: dev_drain reads a keyboard only while the queue has room
+ * for every event it reads (the rest waits in the kernel's buffer). */
 static void key_push(uint32_t key, unsigned mods)
 {
-    if (g.k_len == KEYS_MAX) return;            /* typing faster than the UI: drop the newest */
+    if (g.k_len == KEYS_MAX) return;
     g.keys[(g.k_head + g.k_len++) % KEYS_MAX] = (key_t_){ key, mods };
 }
 
@@ -279,6 +281,9 @@ static void dev_remove(int i)
     g.dev[i] = g.dev[--g.n];
     buttons_changed();                          /* unplugged while pressed: released */
     counts_changed(kbd);                        /* and its modifiers are gone with it */
+    /* With no keyboard left, nothing typed is still to come: a key typed
+     * just before the unplug must not make the UI a keyboard one again. */
+    if (!g.n_kbd) g.k_len = 0;
 }
 
 static int scale(int v, int lo, int hi, int size)
@@ -292,7 +297,11 @@ static int dev_drain(dev_t_ *d)
 {
     struct input_event ev[32];
     for (;;) {
-        ssize_t n = read(d->fd, ev, sizeof ev);
+        /* A keyboard: no more events than keys the queue can take. */
+        size_t room = d->kbd ? (size_t)(KEYS_MAX - g.k_len) : 32;
+        if (room > 32) room = 32;
+        if (!room) return 0;
+        ssize_t n = read(d->fd, ev, room * sizeof ev[0]);
         if (n < 0 && errno == EINTR) continue;
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
         if (n <= 0) return -1;                  /* ENODEV: unplugged; 0: end of a test pipe */

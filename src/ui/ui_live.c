@@ -795,38 +795,45 @@ static int on_screen(int ch)
  * event): a tile shows its channel's state all the time, so only what a
  * tile does not show becomes a toast. That is recording trouble (failed,
  * waiting for a disk), a channel that cannot run (no decoder, bad URL), a
- * configuration that could not be applied, and a camera going offline or
- * coming back while its tile is not on the screen. "REC on", "added",
- * "config applied" and the rest are left to the tiles. The same text for
- * several cameras within a toast's time is one toast ("3 cameras: ..."). */
+ * configuration that could not be applied, and a camera failing to
+ * connect, going offline or coming back while its tile is not on the
+ * screen. "REC on", "added", "config applied" and the rest are left to the
+ * tiles. The same text from several cameras within a toast's time is one
+ * toast ("3 cameras: ..."); different ones wait their turn. */
 static void event_toast(const ui_event_t *ev)
 {
-    static char last[sizeof ev->text];
+    static char     last[sizeof ev->text];
     static uint32_t last_ms;
-    static int count;
+    static uint64_t chans;              /* the cameras it came from, within a toast's time */
     const char *t = ev->text;
     ui_toast_t kind;
+    int off = ev->ch > 0 && !on_screen(ev->ch - 1);
     if (!strncmp(t, "REC ", 4) && strcmp(t, "REC on"))
         kind = UI_TOAST_WARN;
     else if (!strcmp(t, "no decoder") || !strcmp(t, "bad URL") || (!strncmp(t, "config:", 7) && strstr(t, "failed")))
         kind = UI_TOAST_BAD;
-    else if ((!strcmp(t, "offline") || !strcmp(t, "online")) && ev->ch > 0 && !on_screen(ev->ch - 1))
-        kind = !strcmp(t, "online") ? UI_TOAST_OK : UI_TOAST_WARN;
+    else if (off && (!strcmp(t, "offline") || !strcmp(t, "down")))
+        kind = UI_TOAST_WARN;
+    else if (off && !strcmp(t, "online"))
+        kind = UI_TOAST_OK;
     else
         return;
-    if (ev->ch > 0 && !strcmp(last, t) && lv_tick_elaps(last_ms) < VG_DURATION_TOAST)
-        ++count;
-    else
-        count = 1;
+    if (strcmp(last, t) || lv_tick_elaps(last_ms) >= VG_DURATION_TOAST) chans = 0;
+    if (ev->ch > 0) chans |= 1ull << ((ev->ch - 1) & 63);
     snprintf(last, sizeof last, "%s", t);
     last_ms = lv_tick_get();
-    char who[40];
-    if (ev->ch <= 0) ui_toast(kind, "%s", t);
-    else if (count > 1) ui_toast(kind, "%d cameras: %s", count, t);
-    else {
+    int count = 0;
+    for (uint64_t m = chans; m; m &= m - 1) ++count;
+    char text[sizeof ev->text + 48], who[40];
+    if (ev->ch <= 0) {
+        snprintf(text, sizeof text, "%s", t);
+    } else if (count > 1) {
+        snprintf(text, sizeof text, "%d cameras: %s", count, t);
+    } else {
         ui_chan_title(ev->ch - 1, who, sizeof who);
-        ui_toast(kind, "%s: %s", who, t);
+        snprintf(text, sizeof text, "%s: %s", who, t);
     }
+    ui_toast_event(kind, t, text);
 }
 
 void ui_live_event(const ui_event_t *ev)

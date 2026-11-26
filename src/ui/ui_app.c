@@ -279,23 +279,41 @@ int ui_popup_is_open(void) { return g_popup != NULL; }
 
 /* ---- toasts and questions ----------------------------------------------------------------- */
 
+/* Toasts from events wait their turn (a later one must not hide an
+ * earlier failure); a toast for what the user just did shows at once. */
+#define TOASTS_WAITING 4
+
+typedef struct {
+    ui_toast_t kind;
+    char       key[48];
+    char       text[200];
+} toast_t;
+
+static toast_t g_waiting[TOASTS_WAITING];
+static int     g_n_waiting;
+static char    g_toast_key[48];          /* the shown toast's, "" for none or a user's */
+
+static void toast_show(ui_toast_t kind, const char *key, const char *text);
+
 static void toast_done_cb(lv_timer_t *t)
 {
     (void)t;
     if (g_toast) lv_obj_delete(g_toast);
     g_toast = NULL;
     g_toast_timer = NULL;
+    g_toast_key[0] = 0;
+    if (g_n_waiting) {
+        toast_t next = g_waiting[0];
+        memmove(&g_waiting[0], &g_waiting[1], sizeof g_waiting[0] * (size_t)--g_n_waiting);
+        toast_show(next.kind, next.key, next.text);
+    }
 }
 
-void ui_toast(ui_toast_t kind, const char *fmt, ...)
+static void toast_show(ui_toast_t kind, const char *key, const char *text)
 {
-    char text[200];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(text, sizeof text, fmt, ap);
-    va_end(ap);
     if (g_toast) lv_obj_delete(g_toast);
     if (g_toast_timer) lv_timer_delete(g_toast_timer);
+    snprintf(g_toast_key, sizeof g_toast_key, "%s", key);
 
     lv_color_t c = kind == UI_TOAST_OK ? UI_C(OK) : kind == UI_TOAST_WARN ? UI_C(WARN) : UI_C(BAD);
     g_toast = lv_obj_create(lv_layer_top());
@@ -316,6 +334,39 @@ void ui_toast(ui_toast_t kind, const char *fmt, ...)
     lv_obj_align(g_toast, LV_ALIGN_TOP_MID, 0, VG_SIZE_PAGE_HEADER + VG_SPACE_LG);
     g_toast_timer = lv_timer_create(toast_done_cb, VG_DURATION_TOAST, NULL);
     lv_timer_set_repeat_count(g_toast_timer, 1);
+}
+
+void ui_toast(ui_toast_t kind, const char *fmt, ...)
+{
+    char text[200];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof text, fmt, ap);
+    va_end(ap);
+    toast_show(kind, "", text);
+}
+
+void ui_toast_event(ui_toast_t kind, const char *key, const char *text)
+{
+    if (g_toast && !strcmp(g_toast_key, key)) {
+        toast_show(kind, key, text);                    /* the same trouble, more cameras */
+        return;
+    }
+    for (int i = 0; i < g_n_waiting; ++i)
+        if (!strcmp(g_waiting[i].key, key)) {
+            snprintf(g_waiting[i].text, sizeof g_waiting[i].text, "%s", text);
+            return;
+        }
+    if (!g_toast) {
+        toast_show(kind, key, text);
+        return;
+    }
+    if (g_n_waiting == TOASTS_WAITING)                  /* keep the newest */
+        memmove(&g_waiting[0], &g_waiting[1], sizeof g_waiting[0] * (size_t)--g_n_waiting);
+    toast_t *w = &g_waiting[g_n_waiting++];
+    w->kind = kind;
+    snprintf(w->key, sizeof w->key, "%s", key);
+    snprintf(w->text, sizeof w->text, "%s", text);
 }
 
 typedef struct {

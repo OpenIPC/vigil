@@ -87,7 +87,11 @@ three small ones down the right and four along the bottom; **32** is an
 show 32. Window edges are on 16-pixel columns and even rows. Paging walks
 through the channels a page at a time (1 window with four cameras: four
 pages). On a platform whose tiles are fixed (`fixed_tiles`, the
-hi3520dv200 capture pipeline), only the 2x2 view is offered.
+hi3520dv200 capture pipeline), only the 2x2 view is offered, and the
+capture tiles keep the size and place the encoder needs (640x288, between
+where the old header and event strip were), so they sit inside the
+full-screen holes with a black band above and below; not run on that
+board.
 
 ![8 windows](../tests/ui/split8.png)
 
