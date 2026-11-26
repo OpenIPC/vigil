@@ -532,7 +532,7 @@ static void scanner_send(scanner_t *s, uint32_t only)
 static void scanner_listen(scanner_t *s, int ms, void (*heard)(const disc_device_t *, void *), void *u)
 {
     long long end = mono_ms() + ms;
-    static uint8_t buf[65536];                /* the job thread's only */
+    static uint8_t buf[16384];                /* the job thread's only; replies are < 8 KiB */
     for (;;) {
         long long left = end - mono_ms();
         if (left <= 0 || g_stop) return;
@@ -1024,15 +1024,21 @@ static disc_rc_t save_cameras(const char *text, unsigned gen, char *err, size_t 
     config_rc_t rc = config_put_json_at("cameras", text, strlen(text), gen, &errs);
     if (rc == CONFIG_OK) return DISC_OK;
     if (rc == CONFIG_ESTALE) snprintf(err, errcap, "the configuration changed meanwhile; try again");
-    else snprintf(err, errcap, "not saved: %s%s%s", errs.n ? errs.e[0].path : "", errs.n ? ": " : "",
+    else snprintf(err, errcap, "not saved: %.30s%s%.50s", errs.n ? errs.e[0].path : "", errs.n ? ": " : "",
                   errs.n ? errs.e[0].msg : "error");
     return DISC_EPROTO;
 }
 
+/* The camera's name: given, or the device's, cut to fit. A device's
+ * name is kept to printable ASCII: cut in the middle of a UTF-8 sequence
+ * it would be text the YAML file cannot hold. */
 static void device_name(const disc_device_t *d, const char *given, char *out, size_t cap)
 {
     const char *n = given && *given ? given : d->name[0] ? d->name : d->model[0] ? d->model : d->ip;
-    snprintf(out, cap, "%s", n);
+    size_t k = 0;
+    for (; n[k] && k + 1 < cap; ++k)
+        out[k] = n == given || (n[k] >= 0x20 && n[k] < 0x7f) ? n[k] : '?';
+    out[k] = 0;
 }
 
 static int first_empty(const vigil_config_t *c, int after)
@@ -1204,8 +1210,11 @@ static void with_config(job_args_t *a)
     if (!o->ifaces[0]) snprintf(o->ifaces, sizeof o->ifaces, "%s", c->discovery.interfaces);
     if (c->discovery.targets[0]) {
         size_t n = strlen(o->targets);
-        if (n + 1 + strlen(c->discovery.targets) < sizeof o->targets)
-            snprintf(o->targets + n, sizeof o->targets - n, "%s%s", n ? "," : "", c->discovery.targets);
+        size_t m = strlen(c->discovery.targets);
+        if (n + 1 + m < sizeof o->targets) {
+            if (n) o->targets[n++] = ',';
+            memcpy(o->targets + n, c->discovery.targets, m + 1);
+        }
     }
     free(c);
 }

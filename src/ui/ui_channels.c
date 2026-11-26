@@ -301,7 +301,7 @@ static void check_toggle(chans_t *c, int i)
             chans_build(c);
             return;
         }
-    if (c->n_checked < UI_DISC_MAX) snprintf(c->checked[c->n_checked++], sizeof c->checked[0], "%s", key);
+    if (c->n_checked < UI_DISC_MAX) memcpy(c->checked[c->n_checked++], key, sizeof c->checked[0]);
     devs_build(c);
     chans_build(c);
 }
