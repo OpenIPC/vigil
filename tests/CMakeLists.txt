@@ -9,6 +9,16 @@ if(TARGET vigil_api)
   add_test(NAME api_auth COMMAND test_api)
 endif()
 
+if(TARGET vigil_ui)
+  # The on-screen UI on an in-memory display, with the real evdev reader,
+  # the bridge and the configuration store, and fake channels.
+  add_executable(test_ui test_ui.c ${CMAKE_SOURCE_DIR}/src/app/ui_bridge.c
+                 ${CMAKE_SOURCE_DIR}/src/app/input_evdev.c)
+  target_include_directories(test_ui PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
+  target_compile_definitions(test_ui PRIVATE VIGIL_VERSION="${PROJECT_VERSION}")
+  target_link_libraries(test_ui PRIVATE vigil_ui vigil_core)
+endif()
+
 add_test(NAME cli_too_long COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_cli.sh $<TARGET_FILE:vigild>)
 
 find_package(Python3 COMPONENTS Interpreter)
@@ -16,6 +26,13 @@ if(Python3_FOUND)
   # src/ui/theme_tokens.h and web/theme.css are generated from src/ui/theme.json
   # and committed: they must match it.
   add_test(NAME theme_tokens COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-theme.py --check)
+  if(TARGET test_ui)
+    # Screenshots of the main screens against tests/ui/*.png
+    # (UPDATE=1 ctest -R ui_screens rewrites them).
+    add_test(NAME ui_screens
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/ui_compare.py $<TARGET_FILE:test_ui>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/ui ${CMAKE_CURRENT_BINARY_DIR}/ui)
+  endif()
   foreach(clip testsrc_640x360.h264 majestic_1080p.h265)
     add_test(NAME netip_${clip}
              COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_netip.sh $<TARGET_FILE:vigild>
