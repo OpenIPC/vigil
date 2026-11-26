@@ -463,12 +463,39 @@ static int mkdir_mnt(const char *mnt, char *msg, size_t cap)
     return 0;
 }
 
+/* Is /dev/<dev> mounted at `mnt` already? */
+static int mounted_at(const char *dev, const char *mnt)
+{
+    mnt_t *m = calloc(MOUNTS_MAX, sizeof *m);
+    if (!m) return 0;
+    int n = read_mounts(m, MOUNTS_MAX), found = 0;
+    for (int i = 0; i < n && !found; ++i) found = !strcmp(m[i].dev, dev) && !strcmp(m[i].mnt, mnt);
+    free(m);
+    return found;
+}
+
+/* A new partition's uevent sends the firmware's automount.sh after it at
+ * the same time (it tries its filesystems one by one): two mounts of one
+ * device at once both fail with EBUSY. Seen in QEMU on ssr621q after a
+ * format, with nothing mounted in the end. So EBUSY is waited out, and a
+ * mount automount.sh made at the same place is as good as ours. */
+#define MOUNT_BUSY_TRIES 8
+
 static int try_mount(const char *dev, const char *mnt, const char *fs)
 {
     char ps[512], pt[512];
     sys_path(ps, sizeof ps, dev);
     sys_path(pt, sizeof pt, mnt);
-    if (sys_ops()->mount(ps, pt, fs, 0, NULL) == 0) return 0;
+    for (int i = 0;; ++i) {
+        if (sys_ops()->mount(ps, pt, fs, 0, NULL) == 0) return 0;
+        if (errno != EBUSY) break;
+        if (mounted_at(dev, mnt)) return 0;
+        if (i + 1 >= MOUNT_BUSY_TRIES) {
+            errno = EBUSY;
+            return -1;
+        }
+        sleep(1);
+    }
     if (errno != ENODEV) return -1;
     /* exfat, ext4 and ntfs are modules on the firmware's kernels; nothing
      * else loads them. msdos and vfat share the fat driver. */

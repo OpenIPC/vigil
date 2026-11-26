@@ -278,6 +278,15 @@ static void test_mount(void)
     snprintf(line, sizeof line, "mount %s/dev/sdc %s/mnt/sdc ext4", fake_root, fake_root);
     CHECK(fake_ran(line), "as the superblock says");
 
+    /* automount.sh mounting the same device at the same moment: EBUSY,
+     * and then its mount at /mnt/sdc counts. */
+    fake_mount_errno = EBUSY;
+    fake_file("/proc/mounts", "/dev/sdc /mnt/sdc ext4 rw 0 0\n");
+    CHECK(sys_disk_mount("sdc", msg, sizeof msg) == 0, "EBUSY with automount's mount there: %s", msg);
+    fake_file("/proc/mounts", "");
+    CHECK(sys_disk_mount("sdc", msg, sizeof msg) < 0 && strstr(msg, "busy"), "EBUSY that lasts: %s", msg);
+    fake_mount_errno = 0;
+
     /* Unknown filesystem: automount.sh's list, never auto. */
     fake_dev("sdc", 3 * MIB, 0x438, "\0\0", 2);
     fake_clear_log();
