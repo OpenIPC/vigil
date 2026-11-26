@@ -46,6 +46,7 @@
 
 typedef struct {
     char url[512];                  /* source.h's URL buffer */
+    char sub_url[512];              /* "": derived, or none (channels_config_t) */
     char name[32];
     int  enabled;
 } config_camera_t;

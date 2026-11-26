@@ -59,6 +59,7 @@ static void chan_status(int idx, ui_chan_t *st)
     st->width = cs.width;
     st->height = cs.height;
     st->fps = cs.fps;
+    st->no_decoder = cs.no_decoder;
 }
 
 static int next_event(ui_event_t *ev)

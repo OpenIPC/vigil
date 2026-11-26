@@ -371,6 +371,7 @@ int main(int argc, char **argv)
 
     vg_rect_t tiles[CHANNEL_MAX];
     frontend_tiles(tiles, CHANNEL_MAX);
+    channels_set_screen(SCREEN_W, SCREEN_H);
     int rc = 1;
     static vigil_config_t running;      /* channels_config_t points into it */
     g_applied_gen = config_get(&running);

@@ -130,7 +130,14 @@ static void cell_update(cell_t *c)
     else lv_obj_add_flag(c->motion, LV_OBJ_FLAG_HIDDEN);
 
     if (st->configured && st->live) {
-        lv_obj_add_flag(c->mid, LV_OBJ_FLAG_HIDDEN);
+        if (st->no_decoder) {           /* video arrives, nothing to show it with */
+            lv_obj_remove_flag(c->mid, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(c->mid_l1, "No decoder");
+            lv_obj_set_style_text_color(c->mid_l1, UI_C(WARN), 0);
+            lv_obj_add_flag(c->mid_l2, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(c->mid, LV_OBJ_FLAG_HIDDEN);
+        }
         if (c->tiny) lv_obj_add_flag(c->info, LV_OBJ_FLAG_HIDDEN);
         else lv_obj_remove_flag(c->info, LV_OBJ_FLAG_HIDDEN);
         if (st->width)

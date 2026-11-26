@@ -4,6 +4,8 @@
 #include <dirent.h>
 #include <errno.h>
 #include <stddef.h>
+#include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1384,15 +1386,53 @@ static void test_rec_place(void)
 
 /* ---- channels: tiles follow the layout ------------------------------------------ */
 
-/* A display platform with four decoders that never get a picture: the
- * channels below point at a closed port and keep reconnecting. */
-static const hal_caps_t g_fake_caps = { .name = "fake", .display = 1, .decoder = 1,
-                                        .dec_max_w = 1920, .dec_max_h = 1080, .max_channels = 4 };
+/* A display platform with four channels and `g_dec_slots` decoders (none
+ * at first: the tile tests' channels point at a closed port anyway). */
+static hal_caps_t g_fake_caps = { .name = "fake", .display = 1, .decoder = 1,
+                                  .dec_max_w = 1920, .dec_max_h = 1080, .max_channels = 4 };
 const hal_caps_t *hal_caps(void) { return &g_fake_caps; }
-int  hal_dec_open(int ch, vg_codec_t c, const vg_stream_info_t *si) { (void)ch; (void)c; (void)si; return -1; }
-int  hal_dec_send(int ch, const vg_au_t *au) { (void)ch; (void)au; return -1; }
+
+static pthread_mutex_t g_dec_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_dec_slots;                     /* decoders the fake platform has */
+static int g_dec_open[CHANNEL_MAX];         /* channel holds one */
+static int g_dec_opens[CHANNEL_MAX], g_dec_fails[CHANNEL_MAX], g_dec_sent[CHANNEL_MAX];
+
+static int dec_count(int *a, int ch)
+{
+    pthread_mutex_lock(&g_dec_lock);
+    int v = a[ch];
+    pthread_mutex_unlock(&g_dec_lock);
+    return v;
+}
+
+int hal_dec_open(int ch, vg_codec_t c, const vg_stream_info_t *si)
+{
+    (void)c; (void)si;
+    pthread_mutex_lock(&g_dec_lock);
+    int used = 0;
+    for (int i = 0; i < CHANNEL_MAX; ++i) used += g_dec_open[i] && i != ch;
+    int ok = used < g_dec_slots;
+    g_dec_open[ch] = ok;
+    ++*(ok ? &g_dec_opens[ch] : &g_dec_fails[ch]);
+    pthread_mutex_unlock(&g_dec_lock);
+    return ok ? 0 : -1;
+}
+int hal_dec_send(int ch, const vg_au_t *au)
+{
+    (void)au;
+    pthread_mutex_lock(&g_dec_lock);
+    int ok = g_dec_open[ch];
+    g_dec_sent[ch] += ok;
+    pthread_mutex_unlock(&g_dec_lock);
+    return ok ? 0 : -1;
+}
 void hal_dec_reset(int ch) { (void)ch; }
-void hal_dec_close(int ch) { (void)ch; }
+void hal_dec_close(int ch)
+{
+    pthread_mutex_lock(&g_dec_lock);
+    g_dec_open[ch] = 0;
+    pthread_mutex_unlock(&g_dec_lock);
+}
 
 static vg_rect_t g_tile_at[CHANNEL_MAX];    /* w == 0: cleared */
 static int       g_tile_sets[CHANNEL_MAX], g_tile_clears[CHANNEL_MAX];
@@ -1454,6 +1494,340 @@ static void test_channel_tiles(void)
     close(fd);
 }
 
+/* ---- channels: decoders only for the tiles on screen ------------------------------ */
+
+/* A NETIP camera on loopback: logs anyone in and streams a clip, one
+ * access unit per message, at about 100 fps: the main stream (stream
+ * "Main") one clip, the sub-stream ("Extra") another. It counts the
+ * streams being sent and remembers the last channel asked for. */
+typedef struct {
+    const uint8_t *data;
+    size_t         len;
+    int            h265;
+} cam_clip_t;
+
+static struct {
+    int            fd;
+    volatile int   stop;
+    cam_clip_t     main, extra;
+    atomic_int     streaming[2];       /* [0] main, [1] extra */
+    atomic_int     last_channel;
+} g_cam;
+
+static void put_le32(uint8_t *p, size_t v)
+{
+    p[0] = v & 0xff; p[1] = v >> 8 & 0xff; p[2] = v >> 16 & 0xff; p[3] = v >> 24 & 0xff;
+}
+
+static int cam_send(int fd, int msgid, const void *body, size_t len)
+{
+    uint8_t h[20] = { 0xff, 1 };
+    h[14] = msgid & 0xff;
+    h[15] = msgid >> 8;
+    put_le32(h + 16, len);
+    return send(fd, h, 20, MSG_NOSIGNAL) == 20 && send(fd, body, len, MSG_NOSIGNAL) == (ssize_t)len ? 0 : -1;
+}
+
+static int cam_recv(int fd, uint8_t *b, size_t len)
+{
+    size_t got = 0;
+    while (got < len && !g_cam.stop) {
+        ssize_t r = recv(fd, b + got, len - got, 0);
+        if (r <= 0) return -1;
+        got += (size_t)r;
+    }
+    return got == len ? 0 : -1;
+}
+
+static void *cam_client(void *arg)
+{
+    int fd = (int)(intptr_t)arg, extra = 0;
+    static const char ok[] = "{\"Ret\":100,\"SessionID\":\"0x00000001\",\"AliveInterval\":20}\n";
+    uint8_t h[20], body[2049];
+    for (;;) {                                      /* login, claim, start */
+        if (cam_recv(fd, h, 20) < 0) goto out;
+        uint32_t len = h[16] | h[17] << 8 | h[18] << 16 | (uint32_t)h[19] << 24;
+        if (len >= sizeof body || cam_recv(fd, body, len) < 0) goto out;
+        body[len] = 0;
+        int msgid = h[14] | h[15] << 8;
+        if (msgid == 1413) {
+            extra = strstr((char *)body, "\"StreamType\":\"Extra\"") != NULL;
+            const char *chn = strstr((char *)body, "\"Channel\":");
+            if (chn) atomic_store(&g_cam.last_channel, atoi(chn + 10));
+        }
+        if (msgid == 1000 || msgid == 1413) cam_send(fd, msgid + 1, ok, sizeof ok);
+        if (msgid == 1410) break;
+    }
+    /* The clip in a loop; a message per picture: an I-frame header (0x1FC,
+     * 2 H.264 or 3 H.265, 100 fps) or a P-frame header, then the picture
+     * with the parameter sets before it. */
+    const cam_clip_t *clip = extra ? &g_cam.extra : &g_cam.main;
+    uint8_t *msg = malloc(16 + clip->len + 4 * 64);
+    atomic_fetch_add(&g_cam.streaming[extra], 1);
+    while (msg && !g_cam.stop) {
+        size_t pos = 0, nl, len = 0;
+        int key = 0;
+        const uint8_t *n;
+        while (!g_cam.stop && (n = au_next_nal(clip->data, clip->len, &pos, &nl)) != NULL) {
+            memcpy(msg + 16 + len, "\0\0\0\1", 4);
+            memcpy(msg + 20 + len, n, nl);
+            len += 4 + nl;
+            int t = clip->h265 ? (n[0] >> 1) & 0x3f : n[0] & 0x1f;
+            int vcl = clip->h265 ? t < 32 : t >= 1 && t <= 5;
+            key |= clip->h265 ? t >= 16 && t <= 21 : t == 5;
+            if (!vcl) continue;
+            uint8_t ihead[12] = { 0, 0, 1, 0xFC, clip->h265 ? 3 : 2, 100, 80, 45 };
+            static const uint8_t phead[4] = { 0, 0, 1, 0xFD };
+            size_t hl = key ? 16 : 8;
+            uint8_t *m = msg + 16 - hl;
+            memcpy(m, key ? ihead : phead, hl - 4);
+            put_le32(m + hl - 4, len);
+            if (cam_send(fd, 1412, m, hl + len) < 0) goto out_msg;
+            len = 0;
+            key = 0;
+            usleep(10 * 1000);
+        }
+    }
+out_msg:
+    atomic_fetch_sub(&g_cam.streaming[extra], 1);
+    free(msg);
+out:
+    close(fd);
+    return NULL;
+}
+
+static void *cam_server(void *arg)
+{
+    (void)arg;
+    while (!g_cam.stop) {
+        int c = accept(g_cam.fd, NULL, NULL);
+        if (c < 0) break;
+        pthread_t t;
+        if (pthread_create(&t, NULL, cam_client, (void *)(intptr_t)c) == 0) pthread_detach(t);
+        else close(c);
+    }
+    return NULL;
+}
+
+/* Start the camera: main stream `main_clip`, sub-stream `extra_clip`.
+ * Returns its port, or 0. */
+static pthread_t g_cam_thread;
+static int cam_start(const char *main_clip, const char *extra_clip)
+{
+    memset(&g_cam, 0, sizeof g_cam);
+    g_cam.main.data = load(main_clip, &g_cam.main.len);
+    g_cam.main.h265 = strstr(main_clip, ".h265") != NULL;
+    g_cam.extra.data = load(extra_clip, &g_cam.extra.len);
+    g_cam.extra.h265 = strstr(extra_clip, ".h265") != NULL;
+    g_cam.fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    socklen_t al = sizeof a;
+    if (g_cam.fd < 0 || bind(g_cam.fd, (struct sockaddr *)&a, sizeof a) < 0 || listen(g_cam.fd, 8) < 0 ||
+        getsockname(g_cam.fd, (struct sockaddr *)&a, &al) < 0) {
+        fprintf(stderr, "fake camera: no listener, test skipped\n");
+        return 0;
+    }
+    pthread_create(&g_cam_thread, NULL, cam_server, NULL);
+    return ntohs(a.sin_port);
+}
+
+static void cam_stop(void)
+{
+    g_cam.stop = 1;
+    shutdown(g_cam.fd, SHUT_RDWR);
+    close(g_cam.fd);
+    pthread_join(g_cam_thread, NULL);
+    usleep(100 * 1000);                     /* the clients see the stop */
+    free((void *)g_cam.main.data);
+    free((void *)g_cam.extra.data);
+}
+
+/* Wait up to `ms` for cond. */
+#define WAIT_FOR(cond, ms) do { for (int w_ = 0; w_ < (ms) / 20 && !(cond); ++w_) usleep(20 * 1000); } while (0)
+
+static void test_channel_decode(void)
+{
+    int port = cam_start("testsrc_640x360.h264", "testsrc_640x360.h264");
+    if (!port) return;
+    char url[64];
+    snprintf(url, sizeof url, "netip://127.0.0.1:%d/", port);
+
+    /* One decoder for two cameras, both on screen: one gets it, the
+     * other is told "no decoder" and keeps trying. (No screen size: the
+     * main streams everywhere.) */
+    g_fake_caps.dec_shown_only = 1;
+    g_dec_slots = 1;
+    vg_rect_t both[CHANNEL_MAX] = { { 0, 40, 640, 300 }, { 640, 40, 640, 300 } };
+    channels_config_t cc = { .urls = { url, url }, .n = 2, .seg_secs = 60 };
+    CHECK(channels_start(&cc, both) == 0, "start");
+    WAIT_FOR((dec_count(g_dec_open, 0) || dec_count(g_dec_open, 1)) &&
+             dec_count(g_dec_fails, 0) + dec_count(g_dec_fails, 1) > 0, 5000);
+    int has = dec_count(g_dec_open, 0) ? 0 : 1, other = 1 - has;
+    CHECK(dec_count(g_dec_open, has) && dec_count(g_dec_sent, has) > 0, "one channel decodes");
+    CHECK(!dec_count(g_dec_open, other) && dec_count(g_dec_fails, other) > 0, "the other has no decoder");
+    channel_status_t st;
+    channels_status(other, &st);
+    CHECK(st.no_decoder && !st.decoding, "its status says no decoder");
+    channels_status(has, &st);
+    CHECK(!st.no_decoder && st.decoding, "the decoding one's does not");
+
+    /* The decoding channel leaves the screen: it frees its decoder, and
+     * the other takes it at its next keyframe, not after the 10 s retry. */
+    vg_rect_t one[CHANNEL_MAX] = { { 0 } };
+    one[other] = (vg_rect_t){ 0, 40, 1280, 600 };
+    channels_set_tiles(one);
+    WAIT_FOR(dec_count(g_dec_open, other), 3000);
+    CHECK(!dec_count(g_dec_open, has), "hidden channel freed its decoder");
+    CHECK(dec_count(g_dec_open, other) && dec_count(g_dec_opens, other) == 1, "shown channel took it");
+    usleep(500 * 1000);
+    channels_status(has, &st);
+    CHECK(st.live && !st.decoding && st.width == 640 && st.height == 360 && !st.view[0],
+          "hidden channel live, not decoding, size known (%d %d %ux%u '%s')", st.live, st.decoding,
+          st.width, st.height, st.view);
+    CHECK(dec_count(g_dec_opens, has) == 1, "hidden channel did not decode again");
+
+    /* Both back with a decoder each: the hidden one decodes again. */
+    g_dec_slots = 2;
+    channels_set_tiles(both);
+    WAIT_FOR(dec_count(g_dec_open, has), 3000);
+    CHECK(dec_count(g_dec_open, has) && dec_count(g_dec_open, other), "both decode");
+
+    channels_stop();
+    cam_stop();
+    g_fake_caps.dec_shown_only = 0;
+    g_dec_slots = 0;
+}
+
+static void test_sub_url(void)
+{
+    char out[512];
+    static const struct { const char *url, *sub; } cases[] = {
+        { "netip://admin:@10.0.0.5:34567/?ch=0&stream=main", "netip://admin:@10.0.0.5:34567/?ch=0&stream=extra" },
+        { "netip://10.0.0.5", "netip://10.0.0.5/?stream=extra" },
+        { "netip://10.0.0.5/", "netip://10.0.0.5/?stream=extra" },
+        { "netip://10.0.0.5/?stream=Main&ch=2", "netip://10.0.0.5/?ch=2&stream=extra" },
+        { "netip://10.0.0.5/?stream=extra", NULL },     /* the sub-stream already */
+        { "netip://10.0.0.5/?ch=1&stream=sub", NULL },
+        { "rtsp://10.0.0.5/stream1", NULL },            /* no vendor-neutral path */
+        { "capture:0", NULL },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
+        int rc = source_sub_url(cases[i].url, out, sizeof out);
+        if (cases[i].sub)
+            CHECK(rc == 0 && !strcmp(out, cases[i].sub), "sub of %s: %s", cases[i].url, rc ? "none" : out);
+        else
+            CHECK(rc < 0, "%s has no sub-stream (%s)", cases[i].url, out);
+        if (cases[i].sub) {
+            source_t *src = source_create(out, 0);
+            CHECK(src != NULL, "the derived %s is a URL", out);
+            source_destroy(src);
+        }
+    }
+    CHECK(source_sub_url("netip://10.0.0.5/?ch=1", out, 20) < 0, "too long for the buffer: none");
+}
+
+/* Count the files in `dir`, and whether one is open (the writer's .tmp?). */
+static int dir_files(const char *dir)
+{
+    DIR *d = opendir(dir);
+    int n = 0;
+    struct dirent *e;
+    while (d && (e = readdir(d)) != NULL) n += e->d_name[0] != '.';
+    if (d) closedir(d);
+    return n;
+}
+
+static int view_is(int ch, const char *view, unsigned w)
+{
+    channel_status_t st;
+    channels_status(ch, &st);
+    return st.decoding && !strcmp(st.view, view) && st.width == w;
+}
+
+static void test_channel_substream(void)
+{
+    /* main: 1080p H.265; sub: 640x360 H.264 */
+    int port = cam_start("majestic_1080p.h265", "testsrc_640x360.h264");
+    if (!port) return;
+    char url[64], rtsp[64], dir[512], cwd[400];
+    snprintf(url, sizeof url, "netip://127.0.0.1:%d/?ch=0&stream=main", port);
+    snprintf(rtsp, sizeof rtsp, "rtsp://127.0.0.1:1/stream1");      /* nothing there */
+    if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0;
+    snprintf(dir, sizeof dir, "%s/test_substream_rec", cwd);
+    char cmd[600];
+    snprintf(cmd, sizeof cmd, "rm -rf '%s'", dir);
+    if (system(cmd)) {}
+
+    g_fake_caps.dec_shown_only = 1;
+    g_dec_slots = 2;
+    channels_set_screen(1280, 720);
+    vg_rect_t quad[CHANNEL_MAX] = { { 0, 40, 640, 300 }, { 640, 40, 640, 300 } };
+    vg_rect_t full[CHANNEL_MAX] = { { 0, 40, 1280, 600 } };
+    vg_rect_t none[CHANNEL_MAX] = { { 0 } };
+    channels_config_t cc = { .urls = { url, rtsp }, .n = 2, .seg_secs = 60, .rec_dir = dir,
+                             .allow_rootfs = 1 };
+    CHECK(channels_start(&cc, quad) == 0, "start");
+
+    /* 2x2: the sub-stream, derived from the NETIP URL; the main stream
+     * runs too, for the recording. An RTSP camera with no sub_url shows
+     * its main stream. */
+    WAIT_FOR(view_is(0, "sub", 640), 5000);
+    CHECK(view_is(0, "sub", 640), "2x2: the sub-stream decodes");
+    CHECK(atomic_load(&g_cam.streaming[0]) == 1 && atomic_load(&g_cam.streaming[1]) == 1,
+          "two connections: main %d, extra %d", atomic_load(&g_cam.streaming[0]),
+          atomic_load(&g_cam.streaming[1]));
+    channel_status_t st;
+    channels_status(1, &st);
+    CHECK(!strcmp(st.view, "main"), "RTSP without a sub_url: the main stream ('%s')", st.view);
+    WAIT_FOR((channels_status(0, &st), st.recording), 3000);
+    CHECK(st.recording && st.live, "recording the main stream");
+
+    /* 1x1: the main stream, through the recording's connection. */
+    channels_set_tiles(full);
+    WAIT_FOR(view_is(0, "main", 1920), 5000);
+    CHECK(view_is(0, "main", 1920), "full screen: the main stream decodes");
+    CHECK(atomic_load(&g_cam.streaming[0]) == 1, "still one main connection");
+
+    /* Back to 2x2 within the sub-stream's linger: no new connection. */
+    channels_set_tiles(quad);
+    WAIT_FOR(view_is(0, "sub", 640), 5000);
+    CHECK(view_is(0, "sub", 640), "2x2 again: the sub-stream");
+    CHECK(atomic_load(&g_cam.streaming[1]) == 1, "the sub-stream's connection was kept");
+
+    /* Off screen: no decoder, and the sub-stream goes after its linger;
+     * the main stream and its recording stay. */
+    channels_set_tiles(none);
+    WAIT_FOR(atomic_load(&g_cam.streaming[1]) == 0, 9000);
+    channels_status(0, &st);
+    CHECK(!st.decoding && !dec_count(g_dec_open, 0) && !st.view[0], "hidden: not decoding ('%s')", st.view);
+    CHECK(atomic_load(&g_cam.streaming[1]) == 0 && atomic_load(&g_cam.streaming[0]) == 1,
+          "hidden: the sub-stream's connection is gone, the main one stays");
+    channels_set_tiles(quad);
+    WAIT_FOR(view_is(0, "sub", 640), 5000);
+    CHECK(view_is(0, "sub", 640), "shown again: the sub-stream comes back");
+
+    /* An explicit sub_url wins, and changing it restarts only the
+     * sub-stream. */
+    char sub[64];
+    snprintf(sub, sizeof sub, "netip://127.0.0.1:%d/?ch=7&stream=extra", port);
+    cc.sub_urls[0] = sub;
+    CHECK(channels_apply(&cc) == 0, "apply a sub_url");
+    WAIT_FOR(atomic_load(&g_cam.last_channel) == 7 && view_is(0, "sub", 640), 5000);
+    CHECK(atomic_load(&g_cam.last_channel) == 7 && view_is(0, "sub", 640), "the sub_url given is used");
+
+    /* All along: one recording, never broken by the view changes. */
+    channels_status(0, &st);
+    CHECK(st.recording && dir_files(dir) == 1, "one segment through every switch (%d files)", dir_files(dir));
+    CHECK(atomic_load(&g_cam.streaming[0]) == 1, "the main connection never restarted");
+
+    channels_stop();
+    cam_stop();
+    channels_set_screen(0, 0);
+    g_fake_caps.dec_shown_only = 0;
+    g_dec_slots = 0;
+    if (system(cmd)) {}
+}
+
 int main(int argc, char **argv)
 {
     g_data = argc > 1 ? argv[1] : "tests/data";
@@ -1473,6 +1847,9 @@ int main(int argc, char **argv)
     test_config_store();
     test_events();
     test_channel_tiles();
+    test_channel_decode();
+    test_sub_url();
+    test_channel_substream();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

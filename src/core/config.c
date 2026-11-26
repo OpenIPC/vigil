@@ -31,6 +31,7 @@ void config_to_channels(const vigil_config_t *c, channels_config_t *cc)
     for (int i = 0; i < c->n_cameras && i < CHANNEL_MAX; ++i) {
         cc->urls[i] = c->cameras[i].enabled ? c->cameras[i].url : NULL;
         cc->names[i] = c->cameras[i].name;
+        cc->sub_urls[i] = c->cameras[i].sub_url;
     }
     cc->rec_dir = c->record.path[0] ? c->record.path : NULL;
     cc->seg_secs = c->record.segment;

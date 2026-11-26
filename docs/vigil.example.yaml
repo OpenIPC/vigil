@@ -13,16 +13,22 @@ version: 1
 #     Required.
 #   name: Name. Shown in the status and the API; empty: the camera's host.
 #   enabled: Enabled. A disabled camera keeps its tile, empty. Default true.
+#   sub_url: Sub-stream URL. Used in multi-window views; the main URL is used
+#     full screen and for recording. Empty: derived for NETIP, otherwise the
+#     main stream everywhere.
 cameras:
   - url: "rtsp://admin:12345@192.168.1.10/stream=0"
     name: Gate
     enabled: true
+    sub_url: ""
   - url: "netip://admin:@192.168.1.11:34567/?ch=0&stream=main"
     name: Yard
     enabled: true
+    sub_url: ""
   - url: "rtsp://192.168.1.12:554/live"
     name: Garage
     enabled: false
+    sub_url: ""
 
 # Recording
 record:

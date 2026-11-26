@@ -10,12 +10,15 @@
 | UI format | ARGB8888, colour key |
 | Status | **experimental**: run only in emulation ([qemu-bench](https://github.com/OpenIPC/qemu-bench)'s `ssr621q` machine), not on hardware |
 
-Per channel *i*, the decoder `MI_VDEC` channel *i* is bound to input port
-*i* of `MI_DISP` video layer 0, which the display scans out on HDMI and VGA
-at the same timing. The decoder's scaler only shrinks, so it outputs the
-picture at the tile's size (or the picture's own, if smaller) and the
-display scales that into a window fitted inside the tile at the picture's
-aspect ratio, centred, with black bars in the rest of the tile.
+Up to 16 channels. Channel *i* is shown through input port *i* of
+`MI_DISP` video layer 0, which the display scans out on HDMI and VGA at the
+same timing; its decoder is whichever `MI_VDEC` channel is free when it
+opens (see below). The picture goes into a window fitted inside the tile at
+its aspect ratio, centred, with black bars in the rest of the tile, and the
+decoder outputs it at the window's size: mi_disp enlarges a picture but does
+not shrink it across (a wider source lost its right part), and the decoder's
+scaler shrinks at most 8 times (the SDK's decoder sample puts DIVP behind it
+beyond that).
 
 The UI is drawn on the GOP framebuffer `/dev/fb0` above the video layer.
 fbdev.ko sets its size and format from `/config/fbdev.ini` (1280x720,
@@ -23,10 +26,62 @@ ARGB8888 on OpenIPC); vigild checks them and paints tiles magenta,
 which the GOP's colour key makes see-through.
 
 Layouts and full screen ([ui.md](../ui.md)) move a channel's input port
-window (`hal_display_set_tile`). The decoder keeps the output size it was
-opened with, so a channel opened in a 2x2 tile and then shown full screen
-is scaled up by the display (softer than a decode at full size) until its
-decoder is opened again.
+window (`hal_display_set_tile`). A smaller tile shrinks the decoder's
+output at once; a larger one is enlarged by the display until the next
+keyframe, where a new decoder takes over at the new size (making the
+output larger on a running decoder scrambled the pictures in emulation).
+
+## Channels, decoders and memory
+
+| | limit | evidence |
+|---|---|---|
+| tiles | 16 | `MI_DISP_INPUTPORT_MAX 16` (`mi_disp_datatype.h`); the SDK's display test binds layer 0's ports as DISP channels 0..15 |
+| `MI_VDEC` channels | **4 or 32** | the SDK's `mi_vdec.ko` (2020-03) sets its `MaxChnNum` in `_MI_VDEC_CreateDevice`: 32 when the chip's efuse UUID (bits 16..47, efuse regs 0x17/0x18) reads zero, **4 otherwise**; `/proc/mi_modules/mi_vdec/mi_vdec0` shows it. A `mi_vdec.ko` from a vendor's 16-channel i2m NVR firmware has a fixed limit of 32 instead |
+| picture | 2592 wide | `dec_max_w`, the VPU's 5 MP |
+| media heap | 160 MiB | `mma_heap=...,sz=0xA000000` on 256 MiB boards; about 157 MiB free with the display up |
+
+The 4-channel case is what the emulated SSR621Q shows (its efuse holds a
+real chip's UUID): `MI_VDEC_CreateChn` refuses channel 4 with
+`0xA0082002` (invalid channel). Whether real boards are limited the same
+way with OpenIPC's modules is not known yet; it would take a `mi_vdec`
+built without the check. vigild copes with either: it hands out `MI_VDEC`
+channel numbers as decoders open (the one free longest), learns the limit
+from that refusal, and decodes only the channels on screen
+(`dec_shown_only`), so with 4 decoder channels a 2x2 page and paging
+through all 16 cameras work, and a 3x3 or 4x4 layout decodes 4 of its tiles
+(the others say "no decoder" and get one as soon as one is free).
+
+**Memory.** `MI_VDEC` allocates its frame buffers only when the first
+picture decodes, after `MI_VDEC_CreateChn` has succeeded, so vigild keeps
+its own account of the heap: what is free with no decoder open (from
+`/proc/mi_modules/mi_sys_mma/mma_heap_name0`), less 4 MiB, against an
+estimate per decoder, and refuses a decoder that would not fit; the
+channel reports "no decoder" and tries again when another decoder closes.
+What the decoders took in emulation, read from that file:
+
+| stream | refs | heap per decoder |
+|---|---|---|
+| 1280x720 H.264 | 3 | 8.2 MiB + output pictures |
+| 1280x720 H.265 | 3 | 5.6 MiB + output pictures |
+| 640x360 H.264 | 3 | 3.0 MiB + output pictures |
+| 352x288 H.264 / H.265 (sub-streams) | 3 | about 1.5 MiB |
+
+Sixteen 720p decoders fit (6 H.264, 5 H.265 and five 640x360 in a 4x4 view
+took 95 MiB, 64 MiB were left); 1080p or 4 MP main streams fit far fewer.
+Sixteen CIF sub-streams took 24 MiB.
+
+**Sub-streams.** The 9- and 16-window views are meant for the cameras'
+sub-streams: a tile of a quarter of the screen or less shows the camera's
+`sub_url` (or, for a NETIP camera, the same URL with `stream=extra`), a
+larger tile and full screen its main stream, and recording always takes
+the main stream ([architecture](../architecture.md)). Give RTSP cameras a
+`sub_url` (the vendor's second stream, e.g. `.../stream2` or
+`.../h264Preview_01_sub`): without one they decode their main stream in
+every tile.
+
+The bitstream buffer is sized as the SDK's decoder sample does (512 KiB up
+to D1, 1 MiB up to 1080p, 2 MiB above) and grows, with a new decoder, at a
+keyframe that does not fit, up to 4 MiB.
 
 The SDK has no `mi_hdmi`. The HDMI transmitter is
 [opensigmastar](https://github.com/OpenIPC/opensigmastar)'s
@@ -81,4 +136,16 @@ request that added the platform). The UI (live view, navigation bar,
 context menu, full screen and back, settings saved and applied) was driven
 there with the machine's emulated USB mouse. Nothing has run on an SSR621Q
 board yet.
-The HDMI and VGA signals, hot-plug and decoder limits are unverified.
+
+Sixteen channels, also only in emulation (OpenIPC firmware image, 16 fake
+cameras: ten NETIP with a CIF sub-stream on `stream=extra`, six RTSP with a
+`sub_url`; 720p main streams, H.264 and H.265): with the stock emulated
+efuse, `mi_vdec` takes 4 channels, 2x2 pages through all 16 cameras and
+4x4 decodes 4 of them; with the efuse UUID zeroed in the emulator (32
+channels), 4x4 decodes all 16 sub-streams and full screen switches to the
+main stream. In emulation a decoder made again right after another one on
+the same port took 10-40 s to show a picture (the emulated VPU); one on a
+fresh `MI_VDEC` channel shows it within a few seconds.
+
+The HDMI and VGA signals, hot-plug and decoder limits are unverified on
+hardware.
