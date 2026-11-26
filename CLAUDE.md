@@ -19,10 +19,11 @@ HiSilicon (hi3536dv100, hi3520dv200), Rockchip (RK3588) and a hardware-free
 On OpenIPC firmware it is meant to ship as the `vigil` package
 (`general/package/vigil` in OpenIPC/firmware, being added for hi3536dv100):
 started at boot by `/etc/init.d/S95vigil`, a copy of majestic's supervisor
-(restart on crash with back-off, give up after a crash loop), configured in
-`/etc/vigil.yaml` (turned into command-line options), and run with `-s` so
-its log goes to syslog. `vigild` itself reads `/etc/vigil.json` (`-f`), which
-its HTTP API (`docs/api.md`) edits; options override the file.
+(restart on crash with back-off, give up after a crash loop), and run with
+`-s` so its log goes to syslog. `vigild` reads `/etc/vigil.yaml` (`-f`; YAML
+like majestic's, or JSON when the name ends in `.json`), which its HTTP API
+(`docs/api.md`) and on-screen settings rewrite with each setting's help as
+comments; options override the file.
 
 ## The layering rule (the one that must not be broken)
 
@@ -53,7 +54,8 @@ its HTTP API (`docs/api.md`) edits; options override the file.
 - `src/core/` — channel threads, the access-unit normalizer (`au_norm`), SPS
   parsing, the segment writer, events, small net/md5 helpers, and the
   configuration: `schema.c` (generic engine), `config_schema.c` (every
-  setting as a table row), `config.c` (the file and the store).
+  setting as a table row), `schema_yaml.c` (the file's YAML, via libyaml,
+  to and from the same cJSON document), `config.c` (the file and the store).
 - `src/core/source/` — camera protocols behind `source_ops_t`: RTSP
   (`rtsp_client`, `rtp_depay`), NETIP, `capture:N`. A new protocol is one
   `source_<name>.c` listed in `source.c`.
@@ -77,7 +79,7 @@ its HTTP API (`docs/api.md`) edits; options override the file.
 ## Build
 
 ```sh
-# host (generic platform) + tests
+# host (generic platform) + tests; needs libyaml-dev
 cmake -B build && cmake --build build -j && (cd build && ctest --output-on-failure)
 
 # hi3536dv100, against the SDK (static) or the firmware's headers + shared libs
@@ -151,5 +153,6 @@ what the next line does.
 - **LVGL** (`third_party/lvgl`, v9.2.2), **cJSON** (`third_party/cJSON`,
   v1.7.19) and **CivetWeb** (`third_party/civetweb`, a master commit after
   v1.16: v1.16 lacks later security fixes) are submodules; clone with
-  `--recursive`. A new setting is a row in `src/core/config_schema.c`, not
+  `--recursive`. **libyaml** (MIT) comes from the system (`libyaml-dev`; on
+  OpenIPC images with `yaml-cli`). A new setting is a row in `src/core/config_schema.c`, not
   hand-written JSON code.

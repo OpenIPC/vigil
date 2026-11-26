@@ -57,7 +57,7 @@ into `/usr/local`:
   airockchip/librga repository ships binaries only.
 
 ```sh
-sudo apt install cmake meson ninja-build pkg-config libdrm-dev git build-essential
+sudo apt install cmake meson ninja-build pkg-config libdrm-dev libyaml-dev git build-essential
 sudo scripts/rockchip/build-deps.sh        # PREFIX=/usr/local, WORK=/tmp/vigil-deps
 ```
 

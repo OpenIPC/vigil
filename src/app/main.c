@@ -2,6 +2,7 @@
 /* main.c — vigild: open DVR/NVR recorder.
  *
  *   config_init (-f FILE) + command-line overrides
+ *   -> -w OUT: write that configuration to OUT and exit
  *   -> hal_init (media system + HDMI on platforms that have it)
  *   -> channels_start (one thread per camera: source -> decode + record)
  *   -> api_start (HTTP/WebSocket API on its own threads, if configured)
@@ -142,8 +143,9 @@ static void log_to_syslog_stop(void)
 
 static void usage(const char *argv0)
 {
-    printf("usage: %s [-f FILE] [-c URL]... [-o DIR|none] [-S SECS] [-K N] [-t SECS] [-s]\n"
-           "  -f FILE  configuration (default %s; missing = defaults)\n"
+    printf("usage: %s [-f FILE] [-c URL]... [-o DIR|none] [-S SECS] [-K N] [-t SECS] [-s] [-w OUT]\n"
+           "  -f FILE  configuration (default %s; missing = defaults);\n"
+           "           YAML, or JSON when the name ends in .json\n"
            "  -c URL   camera source, in tile order (up to %d); replaces the file's cameras:\n"
            "             rtsp://[user:pass@]host[:554]/path\n"
            "             netip://[user:pass@]host[:34567]/[?ch=N&stream=main|extra]\n"
@@ -153,6 +155,8 @@ static void usage(const char *argv0)
            "  -K N     segments kept per camera (default 3; 0 = keep all)\n"
            "  -t SECS  exit after SECS seconds (default: run until SIGINT)\n"
            "  -s       log to syslog (tag vigil) instead of stderr\n"
+           "  -w OUT   write the configuration (the file with the options applied) to\n"
+           "           OUT and exit: YAML, or JSON when OUT ends in .json; - = stdout\n"
            "Options override the file for this run; the API saves what is in force.\n",
            argv0, CONFIG_DEFAULT_PATH, CHANNEL_MAX);
 }
@@ -166,6 +170,49 @@ static int int_option(const char *opt, const char *v, const char *section, const
     int c = n < f->min ? f->min : n > f->max ? f->max : n;
     if (c != n) vg_log("%s %s: out of range %d..%d, using %d", opt, v, f->min, f->max, c);
     return c;
+}
+
+/* -w: the configuration in force, as a file (converting one from JSON to
+ * YAML, making a commented default one). Not over a file that failed to
+ * load: that would write the defaults in its place. */
+static int write_config(const char *out, const char *in, int loaded, const vigil_config_t *c)
+{
+    if (loaded < 0) {
+        vg_log("%s is invalid; not writing %s", in, out);
+        return 1;
+    }
+    if (!strcmp(out, "-")) {
+        /* The caller's stdout, also under -s: the descriptor 1 then leads
+         * to syslog, and the text holds the cameras' passwords. */
+        int fd = g_saved_out >= 0 ? g_saved_out : STDOUT_FILENO;
+        char err[200];
+        if (config_check_text(c, CONFIG_YAML, err, sizeof err) < 0) {
+            vg_log("%s", err);
+            return 1;
+        }
+        char *text = config_file_text(c, CONFIG_YAML);
+        int ok = text != NULL;
+        fflush(stdout);
+        for (size_t len = ok ? strlen(text) : 0, done = 0; ok && done < len;) {
+            ssize_t n = write(fd, text + done, len - done);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) ok = 0;
+            else done += (size_t)n;
+        }
+        free(text);
+        if (!ok) vg_log("cannot write the configuration to stdout");
+        return ok ? 0 : 1;
+    }
+    char err[700];
+    int rc = config_save_file(out, c, err, sizeof err);
+    if (rc != 0) {
+        /* rc > 0: in place, but its directory was not synced; a caller
+         * that removes the original next must not take it as done. */
+        vg_log("%s", err);
+        return 1;
+    }
+    vg_log("%s written", out);
+    return 0;
 }
 
 /* ---- applying a new configuration (main thread) ------------------------------------ */
@@ -197,6 +244,7 @@ static void apply_config(void)
 int main(int argc, char **argv)
 {
     const char *cfg_path = CONFIG_DEFAULT_PATH, *rec_dir = NULL, *seg = NULL, *keep = NULL;
+    const char *write_path = NULL;
     const char *urls[CHANNEL_MAX];
     int n_urls = 0, run_secs = 0, use_syslog = 0;
 
@@ -206,7 +254,7 @@ int main(int argc, char **argv)
         const char *a = argv[i];
         if (!strcmp(a, "-s"))
             use_syslog = 1;
-        else if (a[0] == '-' && a[1] && !a[2] && strchr("fcoSKt", a[1]))
+        else if (a[0] == '-' && a[1] && !a[2] && strchr("fcoSKtw", a[1]))
             ++i;                                    /* skip the option's value */
     }
 
@@ -238,6 +286,8 @@ int main(int argc, char **argv)
             keep = v;
         } else if (!strcmp(a, "-t") && v) {
             run_secs = atoi(v);
+        } else if (!strcmp(a, "-w") && v) {
+            write_path = v;
         } else {
             usage(argv[0]);
             log_to_syslog_stop();
@@ -247,7 +297,8 @@ int main(int argc, char **argv)
     }
 
     /* defaults < the file < the options */
-    if (config_init(cfg_path) == -2) {
+    int loaded = config_init(cfg_path);
+    if (loaded == -2) {
         log_to_syslog_stop();
         return 2;
     }
@@ -302,6 +353,11 @@ int main(int argc, char **argv)
     }
     config_override(&cfg);
     snprintf(g_api_listen, sizeof g_api_listen, "%s", cfg.api.listen);
+    if (write_path) {
+        int wrc = write_config(write_path, cfg_path, loaded, &cfg);
+        log_to_syslog_stop();
+        return wrc;
+    }
 
     if (hal_init(SCREEN_W, SCREEN_H, 60) < 0) {
         vg_log("platform init failed");

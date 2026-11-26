@@ -16,7 +16,8 @@ are part of the design.
   reserve: the oldest recordings are deleted when the disk fills up. Only
   onto a disk: with none mounted where the path leads, nothing is written
   to the root filesystem (a board's flash) or to RAM.
-- **Configuration** in one JSON file (`/etc/vigil.json`) and an
+- **Configuration** in one YAML file (`/etc/vigil.yaml`, like majestic's,
+  every setting explained in a comment) and an
   **HTTP/WebSocket API** to read and change it while video keeps running,
   with live status and events; login with the system account
   ([docs/api.md](docs/api.md)).
@@ -39,12 +40,13 @@ are part of the design.
 
 ```sh
 git clone --recursive https://github.com/OpenIPC/vigil && cd vigil
+sudo apt install cmake libyaml-dev           # Debian/Ubuntu
 cmake -B build && cmake --build build -j && (cd build && ctest)
 ./build/vigild -o /tmp/rec -c rtsp://user:pass@camera/stream -c netip://admin:@dvr:34567/
 ```
 
 Or put the cameras in a configuration file
-([example](docs/vigil.example.json)) and run `vigild -f vigil.json`;
+([example](docs/vigil.example.yaml)) and run `vigild -f vigil.yaml`;
 then `curl -u root:PASSWORD http://localhost:8080/api/v1/status`.
 
 For a board, see its page under [docs/platforms](docs/platforms/).
@@ -68,6 +70,7 @@ For a board, see its page under [docs/platforms](docs/platforms/).
 
 GPL-3.0-or-later. [LVGL](https://lvgl.io), [cJSON](https://github.com/DaveGamble/cJSON)
 and [CivetWeb](https://github.com/civetweb/civetweb) (all MIT) are included
-as submodules.
+as submodules; [libyaml](https://github.com/yaml/libyaml) (MIT) is used from
+the system.
 Vendor SDKs, libraries and kernel modules are not part of this repository.
 They are used from wherever you keep them.

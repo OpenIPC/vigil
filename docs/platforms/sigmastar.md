@@ -42,6 +42,11 @@ that module only VGA has a picture.
   i2m NVR SDK. OpenIPC firmware ships them in `/usr/lib`
   (`sigmastar-osdrv-infinity2m`).
 - **A cross toolchain** for `arm-openipc-linux-gnueabihf` (glibc).
+- **libyaml for the target** (`yaml.h`, `libyaml.so`): the configuration
+  file is YAML. `cmake/toolchains/cross.cmake` looks in the toolchain's
+  sysroot (OpenIPC firmware builds with `yaml-cli` have it); otherwise add a
+  firmware build's staging directory with `-DCMAKE_FIND_ROOT_PATH=<firmware>/output/staging`,
+  or give `-DLIBYAML_INCLUDE_DIR=… -DLIBYAML_LIBRARY=…`.
 - **On the board**: the media modules and `/config` (panel timings, PQ
   tables, memory map, decoder firmware), loaded by the firmware's
   `load_sigmastar`, and opensigmastar's `open_hdmitx.ko` and `open_hdmi.ko`

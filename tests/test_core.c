@@ -31,6 +31,7 @@
 #include "source.h"
 #include "rtsp_client.h"
 #include "schema.h"
+#include "schema_yaml.h"
 #include "seg_writer.h"
 #include "sps.h"
 
@@ -770,15 +771,26 @@ static char *config_text(const vigil_config_t *c)
     return t;
 }
 
+/* Write `text` to `path` and load it into `d`, errors into `e`. */
+static int load_text(const char *path, const char *text, vigil_config_t *d, schema_errors_t *e)
+{
+    write_file(path, text);
+    memset(e, 0, sizeof *e);
+    return config_load_file(path, d, e);
+}
+
 static void test_config_file(void)
 {
     char dir[] = "/tmp/vigil-cfg-XXXXXX", path[128], tmp[160], err[160];
     if (!mkdtemp(dir)) return;
-    snprintf(path, sizeof path, "%s/vigil.json", dir);
+    snprintf(path, sizeof path, "%s/vigil.yaml", dir);
     snprintf(tmp, sizeof tmp, "%s.tmp", path);
     vigil_config_t c, d;
     schema_errors_t e = { 0 };
 
+    CHECK(config_format("/etc/vigil.yaml") == CONFIG_YAML && config_format("vigil.yml") == CONFIG_YAML &&
+          config_format("/etc/vigil") == CONFIG_YAML && config_format("/etc/vigil.json") == CONFIG_JSON &&
+          config_format(".json") == CONFIG_JSON && config_format("json") == CONFIG_YAML, "format by name");
     CHECK(config_load_file(path, &c, &e) == 1 && c.n_cameras == 0 && c.record.segment == 60 &&
           c.record.keep == 3 && !c.record.path[0] && c.api.auth == 1 && !strcmp(c.api.listen, "0.0.0.0:8080"),
           "missing file: defaults");
@@ -814,42 +826,233 @@ static void test_config_file(void)
     CHECK(config_load_file(path, &d, &e) == 0, "load what was saved: %s", e.n ? e.e[0].msg : "");
     char *a = config_text(&c), *b = config_text(&d);
     CHECK(a && b && !strcmp(a, b), "round trip:\n%s\n%s", a, b);
+    free(b);
     char *raw = read_file(path);
     CHECK(raw && strstr(raw, "admin:secret@"), "the file keeps the password");
-    free(a);
-    free(b);
+    /* YAML, documented by the schema's own help text */
+    CHECK(raw && !strncmp(raw, "# vigild configuration", 22) && strstr(raw, "\nversion: 1\n") &&
+          strstr(raw, "\ncameras:\n  - url: \"rtsp://admin:secret@10.0.0.2/stream\"\n    name: Gate\n"
+                      "    enabled: true\n") &&
+          strstr(raw, "\nrecord:\n  # Recording directory: Where the streams are recorded") &&
+          strstr(raw, "\n  path: /mnt/sda1/rec\n") &&
+          strstr(raw, "  # Segment length (s): A new file starts at the first keyframe after this\n"
+                      "  # many seconds. 10..3600, default 60.\n  segment: 300\n") &&
+          strstr(raw, "# Cameras: In tile order: the first is CAM1. At most 16. Each one:\n#   url: Source URL.") &&
+          strstr(raw, "\n  listen: \"0.0.0.0:8080\"\n") && strstr(raw, "not kept"),
+          "YAML with the help as comments:\n%s", raw ? raw : "");
     free(raw);
+    /* and saved again, the same file */
+    char path2[160];
+    snprintf(path2, sizeof path2, "%s/again.yaml", dir);
+    CHECK(config_save_file(path2, &d, err, sizeof err) == 0, "save again: %s", err);
+    raw = read_file(path);
+    char *raw2 = read_file(path2);
+    CHECK(raw && raw2 && !strcmp(raw, raw2), "load, save: the same text");
+    free(raw);
+    free(raw2);
+    unlink(path2);
 
-    /* the documented example stays valid */
+    /* Strings that YAML would read as something else, or not at all, are
+     * quoted; each one comes back as it was. */
+    static const char *const names[] = {
+        "", "yes", "No", "on", "OFF", "true", "False", "y", "n", "null", "Null", "~", "123", "-1", "+1",
+        "0x1f", "1e3", ".5", "1.0", "0", "007", " lead", "trail ", "a: b", "a #b", "#hash", "a#b", "key:",
+        "-", "- x", "?", "? x", ":", "@at", "`tick", "!tag", "&anchor", "*alias", "%pct", "|lit", ">fold",
+        "'single'", "\"double\"", "back\\slash", "[x]", "{y}", "a,b", "Gate 2", "Ворота", "門",
+        "\xc2\x80" "c1", "nel\xc2\x85", "ls\xe2\x80\xa8", "bom\xef\xbb\xbf", "nb\xc2\xa0sp", "emoji \xf0\x9f\x93\xb7",
+        "tab\tinside", "x\x7f",
+    };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; ++i) {
+        int control = strchr(names[i], '\t') || strchr(names[i], 0x7f);
+        snprintf(c.cameras[0].name, sizeof c.cameras[0].name, "%s", names[i]);
+        memset(&e, 0, sizeof e);
+        if (control) {                  /* refused before it could be saved */
+            CHECK(schema_validate(&config_schema, &c, &e) < 0 && has_error(&e, "cameras[0].name", "control"),
+                  "control character refused: %s", names[i]);
+            continue;
+        }
+        CHECK(config_save_file(path, &c, err, sizeof err) == 0, "save name '%s': %s", names[i], err);
+        memset(&e, 0, sizeof e);
+        int rc = config_load_file(path, &d, &e);
+        CHECK(rc == 0 && !strcmp(d.cameras[0].name, names[i]) && d.n_cameras == 2 && d.cameras[0].enabled,
+              "name '%s' comes back as '%s' (%s)", names[i], d.cameras[0].name, e.n ? e.e[0].msg : "");
+    }
+    static const char *const urls[] = {
+        "rtsp://admin:p?ss#w&rd:x@10.0.0.2:554/live?a=1&b=2",
+        "rtsp://admin:\"q\" \\ @10.0.0.2/x",
+        "rtsp://u:pw@h/x?token=a@b#frag",
+        "netip://admin:@10.0.0.3:34567/?ch=0&stream=main",
+        "capture:1",
+    };
+    snprintf(c.cameras[0].name, sizeof c.cameras[0].name, "Gate");
+    for (size_t i = 0; i < sizeof urls / sizeof urls[0]; ++i) {
+        snprintf(c.cameras[0].url, sizeof c.cameras[0].url, "%s", urls[i]);
+        memset(&e, 0, sizeof e);
+        CHECK(schema_validate(&config_schema, &c, &e) == 0, "URL %s valid: %s", urls[i], e.n ? e.e[0].msg : "");
+        CHECK(config_save_file(path, &c, err, sizeof err) == 0, "save URL: %s", err);
+        memset(&e, 0, sizeof e);
+        CHECK(config_load_file(path, &d, &e) == 0 && !strcmp(d.cameras[0].url, urls[i]),
+              "URL %s comes back as %s (%s)", urls[i], d.cameras[0].url, e.n ? e.e[0].msg : "");
+    }
+    snprintf(c.cameras[0].url, sizeof c.cameras[0].url, "rtsp://admin:secret@10.0.0.2/stream");
+
+    /* the documented example stays valid, and is what vigild writes */
     char example[512];
-    snprintf(example, sizeof example, "%s/../../docs/vigil.example.json", g_data);
+    snprintf(example, sizeof example, "%s/../../docs/vigil.example.yaml", g_data);
     memset(&e, 0, sizeof e);
-    CHECK(config_load_file(example, &d, &e) == 0 && d.n_cameras == 3 && !d.cameras[2].enabled,
-          "docs/vigil.example.json: %s", e.n ? e.e[0].msg : "");
+    CHECK(config_load_file(example, &d, &e) == 0 && d.n_cameras == 3 && !d.cameras[2].enabled &&
+          !strcmp(d.cameras[1].url, "netip://admin:@192.168.1.11:34567/?ch=0&stream=main"),
+          "docs/vigil.example.yaml: %s", e.n ? e.e[0].msg : "");
+    char *ex = read_file(example), *gen = config_file_text(&d, CONFIG_YAML);
+    CHECK(ex && gen && !strcmp(ex, gen),
+          "docs/vigil.example.yaml is what vigild writes (vigild -f docs/vigil.example.yaml -w -):\n%s",
+          gen ? gen : "");
+    free(ex);
+    free(gen);
 
-    /* invalid files: defaults, with the reason */
-    write_file(path, "{\"record\": {\"segment\": 60,}}");
+    /* what people type */
+    CHECK(load_text(path, "# just a comment\n", &d, &e) == 0 && d.record.segment == 60, "comments only: defaults");
+    CHECK(load_text(path, "", &d, &e) == 0 && d.n_cameras == 0, "empty: defaults");
+    CHECK(load_text(path,
+                    "cameras:\n"
+                    "- url: rtsp://10.0.0.2/live\n"         /* plain: a ':' not followed by a space */
+                    "  enabled: yes\n"
+                    "  name:\n"                             /* empty */
+                    "- {url: 'netip://admin:@10.0.0.3/?ch=0', enabled: Off, name: 'it''s'}\n"
+                    "- url: \"capture:0\"\n"
+                    "  enabled: \"no\"\n"
+                    "record:\n"
+                    "  path: '/mnt/sda1/rec'\n"
+                    "  segment: +90   # seconds\n"
+                    "  keep: \"5\"\n"
+                    "  allow_rootfs: TRUE\n"
+                    "api:\n"
+                    "  listen: 8080\n"                      /* a string setting given a number */
+                    "  auth: on\n", &d, &e) == 0,
+          "hand-written YAML: %s %s", e.n ? e.e[0].path : "", e.n ? e.e[0].msg : "");
+    CHECK(d.n_cameras == 3 && d.cameras[0].enabled == 1 && !d.cameras[0].name[0] &&
+          !strcmp(d.cameras[1].name, "it's") && d.cameras[1].enabled == 0 && d.cameras[2].enabled == 0 &&
+          !strcmp(d.cameras[2].url, "capture:0") && !strcmp(d.record.path, "/mnt/sda1/rec") &&
+          d.record.segment == 90 && d.record.keep == 5 && d.record.allow_rootfs == 1 &&
+          !strcmp(d.api.listen, "8080") && d.api.auth == 1, "values as typed");
+    /* the firmware's earlier vigil.yaml: a camera is just its URL */
+    CHECK(load_text(path,
+                    "cameras:\n"
+                    "  - rtsp://admin:12345@192.168.1.10/stream=0\n"
+                    "  - \"netip://admin:@192.168.1.11:34567/?ch=0&stream=main\"\n"
+                    "record:\n"
+                    "  path: \"\"\n"
+                    "  segment: 60\n"
+                    "  keep: 0\n", &d, &e) == 0 && d.n_cameras == 2 && d.cameras[0].enabled &&
+          !strcmp(d.cameras[0].url, "rtsp://admin:12345@192.168.1.10/stream=0") && !d.cameras[0].name[0] &&
+          !strcmp(d.cameras[1].url, "netip://admin:@192.168.1.11:34567/?ch=0&stream=main") && d.record.keep == 0,
+          "a camera given as its URL: %s %s", e.n ? e.e[0].path : "", e.n ? e.e[0].msg : "");
+    CHECK(load_text(path, "cameras:\n  - http://x/\n  -\n", &d, &e) < 0 &&
+          has_error(&e, "cameras[0].url", "not a camera URL") && has_error(&e, "cameras[1]", "object"),
+          "a bad URL, an empty item");
+    CHECK(load_text(path, "cameras:\nrecord:\n", &d, &e) == 0 && d.n_cameras == 0 && d.record.segment == 60,
+          "an empty section: no cameras, defaults");
+    CHECK(load_text(path, "{\"version\": 1, \"record\": {\"segment\": 120, \"allow_rootfs\": true}}", &d, &e) == 0 &&
+          d.record.segment == 120 && d.record.allow_rootfs, "JSON is YAML too");
+    CHECK(load_text(path, "version: 1\nfuture:\n  x: [1, {y: 2}]\nrecord:\n  segment: 90\n  later: true\n",
+                    &d, &e) == 0 && d.record.segment == 90, "a newer file's keys are skipped");
+
+    /* wrong values: the defaults, with each error and its path */
+    CHECK(load_text(path, "record:\n  allow_rootfs: maybe\n  segment: 1e2\ncameras:\n  - url: capture:0\n"
+                          "    enabled: 1\n", &d, &e) < 0 &&
+          has_error(&e, "record.allow_rootfs", "true or false") && has_error(&e, "record.segment", "integer") &&
+          has_error(&e, "cameras[0].enabled", "true or false") && !d.n_cameras && !d.record.allow_rootfs,
+          "wrong types: %d errors", e.total);
+    CHECK(load_text(path, "record:\n  segment: 060\n", &d, &e) < 0 && has_error(&e, "record.segment", "integer"),
+          "a leading 0 is not guessed at");
+    CHECK(load_text(path, "record:\n  segment: 99999999999\n", &d, &e) < 0 &&
+          has_error(&e, "record.segment", "integer"), "beyond int");
+    CHECK(load_text(path, "record:\n  segment: ~\n", &d, &e) < 0 && has_error(&e, "record.segment", "integer"),
+          "null for an integer");
+    CHECK(load_text(path, "record:\n  segment: 5\ncameras:\n  - url: http://x/\n", &d, &e) < 0 &&
+          has_error(&e, "record.segment", "range") && has_error(&e, "cameras[0].url", "not a camera URL") &&
+          !d.n_cameras, "bad values");
+    CHECK(load_text(path, "record: [1, 2]\ncameras:\n  url: capture:0\n", &d, &e) < 0 &&
+          has_error(&e, "record", "object") && has_error(&e, "cameras", "array"), "wrong shapes");
+    CHECK(load_text(path, "cameras:\n  - name: x\n", &d, &e) < 0 && has_error(&e, "cameras[0].url", "required"),
+          "required");
+    CHECK(load_text(path, "version: 2\n", &d, &e) < 0 && has_error(&e, "version", "must be 1"), "version");
+    CHECK(load_text(path, "api:\n  listen: 1.2.3:80\n", &d, &e) < 0 && has_error(&e, "api.listen", "IPv4"),
+          "listen address");
+    CHECK(load_text(path, "api:\n  listen: 0.0.0.0:0\n", &d, &e) < 0 && has_error(&e, "api.listen", "port"),
+          "listen port");
+    CHECK(load_text(path, "record:\n  path: rec\n", &d, &e) < 0 && has_error(&e, "record.path", "absolute"),
+          "relative path");
+    CHECK(load_text(path, "cameras:\n  - url: capture:0\n    name: \"\\x01\"\n", &d, &e) < 0 &&
+          has_error(&e, "cameras[0].name", "control"), "an escape for a control character");
+
+    /* not YAML this reads: the defaults, with the reason */
+    CHECK(load_text(path, "record:\n  segment: [60,\n", &d, &e) < 0 && e.n && strstr(e.e[0].msg, "not valid YAML") &&
+          strstr(e.e[0].msg, "line 3") && d.record.segment == 60, "syntax error: %s", e.n ? e.e[0].msg : "");
+    CHECK(load_text(path, "record:\n  segment: 60\n   keep: 1\n", &d, &e) < 0 && e.n &&
+          strstr(e.e[0].msg, "not valid YAML"), "bad indentation: %s", e.n ? e.e[0].msg : "");
+    CHECK(load_text(path, "record:\n  segment: 60\n\tkeep: 1\n", &d, &e) < 0 && e.n &&
+          strstr(e.e[0].msg, "not valid YAML"), "a tab for indentation: %s", e.n ? e.e[0].msg : "");
+    CHECK(load_text(path, "x: &a [1, 2]\nrecord:\n  keep: *a\n", &d, &e) < 0 &&
+          has_error(&e, "record.keep", "aliases"), "an alias is refused");
+    CHECK(load_text(path, "a: &a [x, x, x, x, x, x, x, x, x]\nb: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a]\n"
+                          "c: &c [*b, *b, *b, *b, *b, *b, *b, *b, *b]\n", &d, &e) < 0 && has_error(&e, "b[0]", "aliases"),
+          "billion laughs: refused at the first alias");
+    CHECK(load_text(path, "x: [[[[[[[[[[1]]]]]]]]]]\n", &d, &e) < 0 && has_error(&e, "x[0][0][0][0][0][0][0]", "deep"),
+          "nested too deeply: %s %s", e.n ? e.e[0].path : "", e.n ? e.e[0].msg : "");
+    {
+        size_t cap = 64 * 1024, n = 0;
+        char *big = malloc(cap);
+        n += (size_t)snprintf(big + n, cap - n, "x: [");
+        for (int i = 0; i < SCHEMA_YAML_MAX_NODES + 1; ++i) n += (size_t)snprintf(big + n, cap - n, "1,");
+        snprintf(big + n, cap - n, "1]\n");
+        CHECK(load_text(path, big, &d, &e) < 0 && e.n && strstr(e.e[0].msg, "too many"),
+              "too many values: %s", e.n ? e.e[0].msg : "");
+        free(big);
+    }
+    CHECK(load_text(path, "record:\n  keep: 1\n  keep: 2\n", &d, &e) < 0 && has_error(&e, "record.keep", "twice"),
+          "a key twice");
+    CHECK(load_text(path, "record:\n  ? [a]\n  : 1\n", &d, &e) < 0 && has_error(&e, "record", "plain text"),
+          "a key that is not text");
+    CHECK(load_text(path, "record:\n  path: \"/a\\0b\"\n", &d, &e) < 0 && has_error(&e, "record.path", "NUL"),
+          "a NUL character");
+    CHECK(load_text(path, "record: {}\n---\nrecord: {}\n", &d, &e) < 0 && e.n && strstr(e.e[0].msg, "one YAML document"),
+          "two documents");
+    CHECK(load_text(path, "- record\n", &d, &e) < 0 && e.n && strstr(e.e[0].msg, "mapping"), "a list");
+    CHECK(load_text(path, "hello\n", &d, &e) < 0 && e.n && strstr(e.e[0].msg, "mapping"), "a word");
+    CHECK(load_text(path, "record:\n  path: \"\xff\"\n", &d, &e) < 0 && e.n && strstr(e.e[0].msg, "not valid YAML"),
+          "not UTF-8: %s", e.n ? e.e[0].msg : "");
+
+    /* a .json file is still JSON, read and written */
+    char jpath[160];
+    snprintf(jpath, sizeof jpath, "%s/vigil.json", dir);
+    CHECK(config_save_file(jpath, &c, err, sizeof err) == 0, "save JSON: %s", err);
+    raw = read_file(jpath);
+    CHECK(raw && raw[0] == '{' && strstr(raw, "\"segment\":\t300") && raw[strlen(raw) - 1] == '\n' &&
+          raw[strlen(raw) - 2] == '}', "a .json file is written as JSON: %s", raw ? raw : "");
+    free(raw);
     memset(&e, 0, sizeof e);
-    CHECK(config_load_file(path, &d, &e) < 0 && e.n && strstr(e.e[0].msg, "not valid JSON") &&
-          d.record.segment == 60 && !d.n_cameras, "bad JSON: %s", e.n ? e.e[0].msg : "");
-    write_file(path, "{\"record\": {\"segment\": 5}, \"cameras\": [{\"url\": \"http://x/\"}]}");
-    memset(&e, 0, sizeof e);
-    CHECK(config_load_file(path, &d, &e) < 0 && has_error(&e, "record.segment", "range") &&
-          has_error(&e, "cameras[0].url", "not a camera URL") && !d.n_cameras, "bad values");
-    write_file(path, "{\"version\": 1, \"future\": {\"x\": 1}, \"record\": {\"segment\": 90, \"later\": true}}");
-    memset(&e, 0, sizeof e);
-    CHECK(config_load_file(path, &d, &e) == 0 && d.record.segment == 90, "a newer file's keys are skipped");
-    write_file(path, "{\"api\": {\"listen\": \"1.2.3:80\"}}");
-    memset(&e, 0, sizeof e);
-    CHECK(config_load_file(path, &d, &e) < 0 && has_error(&e, "api.listen", "IPv4"), "listen address");
-    write_file(path, "{\"api\": {\"listen\": \"0.0.0.0:0\"}}");
-    memset(&e, 0, sizeof e);
-    CHECK(config_load_file(path, &d, &e) < 0 && has_error(&e, "api.listen", "port"), "listen port");
-    write_file(path, "{\"record\": {\"path\": \"rec\"}}");
-    memset(&e, 0, sizeof e);
-    CHECK(config_load_file(path, &d, &e) < 0 && has_error(&e, "record.path", "absolute"), "relative path");
+    CHECK(config_load_file(jpath, &d, &e) == 0 && (b = config_text(&d)) && !strcmp(a, b), "JSON round trip");
+    free(b);
+    CHECK(load_text(jpath, "{\"record\": {\"segment\": 60,}}", &d, &e) < 0 && e.n &&
+          strstr(e.e[0].msg, "not valid JSON") && d.record.segment == 60 && !d.n_cameras,
+          "bad JSON: %s", e.n ? e.e[0].msg : "");
+    CHECK(load_text(jpath, "record:\n  segment: 90\n", &d, &e) < 0 && e.n && strstr(e.e[0].msg, "not valid JSON"),
+          "a .json file is not read as YAML");
+    /* An earlier version took any bytes: such a file still loads and is
+     * saved as JSON, but cannot become YAML. */
+    CHECK(load_text(jpath, "{\"cameras\": [{\"url\": \"capture:0\", \"name\": \"Garage \xe9\"}]}", &d, &e) == 0 &&
+          !strcmp(d.cameras[0].name, "Garage \xe9"), "a .json file with a Latin-1 name loads");
+    CHECK(config_save_file(jpath, &d, err, sizeof err) == 0, "and is saved as JSON: %s", err);
+    CHECK(config_check_text(&d, CONFIG_JSON, err, sizeof err) == 0 &&
+          config_check_text(&d, CONFIG_YAML, err, sizeof err) < 0 && strstr(err, "cameras[0].name: not valid UTF-8"),
+          "not as YAML: %s", err);
+    CHECK(config_save_file(path2, &d, err, sizeof err) < 0 && strstr(err, "UTF-8") && access(path2, F_OK) < 0,
+          "a YAML save refuses it, writing nothing");
+    free(a);
 
     /* atomic save: a failed save leaves the old file as it was */
+    unlink(jpath);
     write_file(path, "old");
     if (geteuid() != 0) {                       /* root writes anywhere */
         chmod(dir, 0500);
@@ -874,7 +1077,7 @@ static void test_config_store(void)
 {
     char dir[] = "/tmp/vigil-cfg-XXXXXX", path[128], bad[140];
     if (!mkdtemp(dir)) return;
-    snprintf(path, sizeof path, "%s/vigil.json", dir);
+    snprintf(path, sizeof path, "%s/vigil.yaml", dir);
     snprintf(bad, sizeof bad, "%s.bad", path);
     char longp[400];
     memset(longp, 'a', sizeof longp - 1);
@@ -882,7 +1085,7 @@ static void test_config_store(void)
     longp[sizeof longp - 1] = 0;
     CHECK(config_init(longp) == -2, "a path too long to keep is refused, not shortened");
 
-    write_file(path, "{\"record\": {\"segment\": 1}}");             /* invalid: defaults */
+    write_file(path, "record:\n  segment: 1\n");                   /* invalid: defaults */
     CHECK(config_init(path) < 0, "invalid file reported");
 
     /* The invalid file is not saved over unless a copy of it is kept. */
@@ -894,7 +1097,7 @@ static void test_config_store(void)
     CHECK(config_put_json("record", "{}", 2, &eb) == CONFIG_EIO && eb.n && strstr(eb.e[0].msg, "not saving"),
           "no copy, no save: %s", eb.n ? eb.e[0].msg : "");
     char *still = read_file(path);
-    CHECK(still && strstr(still, "\"segment\": 1"), "the invalid file is still there");
+    CHECK(still && !strcmp(still, "record:\n  segment: 1\n"), "the invalid file is still there");
     free(still);
     unlink(inbad);
     rmdir(bad);
@@ -913,8 +1116,17 @@ static void test_config_store(void)
     struct stat st;
     CHECK(stat(bad, &st) == 0, "the invalid file is kept as .bad");
     char *raw = read_file(path);
-    CHECK(raw && strstr(raw, "s3cret"), "saved to the file");
+    CHECK(raw && strstr(raw, "s3cret") && strstr(raw, "\n    name: Gate\n") && strstr(raw, "# Segment length"),
+          "saved to the file, as YAML");
     free(raw);
+    char *kept = read_file(bad);
+    CHECK(kept && !strcmp(kept, "record:\n  segment: 1\n"), "the .bad copy is the file as it was");
+    free(kept);
+    /* Not UTF-8: it could be saved, but not read back from YAML. */
+    static const char latin1[] = "[{\"url\":\"capture:0\",\"name\":\"Garage \xe9\"}]";
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("cameras", latin1, strlen(latin1), &e) == CONFIG_EINVAL &&
+          has_error(&e, "cameras[0].name", "UTF-8"), "a name that is not UTF-8 is refused");
 
     /* redacted out, "***" in = keep; cameras may be reordered */
     char *out = config_get_json("cameras", 1);

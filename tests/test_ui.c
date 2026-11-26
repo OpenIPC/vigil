@@ -596,13 +596,17 @@ int main(int argc, char **argv)
     test_layout_math();
 
     char path[512];
-    snprintf(path, sizeof path, "%s/vigil.json", g_out);
+    snprintf(path, sizeof path, "%s/vigil.yaml", g_out);
     unlink(path);
     FILE *f = fopen(path, "w");
-    fputs("{\"version\":1,\"cameras\":["
-          "{\"url\":\"rtsp://admin:secret@192.168.1.10/stream1\",\"name\":\"Gate\"},"
-          "{\"url\":\"netip://192.168.1.11/\",\"name\":\"Yard\"},"
-          "{\"url\":\"rtsp://192.168.1.12/live\",\"enabled\":false}]}", f);
+    fputs("version: 1\n"
+          "cameras:\n"
+          "  - url: \"rtsp://admin:secret@192.168.1.10/stream1\"\n"
+          "    name: Gate\n"
+          "  - url: \"netip://192.168.1.11/\"\n"
+          "    name: Yard\n"
+          "  - url: \"rtsp://192.168.1.12/live\"\n"
+          "    enabled: false\n", f);
     fclose(f);
     CHECK(config_init(path) == 0, "config");
 
