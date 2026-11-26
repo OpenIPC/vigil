@@ -3,6 +3,13 @@ add_executable(test_core test_core.c)
 target_link_libraries(test_core PRIVATE vigil_core)
 add_test(NAME core COMMAND test_core ${CMAKE_CURRENT_SOURCE_DIR}/data)
 
+# src/sys on a fake root: fake /etc, /sys, /proc and /dev files, and a
+# recorder in place of ifup, mkfs, mount, date, ntpd, hostname, curl.
+add_executable(test_sys test_sys.c sys_fake.c)
+target_include_directories(test_sys PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_sys PRIVATE vigil_sys)
+add_test(NAME sys COMMAND test_sys)
+
 if(TARGET vigil_api)
   add_executable(test_api test_api.c)
   target_link_libraries(test_api PRIVATE vigil_api)

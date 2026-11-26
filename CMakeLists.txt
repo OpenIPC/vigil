@@ -80,6 +80,15 @@ add_library(vigil_core STATIC
 target_include_directories(vigil_core PUBLIC src/core src/core/source src/hal)
 target_link_libraries(vigil_core PUBLIC cjson vigil_yaml Threads::Threads)
 
+# ---- sys: looking after the system vigild runs on (src/sys, Linux) ------------
+# Network, time, host name, disks, network storage, mail: OS work the
+# management pages do, kept out of the POSIX-only core. Every file and
+# command goes through src/sys/sys.h, so the tests run it on a fake root.
+add_library(vigil_sys STATIC
+  src/sys/sys.c)
+target_include_directories(vigil_sys PUBLIC src/sys)
+target_link_libraries(vigil_sys PUBLIC vigil_core)
+
 # ---- platform: sets VIGIL_PLATFORM_SOURCES / _LIBS / _DEFS, VIGIL_HAS_UI ----
 set(VIGIL_HAS_UI OFF)
 set(VIGIL_UI_COLOR_DEPTH 32)
@@ -117,7 +126,7 @@ endif()
 add_executable(vigild ${VIGILD_SOURCES} $<TARGET_OBJECTS:vigil_platform>)
 target_include_directories(vigild PRIVATE src/app src/api src/ui ${VIGIL_PLATFORM_INCLUDES})
 target_compile_definitions(vigild PRIVATE ${VIGIL_PLATFORM_DEFS} VIGIL_VERSION="${PROJECT_VERSION}")
-target_link_libraries(vigild PRIVATE vigil_core ${VIGIL_PLATFORM_LIBS})
+target_link_libraries(vigild PRIVATE vigil_sys vigil_core ${VIGIL_PLATFORM_LIBS})
 if(VIGIL_API)
   target_link_libraries(vigild PRIVATE vigil_api)
 endif()
