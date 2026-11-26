@@ -13,6 +13,9 @@ add_test(NAME cli_too_long COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_cli.sh $<TARG
 
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_FOUND)
+  # src/ui/theme_tokens.h and web/theme.css are generated from src/ui/theme.json
+  # and committed: they must match it.
+  add_test(NAME theme_tokens COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-theme.py --check)
   foreach(clip testsrc_640x360.h264 majestic_1080p.h265)
     add_test(NAME netip_${clip}
              COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_netip.sh $<TARGET_FILE:vigild>

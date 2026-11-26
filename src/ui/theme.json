@@ -1,0 +1,22 @@
+{
+  "_comment": "The look of vigil's user interfaces. scripts/gen-theme.py turns this file into src/ui/theme_tokens.h (LVGL) and web/theme.css (CSS custom properties); edit here, run the script, commit all three.",
+  "color": {
+    "bg":     "#0E1116",
+    "panel":  "#171B22",
+    "panel2": "#1F242D",
+    "hover":  "#2A303B",
+    "line":   "#2E3542",
+    "accent": "#2D8CF0",
+    "ok":     "#19BE6B",
+    "bad":    "#ED4014",
+    "warn":   "#FF9900",
+    "text":   "#E8EAED",
+    "text2":  "#9AA3AF",
+    "chip":   "#0B0D11"
+  },
+  "space": { "xs": 4, "sm": 8, "md": 12, "lg": 16, "xl": 24 },
+  "radius": { "sm": 4, "md": 8, "lg": 12 },
+  "font": { "sm": 14, "md": 16, "lg": 20, "xl": 24 },
+  "size": { "header": 40, "strip": 80, "navbar": 64, "page_header": 56, "button": 40, "cursor": 19 },
+  "duration": { "fast": 150, "normal": 250, "navbar_hide": 3000, "toast": 2500, "double_click": 400 }
+}
