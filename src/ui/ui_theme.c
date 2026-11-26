@@ -170,6 +170,18 @@ void ui_btn_accent(lv_obj_t *btn)
 
 lv_obj_t *ui_btn_label(lv_obj_t *btn) { return lv_obj_get_child(btn, 0); }
 
+lv_obj_t *ui_icon(lv_obj_t *parent, const lv_image_dsc_t *img, uint32_t rgb)
+{
+    lv_obj_t *i = lv_image_create(parent);
+    lv_image_set_src(i, img);
+    /* A8: the colour is the recolour */
+    lv_obj_set_style_image_recolor(i, lv_color_hex(rgb), 0);
+    lv_obj_set_style_image_recolor_opa(i, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(i, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(i, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    return i;
+}
+
 lv_obj_t *ui_label(lv_obj_t *parent, const char *text, const lv_font_t *font, lv_color_t color)
 {
     lv_obj_t *l = lv_label_create(parent);

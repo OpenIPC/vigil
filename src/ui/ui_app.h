@@ -163,9 +163,15 @@ void      ui_live_context_menu(const lv_point_t *at);
 void      ui_live_event(const ui_event_t *ev);
 void      ui_menu_open(void);
 void      ui_form_open(int sec, int item);  /* item -1: object section; n: new item */
+/* A new item of array section `sec` at position `slot` (a camera on
+ * channel slot + 1): the empty slots before it are kept empty. */
+void      ui_form_open_slot(int sec, int slot);
 void      ui_list_open(int sec);
 void      ui_system_open(void);
 void      ui_display_open(void);
+/* Every channel: state, stream on screen, codec, size, fps, recording,
+ * events (System -> Channel info). */
+void      ui_channel_info_open(void);
 /* The live view's layouts (windows per page) the platform can show. */
 int       ui_live_layout_offered(int layout);
 /* Where the clock is ("top right"), or "off". */

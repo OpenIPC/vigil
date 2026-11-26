@@ -29,15 +29,16 @@
 #include <string.h>
 
 #include "ui_app.h"
+#include "ui_osk.h"
 #include "ui_theme.h"
 
 #define FIELDS_MAX 24
 #define LABEL_W    320
-#define KB_H       280
 
 typedef struct {
     int        sec, item;           /* item: -1 for an object section */
     int        is_new;              /* item is being added */
+    int        n_stored;            /* items there were; past them, new (empty slots) */
     int        n_items, n_fields;
     char     **vals;                /* n_items x n_fields, as stored (redacted) */
     unsigned   gen;                 /* the generation `vals` came from */
@@ -68,12 +69,16 @@ static void vals_free(char **v, int n)
 /* The section as stored, plus a new item with the defaults when adding;
  * `gen`: the generation they were read from (taken first: if it moves
  * while reading, the save is refused as stale, never mixed). */
-static char **vals_load(int sec, int add, int *n_items, unsigned *gen)
+/* The section as stored, padded with items of defaults to `want` items
+ * (adding one at the end, or at a slot past the end); `gen`: the
+ * generation they were read from (taken first: if it moves while reading,
+ * the save is refused as stale, never mixed). */
+static char **vals_load(int sec, int want, int *n_items, unsigned *gen)
 {
     const ui_section_t *s = section(sec);
     *gen = ui_model()->config_generation ? ui_model()->config_generation() : 0;
     int n = s->is_array ? ui_model()->item_count(sec) : 1;
-    int total = n + (add ? 1 : 0);
+    int total = want > n ? want : n;
     char **v = calloc((size_t)(total * s->n_fields + 1), sizeof *v);
     if (!v) return NULL;
     char buf[1024];
@@ -156,21 +161,12 @@ static int form_dirty(const form_t *f)
 
 static void kb_hide(form_t *f)
 {
-    if (!f->kb || lv_obj_has_flag(f->kb, LV_OBJ_FLAG_HIDDEN)) return;
-    lv_keyboard_set_textarea(f->kb, NULL);
-    lv_obj_add_flag(f->kb, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_style_pad_bottom(f->page->body, VG_SPACE_XL, 0);
+    if (ui_osk_shown(f->kb)) ui_osk_hide(f->kb);
 }
 
 static void kb_show(form_t *f, lv_obj_t *ta, int numeric)
 {
-    lv_keyboard_set_mode(f->kb, numeric ? LV_KEYBOARD_MODE_NUMBER : LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_keyboard_set_textarea(f->kb, ta);
-    lv_obj_remove_flag(f->kb, LV_OBJ_FLAG_HIDDEN);
-    /* Room to scroll the field above the keyboard. */
-    lv_obj_set_style_pad_bottom(f->page->body, KB_H + VG_SPACE_XL, 0);
-    lv_obj_update_layout(f->page->body);
-    lv_obj_scroll_to_view_recursive(ta, LV_ANIM_OFF);
+    if (f->kb) ui_osk_show(f->kb, ta, numeric);
 }
 
 /* Clicked (or Enter): the on-screen keyboard, for a mouse user. Someone
@@ -399,6 +395,7 @@ static void form_title(form_t *f)
 {
     const ui_section_t *s = section(f->sec);
     if (!s->is_array) lv_label_set_text(f->page->title, s->label);
+    else if (f->is_new && s->slots) lv_label_set_text_fmt(f->page->title, "%s %d: new", s->label, f->item + 1);
     else if (f->is_new) lv_label_set_text_fmt(f->page->title, "%s: new", s->label);
     else lv_label_set_text_fmt(f->page->title, "%s: %d", s->label, f->item + 1);
 }
@@ -453,7 +450,7 @@ static void save_cb(lv_event_t *e)
     /* Item k was read from stored item k; a new one from none. */
     int origin[UI_MAX_ITEMS];
     for (int k = 0; k < f->n_items && k < UI_MAX_ITEMS; ++k)
-        origin[k] = f->is_new && k == f->n_items - 1 ? -1 : k;
+        origin[k] = k >= f->n_stored || (f->is_new && k == f->item) ? -1 : k;
     ui_errors_t errs;
     ui_save_rc_t rc = ok && f->n_items <= UI_MAX_ITEMS
                           ? save_section(f->sec, f->n_items, v, s->is_array ? origin : NULL, f->gen, &errs)
@@ -479,15 +476,15 @@ static void save_cb(lv_event_t *e)
     /* What is stored now (secrets redacted again) is the new baseline. */
     int n;
     unsigned gen;
-    char **nv = vals_load(f->sec, 0, &n, &gen);
+    char **nv = vals_load(f->sec, f->item + 1, &n, &gen);
     if (!nv) return;
     vals_free(f->vals, f->n_items * f->n_fields);
     f->vals = nv;
     f->n_items = n;
     f->gen = gen;
+    f->n_stored = n;
     if (f->is_new) {
         f->is_new = 0;
-        f->item = n - 1;
         form_title(f);
     }
     widgets_from_vals(f);
@@ -502,7 +499,7 @@ static void discard_cb(void *user)
 static int form_back(ui_page_t *p)
 {
     form_t *f = p->user;
-    if (f->kb && !lv_obj_has_flag(f->kb, LV_OBJ_FLAG_HIDDEN)) {
+    if (ui_osk_shown(f->kb)) {
         kb_hide(f);
         return 1;
     }
@@ -557,7 +554,7 @@ static void storage_state(lv_obj_t *parent)
     lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
 }
 
-void ui_form_open(int sec, int item)
+static void form_open(int sec, int item, int at_slot)
 {
     const ui_section_t *s = section(sec);
     if (s->n_fields > FIELDS_MAX) return;
@@ -565,11 +562,20 @@ void ui_form_open(int sec, int item)
     if (!f) return;
     f->sec = sec;
     f->n_fields = s->n_fields;
+    f->n_stored = s->is_array ? ui_model()->item_count(sec) : 1;
     if (s->is_array) {
-        int n = ui_model()->item_count(sec);
-        f->is_new = item >= n;
-        f->item = f->is_new ? n : item;
-        if (f->is_new && n >= s->max_items) {
+        int n = f->n_stored;
+        if (at_slot) {
+            /* An empty slot is a new item where it is. */
+            char url[8] = "";
+            if (item < n) ui_model()->get_value(sec, item, 0, url, sizeof url);
+            f->is_new = item >= n || !url[0];
+            f->item = item;
+        } else {
+            f->is_new = item >= n;
+            f->item = f->is_new ? n : item;
+        }
+        if (f->is_new && f->item >= s->max_items) {
             free(f);
             ui_toast(UI_TOAST_BAD, "At most %d", s->max_items);
             return;
@@ -577,7 +583,7 @@ void ui_form_open(int sec, int item)
     } else {
         f->item = -1;
     }
-    f->vals = vals_load(sec, f->is_new, &f->n_items, &f->gen);
+    f->vals = vals_load(sec, f->item + 1, &f->n_items, &f->gen);
     ui_page_t *p = f->vals ? ui_page_push(s->label) : NULL;
     if (!p) {
         vals_free(f->vals, f->n_items * f->n_fields);
@@ -617,14 +623,14 @@ void ui_form_open(int sec, int item)
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
     for (int i = 0; i < f->n_fields; ++i) field_row(list, f, i);
 
-    f->kb = lv_keyboard_create(p->scr);
-    lv_obj_set_size(f->kb, LV_PCT(100), KB_H);
-    lv_obj_align(f->kb, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_add_flag(f->kb, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_event_cb(f->kb, kb_cb, LV_EVENT_READY, f);
+    f->kb = ui_osk_create(p->scr);
+    if (f->kb) lv_obj_add_event_cb(f->kb, kb_cb, LV_EVENT_READY, f);
     lv_obj_add_event_cb(f->kb, kb_cb, LV_EVENT_CANCEL, f);
     ui_page_ready(p);
 }
+
+void ui_form_open(int sec, int item) { form_open(sec, item, 0); }
+void ui_form_open_slot(int sec, int slot) { form_open(sec, slot, 1); }
 
 /* ---- the list of an array section -------------------------------------------------------------- */
 
@@ -675,7 +681,9 @@ static lv_obj_t *cell(lv_obj_t *row, const ui_field_t *fd, const char *text, lv_
 static void edit_cb(lv_event_t *e)
 {
     list_t *l = lv_event_get_user_data(e);
-    ui_form_open(l->sec, (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e)));
+    int k = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    if (section(l->sec)->slots) ui_form_open_slot(l->sec, k);
+    else ui_form_open(l->sec, k);
 }
 
 static void add_cb(lv_event_t *e)
@@ -695,17 +703,29 @@ static void remove_now(void *user)
         vals_free(v, v ? n * s->n_fields : 0);
         return;
     }
-    int origin[UI_MAX_ITEMS];
-    for (int k = 0; k < n - 1; ++k) origin[k] = k < l->remove_item ? k : k + 1;
-    /* Close the gap: every later item moves up a tile. */
-    for (int f = 0; f < s->n_fields; ++f) free(v[l->remove_item * s->n_fields + f]);
-    memmove(&v[l->remove_item * s->n_fields], &v[(l->remove_item + 1) * s->n_fields],
-            sizeof *v * (size_t)((n - l->remove_item - 1) * s->n_fields));
+    int origin[UI_MAX_ITEMS], m = n;
+    if (s->slots) {
+        /* Positions: the slot empties (its defaults, first field empty),
+         * the items after it stay where they are. */
+        for (int k = 0; k < n; ++k) origin[k] = k == l->remove_item ? -1 : k;
+        for (int f = 0; f < s->n_fields; ++f) {
+            char **p = &v[l->remove_item * s->n_fields + f];
+            free(*p);
+            *p = dup(f == 0 || !s->fields[f].def ? "" : s->fields[f].def);
+        }
+    } else {
+        m = n - 1;
+        for (int k = 0; k < m; ++k) origin[k] = k < l->remove_item ? k : k + 1;
+        /* Close the gap: every later item moves up a tile. */
+        for (int f = 0; f < s->n_fields; ++f) free(v[l->remove_item * s->n_fields + f]);
+        memmove(&v[l->remove_item * s->n_fields], &v[(l->remove_item + 1) * s->n_fields],
+                sizeof *v * (size_t)((n - l->remove_item - 1) * s->n_fields));
+    }
     ui_errors_t errs;
     /* Refused if the list changed after it was shown: the row the user
      * picked may be another camera now. */
-    ui_save_rc_t rc = save_section(l->sec, n - 1, v, origin, l->gen, &errs);
-    vals_free(v, (n - 1) * s->n_fields);
+    ui_save_rc_t rc = save_section(l->sec, m, v, origin, l->gen, &errs);
+    vals_free(v, m * s->n_fields);
     report(rc, &errs, 0);
 }
 
@@ -764,6 +784,17 @@ static void list_build(list_t *l)
         if (!first) first = r;
         snprintf(idx, sizeof idx, "%d", k + 1);
         cell(r, NULL, idx, UI_C(TEXT));
+        if (s->slots) {
+            m->get_value(l->sec, k, 0, buf, sizeof buf);
+            if (!buf[0]) {                  /* an empty slot: offered for a camera */
+                lv_obj_t *e = cell(r, &s->fields[0], "Empty", UI_C(TEXT2));
+                lv_obj_set_flex_grow(e, 100);
+                lv_obj_t *add = ui_btn(r, LV_SYMBOL_PLUS, "Add here");
+                lv_obj_set_user_data(add, (void *)(intptr_t)k);
+                lv_obj_add_event_cb(add, edit_cb, LV_EVENT_CLICKED, l);
+                continue;
+            }
+        }
         for (int f = 0; f < s->n_fields; ++f) {
             const ui_field_t *fd = &s->fields[f];
             m->get_value(l->sec, k, f, buf, sizeof buf);

@@ -32,7 +32,9 @@
 #include "ui_app.h"
 #include "ui_bridge.h"
 #include "ui_layout.h"
+#include "ui_osk.h"
 #include "theme_tokens.h"
+#include "icons.h"
 
 #define W 1280
 #define H 720
@@ -74,21 +76,23 @@ static void fake_status(int idx, ui_chan_t *st)
 {
     switch (idx) {
     case 0:
-        *st = (ui_chan_t){ .configured = 1, .live = 1, .recording = 1, .motion = 1, .rec_bytes = 734u << 20,
-                           .name = "Gate", .codec = "H.265", .width = 1920, .height = 1080, .fps = 25 };
+        *st = (ui_chan_t){ .configured = 1, .status = UI_CH_LIVE, .live = 1, .recording = 1,
+                           .events = UI_EV_MOTION | UI_EV_HUMAN, .rec_bytes = 734u << 20, .name = "Gate",
+                           .codec = "H.265", .width = 1920, .height = 1080, .fps = 25, .view = "main",
+                           .rec_state = "recording" };
         break;
     case 1:
-        *st = (ui_chan_t){ .configured = 1, .name = "Yard", .state = "CONNECTING" };
+        *st = (ui_chan_t){ .configured = 1, .status = UI_CH_CONNECTING, .name = "Yard", .state = "CONNECTING" };
         break;
     case 2:
-        *st = (ui_chan_t){ .configured = 1, .state = "connect: Connection refused" };
+        *st = (ui_chan_t){ .configured = 1, .status = UI_CH_ERROR, .state = "DESCRIBE: 404" };
         break;
     default:
         /* Past the first four (the runs with more channels): live, some
          * recording. */
         if (idx >= 3 && g_channels > 4)
-            *st = (ui_chan_t){ .configured = 1, .live = 1, .recording = idx % 3 == 0, .codec = "H.264",
-                               .width = 640, .height = 360, .fps = 15 };
+            *st = (ui_chan_t){ .configured = 1, .status = UI_CH_LIVE, .live = 1, .recording = idx % 3 == 0,
+                               .codec = "H.264", .width = 640, .height = 360, .fps = 15, .view = "sub" };
         break;
     }
 }
@@ -307,6 +311,45 @@ static lv_obj_t *textarea(int nth)
     return find_textarea(lv_screen_active(), nth, &seen);
 }
 
+/* A visible A8 icon `img` among `o`'s descendants. */
+static int icon_shown(lv_obj_t *o, const lv_image_dsc_t *img)
+{
+    if (!o) return 0;
+    if (lv_obj_check_type(o, &lv_image_class) && lv_image_get_src(o) == img && visible(o)) return 1;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(o); ++i)
+        if (icon_shown(lv_obj_get_child(o, (int32_t)i), img)) return 1;
+    return 0;
+}
+
+/* The live view's page arrow (0 previous, 1 next): a round button on the
+ * screen holding a LV_SYMBOL_LEFT / RIGHT label. */
+static lv_obj_t *page_arrow(int next)
+{
+    lv_obj_t *scr = lv_screen_active();
+    for (uint32_t i = 0; i < lv_obj_get_child_count(scr); ++i) {
+        lv_obj_t *b = lv_obj_get_child(scr, (int32_t)i);
+        if (!lv_obj_check_type(b, &lv_button_class) || !lv_obj_get_child_count(b)) continue;
+        lv_obj_t *l = lv_obj_get_child(b, 0);
+        if (lv_obj_check_type(l, &lv_label_class) &&
+            !strcmp(lv_label_get_text(l), next ? LV_SYMBOL_RIGHT : LV_SYMBOL_LEFT))
+            return b;
+    }
+    return NULL;
+}
+
+static int arrow_up(int next)
+{
+    lv_obj_t *b = page_arrow(next);
+    return b && visible(b);
+}
+
+/* The tile showing `title` (its name chip's parent). */
+static lv_obj_t *tile(const char *title)
+{
+    lv_obj_t *l = find(title, 0);
+    return l ? lv_obj_get_parent(lv_obj_get_parent(l)) : NULL;
+}
+
 /* ---- the steps ---------------------------------------------------------------------------- */
 
 #define SAVE LV_SYMBOL_SAVE "  Save"
@@ -344,8 +387,15 @@ static void test_layout_math(void)
 static void test_live(void)
 {
     CHECK(find("Gate", 0) && find("Yard", 0) && find("CAM 3", 0) && find("CAM 4", 0), "tile titles");
-    CHECK(find("H.265  1920x1080  25 fps", 0), "stream line of a live tile");
-    CHECK(find("Connecting...", 0) && find("No video", 0) && find("No camera", 0), "tile states");
+    CHECK(!find("1920x1080", 1), "no stream line on the tiles");
+    CHECK(find("Connecting...", 0) && find("No video", 0) && find("DESCRIBE: 404", 0), "tile states");
+    CHECK(icon_shown(tile("CAM 4"), &ui_icon_add) && !find("No camera", 0), "an empty slot: a \"+\"");
+    lv_obj_t *gate = find("Gate", 0);
+    if (gate) {
+        int gx, gy;
+        center_of(gate, &gx, &gy);
+        CHECK(gx < 120 && gy > 300 && gy < 360, "the name at the bottom left (%d, %d)", gx, gy);
+    }
     CHECK(find("LIVE 1/3", 1), "totals in the navigation bar");
     lv_obj_t *clk = find("2026-11-26  14:32:05", 0);
     int x, y;
@@ -354,7 +404,9 @@ static void test_live(void)
         center_of(clk, &x, &y);
         CHECK(x > W - 200 && y < 40, "clock in the top right corner (%d, %d)", x, y);
     }
-    CHECK(find("REC", 0) && find(LV_SYMBOL_EYE_OPEN, 0), "REC and motion icons on the recording tile");
+    CHECK(icon_shown(tile("Gate"), &ui_icon_rec) && icon_shown(tile("Gate"), &ui_icon_ev_motion) &&
+          icon_shown(tile("Gate"), &ui_icon_ev_human) && !icon_shown(tile("Gate"), &ui_icon_ev_face) &&
+          !icon_shown(tile("Yard"), &ui_icon_rec), "REC, motion and human icons on the recording tile only");
     CHECK(!find("offline", 1), "no toast for a camera whose tile shows it");
     CHECK(!find("Main menu", 0), "navigation bar hidden at first");
     shot("live");
@@ -383,8 +435,8 @@ static void test_context_and_full_screen(void)
     move_to(300, 200);                          /* over CAM1 */
     button(BTN_RIGHT);
     run(50);
-    CHECK(ui_popup_is_open() && find("Full screen: Gate", 1) && find("Pin navigation bar", 1),
-          "context menu with the tile's channel");
+    CHECK(ui_popup_is_open() && !find("Full screen", 1) && !find("Pin navigation bar", 1) &&
+          !find("Next page", 1), "the context menu has nothing but its seven items");
     {
         static const char *const order[] = { "Main menu", "Channels", "Playback", "Record", "PTZ", "Display", "Split" };
         int prev = -1, ok = 1;
@@ -461,9 +513,28 @@ static void test_context_and_full_screen(void)
     CHECK(find("CAM 3: down", 1), "then the third");
     run(VG_DURATION_TOAST + 50);
     CHECK(!find("down", 1), "all shown");
-    button(BTN_RIGHT);
-    click_text("Next page");
-    CHECK(g_tiles[1].w == W && g_tiles[0].w == 0, "next page shows CAM2");
+    /* The page arrows: near the right edge, half way down. */
+    CHECK(!arrow_up(1), "no arrow while the pointer is elsewhere");
+    move_to(W - 20, H / 2);
+    run(150);                                   /* the next poll */
+    CHECK(arrow_up(1) && !arrow_up(0), "the next-page arrow at the right edge");
+    shot("page_arrow");
+    int ax, ay;
+    center_of(page_arrow(1), &ax, &ay);
+    click_at(ax, ay);
+    CHECK(g_tiles[1].w == W && g_tiles[0].w == 0, "clicked: the next page shows CAM2");
+    move_to(20, H / 2);
+    run(150);
+    center_of(page_arrow(0), &ax, &ay);
+    CHECK(arrow_up(0), "the previous-page arrow at the left edge");
+    click_at(ax, ay);
+    CHECK(g_tiles[0].w == W, "clicked: back to CAM1");
+    run(2200);
+    CHECK(!arrow_up(0), "gone after 2 s without moving");
+    move_to(20, 50);
+    run(150);
+    CHECK(!arrow_up(0), "not near the corners");
+    click_at(ax, ay);
     button(BTN_RIGHT);
     click_text("Split");
     click_text("4 windows");
@@ -507,7 +578,7 @@ static void test_menu_and_settings(void)
     CHECK(lv_obj_has_state(rec, LV_STATE_HOVERED), "the tile under the pointer is hovered");
     click_text("STORAGE");
     CHECK(find("Recording directory", 0) && find("Segment length (s)", 0), "recording form from the schema");
-    CHECK(find("Not recording: no directory set.", 1), "the recording's state");
+    CHECK(find("Recording: 1 camera.", 1), "the recording's state");
     lv_obj_t *path = textarea(0), *seg = textarea(1);
     CHECK(path && seg && !strcmp(lv_textarea_get_text(seg), "60"), "values from the store");
 
@@ -766,13 +837,6 @@ static lv_obj_t *focused(void)
     return g ? lv_group_get_focused(g) : NULL;
 }
 
-/* The tile showing `title` (its name chip's parent). */
-static lv_obj_t *tile(const char *title)
-{
-    lv_obj_t *l = find(title, 0);
-    return l ? lv_obj_get_parent(lv_obj_get_parent(l)) : NULL;
-}
-
 static int has_focus(lv_obj_t *o) { return o && lv_obj_has_state(o, LV_STATE_FOCUSED); }
 
 static void test_keyboard_live(void)
@@ -824,12 +888,8 @@ static void test_keyboard_live(void)
     CHECK(has_focus(tile("CAM 4")) && (!menu || y >= H), "Esc: back to the tiles, the bar hides");
 
     key_with(KEY_LEFTSHIFT, KEY_F10);
-    CHECK(ui_popup_is_open() && find("Full screen: CAM 4", 1), "Shift+F10: context menu for the selected tile");
-    key(KEY_UP);
-    key(KEY_UP);
-    key(KEY_ENTER);
-    CHECK(!ui_popup_is_open() && g_tiles[3].w == W, "Up, Up, Enter: full screen from the menu");
-    key(KEY_4);
+    CHECK(ui_popup_is_open() && find("Split", 1), "Shift+F10: the context menu");
+    key(KEY_ESC);
 
     /* Split: Right opens it, Esc or Left closes it, then the menu. */
     key(KEY_COMPOSE);
@@ -1009,6 +1069,115 @@ static void test_keyboard_dropdown(void)
     CHECK(!lv_dropdown_is_open(dd) && ui_page_top() == p, "Esc closes the list, not the page");
     key(KEY_ESC);
     CHECK(!ui_page_top(), "Esc: the page");
+}
+
+static void osk_cancel_cb(lv_event_t *e) { ui_osk_hide(lv_event_get_target(e)); }
+
+/* Press the on-screen keyboard's key `text` (by its text: the buttons
+ * have no labels of their own to click). */
+static int osk_key(lv_obj_t *kb, const char *text)
+{
+    for (uint32_t i = 0;; ++i) {
+        const char *t = lv_buttonmatrix_get_button_text(kb, i);
+        if (!t) return -1;
+        if (strcmp(t, text)) continue;
+        lv_buttonmatrix_set_selected_button(kb, i);
+        lv_obj_send_event(kb, LV_EVENT_VALUE_CHANGED, &i);
+        run(30);
+        return 0;
+    }
+}
+
+static lv_obj_t *osk(void)
+{
+    lv_obj_t *kb = lv_obj_get_child(lv_screen_active(), -1);
+    return kb && lv_obj_check_type(kb, &lv_keyboard_class) ? kb : NULL;
+}
+
+/* An empty slot's "+": the camera form for that channel; the on-screen
+ * keyboard (mouse only) next to the field; a camera added at channel 4
+ * with 2 and 3 left empty. Then Channel info. */
+static void test_empty_slot(void)
+{
+    vigil_config_t c;
+    config_get(&c);
+    CHECK(!ui_keyboard_in_use() && c.n_cameras == 1, "mouse only; one camera (%d)", c.n_cameras);
+    lv_obj_t *plus = NULL;
+    lv_obj_t *t4 = tile("CAM 4");
+    for (uint32_t i = 0; t4 && i < lv_obj_get_child_count(t4); ++i) {
+        lv_obj_t *o = lv_obj_get_child(t4, (int32_t)i);
+        if (lv_obj_check_type(o, &lv_button_class) && visible(o)) plus = o;
+    }
+    CHECK(plus, "CAM 4: a \"+\"");
+    if (!plus) return;
+    int x, y;
+    center_of(plus, &x, &y);
+    click_at(x, y);
+    run(100);
+    CHECK(find("Cameras 4: new", 0), "the form for a camera on channel 4");
+    lv_obj_t *url = textarea(0);
+    center_of(url, &x, &y);
+    click_at(x, y);
+    lv_obj_t *kb = osk();
+    lv_area_t ka, ua;
+    if (kb) lv_obj_get_coords(kb, &ka);
+    lv_obj_get_coords(url, &ua);
+    CHECK(kb && visible(kb) && ka.y1 > ua.y2 && ka.x1 == ua.x1 && lv_obj_get_width(kb) <= 600 &&
+          lv_obj_get_height(kb) <= 200, "the keyboard: small, right below the field (%d,%d %dx%d)",
+          kb ? ka.x1 : -1, kb ? ka.y1 : -1, kb ? lv_obj_get_width(kb) : 0, kb ? lv_obj_get_height(kb) : 0);
+    shot("osk");
+    static const char *const typed[] = { "r", "t", "s", "p", ":", "/", "/", "1", "0", ".", "1", ".",
+                                         "1", ".", "4", "/", LV_SYMBOL_UP, "C", "a", "m" };
+    for (size_t i = 0; kb && i < sizeof typed / sizeof typed[0]; ++i) osk_key(kb, typed[i]);
+    osk_key(kb, "#+=");
+    shot("osk_symbols");
+    osk_key(kb, "?");
+    osk_key(kb, "a");                           /* not on this page */
+    osk_key(kb, "abc");
+    osk_key(kb, "x");
+    CHECK(!strcmp(lv_textarea_get_text(url), "rtsp://10.1.1.4/Cam?x"), "typed with the mouse: %s",
+          lv_textarea_get_text(url));
+    osk_key(kb, LV_SYMBOL_OK);
+    CHECK(kb && !visible(kb), "done: closed");
+    click_text(SAVE);
+    config_get(&c);
+    CHECK(c.n_cameras == 4 && !c.cameras[1].url[0] && !c.cameras[2].url[0] &&
+          !strcmp(c.cameras[3].url, "rtsp://10.1.1.4/Cam?x"), "a camera at channel 4, 2 and 3 empty (%d)",
+          c.n_cameras);
+    button(BTN_RIGHT);
+    run(VG_DURATION_TOAST);
+
+    /* A field low on the screen: the keyboard opens above it; a click
+     * outside closes it (the page hides it on LV_EVENT_CANCEL). */
+    ui_page_t *p = ui_page_push("Test");
+    lv_obj_t *low = lv_textarea_create(p->scr);
+    lv_textarea_set_one_line(low, 1);
+    lv_obj_set_width(low, 400);
+    lv_obj_set_pos(low, 800, H - 60);
+    kb = ui_osk_create(p->scr);
+    lv_obj_add_event_cb(kb, osk_cancel_cb, LV_EVENT_CANCEL, NULL);
+    ui_osk_show(kb, low, 0);
+    run(50);
+    lv_obj_get_coords(kb, &ka);
+    lv_obj_get_coords(low, &ua);
+    CHECK(visible(kb) && ka.y2 < ua.y1 && ka.x2 <= W - VG_SPACE_SM, "a low field: the keyboard above it, on the "
+          "screen (%d,%d-%d,%d)", ka.x1, ka.y1, ka.x2, ka.y2);
+    shot("osk_above");
+    click_at(200, 200);
+    CHECK(!visible(kb), "a click outside closes it");
+    button(BTN_RIGHT);
+    move_to(W / 2, H - 1);
+    run(300);
+    click_text("Main menu");
+    click_text("SYSTEM");
+    click_text("Channel info");
+    CHECK(find("Channel info", 0) && find("1920x1080", 0) && find("motion, human", 0) &&
+          find("Connecting", 0), "Channel info: state, size, events");
+    shot("channel_info");
+    button(BTN_RIGHT);
+    button(BTN_RIGHT);
+    button(BTN_RIGHT);
+    CHECK(!ui_page_top(), "back on the live view");
 }
 
 /* Caps Lock, Num Lock, a second keyboard, and unplugging with Shift held. */
@@ -1196,22 +1365,30 @@ static void shots_status(int idx, ui_chan_t *st)
     static const char *const names[] = { "Front gate", "Yard", "Garage", "Back door", "Parking", "Lobby",
                                          "Office", "Warehouse", "Loading bay", "Roof", "Side street",
                                          "Reception", "Stairs", "Corridor", "Server room", "Fence" };
-    *st = (ui_chan_t){ .configured = 1, .live = 1, .codec = "H.264", .width = 1920, .height = 1080, .fps = 25 };
+    *st = (ui_chan_t){ .configured = 1, .status = UI_CH_LIVE, .live = 1, .codec = "H.264", .width = 1920,
+                       .height = 1080, .fps = 25, .view = "main" };
     snprintf(st->name, sizeof st->name, "%s", names[idx % 16]);
-    snprintf(st->rec_state, sizeof st->rec_state, "recording");
     st->recording = idx % 3 != 2;
-    if (!st->recording) snprintf(st->rec_state, sizeof st->rec_state, "waiting for disk");
-    st->motion = idx == 1 || idx == 6;
-    if (idx == 2) {
-        st->codec[0] = 0;
+    snprintf(st->rec_state, sizeof st->rec_state, "%s", st->recording ? "recording" : "waiting for disk");
+    if (g_channels > 4) snprintf(st->view, sizeof st->view, "sub"), st->width = 704, st->height = 576;
+    static const ui_ch_status_t k_state[16] = { [2] = UI_CH_CONNECTING, [3] = UI_CH_AUTH, [4] = UI_CH_OFFLINE,
+                                                [5] = UI_CH_CODEC, [7] = UI_CH_DISABLED, [8] = UI_CH_NO_VIDEO,
+                                                [10] = UI_CH_ERROR, [14] = UI_CH_EMPTY, [15] = UI_CH_EMPTY };
+    ui_ch_status_t k = idx < 16 ? k_state[idx] : UI_CH_LIVE;
+    if (g_channels == 4 && idx == 3) k = UI_CH_EMPTY;               /* a "+" among four */
+    if (k != UI_CH_LIVE && (k || idx >= 14 || (g_channels == 4 && idx == 3))) {
+        st->status = k;
         st->live = 0;
-        snprintf(st->state, sizeof st->state, "CONNECTING");
-    } else if (idx == 5) {
-        st->live = 0;
-        snprintf(st->state, sizeof st->state, "connect: No route to host");
-    } else if (idx == 0) {
-        snprintf(st->codec, sizeof st->codec, "H.265");
+        st->codec[0] = st->view[0] = 0;
+        st->recording = 0;
+        st->rec_state[0] = 0;
+        if (k == UI_CH_EMPTY) st->configured = 0, st->name[0] = 0;
+        if (k == UI_CH_ERROR) snprintf(st->state, sizeof st->state, "DESCRIBE: 404");
     }
+    if (idx == 9) st->no_decoder = 1;
+    if (idx == 0) st->events = UI_EV_MOTION, snprintf(st->codec, sizeof st->codec, "H.265");
+    if (idx == 1) st->events = UI_EV_HUMAN | UI_EV_VEHICLE;
+    if (idx == 6) st->events = UI_EV_FACE | UI_EV_MOTION;
 }
 
 static void quiet(void) { run(VG_DURATION_TOAST + 100); }
@@ -1228,6 +1405,12 @@ static int shots_4(void)
     shot("context-split");
     click_text("1 window");
     shot("live-1x1");
+    move_to(W - 20, H / 2);                     /* one camera a page: the page arrows */
+    run(150);
+    shot("live-page-arrow-next");
+    move_to(20, H / 2);
+    run(150);
+    shot("live-page-arrow-prev");
     move_to(W / 2, H - 1);
     run(300);
     shot("live-navbar");
@@ -1260,13 +1443,28 @@ static int shots_4(void)
         click_at(x, y);
     }
     shot("camera-form");
+    lv_obj_t *url = textarea(0);
+    if (url) {
+        center_of(url, &x, &y);
+        click_at(x, y);
+    }
+    shot("osk-letters");
+    lv_obj_t *kb = osk();
+    if (kb) {
+        osk_key(kb, LV_SYMBOL_UP);
+        shot("osk-shifted");
+        osk_key(kb, "#+=");
+        shot("osk-symbols");
+        osk_key(kb, "abc");
+    }
+    button(BTN_RIGHT);                          /* the on-screen keyboard */
     lv_obj_t *name = textarea(1);
     if (name) {
         center_of(name, &x, &y);
         click_at(x, y);
     }
     shot("camera-form-keyboard");
-    button(BTN_RIGHT);                          /* the on-screen keyboard */
+    button(BTN_RIGHT);
     if (name) lv_textarea_set_text(name, "Front gate 2");
     button(BTN_RIGHT);
     shot("confirm-discard");
@@ -1289,8 +1487,39 @@ static int shots_4(void)
     button(BTN_RIGHT);
     click_text("SYSTEM");
     shot("system");
+    click_text("Channel info");
+    shot("channel-info");
     button(BTN_RIGHT);
     button(BTN_RIGHT);
+    button(BTN_RIGHT);
+
+    /* A text field low on the screen: the keyboard above it. */
+    ui_page_t *tp = ui_page_push("A field low on the screen");
+    lv_obj_t *low = lv_textarea_create(tp->scr);
+    lv_textarea_set_one_line(low, 1);
+    lv_textarea_set_text(low, "rtsp://admin:***@192.168.1.10/stream1");
+    lv_obj_set_width(low, 520);
+    lv_obj_set_pos(low, 700, H - 70);
+    lv_obj_t *kb2 = ui_osk_create(tp->scr);
+    ui_osk_show(kb2, low, 0);
+    shot("osk-above");
+    button(BTN_RIGHT);
+
+    /* An empty channel's "+": the form for that channel. */
+    lv_obj_t *t4 = tile("CAM 4");
+    for (uint32_t i = 0; t4 && i < lv_obj_get_child_count(t4); ++i) {
+        lv_obj_t *o = lv_obj_get_child(t4, (int32_t)i);
+        if (lv_obj_check_type(o, &lv_button_class) && visible(o)) {
+            center_of(o, &x, &y);
+            move_to(x, y);
+            shot("live-empty-plus-hover");
+            click_at(x, y);
+            run(100);
+            shot("camera-add-channel-4");
+            button(BTN_RIGHT);
+            break;
+        }
+    }
 
     /* With the keyboard: the focus shows. */
     key(KEY_RIGHT);
@@ -1326,7 +1555,13 @@ static int shots_16(void)
     key(KEY_9);
     shot("live-9");
     key(KEY_0);
-    shot("live-16");
+    shot("live-16");                            /* every state, icons, "+" on 15 and 16 */
+    move_to(W / 2, H - 1);
+    run(300);
+    click_text("Main menu");
+    click_text("SYSTEM");
+    click_text("Channel info");
+    shot("channel-info-16");
     input_evdev_delete();
     unlink(path);
     return g_fail ? 1 : 0;
@@ -1425,6 +1660,7 @@ int main(int argc, char **argv)
     test_keyboard_settings();
     test_keyboard_dropdown();
     test_keyboard_plug();
+    test_empty_slot();
 
     lv_mem_monitor_t mon;
     lv_mem_monitor(&mon);

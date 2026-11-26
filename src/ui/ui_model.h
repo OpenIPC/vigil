@@ -26,11 +26,29 @@
 
 /* ---- live view ------------------------------------------------------------------ */
 
+/* What a channel is doing (the core's ch_state_t, in the same order). */
+typedef enum {
+    UI_CH_EMPTY = 0,            /* no camera in this slot: the tile offers to add one */
+    UI_CH_DISABLED,
+    UI_CH_CONNECTING,
+    UI_CH_LIVE,
+    UI_CH_NO_VIDEO,
+    UI_CH_OFFLINE,              /* cannot be reached */
+    UI_CH_AUTH,                 /* user or password refused */
+    UI_CH_CODEC,                /* neither H.264 nor H.265 */
+    UI_CH_ERROR,                /* `state` has the text */
+} ui_ch_status_t;
+
+/* Events a camera reports now (each held a few seconds), as bits. */
+enum { UI_EV_MOTION = 1u << 0, UI_EV_HUMAN = 1u << 1, UI_EV_FACE = 1u << 2, UI_EV_VEHICLE = 1u << 3 };
+
 typedef struct {
     int      configured;        /* a camera is set for this channel */
+    ui_ch_status_t status;
     int      live;              /* video is arriving */
     int      recording;
-    int      motion;            /* the camera reports motion */
+    unsigned events;            /* UI_EV_* */
+    char     view[8];           /* the stream on screen: "main", "sub", "" */
     char     rec_state[24];     /* "" (not recording), "recording", "ready", "failed",
                                    "waiting for disk", "not a disk", "read-only", "error" */
     uint64_t rec_bytes;
@@ -74,6 +92,8 @@ typedef struct {
     const char       *label;
     const char       *help;
     int               is_array;     /* a list of items (cameras) */
+    int               slots;        /* items are positions (channels): removing one
+                                       empties its slot, one can be added anywhere */
     int               max_items;
     const ui_field_t *fields;
     int               n_fields;
