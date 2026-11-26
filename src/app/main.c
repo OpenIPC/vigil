@@ -26,6 +26,7 @@
 #include "channel.h"
 #include "config.h"
 #include "events.h"
+#include "discovery.h"
 #include "frontend.h"
 #include "hal.h"
 #include "log.h"
@@ -387,9 +388,11 @@ int main(int argc, char **argv)
     if (channels_start(&cc, caps->display ? tiles : NULL) == 0) {
         config_mark_applied(g_applied_gen);
         if (mgmt_start() < 0) vg_log("mgmt: cannot start its threads; the management pages will not act");
+        disc_set_max_channels(caps->max_channels);
         api_start();                    /* failing to start it is logged, not fatal */
         rc = frontend_run(run_secs, &g_stop, apply_config) < 0 ? 1 : 0;
         api_stop();
+        disc_shutdown();
         mgmt_stop();
         channels_stop();
     }

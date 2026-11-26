@@ -83,7 +83,7 @@ typedef struct {
     int       n;
 } ci_t;
 
-static const char *status_word(const ui_chan_t *st)
+const char *ui_chan_status_word(const ui_chan_t *st)
 {
     switch (st->status) {
     case UI_CH_EMPTY:      return "-";
@@ -108,7 +108,7 @@ static void ci_fill(ci_t *ci)
         snprintf(v[0], sizeof v[0], "%d", ch + 1);
         if (st->status == UI_CH_EMPTY) snprintf(v[1], sizeof v[1], "-");
         else ui_chan_title(ch, v[1], sizeof v[1]);
-        snprintf(v[2], sizeof v[2], "%s", status_word(st));
+        snprintf(v[2], sizeof v[2], "%s", ui_chan_status_word(st));
         snprintf(v[3], sizeof v[3], "%s", live && st->view[0] ? st->view : "-");
         snprintf(v[4], sizeof v[4], "%s", live && st->codec[0] ? st->codec : "-");
         if (live && st->width) snprintf(v[5], sizeof v[5], "%ux%u", st->width, st->height);

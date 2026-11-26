@@ -251,9 +251,17 @@ safe from any thread at any time. The outcome goes out as events.
 A driver implements `source_ops_t` (`source.h`): `create` parses the URL,
 `open` connects, `poll` waits up to about a second and emits complete AUs,
 and `close`/`destroy` clean up. Every driver watches the channel's stop
-flag, so stopping never waits for a slow camera. Adding a protocol (ONVIF
-discovery, RTMP, HTTP-FLV, …) means writing one new `source_<name>.c` and
-listing it in `source.c`. Nothing else changes.
+flag, so stopping never waits for a slow camera. Adding a protocol (RTMP,
+HTTP-FLV, …) means writing one new `source_<name>.c` and listing it in
+`source.c`. Nothing else changes.
+
+**Discovery** is not a source: `discovery.c` finds cameras (NETIP, ONVIF
+WS-Discovery, Dahua DHIP), changes their addresses and adds them to the
+cameras section through the configuration store, as the API and the
+settings pages do. Its network work runs as jobs on a thread of its own;
+the API (`api_disc.c`) and the UI (through `ui_model.h`) start them and
+read their state. Formats, sources and the protocol matrix are in
+`disc_proto.h`, `disc_ops.h` and [api.md](api.md#discovery).
 
 ## The HAL
 
@@ -323,6 +331,15 @@ adding a platform is covered in [porting.md](porting.md).
 - `api_auth`: Basic credentials, the shadow/`crypt(3)` check, the accounts
   file (hashing, logging in, the root fallback, built-in groups) and the
   table of permissions per endpoint.
+- `api_auth`: Basic credentials and the shadow/`crypt(3)` check.
+- `discovery`: the discovery parsers on good, malformed, oversized and
+  truncated replies, and on thousands of randomly changed ones (two ONVIF
+  replies are real cameras'), the WS-Security and Dahua login hashes, the
+  address plan; `discovery_e2e`: the discovery API against
+  `tests/fake_discovery.py` (NETIP, ONVIF and Dahua devices on 127.0.0.x):
+  scan, merge, address changes over each protocol with wrong and right
+  passwords, a dry run, adding to a channel, auto-add, the rate limit and
+  that no password leaks.
 - `theme_tokens`: the generated `theme_tokens.h` and `web/theme.css` match
   `src/ui/theme.json`.
 - `ui_screens`: the UI on an in-memory display, driven through the evdev

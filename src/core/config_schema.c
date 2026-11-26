@@ -3,12 +3,14 @@
  * setting is a row here plus its member in vigil_config_t. */
 #define _DEFAULT_SOURCE
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "config.h"
+#include "disc_proto.h"
 #include "seg_writer.h"
 #include "source.h"
 
@@ -170,6 +172,38 @@ static int check_mails(const char *v, char *msg, size_t cap)
     return 0;
 }
 
+/* "eth0,wlan0": interface names, comma separated. */
+static int check_ifaces(const char *v, char *msg, size_t cap)
+{
+    for (const char *p = v; *p; ++p)
+        if (!(isalnum((unsigned char)*p) || strchr("_-.@:, ", *p))) {
+            snprintf(msg, cap, "interface names, separated by commas");
+            return -1;
+        }
+    return 0;
+}
+
+/* "10.0.1.5,10.0.2.0": IPv4 addresses, comma separated. */
+static int check_targets(const char *v, char *msg, size_t cap)
+{
+    for (const char *p = v; *p; ) {
+        while (*p == ',' || *p == ' ') ++p;
+        size_t n = strcspn(p, ", ");
+        char a[16];
+        uint32_t ip;
+        if (!n) break;
+        if (n >= sizeof a) n = sizeof a - 1;
+        memcpy(a, p, n);
+        a[n] = 0;
+        if (disc_ip_parse(a, &ip) < 0) {
+            snprintf(msg, cap, "'%s' is not an IPv4 address", a);
+            return -1;
+        }
+        p += strcspn(p, ", ");
+    }
+    return 0;
+}
+
 static int check_mail(const char *v, char *msg, size_t cap)
 {
     if (strchr(v, ',')) {
@@ -206,6 +240,15 @@ static const char *const alarm_protocols[] = { "http", NULL };
 static const char *const languages[] = { "en", NULL };
 static const char *const date_formats[] = { "YYYY-MM-DD", "DD.MM.YYYY", "MM/DD/YYYY", NULL };
 static const char *const time_formats[] = { "24h", "12h", NULL };
+
+static int check_prefer(const char *v, char *msg, size_t cap)
+{
+    if (*v && !disc_proto_bits(v)) {
+        snprintf(msg, cap, "protocols: netip, onvif, dhip, separated by commas");
+        return -1;
+    }
+    return 0;
+}
 
 #define STR(T, M) .type = SCHEMA_STRING, .off = offsetof(T, M), .size = sizeof(((T *)0)->M)
 #define INT(T, M) .type = SCHEMA_INT, .off = offsetof(T, M)
@@ -401,6 +444,21 @@ static const schema_field_t api_fields[] = {
               "permission, so nobody is locked out." },
 };
 
+static const schema_field_t discovery_fields[] = {
+    { .key = "interfaces", STR(config_discovery_t, interfaces), .def_str = "", .live = 1,
+      .check = check_ifaces, .label = "Search on interfaces",
+      .help = "Network interfaces to search for cameras on, separated by commas. Empty: every "
+              "IPv4 interface." },
+    { .key = "targets", STR(config_discovery_t, targets), .def_str = "", .live = 1,
+      .check = check_targets, .label = "Also ask addresses",
+      .help = "IPv4 addresses searched by unicast as well, separated by commas: cameras on a "
+              "routed subnet, which searches by broadcast do not reach." },
+    { .key = "prefer", STR(config_discovery_t, prefer), .def_str = "netip,onvif,dhip", .live = 1,
+      .check = check_prefer, .label = "Protocol order",
+      .help = "Which protocol a camera found is added with when it answers more than one: "
+              "NETIP names both streams, ONVIF asks the camera, Dahua's RTSP path is fixed." },
+};
+
 #define N(a) (int)(sizeof(a) / sizeof((a)[0]))
 
 static const schema_section_t sections[] = {
@@ -431,6 +489,8 @@ static const schema_section_t sections[] = {
     OBJECT("ui", ui, ui_fields, "On-screen UI"),
     { .key = "api", .off = offsetof(vigil_config_t, api), .fields = api_fields,
       .n_fields = N(api_fields), .label = "HTTP API" },
+    { .key = "discovery", .off = offsetof(vigil_config_t, discovery), .fields = discovery_fields,
+      .n_fields = N(discovery_fields), .label = "Camera search" },
 };
 
 const schema_t config_schema = {

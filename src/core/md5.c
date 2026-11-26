@@ -76,3 +76,12 @@ void md5_hex(const void *data, size_t len, char hex[33])
     md5_raw(data, len, d);
     for (int i = 0; i < 16; ++i) snprintf(hex + i * 2, 3, "%02x", d[i]);
 }
+
+void md5_sofia(const char *pass, char out[9])
+{
+    static const char chars[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    uint8_t d[16];
+    md5_raw(pass, strlen(pass), d);
+    for (int i = 0; i < 8; ++i) out[i] = chars[(d[2 * i] + d[2 * i + 1]) % 62];
+    out[8] = 0;
+}

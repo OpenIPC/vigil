@@ -502,6 +502,8 @@ static int request_handler(struct mg_connection *conn, void *cbdata)
         return api_users_request(conn, uri, m);
     int rc = api_mgmt_request(conn, uri, m);
     if (rc) return rc;
+    if (!strncmp(uri, "/api/v1/discovery", 17) || !strncmp(uri, "/api/v1/channels/", 17))
+        return api_disc_request(conn, uri, m);
     return send_error(conn, 404, "not found", NULL);
 }
 

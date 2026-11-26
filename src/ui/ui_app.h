@@ -179,5 +179,11 @@ const char *ui_live_clock_corner(void);
 
 /* "CAM 3" or the camera's name. */
 void ui_chan_title(int ch, char *buf, size_t cap);
+/* What a channel is doing, in words ("Live", "Authentication error", ...). */
+const char *ui_chan_status_word(const ui_chan_t *st);
+
+/* Channels: the cameras found on the network and the channels, in two
+ * panes (ui_channels.c); what "Channels" and CAMERA open. */
+void ui_channels_open(void);
 
 #endif /* UI_APP_H */

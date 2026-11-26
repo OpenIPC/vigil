@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* api_int.h — what the API's request files share (api.c, api_mgmt.c, api_users.c). */
+/* api_int.h — what the API's request files share (api.c, api_disc.c, api_mgmt.c,
+ * api_users.c). */
 #ifndef API_INT_H
 #define API_INT_H
 
@@ -36,5 +37,8 @@ unsigned    api_request_perms(void);
 
 /* /api/v1/me, /api/v1/users..., /api/v1/groups... (api_users.c). */
 int api_users_request(struct mg_connection *conn, const char *uri, const char *method);
+
+/* /api/v1/discovery..., /api/v1/channels/N/assign (api_disc.c). */
+int api_disc_request(struct mg_connection *conn, const char *uri, const char *method);
 
 #endif /* API_INT_H */

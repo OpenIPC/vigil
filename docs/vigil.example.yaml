@@ -199,3 +199,17 @@ api:
   # in too, with every permission, so nobody is locked out. Default
   # /etc/vigil.users.yaml.
   users: /etc/vigil.users.yaml
+
+# Camera search
+discovery:
+  # Search on interfaces: Network interfaces to search for cameras on,
+  # separated by commas. Empty: every IPv4 interface.
+  interfaces: ""
+  # Also ask addresses: IPv4 addresses searched by unicast as well, separated
+  # by commas: cameras on a routed subnet, which searches by broadcast do not
+  # reach.
+  targets: ""
+  # Protocol order: Which protocol a camera found is added with when it
+  # answers more than one: NETIP names both streams, ONVIF asks the camera,
+  # Dahua's RTSP path is fixed. Default netip,onvif,dhip.
+  prefer: "netip,onvif,dhip"

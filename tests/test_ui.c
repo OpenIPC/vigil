@@ -150,6 +150,161 @@ static int fake_info(ui_info_t *info, int max)
 
 /* ---- display, clock and mouse ------------------------------------------------------------ */
 
+/* ---- camera discovery: fake devices and jobs ----------------------------------------- */
+
+static ui_disc_job_t g_dj;
+static int           g_dj_devices;      /* how many the "network" has once a scan ends */
+static int           g_dj_hold;         /* the next job stays running until fake_job_end */
+static char          g_dj_last_user[64], g_dj_last_pass[64];
+
+static const ui_disc_dev_t k_ddev[] = {
+    { "00:12:31:4f:2a:10", "192.168.1.10", "00:12:31:4f:2a:10", "255.255.255.0", "192.168.1.1", "Xiongmai", "IPC",
+      "LocalHost", UI_DISC_NETIP | UI_DISC_ONVIF, 34567, 1 },
+    { "3c:ef:8c:12:34:56", "192.168.1.108", "3c:ef:8c:12:34:56", "255.255.255.0", "192.168.1.1", "Dahua",
+      "IPC-HFW1230S", "Gate", UI_DISC_DHIP, 80, 0 },
+    { "b4:c9:b9:8d:0a:1f", "192.168.1.175", "b4:c9:b9:8d:0a:1f", "255.255.255.0", "192.168.1.1", "OpenIPC",
+      "SigmaStar", "ssc325de", UI_DISC_ONVIF | UI_DISC_NETIP, 34567, 0 },
+    { "00:12:31:00:00:22", "192.168.1.22", "00:12:31:00:00:22", "255.255.255.0", "192.168.1.1", "Xiongmai", "NVR",
+      "NVR-8", UI_DISC_NETIP, 34567, 0 },
+    { "e0:50:8b:00:00:01", "192.168.1.64", "e0:50:8b:00:00:01", "255.255.255.0", "192.168.1.1", "Acme",
+      "DS-2CD", "Lobby", UI_DISC_ONVIF, 80, 0 },
+};
+
+static int fake_disc_devices(ui_disc_dev_t *out, int max)
+{
+    int n = g_dj_devices < max ? g_dj_devices : max;
+    memcpy(out, k_ddev, (size_t)n * sizeof *out);
+    return n;
+}
+
+static void fake_disc_job(ui_disc_job_t *j) { *j = g_dj; }
+
+static int fake_job_new(ui_job_kind_t kind, int dry)
+{
+    unsigned id = g_dj.id + 1;
+    memset(&g_dj, 0, sizeof g_dj);
+    g_dj.id = id;
+    g_dj.kind = kind;
+    g_dj.dry_run = dry;
+    g_dj.running = g_dj_hold;
+    g_dj.progress = g_dj_hold ? 40 : 100;
+    return (int)id;
+}
+
+static void fake_job_end(void)
+{
+    g_dj.running = 0;
+    g_dj.progress = 100;
+    if (g_dj.kind == UI_JOB_SCAN) {
+        g_dj_devices = (int)(sizeof k_ddev / sizeof k_ddev[0]);
+        snprintf(g_dj.msg, sizeof g_dj.msg, "%d devices", g_dj_devices);
+    }
+}
+
+static int fake_disc_scan(unsigned protos, char *err, size_t cap)
+{
+    (void)protos;
+    (void)err;
+    (void)cap;
+    int id = fake_job_new(UI_JOB_SCAN, 0);
+    snprintf(g_dj.msg, sizeof g_dj.msg, "searching");
+    if (!g_dj_hold) fake_job_end();
+    return id;
+}
+
+static int fake_disc_ip(const ui_disc_ip_t *items, int n, const char *start, const char *mask, const char *gw,
+                        const char *user, const char *pass, int dry_run, char *err, size_t cap)
+{
+    (void)mask;
+    (void)gw;
+    (void)err;
+    (void)cap;
+    snprintf(g_dj_last_user, sizeof g_dj_last_user, "%s", user);
+    snprintf(g_dj_last_pass, sizeof g_dj_last_pass, "%s", pass);
+    int id = fake_job_new(UI_JOB_IP, dry_run);
+    unsigned next = start && *start ? (unsigned)atoi(strrchr(start, '.') + 1) : 0;
+    for (int i = 0; i < n && i < UI_DISC_MAX; ++i) {
+        ui_disc_res_t *r = &g_dj.r[i];
+        const ui_disc_dev_t *d = NULL;
+        for (size_t k = 0; k < sizeof k_ddev / sizeof k_ddev[0]; ++k)
+            if (!strcmp(k_ddev[k].key, items[i].key)) d = &k_ddev[k];
+        snprintf(r->key, sizeof r->key, "%s", items[i].key);
+        snprintf(r->ip, sizeof r->ip, "%s", d ? d->ip : "?");
+        if (items[i].ip[0]) snprintf(r->new_ip, sizeof r->new_ip, "%s", items[i].ip);
+        else snprintf(r->new_ip, sizeof r->new_ip, "192.168.0.%u", next == 20 ? (next += 2, 21) : next++);
+        r->proto = d && (d->protos & UI_DISC_NETIP) ? UI_DISC_NETIP : d && (d->protos & UI_DISC_DHIP) ? UI_DISC_DHIP
+                 : UI_DISC_ONVIF;
+        r->done = 1;
+        r->ok = dry_run || r->proto != UI_DISC_ONVIF;
+        r->reprobed = r->ok && !dry_run;
+        char from[16], to[16];
+        memcpy(from, r->ip, sizeof from);
+        memcpy(to, r->new_ip, sizeof to);
+        if (dry_run) snprintf(r->msg, sizeof r->msg, "%s -> %s", from, to);
+        else snprintf(r->msg, sizeof r->msg, "%s", r->ok ? "changed" : "GetNetworkInterfaces: not authorized");
+    }
+    g_dj.n = n;
+    snprintf(g_dj.msg, sizeof g_dj.msg, dry_run ? "plan for %d devices" : "%d changed", n);
+    return id;
+}
+
+static int fake_disc_assign(const char *key, int channel, const char *user, const char *pass, int replace,
+                            char *err, size_t cap)
+{
+    (void)replace;
+    (void)err;
+    (void)cap;
+    snprintf(g_dj_last_user, sizeof g_dj_last_user, "%s", user);
+    snprintf(g_dj_last_pass, sizeof g_dj_last_pass, "%s", pass);
+    int id = fake_job_new(UI_JOB_ASSIGN, 0);
+    ui_disc_res_t *r = &g_dj.r[0];
+    snprintf(r->key, sizeof r->key, "%s", key);
+    snprintf(r->ip, sizeof r->ip, "192.168.1.108");
+    r->channel = channel ? channel : 4;
+    r->proto = UI_DISC_DHIP;
+    r->done = r->ok = 1;
+    snprintf(r->msg, sizeof r->msg, "added to channel %d", r->channel);
+    g_dj.n = 1;
+    return id;
+}
+
+static int fake_disc_autoadd(const char *user, const char *pass, char *err, size_t cap)
+{
+    (void)err;
+    (void)cap;
+    snprintf(g_dj_last_user, sizeof g_dj_last_user, "%s", user);
+    snprintf(g_dj_last_pass, sizeof g_dj_last_pass, "%s", pass);
+    int id = fake_job_new(UI_JOB_AUTOADD, 0);
+    static const struct { int dev, ch, ok; unsigned proto; const char *msg; } R[] = {
+        { 3, 3, 1, UI_DISC_NETIP, "channel 3" }, { 1, 4, 1, UI_DISC_DHIP, "channel 4" },
+        { 2, 0, 0, UI_DISC_NETIP, "no empty channel left" },
+        { 4, 0, 0, UI_DISC_ONVIF, "GetCapabilities: not authorized" },
+    };
+    for (size_t i = 0; i < sizeof R / sizeof R[0]; ++i) {
+        ui_disc_res_t *r = &g_dj.r[i];
+        snprintf(r->key, sizeof r->key, "%s", k_ddev[R[i].dev].key);
+        snprintf(r->ip, sizeof r->ip, "%s", k_ddev[R[i].dev].ip);
+        r->channel = R[i].ch;
+        r->proto = R[i].proto;
+        r->done = 1;
+        r->ok = R[i].ok;
+        snprintf(r->msg, sizeof r->msg, "%s", R[i].msg);
+    }
+    g_dj.n = (int)(sizeof R / sizeof R[0]);
+    snprintf(g_dj.msg, sizeof g_dj.msg, "2 added, 2 not");
+    return id;
+}
+
+static void fake_discovery(ui_model_t *m)
+{
+    m->disc_scan = fake_disc_scan;
+    m->disc_devices = fake_disc_devices;
+    m->disc_job = fake_disc_job;
+    m->disc_ip = fake_disc_ip;
+    m->disc_assign = fake_disc_assign;
+    m->disc_autoadd = fake_disc_autoadd;
+}
+
 static uint32_t g_fb[W * H];
 static uint32_t g_ms;
 static int      g_mouse[2];             /* pipe: test -> evdev reader */
@@ -639,8 +794,10 @@ static void test_cameras(void)
 {
     click_text("CAMERA");
     CHECK(find("rtsp://admin:***@192.168.1.10/stream1", 0), "URL redacted as in the API");
+    CHECK(find("Search settings", 1) && find("No devices yet", 1) && find("Empty", 0),
+          "CAMERA: the Channels page, its two panes, channel 4 empty");
     shot("cameras");
-    lv_obj_t *edit = find("Edit", 1);
+    lv_obj_t *edit = find(LV_SYMBOL_EDIT "  Edit", 0);
     int x, y;
     center_of(edit, &x, &y);
     click_at(x, y);
@@ -660,17 +817,17 @@ static void test_cameras(void)
     button(BTN_RIGHT);
     CHECK(ui_popup_is_open() && find("Discard the changes", 1), "discard question");
     click_text("Discard");
-    CHECK(find("Add", 1) && find("Front gate", 0), "back in the list, updated");
+    CHECK(find("Search settings", 1) && find("Front gate", 0), "back on the Channels page, updated");
 
-    /* Remove the third camera, confirmed. */
-    lv_obj_t *rm = find_nth(lv_screen_active(), LV_SYMBOL_TRASH "  Remove", 2);
-    CHECK(rm, "third Remove button");
+    /* Clear the third channel, confirmed. */
+    lv_obj_t *rm = find_nth(lv_screen_active(), LV_SYMBOL_TRASH "  Clear", 2);
+    CHECK(rm, "third Clear button");
     if (rm) {
         center_of(rm, &x, &y);
         click_at(x, y);
-        CHECK(ui_popup_is_open() && find("Remove item 3 from Cameras", 1), "remove question");
-        lv_obj_t *yes = find_in(lv_layer_top(), "Remove", 0);
-        CHECK(yes, "Remove button in the question");
+        CHECK(ui_popup_is_open() && find("Clear channel 3?", 1), "clear question");
+        lv_obj_t *yes = find_in(lv_layer_top(), "Clear", 0);
+        CHECK(yes, "Clear button in the question");
         if (yes) {
             center_of(yes, &x, &y);
             click_at(x, y);
@@ -679,6 +836,87 @@ static void test_cameras(void)
     config_get(&c);
     CHECK(c.n_cameras == 2, "camera removed (%d left)", c.n_cameras);
     button(BTN_RIGHT);
+}
+
+/* The Channels page's search pane with fake devices and jobs: a search
+ * that runs and ends, checking devices, Change IP, a mass change's preview
+ * and its apply, auto add, adding one device to a channel. */
+static void test_channels_discovery(void)
+{
+    click_text("CAMERA");
+    g_dj_hold = 1;
+    click_text(LV_SYMBOL_REFRESH "  Search");
+    run(300);
+    CHECK(find("Searching... 40%", 1), "Search: the job's progress");
+    shot("channels_searching");
+    fake_job_end();
+    g_dj_hold = 0;
+    run(300);
+    CHECK(find("5 devices", 0) && find("192.168.1.108", 0) && find("On channel 1", 0) && find("New", 0) &&
+          find("NETIP, ONVIF", 0), "the devices found, with their protocols and status");
+    lv_obj_t *dh = find("192.168.1.108", 0);
+    int x, y;
+    if (!dh) return;
+    center_of(dh, &x, &y);
+    click_at(x, y);
+    run(100);
+    CHECK(find("1 checked", 0) && find("Replace", 1) && find("Add checked", 1), "one device checked: Add/Replace");
+    shot("channels_results");
+
+    click_text("Change IP...");
+    CHECK(find("Change IP: 192.168.1.108", 0) && textarea(0) &&
+          !strcmp(lv_textarea_get_text(textarea(0)), "192.168.1.108"), "Change IP: its form");
+    lv_textarea_set_text(textarea(0), "192.168.0.31");
+    lv_textarea_set_text(textarea(4), "pw1");
+    shot("channels_change_ip");
+    click_text(LV_SYMBOL_OK "  Change");
+    run(400);
+    CHECK(find("1 changed", 0) && find("changed", 0) && !strcmp(g_dj_last_pass, "pw1"), "Change IP: done");
+    button(BTN_RIGHT);
+    run(100);
+
+    click_text("Select all");
+    run(100);
+    CHECK(find("5 checked", 0), "Select all");
+    click_text("Mass change...");
+    lv_textarea_set_text(textarea(0), "192.168.0.20");
+    click_text(LV_SYMBOL_EYE_OPEN "  Preview");
+    run(400);
+    CHECK(find("plan for 5 devices", 0) && find("192.168.0.21", 0) && find("192.168.0.24", 0), "the preview");
+    shot("channels_mass_preview");
+    click_text(LV_SYMBOL_OK "  Apply");
+    run(400);
+    CHECK(find("5 changed", 0) && find("not authorized", 1), "applied: one refused");
+    button(BTN_RIGHT);
+    run(100);
+
+    click_text("Auto add all");
+    CHECK(find("go to the 2 empty channels", 1), "Auto add: what it will do");
+    click_text(LV_SYMBOL_OK "  Add all");
+    run(400);
+    CHECK(find("2 added, 2 not", 0) && find("no empty channel left", 0), "Auto add: the results");
+    shot("channels_autoadd");
+    button(BTN_RIGHT);
+    run(100);
+
+    /* One device to a channel, from its row's menu. */
+    click_text("Select all");                   /* none checked again */
+    run(100);
+    lv_obj_t *add_to = find_nth(lv_screen_active(), LV_SYMBOL_PLUS "  Add to...", 1);
+    if (add_to) {
+        center_of(add_to, &x, &y);
+        click_at(x, y);
+    }
+    CHECK(ui_popup_is_open() && find_in(lv_layer_top(), "Add to channel 3", 1), "Add to...: the empty channels");
+    lv_obj_t *to3 = find_in(lv_layer_top(), "Add to channel 3", 1);
+    if (to3) {
+        center_of(to3, &x, &y);
+        click_at(x, y);
+    }
+    run(400);
+    CHECK(find("added to channel 3", 1), "added: a toast");
+    button(BTN_RIGHT);
+    g_dj_devices = 0;
 }
 
 static void test_system(void)
@@ -1010,18 +1248,24 @@ static void test_keyboard_settings(void)
     config_get(&c);
     CHECK(!strcmp(c.record.path, "/tmp/Kbd"), "nothing saved");
 
-    /* The camera list: rows by the arrows, Enter edits, Space toggles. */
+    /* The Channels page: Tab to the channel table, Enter edits, Space
+     * toggles, Delete asks to clear. */
     key(KEY_LEFT);
     key(KEY_LEFT);
     key(KEY_ENTER);
-    CHECK(find("Add", 1), "Left, Left: CAMERA, the camera list");
+    CHECK(find("Search settings", 1), "Left, Left: CAMERA, the Channels page");
     CHECK(c.n_cameras == 1, "one camera left by the steps before");
-    key(KEY_DOWN);
-    CHECK(focused() && lv_obj_check_type(focused(), &lv_button_class) && find("Add", 1) &&
-          lv_obj_get_parent(find("Add", 1)) == focused(), "Down past the last row: Add");
-    key(KEY_UP);
+    lv_obj_t *chans = NULL;
+    for (int i = 0; i < 20 && !chans; ++i) {
+        key(KEY_TAB);
+        lv_obj_t *f = focused();
+        if (f && lv_obj_has_flag(f, UI_FLAG_ARROWS) && lv_obj_get_child_count(f) &&
+            find_in(lv_obj_get_child(f, 0), "Edit", 1))
+            chans = f;                          /* the rows of channels: Edit on the first */
+    }
+    CHECK(chans, "Tab reaches the channel table");
     key(KEY_ENTER);
-    CHECK(find("Cameras: 1", 0), "Up, Enter: the camera's form");
+    CHECK(find("Cameras: 1", 0), "Enter: the camera's form");
     lv_obj_t *sw = NULL;
     key(KEY_TAB);
     key(KEY_TAB);
@@ -1035,11 +1279,11 @@ static void test_keyboard_settings(void)
     key(KEY_UP);
     CHECK(focused() == textarea(1), "Up: the field above");
     key(KEY_ESC);
-    CHECK(find("Add", 1) && !ui_popup_is_open(), "Esc: unchanged, back in the list");
+    CHECK(find("Search settings", 1) && !ui_popup_is_open(), "Esc: unchanged, back on the Channels page");
     key(KEY_DELETE);
-    CHECK(ui_popup_is_open() && find("Remove item 1 from Cameras", 1), "Delete on a row asks");
+    CHECK(ui_popup_is_open() && find("Clear channel 1?", 1), "Delete on a row asks");
     key(KEY_ESC);
-    CHECK(!ui_popup_is_open(), "Esc: not removed");
+    CHECK(!ui_popup_is_open(), "Esc: not cleared");
     key(KEY_ESC);
     key(KEY_ESC);
     CHECK(!ui_page_top(), "Esc, Esc: back on the live view");
@@ -1323,6 +1567,7 @@ static int setup(int channels, const char *json, char *path, size_t cap)
     g_model.show_tiles = fake_tiles;
     g_model.now = fake_now;
     g_model.system_info = fake_info;
+    fake_discovery(&g_model);
     ui_app_create(&g_model);
     if (pipe(g_mouse) < 0 || pipe(g_kbd) < 0) return -1;
     fcntl(g_mouse[0], F_SETFL, O_NONBLOCK);
@@ -1438,8 +1683,67 @@ static int shots_4(void)
     button(BTN_RIGHT);
     click_text("CAMERA");
     shot("cameras");
-    lv_obj_t *edit = find("Edit", 1);
     int x, y;
+    /* The search pane: a search running, its results, the dialogs. */
+    g_dj_hold = 1;
+    click_text(LV_SYMBOL_REFRESH "  Search");
+    run(300);
+    shot("channels-searching");
+    fake_job_end();
+    g_dj_hold = 0;
+    run(300);
+    shot("channels-search-results");
+    lv_obj_t *o = find("192.168.1.108", 0);
+    if (o) {
+        center_of(o, &x, &y);
+        click_at(x, y);
+        run(100);
+    }
+    shot("channels-device-checked");
+    o = find_nth(lv_screen_active(), LV_SYMBOL_PLUS "  Add to...", 2);
+    if (o) {
+        center_of(o, &x, &y);
+        click_at(x, y);
+        run(100);
+    }
+    shot("channels-add-to-menu");
+    button(BTN_RIGHT);
+    click_text("Change IP...");
+    if (textarea(0)) lv_textarea_set_text(textarea(0), "192.168.0.31");
+    if (textarea(4)) lv_textarea_set_text(textarea(4), "secret");
+    shot("channels-change-ip");
+    click_text(LV_SYMBOL_OK "  Change");
+    run(400);
+    shot("channels-change-ip-done");
+    button(BTN_RIGHT);
+    run(100);
+    click_text("Select all");
+    run(100);
+    click_text("Mass change...");
+    if (textarea(0)) lv_textarea_set_text(textarea(0), "192.168.0.20");
+    shot("channels-mass-change");
+    click_text(LV_SYMBOL_EYE_OPEN "  Preview");
+    run(400);
+    shot("channels-mass-preview");
+    click_text(LV_SYMBOL_OK "  Apply");
+    run(400);
+    shot("channels-mass-applied");
+    button(BTN_RIGHT);
+    run(100);
+    click_text("Select all");
+    run(100);
+    click_text("Auto add all");
+    shot("channels-autoadd");
+    click_text(LV_SYMBOL_OK "  Add all");
+    run(400);
+    shot("channels-autoadd-result");
+    button(BTN_RIGHT);
+    run(100);
+    click_text("Search settings");
+    shot("channels-search-settings");
+    button(BTN_RIGHT);
+    run(VG_DURATION_TOAST + 100);
+    lv_obj_t *edit = find("Edit", 1);
     if (edit) {
         center_of(edit, &x, &y);
         click_at(x, y);
@@ -1543,10 +1847,41 @@ static int shots_4(void)
     return g_fail ? 1 : 0;
 }
 
+/* Sixteen channels: cameras on 1-14 (8 disabled), 15 and 16 empty. */
+static const char k_shots16_json[] =
+    "{\"version\":1,\"cameras\":["
+    "{\"url\":\"rtsp://admin:secret@192.168.1.10/stream1\",\"name\":\"Front gate\"},"
+    "{\"url\":\"rtsp://192.168.1.11/stream1\",\"name\":\"Yard\"},"
+    "{\"url\":\"netip://admin:@192.168.1.12/?ch=0&stream=main\",\"name\":\"Garage\"},"
+    "{\"url\":\"rtsp://admin:x@192.168.1.13/live\",\"name\":\"Back door\"},"
+    "{\"url\":\"netip://admin:@192.168.1.14/?ch=0&stream=main\",\"name\":\"Parking\"},"
+    "{\"url\":\"rtsp://192.168.1.15/cam/realmonitor?channel=1&subtype=0\",\"name\":\"Lobby\"},"
+    "{\"url\":\"rtsp://192.168.1.16/main\",\"name\":\"Office\"},"
+    "{\"url\":\"netip://192.168.1.17/\",\"name\":\"Warehouse\",\"enabled\":false},"
+    "{\"url\":\"netip://192.168.1.18/\",\"name\":\"Loading bay\"},"
+    "{\"url\":\"rtsp://192.168.1.19/live\",\"name\":\"Roof\"},"
+    "{\"url\":\"rtsp://192.168.1.20/live\",\"name\":\"Side street\"},"
+    "{\"url\":\"netip://192.168.1.21/\",\"name\":\"Reception\"},"
+    "{\"url\":\"netip://192.168.1.22/\",\"name\":\"Stairs\"},"
+    "{\"url\":\"rtsp://192.168.1.23/live\",\"name\":\"Corridor\"}],"
+    "\"record\":{\"path\":\"/mnt/disk/rec\",\"segment\":300,\"keep\":48}}";
+
 static int shots_16(void)
 {
     char path[512];
-    if (setup(16, k_shots_json, path, sizeof path) < 0) return 1;
+    if (setup(16, k_shots16_json, path, sizeof path) < 0) return 1;
+    move_to(300, 200);
+    button(BTN_RIGHT);
+    click_text("Channels");
+    run(300);
+    shot("channels-16-states");
+    lv_obj_t *t = NULL;
+    for (lv_obj_t *l = find("Corridor", 0); l && !t; l = lv_obj_get_parent(l))
+        if (lv_obj_has_flag(l, UI_FLAG_ARROWS)) t = l;
+    if (t) lv_obj_scroll_to_y(t, 2000, LV_ANIM_OFF);
+    run(100);
+    shot("channels-16-states-end");
+    button(BTN_RIGHT);
     move_to(300, 200);
     button(BTN_RIGHT);
     click_text("Split");
@@ -1638,6 +1973,7 @@ int main(int argc, char **argv)
     g_model.show_tiles = fake_tiles;
     g_model.now = fake_now;
     g_model.system_info = fake_info;
+    fake_discovery(&g_model);
     ui_app_create(&g_model);
 
     if (pipe(g_mouse) < 0) return 1;
@@ -1654,6 +1990,7 @@ int main(int argc, char **argv)
     test_context_and_full_screen();
     test_menu_and_settings();
     test_cameras();
+    test_channels_discovery();
     test_system();
     test_same_redacted_urls();
     test_stale_and_cancel();

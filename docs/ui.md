@@ -19,7 +19,9 @@ live view                  tiles over the whole screen, clock in a corner
  |                         Display, Split > (layouts)
  +-> Main menu             cards: PLAYBACK, AI, ALARM, OPERATION, BACKUP, DISPLAY
       |                    MANAGEMENT: CAMERA, NETWORK, STORAGE, SYSTEM, ACCOUNT
-      +-> CAMERA           the camera list: Add, Edit, Remove
+      +-> CAMERA           Channels: cameras found on the network (Search, Add,
+      |    |               Change IP, Mass change, Auto add) and every channel
+      |    |               (Edit, Clear, Add / Replace with a device found)
       |    +-> a camera    form: URL, name, enabled
       +-> STORAGE          the recording's state, and its form
       +-> NETWORK          the HTTP API's form
@@ -98,7 +100,7 @@ every chip over the video. PgUp/PgDn and `[`/`]` do the same.
 ![Page arrow](../tests/ui/page_arrow.png)
 
 The **context menu** (right button, or the Menu key) is, in this order:
-**Main menu**; **Channels** (the camera list); **Playback**; **Record**
+**Main menu**; **Channels** (the Channels page); **Playback**; **Record**
 (the recording settings); **PTZ**; **Display** (output, clock corner and
 layouts, read-only until the UI has settings of its own); **Split**, a
 submenu of the layouts; nothing else (full screen is a double click or
@@ -139,7 +141,7 @@ OPERATION (the System page), BACKUP and DISPLAY (the Display page).
 PLAYBACK, AI, ALARM and BACKUP are not in vigil yet: their cards are
 there and say "not available yet", the same as Playback and PTZ in the
 context menu. Six cards fill one page at 1280x720, so there are no page
-dots. The management row: CAMERA (the camera list), NETWORK (the HTTP
+dots. The management row: CAMERA (the Channels page), NETWORK (the HTTP
 API), STORAGE (the recording: what it is doing now, from each channel's
 recording state, and its settings), any other section of the schema with
 its own label, SYSTEM, and ACCOUNT (not there yet). The arrows move over
@@ -168,6 +170,7 @@ src/ui/ui_app.c         screen stack, subjects, popups, toasts, questions
 src/ui/ui_live.c        live view, clock, navigation bar, context menu, event toasts
 src/ui/ui_menu.c        main menu
 src/ui/ui_form.c        settings forms and lists, from the schema
+src/ui/ui_channels.c    Channels: camera search (discovery jobs) and the channel table
 src/ui/ui_system.c      System page
 src/ui/ui_layout.c      tile geometry (plain C, shared with frontend_tiles)
 src/ui/ui_theme.c       LVGL styles from the design tokens
@@ -266,7 +269,41 @@ YAML an empty slot is `- url: ""` (or `- ~` by hand). In the UI model a
 section with positions is `ui_section_t.slots`; `ui_form_open_slot(sec,
 slot)` opens the form for a new item at a position.
 
-![The camera list](../tests/ui/cameras.png)
+![The Channels page](../tests/ui/cameras.png)
+
+### Channels: finding cameras and putting them on channels
+
+The page CAMERA and the context menu's **Channels** open
+(`ui_channels.c`) has two panes, as an NVR's camera page does.
+
+**Search** (top): the protocol (all, NETIP, ONVIF, DHIP), **Search**
+(its progress beside it), and a table of the devices found: a check box,
+address, port, MAC, vendor and model, the protocols that answered, and
+"New" or "On channel N" (the channel whose camera URL points at that
+address). A device row's **Add to...** opens a small menu of the empty
+channels. The buttons act on the checked devices: **Add** puts each on
+the next empty channel, **Change IP...** (one device) and **Mass
+change...** (the checked ones, or all) open a page with the address, mask,
+gateway and the credentials; the mass change's **Preview** shows which
+device gets which address (addresses in use skipped) and **Apply** applies
+exactly that. **Auto add all** asks for the credentials and fills the empty
+channels with every new device, showing where each went or why not.
+**Add with user / password** are the credentials Add uses (admin, empty
+password by default); they are not kept, except in the URL of a camera
+added. Discovery itself is in the core ([api.md](api.md#discovery)); the
+page starts its jobs through the model (`disc_*` in `ui_model.h`) and
+follows them on a timer, so the screen never waits for the network.
+**Search settings** in the header opens the `discovery` section
+(interfaces, addresses also asked, protocol order).
+
+**Channels** (bottom): one row per channel: name, source URL (password
+hidden), protocol, state (as the tiles say it), enabled; **Edit** (the
+camera form), **Clear** (asks, then empties the slot), **Add** on an
+empty one (the camera form, or with one device checked, that device), and
+with one device checked, **Replace** on the others.
+
+![Search results, one device checked](../tests/ui/channels_results.png)
+![Mass change preview](../tests/ui/channels_mass_preview.png)
 
 ### The on-screen keyboard
 
@@ -415,8 +452,10 @@ longer opens the on-screen keyboard: type into it.
 | | arrows on a drop-down | previous / next value; Enter opens the list |
 | | Ctrl+S | Save |
 | | Esc with unsaved changes | asks first (Cancel is focused: Enter keeps the page) |
-| camera list | Enter | edit the row |
-| | Delete | remove the row (asks first) |
+| Channels: devices | arrows, Enter or Space | move, check the device |
+| Channels: channels | Enter | edit the camera (an empty channel: add one) |
+| | Delete | clear the channel (asks first) |
+| | A, + | put the checked device on the channel |
 
 ![Keyboard shortcuts](../tests/ui/help.png)
 

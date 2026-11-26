@@ -15,7 +15,7 @@ static int at(const char *uri, const char *p)
 }
 
 static const struct { const char *key; unsigned perm; } SECTIONS[] = {
-    { "cameras", PERM_CAMERAS },
+    { "cameras", PERM_CAMERAS }, { "discovery", PERM_CAMERAS },
     { "record", PERM_STORAGE }, { "schedule", PERM_STORAGE }, { "quota", PERM_STORAGE },
     { "nas", PERM_STORAGE },
     { "ddns", PERM_NETWORK }, { "upnp", PERM_NETWORK }, { "smtp", PERM_NETWORK },

@@ -56,7 +56,8 @@ static void open_fn(int fn, const char *later)
     }
     if (fn >= FN_SECTION) {
         int sec = fn - FN_SECTION;
-        if (ui_model()->sections[sec].is_array) ui_list_open(sec);
+        if (!strcmp(ui_model()->sections[sec].key, "cameras")) ui_channels_open();
+        else if (ui_model()->sections[sec].is_array) ui_list_open(sec);
         else ui_form_open(sec, -1);
     } else if (fn == FN_OPERATION || fn == FN_SYSTEM) {
         ui_system_open();
