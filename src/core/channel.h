@@ -33,8 +33,11 @@ typedef struct {
     int        live;                /* video arrived within the last 3 s */
     int        decoding;            /* a decoder is running */
     int        recording;           /* a segment is open */
-    char       rec_state[24];       /* "" (not recording), "recording", or why not:
-                                       "waiting for disk", "not a disk", "read-only", "error" */
+    char       rec_state[24];       /* "" (no recording asked for); set up: "recording",
+                                       "ready" (no segment open yet: waiting for a keyframe
+                                       or the camera), "failed" (the last write failed); not
+                                       set up: "waiting for disk", "not a disk", "read-only",
+                                       "error" */
     uint64_t   rec_bytes;
     vg_codec_t codec;
     unsigned   width, height, fps;  /* fps averaged over 2 s */

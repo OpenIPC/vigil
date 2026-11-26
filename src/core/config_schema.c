@@ -122,7 +122,8 @@ static const schema_field_t record_fields[] = {
       .label = "Record onto the root filesystem",
       .help = "Off: recording waits until a disk is mounted where the path leads, and never "
               "writes to the root filesystem (on a board, its flash). On only where the root "
-              "filesystem is itself a disk. RAM and flash filesystems are refused either way." },
+              "filesystem is itself a disk. RAM and flash filesystems are refused either way, "
+              "the root included." },
 };
 
 static const schema_field_t api_fields[] = {

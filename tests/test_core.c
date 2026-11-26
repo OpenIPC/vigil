@@ -1106,13 +1106,28 @@ static void test_rec_place(void)
     CHECK(rec_place_check("/mnt/rec/cams", 1, &ops, why, sizeof why) == REC_PLACE_NOT_DISK,
           "a link into tmpfs: %s", why);
     g_fake_link = g_fake_target = NULL;
-    /* Without mountinfo (not Linux) only the root check is left. */
+    /* Without mountinfo a separate device cannot be told from tmpfs or
+     * flash: refused. The root filesystem is refused before it is read. */
     g_fake = board;
     rec_place_ops_t nomi = { fake_stat, fake_realpath, "/nonexistent/mountinfo" };
     CHECK(rec_place_check("/mnt/sda1/rec", 0, &nomi, why, sizeof why) == REC_PLACE_NO_DISK,
           "no mountinfo: still not the root filesystem (%s)", why);
-    CHECK(rec_place_check("/mnt/mmcblk0p1/rec", 0, &nomi, why, sizeof why) == REC_PLACE_OK,
-          "no mountinfo: another device is a disk (%s)", why);
+    CHECK(rec_place_check("/mnt/mmcblk0p1/rec", 0, &nomi, why, sizeof why) == REC_PLACE_ERROR,
+          "no mountinfo: another device cannot be told apart, refused (%s)", why);
+    /* allow_rootfs counts the root as a disk, not RAM or flash as one. */
+    static const char *const roots[] = { "tmpfs", "rootfs", "jffs2", "ubifs" };
+    for (size_t i = 0; i < sizeof roots / sizeof roots[0]; ++i) {
+        f = fopen(mi, "w");
+        fprintf(f, "1 0 0:2 / / rw,relatime - %s %s rw\n", roots[i], roots[i]);
+        fclose(f);
+        CHECK(rec_place_check("/mnt/sda1/rec", 1, &ops, why, sizeof why) == REC_PLACE_NOT_DISK,
+              "allow_rootfs on a %s root: still not a disk (%s)", roots[i], why);
+    }
+    f = fopen(mi, "w");
+    fputs("1 0 8:2 / / rw,relatime - ext4 /dev/sda2 rw\n", f);
+    fclose(f);
+    CHECK(rec_place_check("/mnt/sda1/rec", 1, &ops, why, sizeof why) == REC_PLACE_OK,
+          "allow_rootfs on an ext4 root: recorded (%s)", why);
     unlink(mi);
     rmdir(dir);
 

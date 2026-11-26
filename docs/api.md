@@ -80,17 +80,20 @@ created, on a disk. The deepest part of `record.path` that exists decides:
   one without a disk — `tmpfs`, `ramfs`, `proc`, `sysfs` and the like — or
   flash — `jffs2`, `ubifs`, `squashfs`, `cramfs`, `romfs`, `yaffs`; any other
   type (`vfat`, `exfat`, `ext4`, `xfs`, `btrfs`, `ntfs`, `nfs`, `cifs`, FUSE, …)
-  is a disk. RAM and flash are refused whatever `allow_rootfs` says;
+  is a disk. RAM and flash are refused whatever `allow_rootfs` says, a root
+  filesystem of that kind included. Where mountinfo cannot be read, a
+  directory off the root filesystem cannot be told apart from RAM, and is
+  refused (`error`);
 - it must not be mounted read-only.
 
 Only the part below that directory is created, so nothing is ever made
 above the mount point. Otherwise the channel does not record. It reports why
 (`rec_state`), and it looks again every 10 s, at a keyframe, so recording
-starts by itself once the disk is mounted. A disk that goes away while it
-records is noticed at the next failed write, and the channel waits for it the
-same way. The configuration is not changed: `record.path` stays what was set.
-On a system without `/proc/self/mountinfo`, only the root filesystem check
-applies.
+starts by itself once the disk is mounted. While recording, the directory is
+looked at again before every new segment and after a failed write, so a disk
+that goes away stops recording before a segment could be opened on the
+mount point left behind; the channel then waits for it the same way. The
+configuration is not changed: `record.path` stays what was set.
 
 ## What applies when
 
@@ -255,10 +258,12 @@ time). One channel per configured camera, in tile order. `running`: the
 channel has a source (it is enabled and its URL could be used); `live`:
 video arrived in the last 3 s; `state` is `live`, `off`, `CONNECTING` or the
 last error (`connect: Connection refused`, `login refused (Ret 203)`, …);
-`recording`: a segment is open; `rec_state` is `off` (no `record.path`),
-`recording`, or why not: `waiting for disk` (the path leads onto the root
-filesystem: nothing is mounted there), `not a disk` (RAM or flash),
-`read-only`, `error` (not a directory, no permission; the log says which);
+`recording`: a segment is open; `rec_state` is `off` (no `record.path`);
+when recording is set up, `recording`, `ready` (no segment open yet: waiting
+for a keyframe or for the camera) or `failed` (the last write failed); when it
+is not, why: `waiting for disk` (the path leads onto the root filesystem:
+nothing is mounted there), `not a disk` (RAM or flash), `read-only`, `error`
+(not a directory, no permission, mountinfo unreadable; the log says which);
 `rec_bytes` counts what was written since the channel started; `fps` is
 averaged over 2 s; `codec` is `null` until the stream says.
 

@@ -344,7 +344,9 @@ def main():
         st, _, err = api.json("PUT", "/api/v1/config/record", {"path": rec + "/../../escape"})
         check(st == 400 and err["errors"][0]["path"] == "record.path", "record.path with \"..\": 400")
         api.json("PUT", "/api/v1/config/record", {"path": rec, "segment": 120, "allow_rootfs": True})
-        check(wait_for(recording(True), 20, 0.5), "back on the build tree: recording")
+        check(wait_for(recording(True), 20, 0.5) and
+              api.json("GET", "/api/v1/status")[2]["channels"][0]["rec_state"] == "recording",
+              "back on the build tree: recording, rec_state recording")
 
         # ---- a client that does not read: the others go on, shutdown does
         # not wait for it. (Smoke test: what the API sends in a test's time

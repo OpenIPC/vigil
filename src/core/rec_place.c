@@ -89,12 +89,13 @@ typedef struct {
     int  found;
 } mount_t;
 
-/* The longest mount point in `file` that contains `path`. */
-static void find_mount(const char *file, const char *path, mount_t *best)
+/* The longest mount point in `file` that contains `path`. -1 (errno set)
+ * when the file cannot be read: then nothing is known about the mount. */
+static int find_mount(const char *file, const char *path, mount_t *best)
 {
     memset(best, 0, sizeof *best);
     FILE *f = fopen(file, "r");
-    if (!f) return;
+    if (!f) return -1;
     char line[2 * PATH_MAX];
     while (fgets(line, sizeof line, f)) {
         /* id parent major:minor root mount-point options [optional...] - fstype source super-options */
@@ -120,7 +121,13 @@ static void find_mount(const char *file, const char *path, mount_t *best)
         best->ro = has_opt(opts, "ro") || (sopts && has_opt(sopts, "ro"));
         best->found = 1;
     }
+    int err = ferror(f);
     fclose(f);
+    if (err) {
+        errno = EIO;
+        return -1;
+    }
+    return 0;
 }
 
 const char *rec_place_name(rec_place_t p)
@@ -182,17 +189,26 @@ rec_place_t rec_place_check(const char *dir, int allow_rootfs, const rec_place_o
         snprintf(why, cap, "%s: %s", p, strerror(errno));
         return REC_PLACE_ERROR;
     }
+    /* Without mountinfo a separate tmpfs (/dev/shm) or flash partition
+     * would pass the root check: what cannot be told is not used. */
     mount_t m;
-    find_mount(mi, real, &m);
-    if (!m.found) return REC_PLACE_OK;                  /* no mountinfo: the root check is all there is */
+    if (find_mount(mi, real, &m) < 0) {
+        snprintf(why, cap, "cannot tell what %s is on: %s: %s", p, mi, strerror(errno));
+        return REC_PLACE_ERROR;
+    }
+    if (!m.found) {
+        snprintf(why, cap, "cannot tell what %s is on: no mount for it in %s", p, mi);
+        return REC_PLACE_ERROR;
+    }
     /* "/" from mountinfo when st_dev did not tell (a root without a
      * distinct st_dev): the root filesystem all the same. */
     if (!strcmp(m.mnt, "/") && !allow_rootfs) {
         snprintf(why, cap, "%s is on the root filesystem: no disk mounted there", p);
         return REC_PLACE_NO_DISK;
     }
-    /* allow_rootfs vouches for the root filesystem, whatever its type. */
-    if (strcmp(m.mnt, "/") && not_disk_type(m.fs)) {
+    /* allow_rootfs vouches for the root filesystem being a disk, not for
+     * RAM or flash: a tmpfs, jffs2 or ubifs root is refused all the same. */
+    if (not_disk_type(m.fs)) {
         snprintf(why, cap, "%s is on %s (%s), not a disk", p, m.mnt, m.fs);
         return REC_PLACE_NOT_DISK;
     }

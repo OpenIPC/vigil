@@ -11,9 +11,9 @@
  *     the path that exists, against st_dev of "/"), unless record.allow_rootfs
  *     says the root filesystem is a disk;
  *   - not on a filesystem that holds no disk (tmpfs, ramfs, proc, ...) or that
- *     is flash (jffs2, ubifs, squashfs, ...), and not mounted read-only: the
- *     mount is the longest mount point in /proc/self/mountinfo that contains
- *     the resolved path.
+ *     is flash (jffs2, ubifs, squashfs, ...), the root included, and not
+ *     mounted read-only: the mount is the longest mount point in
+ *     /proc/self/mountinfo that contains the resolved path.
  *
  * Only the part of the path below its deepest existing directory is ever
  * created, and that directory is on the disk, so nothing is created above
@@ -35,7 +35,8 @@ typedef enum {
 
 /* What the check reads, replaceable for tests. NULL members (or a NULL
  * ops) mean the real thing; mountinfo NULL means /proc/self/mountinfo. A
- * mountinfo that cannot be opened (not Linux) leaves only the root check. */
+ * mountinfo that cannot be read refuses the directory (REC_PLACE_ERROR):
+ * without it a separate RAM or flash filesystem cannot be told apart. */
 typedef struct {
     int         (*stat_fn)(const char *path, struct stat *st);
     char       *(*realpath_fn)(const char *path, char *resolved);

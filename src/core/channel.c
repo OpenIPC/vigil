@@ -43,7 +43,7 @@ typedef struct {
     seg_writer_t    seg;
     int             rec_on, rec_fail_told;
     time_t          rec_retry_at;   /* not set up then: try again later */
-    time_t          rec_checked_at; /* a write failed: the directory was looked at then */
+    time_t          rec_checked_at; /* the directory was last looked at then (rec_check) */
     rec_place_t     rec_place;      /* the last answer, to say each change once */
     int             rec_told;
     pthread_t       thread;
@@ -100,6 +100,10 @@ void channels_status(int idx, channel_status_t *st)
         *st = c->st;
         st->recording = c->rec_on && c->seg.f != NULL;
         st->rec_bytes = c->seg.bytes;
+        /* Set up: say how it goes. Not set up: the reason, kept by rec_setup. */
+        if (c->rec_on)
+            snprintf(st->rec_state, sizeof st->rec_state, "%s",
+                     c->rec_fail_told ? "failed" : st->recording ? "recording" : "ready");
     }
     pthread_mutex_unlock(&g_locks[idx]);
 }
@@ -182,7 +186,7 @@ static void rec_setup(channel_t *c, vg_codec_t codec)
             if (codec != VG_CODEC_NONE) seg_set_ext(&c->seg, codec == VG_CODEC_H264 ? "h264" : "h265");
             c->rec_on = 1;
             c->rec_fail_told = 0;
-            snprintf(c->st.rec_state, sizeof c->st.rec_state, "recording");
+            c->st.rec_state[0] = 0;         /* set up: channels_status says how it goes */
         } else {
             snprintf(why, sizeof why, "cannot create %s: %s", c->rec_dir, strerror(errno));
             p = REC_PLACE_ERROR;
@@ -212,13 +216,16 @@ static void rec_retry(channel_t *c, vg_codec_t codec)
     rec_setup(c, codec);
 }
 
-/* A write failed. If the directory is no longer where it may record (the
- * disk was pulled, unmounted), recording goes off and waits for it, rather
- * than trying the files again. Looked at once per REC_RETRY_SECS. */
-static void rec_failed(channel_t *c)
+/* While recording: is the directory still where it may record? Asked
+ * before every new segment and after a failed write, at most once a second
+ * (each is a stat and a read of mountinfo). A disk that was pulled or
+ * unmounted leaves the mount point behind on the root filesystem; a new
+ * segment opened there would go onto the flash. So recording goes off and
+ * waits for the disk as at the start, rather than trying the files again. */
+static void rec_check(channel_t *c)
 {
     time_t now = time(NULL);
-    if (now - c->rec_checked_at < REC_RETRY_SECS) return;
+    if (now == c->rec_checked_at) return;
     c->rec_checked_at = now;
     char why[PATH_MAX_WHY];
     rec_place_t p = rec_place_check(c->rec_dir, c->allow_rootfs, NULL, why, sizeof why);
@@ -251,6 +258,9 @@ static void on_au(void *user, const vg_au_t *au)
     }
 
     if (!c->rec_on && c->rec_dir[0] && au->key) rec_retry(c, au->codec);
+    /* A keyframe that will open a new segment (seg_write's own test). */
+    if (c->rec_on && au->key && (!c->seg.f || time(NULL) - c->seg.seg_start >= c->seg.seg_secs))
+        rec_check(c);
     if (c->rec_on) {
         pthread_mutex_lock(c->lock);
         int was_open = c->seg.f != NULL;
@@ -264,7 +274,7 @@ static void on_au(void *user, const vg_au_t *au)
         } else if (rc == 0 && is_open && !was_open) {
             c->rec_fail_told = 0;
         }
-        if (rc < 0) rec_failed(c);
+        if (rc < 0) rec_check(c);
     }
     ++c->frames;
 }
