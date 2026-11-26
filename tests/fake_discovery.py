@@ -110,6 +110,8 @@ class Device:
                     s.bind((self.ip, port))
                     self.socks.append(s)
                     threading.Thread(target=udp_loop, args=(s, [self], proto), daemon=True).start()
+        if a.shared:
+            return                  # discovery only: the addresses are made up
         if "netip" in self.protos:
             self.serve_tcp(a.tcp[0], NetipTcp)
         if "onvif" in self.protos:
@@ -435,8 +437,9 @@ def main():
             if group:
                 s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
                              socket.inet_aton(group) + socket.inet_aton(a.shared))
-            threading.Thread(target=udp_loop, args=(s, [d for d in devices if proto in d.protos], proto),
-                             daemon=True).start()
+            mine = [d for d in devices if proto in d.protos]
+            if mine:
+                threading.Thread(target=udp_loop, args=(s, mine, proto), daemon=True).start()
     log("ready: " + " ".join("%s@%s" % (",".join(sorted(d.protos)), d.ip) for d in devices))
     try:
         while True:

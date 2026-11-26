@@ -727,13 +727,16 @@ static disc_rc_t netip_udp_set(const disc_device_t *d, const char *ip, const cha
         snprintf(err, errcap, "cannot open a UDP socket");
         return DISC_EUNREACHABLE;
     }
+    /* Once to each place the device can hear it from: a second copy would
+     * apply the change twice (XM devices restart their network for each).
+     * 255.255.255.255 reaches it whatever its subnet; a device asked by
+     * unicast in the scan (a routed subnet, a test) is told by unicast. */
     uint32_t dev;
-    if (disc_ip_parse(d->ip, &dev) == 0) send_to(s.fd[0], pkt, len, dev, s.port[0], NULL);
-    for (int i = 0; i < s.nf && s.broadcast; ++i) {
-        if (d->iface[0] && strcmp(d->iface, s.f[i].name)) continue;
-        if (s.f[i].bcast) send_to(s.fd[0], pkt, len, s.f[i].bcast, s.port[0], &s.f[i]);
-        send_to(s.fd[0], pkt, len, 0xffffffffu, s.port[0], &s.f[i]);
-    }
+    int unicast = !s.broadcast;
+    for (int t = 0; t < s.nt; ++t) unicast |= disc_ip_parse(d->ip, &dev) == 0 && s.targets[t] == dev;
+    if (unicast && disc_ip_parse(d->ip, &dev) == 0) send_to(s.fd[0], pkt, len, dev, s.port[0], NULL);
+    for (int i = 0; i < s.nf && s.broadcast && !unicast; ++i)
+        if (!d->iface[0] || !strcmp(d->iface, s.f[i].name)) send_to(s.fd[0], pkt, len, 0xffffffffu, s.port[0], &s.f[i]);
     wipe(pkt, sizeof pkt);
     long long end = mono_ms() + NETIP_SET_S * 1000;
     int ret = -1;
