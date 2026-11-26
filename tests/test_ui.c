@@ -1360,6 +1360,199 @@ static void shots_network(void)
     g_mg_wifi = 0;
 }
 
+/* The schedule's grid: the object before the legend in its panel. */
+static lv_obj_t *sched_grid(void)
+{
+    lv_obj_t *l = find("Continuous   ", 0);
+    return l ? lv_obj_get_child(lv_obj_get_parent(lv_obj_get_parent(l)), 0) : NULL;
+}
+
+/* The centre of half hour `slot` of day `day` (0 = Monday) on the grid. */
+static void slot_at(lv_obj_t *grid, int day, int slot, int *x, int *y)
+{
+    lv_area_t a;
+    lv_obj_get_coords(grid, &a);
+    *x = a.x1 + 52 + slot * 18 + 9;
+    *y = a.y1 + 22 + day * 26 + 13;
+}
+
+/* Paint day `day` from slot `from` to `to` by dragging the mouse. */
+static void drag_slots(lv_obj_t *grid, int day, int from, int to)
+{
+    int x, y;
+    slot_at(grid, day, from, &x, &y);
+    move_to(x, y);
+    ev(EV_KEY, BTN_LEFT, 1);
+    ev(EV_SYN, SYN_REPORT, 0);
+    run(40);
+    for (int k = from + 1; k <= to; ++k) {
+        slot_at(grid, day, k, &x, &y);
+        move_to(x, y);
+    }
+    ev(EV_KEY, BTN_LEFT, 0);
+    ev(EV_SYN, SYN_REPORT, 0);
+    run(60);
+}
+
+static void test_storage_pages(void)
+{
+    run(VG_DURATION_TOAST);
+    move_to(W / 2, H - 1);
+    run(300);
+    click_text("Main menu");
+    click_text("STORAGE");
+    CHECK(find("When the disk is full", 0) && find("Segment length (min)", 0) && find("/mnt/sda1/rec", 1),
+          "STORAGE: Basic, with the mounted disk as a shortcut");
+    shot("storage_basic");
+    lv_obj_t *seg = textarea(0);
+    CHECK(seg && !strcmp(lv_textarea_get_text(seg), "1"), "60 s shown as 1 min: %s", seg ? lv_textarea_get_text(seg) : "");
+    if (seg) lv_textarea_set_text(seg, "2");
+    lv_obj_t *dd = NULL;
+    for (lv_obj_t *o = lv_obj_get_parent(find("When the disk is full", 0)); o && !dd;) {
+        for (uint32_t i = 0; i < lv_obj_get_child_count(o); ++i) {
+            lv_obj_t *c = lv_obj_get_child(o, (int32_t)i);
+            lv_obj_t *box = lv_obj_get_child_count(c) ? lv_obj_get_child(c, 0) : NULL;
+            if (box && lv_obj_get_child_count(box) && lv_obj_check_type(lv_obj_get_child(box, 0), &lv_dropdown_class))
+                dd = lv_obj_get_child(box, 0);
+        }
+        break;
+    }
+    CHECK(dd != NULL, "the on_full drop-down");
+    if (dd) lv_dropdown_set_selected(dd, 1);
+    click_text(SAVE);
+    run(100);
+    vigil_config_t c;
+    config_get(&c);
+    CHECK(c.record.segment == 120 && !strcmp(c.record.on_full, "stop"), "saved: segment %d s, on_full %s",
+          c.record.segment, c.record.on_full);
+
+    nav_to("Schedule");
+    lv_obj_t *grid = sched_grid();
+    CHECK(grid && find("Motion only records while", 1), "Schedule: the grid and the motion note");
+    click_text("Off");
+    if (grid) drag_slots(grid, 5, 0, 47);
+    shot("storage_schedule");
+    click_text(SAVE);
+    run(100);
+    config_get(&c);
+    int found = 0;
+    for (int i = 0; i < c.n_schedules; ++i)
+        if (c.schedule[i].camera == 1)
+            found = strspn(c.schedule[i].day[5], "-") == 48 && strspn(c.schedule[i].day[0], "C") == 48;
+    CHECK(c.n_schedules == 1 && found, "saved: CAM1 Saturday off (%d entries)", c.n_schedules);
+    /* The day last painted (Saturday) to every day. */
+    click_text("Copy the day to all days");
+    click_text(SAVE);
+    run(100);
+    config_get(&c);
+    CHECK(c.n_schedules == 1 && strspn(c.schedule[0].day[0], "-") == 48 && strspn(c.schedule[0].day[6], "-") == 48,
+          "Copy the day: every day off");
+    click_text("Always");
+    click_text(SAVE);
+    run(100);
+    config_get(&c);
+    CHECK(c.n_schedules == 0, "Always: no entry needed (%d)", c.n_schedules);
+
+    nav_to("Disk Manager");
+    CHECK(find("sda1", 1) && find("recording", 0) && find("sdb1", 1) && find("WDC WD10PURZ", 0) && !find(SAVE, 0),
+          "Disk Manager: the disks, their states, nothing to save");
+    shot("storage_disks");
+    /* sdb1's Format: the second row with a Format button after sda's two. */
+    lv_obj_t *sdb1 = find("    sdb1", 0);
+    lv_obj_t *fmt = NULL;
+    if (sdb1) {
+        lv_obj_t *row = lv_obj_get_parent(sdb1);
+        for (uint32_t i = 0; i < lv_obj_get_child_count(row) && !fmt; ++i) {
+            lv_obj_t *b = lv_obj_get_child(row, (int32_t)i);
+            if (lv_obj_check_type(b, &lv_button_class)) fmt = b;
+        }
+    }
+    CHECK(fmt != NULL, "sdb1 has a Format button");
+    int x, y;
+    if (fmt) {
+        center_of(fmt, &x, &y);
+        click_at(x, y);
+    }
+    lv_obj_t *go = find(LV_SYMBOL_TRASH "  Format", 0);
+    CHECK(find("Format sdb1", 1) && go && lv_obj_has_state(lv_obj_get_parent(go), LV_STATE_DISABLED),
+          "the question; Format disabled");
+    lv_obj_t *name = textarea(0);
+    if (name) lv_textarea_set_text(name, "sdb");
+    CHECK(go && lv_obj_has_state(lv_obj_get_parent(go), LV_STATE_DISABLED), "a wrong name: still disabled");
+    shot("storage_format");
+    if (name) lv_textarea_set_text(name, "sdb1");
+    CHECK(go && !lv_obj_has_state(lv_obj_get_parent(go), LV_STATE_DISABLED), "the right name: enabled");
+    if (go) {
+        center_of(go, &x, &y);
+        click_at(x, y);
+    }
+    run(1000);
+    CHECK(g_mg_formatted && find("/mnt/sdb1", 0), "formatted: mounted at /mnt/sdb1");
+    g_mg_formatted = 0;
+
+    nav_to("Disk Quota");
+    lv_obj_t *gb = textarea(0);
+    CHECK(gb && find("Max size (GB)", 0), "Disk Quota: a row per camera");
+    if (gb) lv_textarea_set_text(gb, "50");
+    click_text(SAVE);
+    run(100);
+    config_get(&c);
+    CHECK(c.n_quotas == 1 && c.quota[0].camera == 1 && c.quota[0].max_gb == 50 && !c.quota[0].max_days,
+          "saved: CAM1 50 GB (%d entries)", c.n_quotas);
+
+    nav_to("Network Storage");
+    CHECK(find("CONFIG_NFS_V3", 1) && find("Not mounted", 1), "Network Storage: NFS needs a kernel option");
+    int jobs = g_mg_jobs;
+    click_text(LV_SYMBOL_UPLOAD "  Test");
+    run(800);
+    CHECK(g_mg_jobs == jobs + 1 && find("done", 1), "Test: a job, followed");
+    click_text("Record here");
+    run(100);
+    config_get(&c);
+    CHECK(!strcmp(c.record.path, "/mnt/nas/rec"), "Record here: %s", c.record.path);
+    button(BTN_RIGHT);
+    CHECK(find("Main menu", 0), "back in the menu");
+    button(BTN_RIGHT);
+}
+
+static void shots_storage(void)
+{
+    static const char *const items[] = { "Basic", "Schedule", "Disk Manager", "Disk Quota", "Network Storage" };
+    shots_settings("STORAGE", "storage", items, 5);
+    click_text("STORAGE");
+    nav_to("Schedule");
+    lv_obj_t *grid = sched_grid();
+    click_text("Off");
+    if (grid) {
+        drag_slots(grid, 5, 0, 47);
+        drag_slots(grid, 6, 0, 47);
+        for (int d = 0; d < 5; ++d) drag_slots(grid, d, 18, 35);
+    }
+    click_text("Motion only");
+    if (grid) for (int d = 0; d < 5; ++d) drag_slots(grid, d, 0, 11);
+    shot("storage-schedule-painted");
+    click_text("Always");
+    nav_to("Disk Manager");
+    lv_obj_t *sdb1 = find("    sdb1", 0);
+    if (sdb1) {
+        lv_obj_t *row = lv_obj_get_parent(sdb1);
+        for (uint32_t i = 0; i < lv_obj_get_child_count(row); ++i) {
+            lv_obj_t *b = lv_obj_get_child(row, (int32_t)i);
+            if (!lv_obj_check_type(b, &lv_button_class)) continue;
+            int x, y;
+            center_of(b, &x, &y);
+            click_at(x, y);
+            break;
+        }
+    }
+    lv_obj_t *name = textarea(0);
+    if (name) lv_textarea_set_text(name, "sdb1");
+    shot("storage-disks-format");
+    click_text(LV_SYMBOL_CLOSE "  Cancel");
+    quiet();
+    button(BTN_RIGHT);
+}
+
 /* ---- the keyboard ------------------------------------------------------------------------------- */
 
 static int g_kbd[2] = { -1, -1 };       /* pipe: test -> evdev reader, as a keyboard */
@@ -2134,6 +2327,8 @@ static int shots_4(void)
     quiet();
     shots_network();
     quiet();
+    shots_storage();
+    quiet();
     click_text("OPERATION");
     shot("system");
     click_text("Channel info");
@@ -2345,6 +2540,7 @@ int main(int argc, char **argv)
     test_keyboard_plug();
     test_empty_slot();
     test_network_pages();
+    test_storage_pages();
 
     lv_mem_monitor_t mon;
     lv_mem_monitor(&mon);
