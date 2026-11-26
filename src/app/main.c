@@ -227,6 +227,8 @@ static void apply_config(void)
     unsigned gen = config_get(&c);
     channels_config_t cc;
     config_to_channels(&c, &cc);
+    rec_week_t weeks[CHANNEL_MAX];
+    rec_sched_set(weeks, config_to_schedule(&c, weeks));
     int failed = channels_apply(&cc);
     g_applied_gen = gen;
     config_mark_applied(gen);
@@ -377,6 +379,8 @@ int main(int argc, char **argv)
     g_applied_gen = config_get(&running);
     channels_config_t cc;
     config_to_channels(&running, &cc);
+    rec_week_t weeks[CHANNEL_MAX];
+    rec_sched_set(weeks, config_to_schedule(&running, weeks));
     if (channels_start(&cc, caps->display ? tiles : NULL) == 0) {
         config_mark_applied(g_applied_gen);
         api_start();                    /* failing to start it is logged, not fatal */

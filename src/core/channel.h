@@ -39,6 +39,9 @@ typedef struct {
     int         seg_secs;           /* segment length */
     int         keep;               /* segments kept per camera, 0 = all */
     int         allow_rootfs;       /* record onto the root filesystem too (rec_place.h) */
+    int         stop_when_full;     /* record.on_full "stop": nothing deleted for space */
+    uint64_t    quota_bytes[CHANNEL_MAX];   /* per camera, 0: none (seg_set_quota) */
+    time_t      quota_age[CHANNEL_MAX];     /* seconds, 0: none */
 } channels_config_t;
 
 /* What a channel is doing, for the tile and the API (ch_state_name). */
@@ -94,7 +97,10 @@ typedef struct {
     int        recording;           /* a segment is open */
     char       rec_state[24];       /* "" (no recording asked for); set up: "recording",
                                        "ready" (no segment open yet: waiting for a keyframe
-                                       or the camera), "failed" (the last write failed); not
+                                       or the camera), "failed" (the last write failed),
+                                       "disk full" (record.on_full stop), "schedule off",
+                                       "waiting for motion" (rec_sched.h), "paused" (held
+                                       for disk work, channels_rec_hold); not
                                        set up: "waiting for disk", "not a disk", "read-only",
                                        "error" */
     uint64_t   rec_bytes;
@@ -132,6 +138,14 @@ void channels_set_tiles(const vg_rect_t *tiles);
  * of it or less shows a camera's sub-stream, a larger one its main stream.
  * Unset (0), the main stream everywhere. Before channels_start. */
 void channels_set_screen(unsigned w, unsigned h);
+
+/* Stop recording into `dir` and everything under it (a disk about to be
+ * unmounted or formatted): the channels recording there close their
+ * segments and open none until channels_rec_release. Waits up to
+ * `timeout_ms` for the open segments to close; returns how many are still
+ * open (0: the directory is free). Any thread; one hold at a time. */
+int  channels_rec_hold(const char *dir, int timeout_ms);
+void channels_rec_release(void);
 
 /* Snapshot of channel `idx` (0-based). Any thread, at any time. */
 void channels_status(int idx, channel_status_t *st);

@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
@@ -65,6 +66,7 @@ int seg_init(seg_writer_t *w, const char *dir, const char *prefix,
     snprintf(w->ext, sizeof w->ext, "es");
     w->seg_secs = seg_secs > 0 ? seg_secs : 60;
     w->keep = keep < 0 ? 0 : (keep > SEG_KEEP_MAX ? SEG_KEEP_MAX : keep);
+    w->overwrite = 1;
     if (mkdir_p(dir) < 0) return -1;
     struct statvfs fs;
     w->reserve = 8ull << 20;
@@ -73,6 +75,82 @@ int seg_init(seg_writer_t *w, const char *dir, const char *prefix,
         if (tenth > w->reserve) w->reserve = tenth;
     }
     return 0;
+}
+
+void seg_set_overwrite(seg_writer_t *w, int overwrite)
+{
+    w->overwrite = !!overwrite;
+}
+
+void seg_set_quota(seg_writer_t *w, uint64_t max_bytes, time_t max_age)
+{
+    w->quota_bytes = max_bytes;
+    w->quota_age = max_age;
+    w->quota_checked = 0;
+}
+
+typedef struct {
+    char     name[256];
+    uint64_t size;
+    time_t   mtime;
+} rec_file_t;
+
+static int by_name(const void *a, const void *b)
+{
+    return strcmp(((const rec_file_t *)a)->name, ((const rec_file_t *)b)->name);
+}
+
+int seg_quota_enforce(const char *dir, const char *prefix, uint64_t max_bytes, time_t max_age,
+                      time_t now)
+{
+    if (!max_bytes && !max_age) return 0;
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    size_t pl = strlen(prefix), n = 0, cap = 0;
+    rec_file_t *f = NULL;
+    uint64_t total = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        const char *nm = e->d_name, *dot = strrchr(nm, '.');
+        /* "CAM1_..." is not "CAM10_...": the prefix ends at its '_'. */
+        if (strncmp(nm, prefix, pl) || nm[pl] != '_' || !dot || strncmp(dot, ".h26", 4)) continue;
+        char path[512];
+        struct stat st;
+        snprintf(path, sizeof path, "%s/%s", dir, nm);
+        if (stat(path, &st) < 0 || !S_ISREG(st.st_mode)) continue;
+        if (n == cap) {
+            size_t nc = cap ? cap * 2 : 256;
+            rec_file_t *g = realloc(f, nc * sizeof *f);
+            if (!g) break;
+            f = g;
+            cap = nc;
+        }
+        snprintf(f[n].name, sizeof f[n].name, "%s", nm);
+        f[n].size = (uint64_t)st.st_size;
+        f[n].mtime = st.st_mtime;
+        total += f[n].size;
+        ++n;
+    }
+    closedir(d);
+    qsort(f, n, sizeof *f, by_name);
+    int deleted = 0;
+    for (size_t i = 0; i < n; ++i) {
+        int over = max_bytes && total > max_bytes;
+        int old = max_age && f[i].mtime < now - max_age;
+        if (!over && !old) {
+            if (!max_age) break;            /* by size only: the rest are newer */
+            continue;
+        }
+        char path[512];
+        snprintf(path, sizeof path, "%s/%s", dir, f[i].name);
+        if (is_open(path)) continue;
+        if (unlink(path) == 0) {
+            total -= f[i].size;
+            ++deleted;
+        }
+    }
+    free(f);
+    return deleted;
 }
 
 void seg_set_ext(seg_writer_t *w, const char *ext)
@@ -157,7 +235,16 @@ static void guard_space(seg_writer_t *w)
     if (now == w->space_checked) return;
     w->space_checked = now;
     uint64_t before = free_bytes(w);
-    if (before >= w->reserve) return;
+    if (before >= w->reserve) {
+        w->full = 0;
+        return;
+    }
+    if (!w->overwrite) {
+        /* Stop: nothing is deleted; what is open is finished and kept. */
+        w->full = 1;
+        seg_close(w);
+        return;
+    }
     if (drop_oldest_in_dir(w) == 0 && free_bytes(w) > before) return;
     /* Nothing finished to delete, or deleting did not help: roll the open
      * segment over so it becomes deletable at the next check. */
@@ -175,6 +262,10 @@ static int seg_open(seg_writer_t *w)
     /* Retention: drop the oldest of our segments before adding one. (Low
      * space is guard_space's job, which runs before every write.) */
     if (w->keep && w->n_names >= w->keep) drop_oldest(w);
+    if ((w->quota_bytes || w->quota_age) && now - w->quota_checked >= SEG_QUOTA_SECS) {
+        w->quota_checked = now;
+        seg_quota_enforce(w->dir, w->prefix, w->quota_bytes, w->quota_age, now);
+    }
 
     /* A unique name: a segment closed and reopened within the same second
      * (codec change, roll-over) must not truncate the previous one. */
@@ -204,6 +295,7 @@ int seg_write(seg_writer_t *w, const uint8_t *data, size_t len, int key)
 {
     int rc = 0;
     guard_space(w);
+    if (w->full) return SEG_FULL;
     if (key && (!w->f || time(NULL) - w->seg_start >= w->seg_secs)) {
         if (seg_close(w) < 0) rc = -1;               /* the old tail is lost; go on */
         if (seg_open(w) < 0) return -1;

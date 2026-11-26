@@ -43,9 +43,29 @@ void config_to_channels(const vigil_config_t *c, channels_config_t *cc)
         cc->sub_urls[i] = c->cameras[i].sub_url;
     }
     cc->rec_dir = c->record.path[0] ? c->record.path : NULL;
+    cc->stop_when_full = !strcmp(c->record.on_full, "stop");
+    for (int i = 0; i < c->n_quotas; ++i) {
+        int k = c->quota[i].camera - 1;
+        if (k < 0 || k >= CHANNEL_MAX) continue;
+        cc->quota_bytes[k] = (uint64_t)c->quota[i].max_gb * 1000000000ull;
+        cc->quota_age[k] = (time_t)c->quota[i].max_days * 86400;
+    }
     cc->seg_secs = c->record.segment;
     cc->keep = c->record.keep;
     cc->allow_rootfs = c->record.allow_rootfs;
+}
+
+int config_to_schedule(const vigil_config_t *c, rec_week_t weeks[CHANNEL_MAX])
+{
+    memset(weeks, 0, sizeof(rec_week_t) * CHANNEL_MAX);
+    for (int i = 0; i < c->n_schedules; ++i) {
+        int k = c->schedule[i].camera - 1;
+        if (k < 0 || k >= CHANNEL_MAX) continue;
+        weeks[k].set = 1;
+        for (int d = 0; d < 7; ++d)
+            memcpy(weeks[k].day[d], c->schedule[i].day[d], sizeof weeks[k].day[d]);
+    }
+    return CHANNEL_MAX;
 }
 
 /* ---- files ---------------------------------------------------------------------- */
@@ -399,6 +419,10 @@ config_rc_t config_put_json_at(const char *section, const char *body, size_t len
      * a value loaded from an older .json file is not the client's to fix. */
     if (rc == 0) rc = schema_check_utf8(&config_schema, sec, &nc, errs);
     if (rc == 0) rc = resolve_secrets(&nc, &old, errs);
+    if (rc == 0)
+        for (int i = 0; i < config_schema.n_sections; ++i)
+            if (!sec || sec == &config_schema.sections[i])
+                schema_keep_secrets(&config_schema.sections[i], &nc, &old);
     if (rc == 0) rc = schema_validate(&config_schema, &nc, errs);
     if (rc < 0) {
         pthread_mutex_unlock(&g_write);

@@ -29,6 +29,7 @@
 #include "hal_display.h"
 #include "net.h"
 #include "rec_place.h"
+#include "rec_sched.h"
 #include "rtp_depay.h"
 #include "source.h"
 #include "rtsp_client.h"
@@ -2047,6 +2048,168 @@ static void test_channel_events(void)
     CHECK(st.events == 0 && st.status == CH_EMPTY, "an empty slot shows no events");
 }
 
+
+/* ---- recording: full disk, quotas, schedule --------------------------------------- */
+
+static void touch_at(const char *dir, const char *name, size_t size, time_t mtime)
+{
+    char path[512];
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    for (size_t i = 0; i < size; ++i) fputc(0, f);
+    fclose(f);
+    struct timeval tv[2] = { { mtime, 0 }, { mtime, 0 } };
+    utimes(path, tv);
+}
+
+static int exists_in(const char *dir, const char *name)
+{
+    char path[512];
+    struct stat st;
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    return stat(path, &st) == 0;
+}
+
+static void test_rec_policies(void)
+{
+    char dir[] = "/tmp/vigil-pol-XXXXXX";
+    if (!mkdtemp(dir)) return;
+    uint8_t data[100] = {0};
+
+    /* record.on_full stop: below the reserve nothing is deleted, the open
+     * segment is closed and seg_write says SEG_FULL until there is room. */
+    touch_at(dir, "CAM2_20260101_000000.h264", 10, 1000);
+    seg_writer_t w;
+    seg_init(&w, dir, "CAM1", 3600, 0);
+    seg_set_ext(&w, "h264");
+    seg_set_overwrite(&w, 0);
+    CHECK(seg_write(&w, data, sizeof data, 1) == 0 && w.f, "writes while there is room");
+    w.reserve = UINT64_MAX;
+    w.space_checked = 0;
+    CHECK(seg_write(&w, data, sizeof data, 1) == SEG_FULL && !w.f, "full: SEG_FULL, segment closed");
+    CHECK(exists_in(dir, "CAM2_20260101_000000.h264"), "stop: another camera's recording is kept");
+    w.space_checked = 0;
+    CHECK(seg_write(&w, data, sizeof data, 1) == SEG_FULL, "still full");
+    w.reserve = 0;
+    w.space_checked = 0;
+    CHECK(seg_write(&w, data, sizeof data, 1) == 0 && w.f, "room again: writing");
+    seg_close(&w);
+    /* overwrite (the default) deletes the oldest in the directory instead */
+    seg_set_overwrite(&w, 1);
+    w.reserve = UINT64_MAX;
+    w.space_checked = 0;
+    CHECK(seg_write(&w, data, sizeof data, 1) == 0, "overwrite: no SEG_FULL");
+    CHECK(!exists_in(dir, "CAM2_20260101_000000.h264"), "overwrite: the oldest recording made room");
+    seg_close(&w);
+    char cmd[80];
+    snprintf(cmd, sizeof cmd, "rm -f %s/*", dir);
+    if (system(cmd)) {}
+
+    /* Quotas: by size the oldest of the camera's own go; by age those
+     * older than the limit; another camera's (CAM10 is not CAM1) stay. */
+    time_t now = 1800000000;
+    touch_at(dir, "CAM1_20260101_000000.h264", 400, now - 10 * 86400);
+    touch_at(dir, "CAM1_20260102_000000.h264", 400, now - 5 * 86400);
+    touch_at(dir, "CAM1_20260103_000000.h265", 400, now - 2 * 86400);
+    touch_at(dir, "CAM1_20260104_000000.h264", 400, now - 1 * 86400);
+    touch_at(dir, "CAM10_20250101_000000.h264", 400, now - 100 * 86400);
+    touch_at(dir, "CAM1_notes.txt", 400, now - 100 * 86400);
+    CHECK(seg_quota_enforce(dir, "CAM1", 1000, 0, now) == 2, "size quota: two deleted");
+    CHECK(!exists_in(dir, "CAM1_20260101_000000.h264") && !exists_in(dir, "CAM1_20260102_000000.h264") &&
+          exists_in(dir, "CAM1_20260103_000000.h265") && exists_in(dir, "CAM1_20260104_000000.h264"),
+          "size quota: the oldest two by name went");
+    CHECK(exists_in(dir, "CAM10_20250101_000000.h264") && exists_in(dir, "CAM1_notes.txt"),
+          "quota: CAM10 and other files untouched");
+    CHECK(seg_quota_enforce(dir, "CAM1", 0, 36 * 3600, now) == 1 && !exists_in(dir, "CAM1_20260103_000000.h265") &&
+          exists_in(dir, "CAM1_20260104_000000.h264"), "age quota: older than 36 h deleted");
+    CHECK(seg_quota_enforce(dir, "CAM1", 0, 0, now) == 0, "no quota: nothing");
+    snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
+    if (system(cmd)) {}
+
+    /* The week: Monday first, half hours from 00:00 local time. */
+    rec_week_t wk;
+    memset(&wk, 0, sizeof wk);
+    struct tm tm = { .tm_wday = 1, .tm_hour = 12, .tm_min = 0 };
+    CHECK(rec_week_at(&wk, &tm) == REC_SCHED_CONT, "no week: continuous");
+    wk.set = 1;
+    for (int d = 0; d < 7; ++d) memset(wk.day[d], 'C', REC_SCHED_SLOTS);
+    wk.day[0][24] = '-';                    /* Monday 12:00-12:30 */
+    wk.day[0][25] = 'M';                    /* Monday 12:30-13:00 */
+    wk.day[6][47] = '-';                    /* Sunday 23:30-24:00 */
+    CHECK(rec_week_at(&wk, &tm) == REC_SCHED_OFF, "Monday 12:00: off");
+    tm.tm_min = 29;
+    CHECK(rec_week_at(&wk, &tm) == REC_SCHED_OFF, "Monday 12:29: off");
+    tm.tm_min = 30;
+    CHECK(rec_week_at(&wk, &tm) == REC_SCHED_MOTION, "Monday 12:30: motion");
+    tm.tm_hour = 13;
+    tm.tm_min = 0;
+    CHECK(rec_week_at(&wk, &tm) == REC_SCHED_CONT, "Monday 13:00: continuous");
+    struct tm sun = { .tm_wday = 0, .tm_hour = 23, .tm_min = 45 };
+    CHECK(rec_week_at(&wk, &sun) == REC_SCHED_OFF, "Sunday 23:45: off");
+
+    /* From the configuration: per camera, the rest always on. */
+    vigil_config_t c;
+    config_defaults(&c);
+    schema_errors_t e = { 0 };
+    cJSON *doc = cJSON_Parse("{\"schedule\":[{\"camera\":3,\"sat\":\"------------------------------------------------\"}],"
+                             "\"quota\":[{\"camera\":2,\"max_gb\":5,\"max_days\":7}],"
+                             "\"record\":{\"path\":\"/x\",\"on_full\":\"stop\"}}");
+    CHECK(schema_from_json(&config_schema, doc, &c, 1, &e) == 0, "schedule and quota load: %s",
+          e.n ? e.e[0].msg : "");
+    cJSON_Delete(doc);
+    rec_week_t weeks[CHANNEL_MAX];
+    config_to_schedule(&c, weeks);
+    struct tm sat = { .tm_wday = 6, .tm_hour = 10 };
+    CHECK(!weeks[0].set && weeks[2].set && rec_week_at(&weeks[2], &sat) == REC_SCHED_OFF &&
+          rec_week_at(&weeks[2], &tm) == REC_SCHED_CONT, "CAM3: Saturday off, the rest on");
+    channels_config_t cc;
+    config_to_channels(&c, &cc);
+    CHECK(cc.stop_when_full && cc.quota_bytes[1] == 5000000000ull && cc.quota_age[1] == 7 * 86400 &&
+          !cc.quota_bytes[0], "on_full and quotas reach the channels");
+    e = (schema_errors_t){ 0 };
+    doc = cJSON_Parse("{\"schedule\":[{\"camera\":1,\"mon\":\"CCX\"}]}");
+    CHECK(schema_from_json(&config_schema, doc, &c, 1, &e) < 0 && e.n && !strcmp(e.e[0].path, "schedule[0].mon"),
+          "a day that is not 48 letters is refused");
+    cJSON_Delete(doc);
+}
+
+static void test_secrets(void)
+{
+    char dir[] = "/tmp/vigil-sec-XXXXXX", path[128];
+    if (!mkdtemp(dir)) return;
+    snprintf(path, sizeof path, "%s/vigil.yaml", dir);
+    write_file(path, "smtp:\n  server: mail.example.org\n  password: \"s3cret\"\nnas:\n  type: cifs\n");
+    CHECK(config_init(path) == 0, "loaded");
+    char *j = config_get_json("smtp", 1);
+    CHECK(j && strstr(j, "\"password\":\t\"***\"") && !strstr(j, "s3cret"), "smtp password redacted: %s", j);
+    free(j);
+    j = config_get_json("nas", 1);
+    CHECK(j && strstr(j, "\"password\":\t\"\""), "an empty password shows empty: %s", j);
+    free(j);
+    schema_errors_t e = { 0 };
+    const char *body = "{\"server\":\"mail2.example.org\",\"password\":\"***\"}";
+    CHECK(config_put_json("smtp", body, strlen(body), &e) == CONFIG_OK, "PUT with ***");
+    vigil_config_t c;
+    config_get(&c);
+    CHECK(!strcmp(c.smtp.password, "s3cret") && !strcmp(c.smtp.server, "mail2.example.org"),
+          "*** keeps the stored password");
+    body = "{\"password\":\"new\"}";
+    config_put_json("smtp", body, strlen(body), &e);
+    config_get(&c);
+    CHECK(!strcmp(c.smtp.password, "new"), "a new password replaces it");
+    char *file = read_file(path);
+    CHECK(file && strstr(file, "password: new"), "the file holds the password itself");
+    free(file);
+    body = "{\"to\":\"a@b.c, bad\"}";
+    e = (schema_errors_t){ 0 };
+    CHECK(config_put_json("smtp", body, strlen(body), &e) == CONFIG_EINVAL && !strcmp(e.e[0].path, "smtp.to"),
+          "a bad address is refused");
+    char cmd[80];
+    snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
+    if (system(cmd)) {}
+}
+
 int main(int argc, char **argv)
 {
     g_data = argc > 1 ? argv[1] : "tests/data";
@@ -2072,6 +2235,8 @@ int main(int argc, char **argv)
     test_camera_slots();
     test_fail_kinds();
     test_channel_events();
+    test_rec_policies();
+    test_secrets();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

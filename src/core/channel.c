@@ -33,6 +33,7 @@
 #include "hal_display.h"
 #include "log.h"
 #include "rec_place.h"
+#include "rec_sched.h"
 #include "schema.h"
 #include "seg_writer.h"
 #include "source.h"
@@ -78,7 +79,9 @@ struct channel {
     /* What it was started with, to tell whether a new configuration
      * changes it. */
     char            url[512], sub_url[512], rec_dir[192];
-    int             seg_secs, keep, allow_rootfs;
+    int             seg_secs, keep, allow_rootfs, stop_when_full;
+    uint64_t        quota_bytes;
+    time_t          quota_age;
     int             self_displayed; /* the platform shows its source (local capture) */
 
     sess_t          s[S_N];
@@ -88,6 +91,11 @@ struct channel {
     time_t          rec_checked_at; /* the directory was last looked at then (rec_check) */
     rec_place_t     rec_place;      /* the last answer, to say each change once */
     int             rec_told;
+    /* Set up, but not writing now and why: "disk full", "schedule off",
+     * "waiting for motion", "paused" (status, under lock); "" writing. */
+    char            rec_why[24];
+    time_t          rec_why_at;     /* the schedule and the hold were last looked at */
+    int             full_told;
 
     /* The session whose picture the tile wants: S_MAIN, S_SUB or
      * VIEW_NONE (off screen where decoders are scarce). Set by the thread
@@ -230,7 +238,8 @@ void channels_status(int idx, channel_status_t *st)
         /* Set up: say how it goes. Not set up: the reason, kept by rec_setup. */
         if (c->rec_on)
             snprintf(st->rec_state, sizeof st->rec_state, "%s",
-                     c->rec_fail_told ? "failed" : st->recording ? "recording" : "ready");
+                     c->rec_why[0] ? c->rec_why
+                     : c->rec_fail_told ? "failed" : st->recording ? "recording" : "ready");
     }
     pthread_mutex_unlock(&g_locks[idx]);
 }
@@ -353,6 +362,8 @@ static void rec_setup(channel_t *c, vg_codec_t codec)
     pthread_mutex_lock(c->lock);
     if (p == REC_PLACE_OK) {
         if (seg_init(&c->seg, c->rec_dir, prefix, c->seg_secs, c->keep) == 0) {
+            seg_set_overwrite(&c->seg, !c->stop_when_full);
+            seg_set_quota(&c->seg, c->quota_bytes, c->quota_age);
             if (codec != VG_CODEC_NONE) seg_set_ext(&c->seg, codec == VG_CODEC_H264 ? "h264" : "h265");
             c->rec_on = 1;
             c->rec_fail_told = 0;
@@ -412,6 +423,73 @@ static void rec_check(channel_t *c)
 }
 
 
+/* ---- what keeps a set-up recording from writing ------------------------------ */
+
+/* channels_rec_hold: a directory no channel may record into now. */
+static pthread_mutex_t g_hold_lock = PTHREAD_MUTEX_INITIALIZER;
+static char            g_hold[192];
+
+static int under(const char *dir, const char *top)
+{
+    size_t n = strlen(top);
+    while (n > 1 && top[n - 1] == '/') --n;
+    return n && !strncmp(dir, top, n) && (dir[n] == 0 || dir[n] == '/');
+}
+
+static int held(const char *dir)
+{
+    pthread_mutex_lock(&g_hold_lock);
+    int h = g_hold[0] && under(dir, g_hold);
+    pthread_mutex_unlock(&g_hold_lock);
+    return h;
+}
+
+/* Why the main session must not write now ("" when it may): the hold,
+ * the schedule. Looked at once a second. */
+static const char *rec_blocked(channel_t *c, time_t now)
+{
+    if (now == c->rec_why_at) return NULL;              /* unchanged */
+    c->rec_why_at = now;
+    if (held(c->rec_dir)) return "paused";
+    char mode = rec_sched_mode(c->idx, now);
+    if (mode == REC_SCHED_OFF) return "schedule off";
+    if (mode == REC_SCHED_MOTION) {
+        pthread_mutex_lock(c->lock);
+        unsigned ev = channel_events_held(g_ev_last[c->idx], now);
+        pthread_mutex_unlock(c->lock);
+        if (!(ev & CH_EV_MOTION)) return "waiting for motion";
+    }
+    return "";
+}
+
+int channels_rec_hold(const char *dir, int timeout_ms)
+{
+    pthread_once(&g_once, locks_init);
+    pthread_mutex_lock(&g_hold_lock);
+    snprintf(g_hold, sizeof g_hold, "%s", dir);
+    pthread_mutex_unlock(&g_hold_lock);
+    int open = 0;
+    for (int waited = 0;; waited += 100) {
+        open = 0;
+        for (int i = 0; i < CHANNEL_MAX; ++i) {
+            channel_t *c = &g_ch[i];
+            pthread_mutex_lock(&g_locks[i]);
+            open += c->active && c->rec_on && c->seg.f && under(c->rec_dir, dir);
+            pthread_mutex_unlock(&g_locks[i]);
+        }
+        if (!open || waited >= timeout_ms) break;
+        usleep(100 * 1000);
+    }
+    return open;
+}
+
+void channels_rec_release(void)
+{
+    pthread_mutex_lock(&g_hold_lock);
+    g_hold[0] = 0;
+    pthread_mutex_unlock(&g_hold_lock);
+}
+
 /* ---- per-session thread --------------------------------------------------- */
 
 static void on_au(void *user, const vg_au_t *au)
@@ -430,6 +508,22 @@ static void on_au(void *user, const vg_au_t *au)
     if (s->id != S_MAIN) return;            /* recording is the main stream's */
 
     if (!c->rec_on && c->rec_dir[0] && au->key) rec_retry(c, au->codec);
+    if (c->rec_on) {
+        const char *why = rec_blocked(c, time(NULL));
+        if (why) {
+            pthread_mutex_lock(c->lock);
+            int was = c->rec_why[0] != 0 && strcmp(c->rec_why, "disk full") != 0;
+            if (*why) {
+                if (c->seg.f) rec_close(c);
+                snprintf(c->rec_why, sizeof c->rec_why, "%s", why);
+            } else if (was) {
+                c->rec_why[0] = 0;          /* "disk full" is seg_write's to clear */
+            }
+            pthread_mutex_unlock(c->lock);
+            if (*why && !was) vg_log("CAM%d: not recording: %s", c->idx + 1, why);
+        }
+        if (c->rec_why[0] && strcmp(c->rec_why, "disk full") != 0) return;
+    }
     /* A keyframe that will open a new segment (seg_write's own test). */
     if (c->rec_on && au->key && (!c->seg.f || time(NULL) - c->seg.seg_start >= c->seg.seg_secs))
         rec_check(c);
@@ -438,7 +532,23 @@ static void on_au(void *user, const vg_au_t *au)
         int was_open = c->seg.f != NULL;
         int rc = seg_write(&c->seg, au->data, au->len, au->key);
         int is_open = c->seg.f != NULL;
+        if (rc == SEG_FULL) snprintf(c->rec_why, sizeof c->rec_why, "disk full");
+        else if (!strcmp(c->rec_why, "disk full")) c->rec_why[0] = 0;
         pthread_mutex_unlock(c->lock);
+        if (rc == SEG_FULL) {
+            if (!c->full_told) {
+                vg_log("CAM%d: the disk is full; recording stops until there is room (record.on_full: stop)",
+                       c->idx + 1);
+                events_push(c->idx + 1, "REC disk full");
+                c->full_told = 1;
+            }
+            return;
+        }
+        if (c->full_told) {
+            vg_log("CAM%d: room on the disk again; recording", c->idx + 1);
+            events_push(c->idx + 1, "REC on");
+            c->full_told = 0;
+        }
         if (rc < 0 && !c->rec_fail_told) {
             vg_log("CAM%d: recording failed", c->idx + 1);
             events_push(c->idx + 1, "REC failed");
@@ -707,7 +817,9 @@ static int slot_matches(const channel_t *c, const channels_config_t *cfg, int i)
     const char *url = i < cfg->n ? cfg->urls[i] : NULL;
     if (!c->active) return url == NULL;
     return url && !strcmp(c->url, url) && !strcmp(c->rec_dir, str_or_empty(cfg->rec_dir)) &&
-           c->seg_secs == cfg->seg_secs && c->keep == cfg->keep && c->allow_rootfs == cfg->allow_rootfs;
+           c->seg_secs == cfg->seg_secs && c->keep == cfg->keep && c->allow_rootfs == cfg->allow_rootfs &&
+           c->stop_when_full == cfg->stop_when_full && c->quota_bytes == cfg->quota_bytes[i] &&
+           c->quota_age == cfg->quota_age[i];
 }
 
 static void slot_stop(channel_t *c)
@@ -763,6 +875,9 @@ static int slot_start(int i, const channels_config_t *cfg)
     c->seg_secs = cfg->seg_secs;
     c->keep = cfg->keep;
     c->allow_rootfs = cfg->allow_rootfs;
+    c->stop_when_full = cfg->stop_when_full;
+    c->quota_bytes = cfg->quota_bytes[i];
+    c->quota_age = cfg->quota_age[i];
     c->st.configured = 1;
     snprintf(c->st.name, sizeof c->st.name, "%s", name);
     if (cfg->rec_dir) {
