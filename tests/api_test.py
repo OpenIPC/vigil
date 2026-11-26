@@ -257,6 +257,44 @@ def main():
         st, _, _ = api.json("PUT", "/api/v1/config/nope", {})
         check(st == 404, "unknown section: 404")
 
+        # ---- management: on a host vigild does not manage, it shows and refuses
+        st, _, eth = api.json("GET", "/api/v1/network/ethernet")
+        check(st == 200 and eth["managed"] is False and "config" in eth and "status" in eth and
+              eth["pending"] is None, "ethernet: shown, not managed (%s)" % st)
+        st, _, err = api.json("PUT", "/api/v1/network/ethernet", {"dhcp": False, "address": "10.0.0.2",
+                                                                  "netmask": "255.255.255.0"})
+        check(st == 409 and "does not manage" in err["error"], "ethernet: PUT refused here (%s)" % st)
+        st, _, _ = api.json("POST", "/api/v1/network/ethernet/confirm")
+        check(st == 409, "confirm without a change: 409 (%s)" % st)
+        st, _, z = api.json("GET", "/api/v1/system/zones")
+        check(st == 200 and {"name": "Europe/Berlin", "tz": "CET-1CEST,M3.5.0,M10.5.0/3"} in z, "zones")
+        st, _, t = api.json("GET", "/api/v1/system/time")
+        check(st == 200 and "ntp" in t and t["ntp"]["enabled"] is True and isinstance(t["time"], (int, float)),
+              "time (%s)" % st)
+        st, _, _ = api.json("PUT", "/api/v1/system/time", {"zone": "Europe/Berlin"})
+        check(st == 409, "time zone: refused here (%s)" % st)
+        st, _, h = api.json("GET", "/api/v1/system/hostname")
+        st2, _, status2 = api.json("GET", "/api/v1/status")
+        check(st == 200 and h["hostname"] and status2["hostname"] == h["hostname"], "hostname, also in status")
+        st, _, d = api.json("GET", "/api/v1/disks")
+        check(st == 200 and isinstance(d["disks"], list) and isinstance(d["formats"], list), "disks (%s)" % st)
+        st, _, _ = api.json("POST", "/api/v1/disks/sda/format", {"fs": "vfat", "confirm": "sda"})
+        check(st == 409, "format: refused here (%s)" % st)
+        st, _, sv = api.json("GET", "/api/v1/network/services")
+        check(st == 200 and sv["upnp"]["active"] is False and sv["p2p"]["available"] is False,
+              "services: UPnP not active, no P2P")
+        st, _, n = api.json("GET", "/api/v1/storage/nas")
+        check(st == 200 and n["mount"] == "/mnt/nas" and "cifs" in n["support"], "network storage (%s)" % st)
+        st, _, _ = api.json("GET", "/api/v1/jobs/999")
+        check(st == 404, "unknown job: 404")
+        st, _, _ = api.json("GET", "/api/v1/network/wifi/scan")
+        check(st == 409, "Wi-Fi scan without an adapter: 409 (%s)" % st)
+        st, _, j = api.json("POST", "/api/v1/network/smtp/test")
+        check(st == 202 and j["job"] > 0, "test mail: a job (%s)" % st)
+        st, _, job = api.json("GET", "/api/v1/jobs/%d" % j["job"])
+        check(st == 200 and job["kind"] == "smtp-test" and job["state"] in ("queued", "running", "failed", "done"),
+              "the job (%s)" % job)
+
         # ---- WebSocket
         bad = WebSocket(api_port, "Basic " + base64.b64encode(b"root:nope").decode())
         check(bad.status == 401, "WebSocket with a wrong password: 401 (%s)" % bad.status)
@@ -483,6 +521,12 @@ def main():
         check(st == 403, "storage user: PUT api 403 (%s)" % st)
         st, _, _ = kim.json("PUT", "/api/v1/config", {})
         check(st == 403, "storage user: PUT whole config 403 (%s)" % st)
+        st, _, _ = kim.json("GET", "/api/v1/disks")
+        check(st == 200, "storage user: disks 200 (%s)" % st)
+        st, _, _ = kim.json("GET", "/api/v1/network/ethernet")
+        check(st == 403, "storage user: network 403 (%s)" % st)
+        st, _, _ = vera.json("GET", "/api/v1/system/time")
+        check(st == 403, "viewer: system time 403 (%s)" % st)
         try:
             kws = WebSocket(api_port, kim.auth)
             got = wait_for(lambda: kws.find(lambda m: True), 2)
