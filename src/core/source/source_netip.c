@@ -66,16 +66,6 @@ typedef struct {
     vg_codec_t codec;
 } netip_t;
 
-/* "sofia" hash: MD5, then each byte pair -> one of 62 characters. */
-static void sofia_hash(const char *pass, char out[9])
-{
-    static const char chars[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    uint8_t d[16];
-    md5_raw(pass, strlen(pass), d);
-    for (int i = 0; i < 8; ++i) out[i] = chars[(d[2 * i] + d[2 * i + 1]) % 62];
-    out[8] = 0;
-}
-
 static void put32(uint8_t *p, uint32_t v) { p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24; }
 static uint32_t get32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
 static uint32_t get32be(const uint8_t *p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
@@ -221,7 +211,7 @@ static int netip_open(source_t *s)
         return -1;
     }
 
-    sofia_hash(n->pass, hash);
+    md5_sofia(n->pass, hash);
     snprintf(req, sizeof req,
              "{\"EncryptType\":\"MD5\",\"LoginType\":\"DVRIP-Web\",\"PassWord\":\"%s\",\"UserName\":\"%s\"}",
              hash, n->user);
