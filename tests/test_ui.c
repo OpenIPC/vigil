@@ -30,6 +30,7 @@
 #include "ui_app.h"
 #include "ui_bridge.h"
 #include "ui_layout.h"
+#include "theme_tokens.h"
 
 #define W 1280
 #define H 720
@@ -68,7 +69,7 @@ static void fake_status(int idx, ui_chan_t *st)
 {
     switch (idx) {
     case 0:
-        *st = (ui_chan_t){ .configured = 1, .live = 1, .recording = 1, .rec_bytes = 734u << 20,
+        *st = (ui_chan_t){ .configured = 1, .live = 1, .recording = 1, .motion = 1, .rec_bytes = 734u << 20,
                            .name = "Gate", .codec = "H.265", .width = 1920, .height = 1080, .fps = 25 };
         break;
     case 1:
@@ -89,12 +90,27 @@ static int g_ev;
 
 static time_t fake_now(void) { return 1795703525; }     /* 2026-11-26 14:32:05 UTC */
 
+static ui_event_t g_more[8];             /* pushed by the steps */
+static int        g_n_more, g_more_read;
+
 static int fake_event(ui_event_t *ev)
 {
-    if (g_ev >= (int)(sizeof k_events / sizeof k_events[0])) return 0;
-    *ev = k_events[g_ev++];
-    ev->time = fake_now() - 60 + 20 * g_ev;
+    if (g_ev < (int)(sizeof k_events / sizeof k_events[0])) {
+        *ev = k_events[g_ev++];
+        ev->time = fake_now() - 60 + 20 * g_ev;
+        return 1;
+    }
+    if (g_more_read == g_n_more) return 0;
+    *ev = g_more[g_more_read++];
+    ev->time = fake_now();
     return 1;
+}
+
+static void push_event(int ch, const char *text)
+{
+    if (g_n_more == (int)(sizeof g_more / sizeof g_more[0])) abort();
+    g_more[g_n_more] = (ui_event_t){ .ch = ch };
+    snprintf(g_more[g_n_more++].text, sizeof g_more[0].text, "%s", text);
 }
 
 static void fake_tiles(const ui_rect_t *t, int n)
@@ -289,15 +305,17 @@ static void test_layout_math(void)
 {
     ui_cell_t c[UI_LAYOUT_MAX];
     CHECK(ui_layout_cells(W, H, 4, 0, 4, c) == 4, "4 cells");
-    CHECK(c[3].x == 640 && c[3].y == 40 + 300 && c[3].w == 640 && c[3].h == 300, "cell 4 %d,%d %dx%d",
+    CHECK(c[3].x == 640 && c[3].y == 360 && c[3].w == 640 && c[3].h == 360, "cell 4 %d,%d %dx%d",
           c[3].x, c[3].y, c[3].w, c[3].h);
     CHECK(ui_layout_pages(1, 4) == 4 && ui_layout_pages(4, 4) == 1 && ui_layout_pages(9, 10) == 2, "pages");
     ui_layout_cells(W, H, 1, 2, 4, c);
-    CHECK(c[0].ch == 2 && c[0].w == W && c[0].h == 600, "page 3 of 1x1 shows CAM3");
+    CHECK(c[0].ch == 2 && c[0].x == 0 && c[0].y == 0 && c[0].w == W && c[0].h == H, "page 3 of 1x1 shows CAM3");
     ui_layout_cells(W, H, 9, 0, 4, c);
     int area = 0;
     for (int i = 0; i < 9; ++i) area += c[i].w * c[i].h;
-    CHECK(area == W * 600 && c[4].ch == -1, "3x3 covers the grid, no channel past 4");
+    CHECK(area == W * H && c[4].ch == -1, "3x3 covers the screen, no channel past 4");
+    CHECK(c[1].x == 416 && c[2].x == 848 && c[2].w == W - 848, "3x3 columns on 16-pixel edges (%d, %d)",
+          c[1].x, c[2].x);
     CHECK(!ui_layout_valid(2) && ui_layout_cells(W, H, 2, 0, 4, c) == 0, "2 is not a layout");
 }
 
@@ -306,9 +324,16 @@ static void test_live(void)
     CHECK(find("Gate", 0) && find("Yard", 0) && find("CAM 3", 0) && find("CAM 4", 0), "tile titles");
     CHECK(find("H.265  1920x1080  25 fps", 0), "stream line of a live tile");
     CHECK(find("Connecting...", 0) && find("No video", 0) && find("No camera", 0), "tile states");
-    CHECK(find("LIVE 1/3", 1), "header totals");
-    CHECK(find("2026-11-26  14:32:05", 0), "clock");
-    CHECK(find("offline", 1), "event strip");
+    CHECK(find("LIVE 1/3", 1), "totals in the navigation bar");
+    lv_obj_t *clk = find("2026-11-26  14:32:05", 0);
+    int x, y;
+    CHECK(clk, "clock");
+    if (clk) {
+        center_of(clk, &x, &y);
+        CHECK(x > W - 200 && y < 40, "clock in the top right corner (%d, %d)", x, y);
+    }
+    CHECK(find("REC", 0) && find(LV_SYMBOL_EYE_OPEN, 0), "REC and motion icons on the recording tile");
+    CHECK(!find("offline", 1), "no toast for a camera whose tile shows it");
     CHECK(!find("Main menu", 0), "navigation bar hidden at first");
     shot("live");
 }
@@ -348,8 +373,9 @@ static void test_context_and_full_screen(void)
     run(100);
     click_at(900, 200);
     run(50);
-    CHECK(g_tile_calls == calls + 1 && g_tiles[1].w == W && g_tiles[1].h == 600 && g_tiles[0].w == 0,
+    CHECK(g_tile_calls == calls + 1 && g_tiles[1].w == W && g_tiles[0].w == 0,
           "double click: CAM2 full screen (%dx%d)", g_tiles[1].w, g_tiles[1].h);
+    CHECK(g_tiles[1].h == H && g_tiles[1].y == 0, "full screen is the whole screen");
     CHECK(find("Yard", 0) && !find("Gate", 0), "one tile");
     shot("fullscreen");
     click_at(640, 300);
@@ -371,6 +397,16 @@ static void test_context_and_full_screen(void)
     button(BTN_RIGHT);
     click_text("Single view");
     CHECK(g_tiles[0].w == W && g_tiles[1].w == 0, "single view shows CAM1");
+    push_event(4, "offline");                   /* CAM4 is not on the screen */
+    ui_app_refresh();
+    CHECK(find("CAM 4: offline", 1), "toast for a camera off the screen");
+    push_event(2, "REC waiting for disk");
+    push_event(3, "REC waiting for disk");
+    push_event(1, "REC on");
+    ui_app_refresh();
+    CHECK(find("2 cameras: REC waiting for disk", 1), "one toast for the same trouble on two cameras");
+    shot("toast");
+    run(VG_DURATION_TOAST);                     /* gone before the next screens */
     button(BTN_RIGHT);
     click_text("Next page");
     CHECK(g_tiles[1].w == W && g_tiles[0].w == 0, "next page shows CAM2");

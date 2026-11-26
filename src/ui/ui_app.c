@@ -9,7 +9,6 @@
 #include <time.h>
 
 #include "ui_app.h"
-#include "ui_events.h"
 #include "ui_theme.h"
 
 #define REFRESH_MS  250

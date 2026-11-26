@@ -11,8 +11,8 @@ configuration schema, and how to run and test it without a board.
 ## Screens
 
 ```
-live view                  tiles over the video, header, event strip
- |  navigation bar         bottom edge; Main menu, 1x1 / 2x2, < page >, Pin, clock
+live view                  tiles over the whole screen, clock in a corner
+ |  navigation bar         bottom edge; Main menu, 1x1 / 2x2, < page >, Pin, totals, clock
  |  context menu           right button: Main menu, full screen, layouts, pages, pin
  +-> Main menu             one tile per settings section + System
       +-> Cameras          the camera list: Add, Edit, Remove
@@ -22,19 +22,42 @@ live view                  tiles over the video, header, event strip
       +-> System           platform, version, uptime, memory, storage (read-only)
 ```
 
-**Live view.** A header (product and role, date and time, LIVE/REC totals),
-the grid, and the last events. Each tile is a *hole*: LVGL paints it in the
-colour the platform keys out (or fully transparent where the UI layer has
-alpha, `hal_ui_hole`), so the decoded video below shows through. On it sit
-small opaque chips: the camera's name from the configuration (or `CAM n`)
-with a red dot while recording, and either the stream (`H.265 1920x1080
-25 fps`) or the state (`Connecting...`, `No video` with the reason,
-`No camera`). A tile flashes when its camera has an event.
+**Live view.** The tiles take the whole screen (2x2 on a 1280x720 output:
+four 640x360 tiles); there is no header or footer bar. Each tile is a
+*hole*: LVGL paints it in the colour the platform keys out (or fully
+transparent where the UI layer has alpha, `hal_ui_hole`), so the decoded
+video below shows through. On it sit small opaque chips: top left the
+camera's name from the configuration (or `CAM n`) with its status icons, a
+red dot and `REC` while the channel records and an eye
+(`LV_SYMBOL_EYE_OPEN`) while the camera reports motion; bottom left the
+stream (`H.265 1920x1080 25 fps`); in the middle the state when there is
+no picture (`Connecting...`, `No video` with the reason, `No camera`). A
+tile flashes when its camera has an event.
+
+The date and time are in a corner of the screen (top right;
+`CLOCK_CORNER` in `ui_live.c` picks another corner or none, until the UI
+has settings of its own), in an opaque chip like the tiles' labels.
+
+Motion is wired through (`motion` in the channel status and in
+`ui_chan_t`) but nothing reports it yet: the icon appears once a source
+does (camera alarms over NETIP or ONVIF events are the next step).
+
+**Events.** The live view has no event list; the HTTP API's WebSocket
+carries every event. A tile shows its channel's state all the time, so
+only what the tiles do not show becomes a toast at the top of the screen:
+recording trouble (`REC failed`, `REC waiting for disk`, ...), a channel
+that cannot run (`no decoder`, `bad URL`), a configuration that could not
+be applied, and a camera going offline or coming back while its tile is not
+on the screen. The same trouble on several cameras at once is one toast
+(`2 cameras: REC waiting for disk`). `REC on`, `online` for a tile in
+view, `config applied` and the like would only be noise.
 
 ![Navigation bar](../tests/ui/navbar.png)
 
-The **navigation bar** slides up when the pointer reaches the bottom edge
-of the screen and hides 3 s after the pointer leaves it, unless pinned. The
+The **navigation bar** slides up over the video when the pointer reaches
+the bottom edge of the screen and hides 3 s after the pointer leaves it,
+unless pinned. Besides the actions it shows the LIVE and REC totals and the
+clock. The
 **context menu** (right button) offers the same actions, plus "Full
 screen" for the tile under the pointer. **Double-clicking** a tile shows
 that channel full screen; double-clicking again returns to the layout
@@ -65,11 +88,10 @@ src/app/input_evdev.c   mice / touch screens -> LVGL pointer, right button -> ba
         |
         v  ui_model.h (no core types)
 src/ui/ui_app.c         screen stack, subjects, popups, toasts, questions
-src/ui/ui_live.c        live view, navigation bar, context menu
+src/ui/ui_live.c        live view, clock, navigation bar, context menu, event toasts
 src/ui/ui_menu.c        main menu
 src/ui/ui_form.c        settings forms and lists, from the schema
 src/ui/ui_system.c      System page
-src/ui/ui_events.c      event strip
 src/ui/ui_layout.c      tile geometry (plain C, shared with frontend_tiles)
 src/ui/ui_theme.c       LVGL styles from the design tokens
 src/ui/ui_cursor.c      the software mouse pointer
@@ -84,16 +106,17 @@ Everything runs on the main thread. Channel threads never touch LVGL:
 
 - **Status**: every 250 ms the UI asks the model for each channel's
   snapshot (`channels_status()` underneath) and, when one changed, notifies
-  that channel's `lv_subject`. Tiles and the header totals observe the
+  that channel's `lv_subject`. Tiles and the navigation bar's totals observe the
   subjects, so they redraw only when something changed.
 - **Events**: the UI has its own cursor on the events ring (as the API's
-  WebSocket has), so it sees every event; they go to the strip and flash
-  the tile.
+  WebSocket has), so it sees every event; each flashes its tile, and the
+  ones that need attention become toasts (above).
 - **Configuration**: the store's generation is a subject too. The camera
   list observes it and rebuilds when the configuration changed, whether
   the change came from this UI or from the HTTP API.
-- **Clock** and **navigation bar pinned** are subjects as well; the header,
-  the bar and the pages bind labels to the clock (`lv_label_bind_text`).
+- **Clock** and **navigation bar pinned** are subjects as well; the live
+  view's clock, the bar and the pages bind labels to the clock
+  (`lv_label_bind_text`).
 
 **Layouts move the video.** Changing the layout, the page or going full
 screen computes the cells (`ui_layout_cells`) and hands one rectangle per

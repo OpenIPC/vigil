@@ -30,6 +30,7 @@ typedef struct {
     int      configured;        /* a camera is set for this channel */
     int      live;              /* video is arriving */
     int      recording;
+    int      motion;            /* the camera reports motion */
     uint64_t rec_bytes;
     char     name[32];          /* "" : the UI shows "CAM n" */
     char     state[48];         /* not live: "CONNECTING" or the last error */

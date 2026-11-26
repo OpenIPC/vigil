@@ -36,9 +36,8 @@
 #define VG_FONT_XL                   24
 #define VG_FONT_XL_LV                (&lv_font_montserrat_24)
 
-#define VG_SIZE_HEADER               40
-#define VG_SIZE_STRIP                80
 #define VG_SIZE_NAVBAR               64
+#define VG_SIZE_ICON_DOT             10
 #define VG_SIZE_PAGE_HEADER          56
 #define VG_SIZE_BUTTON               40
 #define VG_SIZE_CURSOR               19

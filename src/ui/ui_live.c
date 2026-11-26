@@ -1,35 +1,42 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* ui_live.c — the live view.
  *
- *   header (40 px)    product and role, date and time, LIVE/REC totals
- *   grid  (600 px)    1, 4, 9 or 16 tiles (ui_layout.c). A tile is a hole
- *                     the channel's video shows through (hal_ui_hole), with
- *                     opaque chips: the camera's title and REC dot, its
- *                     state ("Connecting...", "No video") or its stream
- *   strip  (80 px)    the last events (ui_events.c)
- *   navigation bar    over the strip: shown when the pointer reaches the
- *                     bottom edge, hidden 3 s after it leaves, or pinned
+ *   grid              1, 4, 9 or 16 tiles over the whole screen
+ *                     (ui_layout.c). A tile is a hole the channel's video
+ *                     shows through (hal_ui_hole), with small opaque chips
+ *                     on it: the camera's name with REC and motion icons,
+ *                     its state ("Connecting...", "No video") or its stream
+ *   clock             date and time in one corner (CLOCK_CORNER)
+ *   navigation bar    over the bottom of the grid: shown when the pointer
+ *                     reaches the bottom edge, hidden 3 s after it leaves,
+ *                     or pinned
  *
  * Changing the layout or the page, and double-clicking a tile (that channel
  * full screen, and back), moves the video through model->show_tiles. The
- * right button opens a context menu with the same actions.
+ * right button opens a context menu with the same actions. Events that
+ * need attention become toasts (event_toast).
  */
 #include <stdio.h>
 #include <string.h>
 
 #include "hal_ui.h"
 #include "ui_app.h"
-#include "ui_events.h"
 #include "ui_layout.h"
 #include "ui_theme.h"
 
 #define NAV_EDGE   3            /* px from the bottom that bring the bar up */
 #define NAV_POLL   100          /* ms */
 
+/* Where the clock is: LV_ALIGN_TOP_LEFT, _TOP_RIGHT, _BOTTOM_LEFT,
+ * _BOTTOM_RIGHT, or LV_ALIGN_DEFAULT for none. A constant until the UI
+ * has settings of its own. */
+#define CLOCK_CORNER LV_ALIGN_TOP_RIGHT
+
 typedef struct {
     int         ch;
     lv_obj_t   *obj;
-    lv_obj_t   *rec, *title;    /* top-left chip */
+    lv_obj_t   *title;          /* top-left chip: name, REC, motion */
+    lv_obj_t   *rec, *motion;
     lv_obj_t   *mid, *mid_l1, *mid_l2; /* centre chip: state */
     lv_obj_t   *info, *info_l;  /* bottom-left chip: stream */
     lv_obj_t   *flash;
@@ -40,7 +47,7 @@ static const int k_layouts[] = { 1, 4, 9, 16 };
 #define N_LAYOUTS (int)(sizeof k_layouts / sizeof k_layouts[0])
 
 static struct {
-    lv_obj_t  *scr, *grid, *summary;
+    lv_obj_t  *scr, *grid, *clock, *summary;
     lv_obj_t  *nav, *nav_page, *nav_prev, *nav_next, *nav_pin;
     lv_obj_t  *layout_btn[N_LAYOUTS];
     int        sw, sh;
@@ -101,6 +108,8 @@ static void cell_update(cell_t *c)
     lv_label_set_text(c->title, buf);
     if (st->recording) lv_obj_remove_flag(c->rec, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(c->rec, LV_OBJ_FLAG_HIDDEN);
+    if (st->motion) lv_obj_remove_flag(c->motion, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(c->motion, LV_OBJ_FLAG_HIDDEN);
 
     if (st->configured && st->live) {
         lv_obj_add_flag(c->mid, LV_OBJ_FLAG_HIDDEN);
@@ -190,13 +199,23 @@ static void cell_deleted_cb(lv_event_t *e)
     c->flash_timer = NULL;
 }
 
+/* Room the clock takes from a chip in the tile's corner `corner`. */
+static int clock_offset(const ui_cell_t *g, lv_align_t corner)
+{
+    if (!L.clock || corner != CLOCK_CORNER) return 0;
+    int left = corner == LV_ALIGN_TOP_LEFT || corner == LV_ALIGN_BOTTOM_LEFT;
+    int top = corner == LV_ALIGN_TOP_LEFT || corner == LV_ALIGN_TOP_RIGHT;
+    if ((left ? g->x != 0 : g->x + g->w != L.sw) || (top ? g->y != 0 : g->y + g->h != L.sh)) return 0;
+    return lv_obj_get_height(L.clock) + VG_SPACE_SM;
+}
+
 static void cell_build(cell_t *c, const ui_cell_t *g)
 {
     memset(c, 0, sizeof *c);
     c->ch = g->ch;
     lv_obj_t *o = lv_obj_create(L.grid);
     ui_plain(o);
-    lv_obj_set_pos(o, g->x, g->y - UI_HEADER_H);
+    lv_obj_set_pos(o, g->x, g->y);
     lv_obj_set_size(o, g->w, g->h);
     /* The hole: a plain fill (no gradient), or a colour key would not
      * match every pixel. */
@@ -211,14 +230,26 @@ static void cell_build(cell_t *c, const ui_cell_t *g)
 
     int small = g->w < 400;
     lv_obj_t *t = chip(o);
-    lv_obj_align(t, LV_ALIGN_TOP_LEFT, VG_SPACE_SM, VG_SPACE_SM);
+    lv_obj_align(t, LV_ALIGN_TOP_LEFT, VG_SPACE_SM, VG_SPACE_SM + clock_offset(g, LV_ALIGN_TOP_LEFT));
+    c->title = ui_label(t, "", small ? VG_FONT_SM_LV : VG_FONT_MD_LV, UI_C(TEXT));
+    /* REC: a red dot and the word, as on a camcorder. */
     c->rec = lv_obj_create(t);
     ui_plain(c->rec);
-    lv_obj_set_size(c->rec, 10, 10);
-    lv_obj_set_style_radius(c->rec, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(c->rec, UI_C(BAD), 0);
-    lv_obj_set_style_bg_opa(c->rec, LV_OPA_COVER, 0);
-    c->title = ui_label(t, "", small ? VG_FONT_SM_LV : VG_FONT_MD_LV, UI_C(TEXT));
+    lv_obj_remove_flag(c->rec, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(c->rec, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_layout(c->rec, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(c->rec, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(c->rec, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(c->rec, VG_SPACE_XS, 0);
+    lv_obj_t *dot = lv_obj_create(c->rec);
+    ui_plain(dot);
+    lv_obj_remove_flag(dot, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(dot, VG_SIZE_ICON_DOT, VG_SIZE_ICON_DOT);
+    lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(dot, UI_C(BAD), 0);
+    lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+    ui_label(c->rec, "REC", VG_FONT_SM_LV, UI_C(BAD));
+    c->motion = ui_label(t, LV_SYMBOL_EYE_OPEN, VG_FONT_SM_LV, UI_C(WARN));
 
     c->mid = chip(o);
     lv_obj_set_flex_flow(c->mid, LV_FLEX_FLOW_COLUMN);
@@ -233,7 +264,8 @@ static void cell_build(cell_t *c, const ui_cell_t *g)
     lv_label_set_long_mode(c->mid_l2, LV_LABEL_LONG_WRAP);
 
     c->info = chip(o);
-    lv_obj_align(c->info, LV_ALIGN_BOTTOM_LEFT, VG_SPACE_SM, -VG_SPACE_SM);
+    lv_obj_align(c->info, LV_ALIGN_BOTTOM_LEFT, VG_SPACE_SM,
+                 -VG_SPACE_SM - clock_offset(g, LV_ALIGN_BOTTOM_LEFT));
     c->info_l = ui_label(c->info, "", VG_FONT_SM_LV, UI_C(TEXT2));
 
     c->flash = lv_obj_create(o);
@@ -293,57 +325,39 @@ static void set_layout(int layout, int page)
     if (L.nav) nav_update();
 }
 
-/* ---- header ----------------------------------------------------------------------------- */
+/* ---- clock and totals ------------------------------------------------------------------- */
 
 static void summary_cb(lv_observer_t *o, lv_subject_t *s)
 {
     (void)s;
     lv_obj_t *label = lv_observer_get_target_obj(o);
     int n = n_channels(), cams = 0, live = 0, rec = 0;
-    uint64_t bytes = 0;
     for (int i = 0; i < n; ++i) {
         const ui_chan_t *st = ui_channel(i);
         cams += st->configured;
         live += st->configured && st->live;
         rec += st->recording;
-        bytes += st->rec_bytes;
     }
-    lv_label_set_text_fmt(label, "LIVE %d/%d    REC %d/%d    %llu MiB", live, cams, rec, cams,
-                          (unsigned long long)(bytes >> 20));
+    lv_label_set_text_fmt(label, "LIVE %d/%d   REC %d/%d", live, cams, rec, cams);
 }
 
-static void make_header(void)
+/* The clock over the video: an opaque chip (a translucent one would show
+ * as a pink fringe on a colour-keyed layer). */
+static void make_clock(void)
 {
-    lv_obj_t *h = lv_obj_create(L.scr);
-    ui_plain(h);
-    lv_obj_set_size(h, LV_PCT(100), UI_HEADER_H);
-    lv_obj_set_style_bg_color(h, UI_C(PANEL), 0);
-    lv_obj_set_style_bg_opa(h, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(h, UI_C(LINE), 0);
-    lv_obj_set_style_border_side(h, LV_BORDER_SIDE_BOTTOM, 0);
-    lv_obj_set_style_border_width(h, 1, 0);
-    lv_obj_set_style_pad_hor(h, VG_SPACE_LG, 0);
-
-    lv_obj_t *brand = lv_obj_create(h);
-    ui_plain(brand);
-    lv_obj_set_size(brand, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_layout(brand, LV_LAYOUT_FLEX);
-    lv_obj_set_flex_flow(brand, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(brand, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(brand, VG_SPACE_SM, 0);
-    ui_label(brand, LV_SYMBOL_VIDEO, VG_FONT_MD_LV, UI_C(ACCENT));
-    ui_label(brand, "vigil", VG_FONT_MD_LV, UI_C(TEXT));
-    ui_label(brand, ui_model()->role ? ui_model()->role : "", VG_FONT_SM_LV, UI_C(TEXT2));
-    lv_obj_align(brand, LV_ALIGN_LEFT_MID, 0, 0);
-
-    lv_obj_t *clk = ui_label(h, "", VG_FONT_LG_LV, UI_C(TEXT));
-    lv_label_bind_text(clk, &ui_subj_clock, NULL);
-    lv_obj_align(clk, LV_ALIGN_CENTER, 0, 0);
-
-    L.summary = ui_label(h, "", VG_FONT_SM_LV, UI_C(TEXT2));
-    lv_obj_align(L.summary, LV_ALIGN_RIGHT_MID, 0, 0);
-    for (int i = 0; i < n_channels(); ++i)
-        lv_subject_add_observer_obj(ui_subject_channel(i), summary_cb, L.summary, NULL);
+    if (CLOCK_CORNER == LV_ALIGN_DEFAULT) return;
+    L.clock = lv_obj_create(L.scr);
+    ui_plain(L.clock);
+    lv_obj_add_style(L.clock, &ui_st_chip, 0);
+    lv_obj_set_style_pad_hor(L.clock, VG_SPACE_MD, 0);
+    lv_obj_set_size(L.clock, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_remove_flag(L.clock, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t *l = ui_label(L.clock, "", VG_FONT_MD_LV, UI_C(TEXT));
+    lv_label_bind_text(l, &ui_subj_clock, NULL);
+    int dx = CLOCK_CORNER == LV_ALIGN_TOP_LEFT || CLOCK_CORNER == LV_ALIGN_BOTTOM_LEFT ? VG_SPACE_SM : -VG_SPACE_SM;
+    int dy = CLOCK_CORNER == LV_ALIGN_TOP_LEFT || CLOCK_CORNER == LV_ALIGN_TOP_RIGHT ? VG_SPACE_SM : -VG_SPACE_SM;
+    lv_obj_align(L.clock, CLOCK_CORNER, dx, dy);
+    lv_obj_update_layout(L.clock);
 }
 
 /* ---- navigation bar ------------------------------------------------------------------------ */
@@ -488,6 +502,10 @@ static void make_nav(void)
     lv_obj_set_height(spring, 1);
     lv_obj_set_flex_grow(spring, 1);
     L.nav_pin = nav_btn(LV_SYMBOL_DOWNLOAD, "Pin", ACT_PIN);
+    L.summary = ui_label(L.nav, "", VG_FONT_SM_LV, UI_C(TEXT2));
+    lv_obj_set_style_pad_left(L.summary, VG_SPACE_LG, 0);
+    for (int i = 0; i < n_channels(); ++i)
+        lv_subject_add_observer_obj(ui_subject_channel(i), summary_cb, L.summary, NULL);
     lv_obj_t *clk = ui_label(L.nav, "", VG_FONT_MD_LV, UI_C(TEXT));
     lv_label_bind_text(clk, &ui_subj_clock, NULL);
     lv_obj_set_style_pad_left(clk, VG_SPACE_LG, 0);
@@ -564,11 +582,54 @@ void ui_live_context_menu(const lv_point_t *at)
 
 /* ---- events --------------------------------------------------------------------------------- */
 
+static int on_screen(int ch)
+{
+    for (int i = 0; i < L.n_cells; ++i)
+        if (L.cells[i].ch == ch) return 1;
+    return 0;
+}
+
+/* The live view has no event list (the HTTP API's WebSocket has every
+ * event): a tile shows its channel's state all the time, so only what a
+ * tile does not show becomes a toast. That is recording trouble (failed,
+ * waiting for a disk), a channel that cannot run (no decoder, bad URL), a
+ * configuration that could not be applied, and a camera going offline or
+ * coming back while its tile is not on the screen. "REC on", "added",
+ * "config applied" and the rest are left to the tiles. The same text for
+ * several cameras within a toast's time is one toast ("3 cameras: ..."). */
+static void event_toast(const ui_event_t *ev)
+{
+    static char last[sizeof ev->text];
+    static uint32_t last_ms;
+    static int count;
+    const char *t = ev->text;
+    ui_toast_t kind;
+    if (!strncmp(t, "REC ", 4) && strcmp(t, "REC on"))
+        kind = UI_TOAST_WARN;
+    else if (!strcmp(t, "no decoder") || !strcmp(t, "bad URL") || (!strncmp(t, "config:", 7) && strstr(t, "failed")))
+        kind = UI_TOAST_BAD;
+    else if ((!strcmp(t, "offline") || !strcmp(t, "online")) && ev->ch > 0 && !on_screen(ev->ch - 1))
+        kind = !strcmp(t, "online") ? UI_TOAST_OK : UI_TOAST_WARN;
+    else
+        return;
+    if (ev->ch > 0 && !strcmp(last, t) && lv_tick_elaps(last_ms) < VG_DURATION_TOAST)
+        ++count;
+    else
+        count = 1;
+    snprintf(last, sizeof last, "%s", t);
+    last_ms = lv_tick_get();
+    char who[40];
+    if (ev->ch <= 0) ui_toast(kind, "%s", t);
+    else if (count > 1) ui_toast(kind, "%d cameras: %s", count, t);
+    else {
+        ui_chan_title(ev->ch - 1, who, sizeof who);
+        ui_toast(kind, "%s: %s", who, t);
+    }
+}
+
 void ui_live_event(const ui_event_t *ev)
 {
-    char who[40] = "";
-    if (ev->ch > 0) ui_chan_title(ev->ch - 1, who, sizeof who);
-    ui_events_push(ev->ch, who, ev->time, ev->text);
+    event_toast(ev);
     for (int i = 0; ev->ch > 0 && i < L.n_cells; ++i) {
         cell_t *c = &L.cells[i];
         if (c->ch != ev->ch - 1) continue;
@@ -591,20 +652,16 @@ lv_obj_t *ui_live_create(void)
     L.scr = lv_obj_create(NULL);
     ui_plain(L.scr);
     lv_obj_add_style(L.scr, &ui_st_screen, 0);
-    make_header();
 
     L.grid = lv_obj_create(L.scr);
     ui_plain(L.grid);
-    lv_obj_set_pos(L.grid, 0, UI_HEADER_H);
-    lv_obj_set_size(L.grid, L.sw, L.sh - UI_HEADER_H - UI_STRIP_H);
+    lv_obj_set_size(L.grid, L.sw, L.sh);
     /* With alpha holes (not a colour key), whatever lies under a tile must
      * be transparent too, or it would paint over the video. */
     if (L.hole_opa < LV_OPA_COVER) lv_obj_set_style_bg_opa(L.scr, LV_OPA_TRANSP, 0);
 
-    ui_events_create(L.scr, UI_STRIP_H);
+    make_clock();
     make_nav();
     set_layout(n_channels() > 1 && layout_offered(4) ? 4 : 1, 0);
-    time_t now = ui_model()->now ? ui_model()->now() : time(NULL);
-    ui_events_push(0, NULL, now, "Started");
     return L.scr;
 }

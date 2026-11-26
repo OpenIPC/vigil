@@ -149,8 +149,8 @@ video and tries again every 10 s.
 Channel threads never touch the UI. They publish a status snapshot
 (`channels_status()`: live, fps, codec, size, recording, last error) and
 short events ("CAM2 offline") through a thread-safe ring (`events.c`).
-The ring has many readers, each with its own cursor: the UI thread's event
-strip and the API's WebSocket feed both see every event, and a reader that
+The ring has many readers, each with its own cursor: the UI thread (tile
+flashes, toasts) and the API's WebSocket feed both see every event, and a reader that
 falls behind skips ahead and is told how many it missed. Without a display,
 `frontend_headless.c` prints the status to the log.
 
@@ -229,13 +229,14 @@ portable and cheap on small CPUs.
 
 ## Screen layout
 
-The screen is 1280×720: a 40-pixel header, a grid of 1, 4, 9 or 16 tiles,
-and an 80-pixel event strip (`src/ui/ui_layout.c`, sizes from the design
-tokens). Channels start in the 2×2 grid (`frontend_tiles`); the UI moves
+The screen is 1280×720, all of it a grid of 1, 4, 9 or 16 tiles
+(`src/ui/ui_layout.c`; tile edges on 16-pixel columns and even rows, which
+every video layer places exactly). Channels start in the 2×2 grid (`frontend_tiles`); the UI moves
 them for another layout, another page or one channel full screen through
 `channels_set_tiles()`, which places each running channel with
 `hal_display_set_tile` (or hides it with `hal_display_clear_tile`) from the
-main thread. LVGL draws the header, the strip and chips on each tile, and
+main thread. LVGL draws the clock, small chips on each tile and, when
+asked for, the navigation bar and menus over the video, and
 paints the rest of each tile as a "hole" so the video plane underneath
 shows through: a colour key on HiSilicon hifb and SigmaStar's GOP, full
 transparency on Rockchip's alpha-blended plane. The screens, the

@@ -20,8 +20,9 @@ are part of the design.
   **HTTP/WebSocket API** to read and change it while video keeps running,
   with live status and events; login with the system account
   ([docs/api.md](docs/api.md)).
-- **On-screen UI** with a USB mouse: live view in 1x1 or 2x2 with paging
-  and double-click full screen, a context menu and an auto-hiding
+- **On-screen UI** with a USB mouse: a full-screen live view in 1x1 or
+  2x2 with paging and double-click full screen, the camera's name, REC and
+  motion icons on each tile, a clock, a context menu and an auto-hiding
   navigation bar, and settings pages built from the same schema as the
   API ([docs/ui.md](docs/ui.md)).
 
