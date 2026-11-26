@@ -84,4 +84,8 @@ int sys_disk_mount(const char *name, char *msg, size_t cap);
  * points. 0 or -1, with `msg` (a mount still in use is named). */
 int sys_disk_unmount(const char *name, char *msg, size_t cap);
 
+/* How long a format waits after a new partition table for the system's
+ * own reaction to it (mdev, automount.sh); 0 for the tests. */
+void sys_disk_set_settle(int ms);
+
 #endif /* SYS_DISK_H */

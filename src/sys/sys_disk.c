@@ -488,6 +488,10 @@ static int try_mount(const char *dev, const char *mnt, const char *fs)
     sys_path(pt, sizeof pt, mnt);
     for (int i = 0;; ++i) {
         if (sys_ops()->mount(ps, pt, fs, 0, NULL) == 0) return 0;
+        int e = errno;
+        /* automount.sh removed the mount point after its own try */
+        if (e == ENOENT && i + 1 < MOUNT_BUSY_TRIES && mkdir(pt, 0755) == 0) continue;
+        errno = e;
         if (errno != EBUSY) break;
         if (mounted_at(dev, mnt)) return 0;
         if (i + 1 >= MOUNT_BUSY_TRIES) {
@@ -566,15 +570,39 @@ static unsigned char part_type(const char *fs)
     return !strcmp(fs, "vfat") ? 0x0c : !strcmp(fs, "ext4") ? 0x83 : 0x07;
 }
 
-static int wait_for(const char *name)
+static int g_settle_ms = 3000;
+
+void sys_disk_set_settle(int ms) { g_settle_ms = ms; }
+
+static ino_t node_ino(const char *name)
 {
-    char dev[64];
+    char dev[64], p[512];
+    struct stat st;
     snprintf(dev, sizeof dev, "/dev/%s", name);
-    for (int i = 0; i < 50; ++i) {
-        if (sys_exists(dev)) return 0;
+    return stat(sys_path(p, sizeof p, dev), &st) == 0 ? st.st_ino : 0;
+}
+
+/* After a new partition table the kernel announces the partitions again:
+ * mdev removes /dev/<part> (if it was there) and makes it anew, and
+ * automount.sh, run for each, tries to mount the new partition and then
+ * removes /mnt/<part>. Working on the node before that is over loses the
+ * race: in QEMU on ssr621q the mkfs went to a node about to be replaced
+ * and the mount point vanished under the mount. So: wait for a node that
+ * is not the old one, then let automount.sh's attempt pass. */
+static int wait_for(const char *name, ino_t old)
+{
+    int tries = g_settle_ms ? 100 : 1;
+    for (int i = 0; i < tries; ++i) {
+        ino_t now = node_ino(name);
+        if (now && (now != old || !g_settle_ms)) break;
+        if (i + 1 == tries) {
+            if (!now) return -1;
+            break;                          /* the old node stayed: use it */
+        }
         usleep(100 * 1000);
     }
-    return -1;
+    if (g_settle_ms) usleep((useconds_t)g_settle_ms * 1000);
+    return 0;
 }
 
 int sys_disk_format(const char *name, const char *fs, char *msg, size_t cap)
@@ -620,12 +648,13 @@ int sys_disk_format(const char *name, const char *fs, char *msg, size_t cap)
         }
         char dp[64], p[512];
         snprintf(dp, sizeof dp, "/dev/%s", name);
+        ino_t old_node = whole ? 0 : node_ino(target);
         if (sys_ops()->reread_parts(sys_path(p, sizeof p, dp)) < 0) {
             snprintf(msg, cap, "the kernel kept the old partition table of %s (%s); unplug it and try again",
                      name, strerror(errno));
             goto out;
         }
-        if (!whole && wait_for(target) < 0) {
+        if (!whole && wait_for(target, old_node) < 0) {
             snprintf(msg, cap, "%s did not appear after the new partition table", target);
             goto out;
         }

@@ -66,6 +66,7 @@ static const sys_disk_t *get(const sys_disk_t *d, int n, const char *name)
 static void setup(void)
 {
     fake_init();
+    sys_disk_set_settle(0);
     /* a USB stick, one exFAT partition, mounted where automount.sh puts it */
     fake_file("/sys/block/sda/size", "262144\n");
     fake_file("/sys/block/sda/removable", "1\n");
