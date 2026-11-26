@@ -301,6 +301,7 @@ static cJSON *status_json(void)
         cJSON_AddStringToObject(o, "state", st.configured ? (st.live ? "live" : st.state) : "off");
         cJSON_AddBoolToObject(o, "decoding", st.decoding);
         cJSON_AddBoolToObject(o, "recording", st.recording);
+        cJSON_AddStringToObject(o, "rec_state", st.rec_state[0] ? st.rec_state : "off");
         cJSON_AddNumberToObject(o, "rec_bytes", (double)st.rec_bytes);
         if (st.codec != VG_CODEC_NONE) cJSON_AddStringToObject(o, "codec", vg_codec_name(st.codec));
         else cJSON_AddNullToObject(o, "codec");
@@ -322,8 +323,8 @@ static void status_signature(char *out, size_t cap)
     for (int i = 0; i < CHANNEL_MAX && len < cap; ++i) {
         channel_status_t st;
         channels_status(i, &st);
-        int n = snprintf(out + len, cap - len, "%d%d%d%s|", st.configured, st.live, st.recording,
-                         st.live ? "" : st.state);
+        int n = snprintf(out + len, cap - len, "%d%d%d%s|%s|", st.configured, st.live, st.recording,
+                         st.live ? "" : st.state, st.rec_state);
         if (n < 0) break;
         len += (size_t)n;
     }

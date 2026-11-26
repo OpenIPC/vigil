@@ -91,7 +91,9 @@ loading the HiSilicon kernel modules and the hi3520dv200 musl toolchain.
 `ctest` in a generic build runs the unit tests and end-to-end runs of `vigild`
 against `tests/netip_server.py` and `tests/rtsp_server.py` (skipped without the
 GStreamer RTSP server), including misbehaving-server cases; the end-to-end tests
-decode the recordings with ffmpeg. `api_e2e` drives the HTTP/WebSocket API of a
+decode the recordings with ffmpeg. They record into the build tree with
+`record.allow_rootfs` on: `vigild` records only onto a disk, and refuses
+`/tmp` where it is tmpfs. `api_e2e` drives the HTTP/WebSocket API of a
 running `vigild`. A parser or protocol change comes with a test
 in `tests/test_core.c` that fails without it.
 

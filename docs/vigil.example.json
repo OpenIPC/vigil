@@ -8,7 +8,8 @@
   "record": {
     "path": "/mnt/sda1/rec",
     "segment": 60,
-    "keep": 0
+    "keep": 0,
+    "allow_rootfs": false
   },
   "api": {
     "listen": "0.0.0.0:8080",

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* channel.c — camera channels (see channel.h). */
 #define _DEFAULT_SOURCE
+#include <errno.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -16,6 +17,7 @@
 #include "hal_decoder.h"
 #include "hal_display.h"
 #include "log.h"
+#include "rec_place.h"
 #include "schema.h"
 #include "seg_writer.h"
 #include "source.h"
@@ -25,6 +27,7 @@
 #define RECONNECT_MAX_SECS 10
 #define DEC_RETRY_SECS     10       /* retry a failed decoder setup */
 #define REC_RETRY_SECS     10       /* retry a recording directory that could not be set up */
+#define PATH_MAX_WHY       400      /* a reason, with a path in it, for the log */
 
 typedef struct {
     int             idx;
@@ -33,13 +36,16 @@ typedef struct {
     /* What it was started with, to tell whether a new configuration
      * changes it. */
     char            url[512], rec_dir[192];
-    int             seg_secs, keep;
+    int             seg_secs, keep, allow_rootfs;
 
     source_t       *src;
     au_norm_t       norm;
     seg_writer_t    seg;
     int             rec_on, rec_fail_told;
-    time_t          rec_retry_at;   /* seg_init failed then: try again later */
+    time_t          rec_retry_at;   /* not set up then: try again later */
+    time_t          rec_checked_at; /* the directory was last looked at then (rec_check) */
+    rec_place_t     rec_place;      /* the last answer, to say each change once */
+    int             rec_told;
     pthread_t       thread;
     int             thread_up;
 
@@ -94,6 +100,10 @@ void channels_status(int idx, channel_status_t *st)
         *st = c->st;
         st->recording = c->rec_on && c->seg.f != NULL;
         st->rec_bytes = c->seg.bytes;
+        /* Set up: say how it goes. Not set up: the reason, kept by rec_setup. */
+        if (c->rec_on)
+            snprintf(st->rec_state, sizeof st->rec_state, "%s",
+                     c->rec_fail_told ? "failed" : st->recording ? "recording" : "ready");
     }
     pthread_mutex_unlock(&g_locks[idx]);
 }
@@ -158,27 +168,77 @@ static void rec_close(channel_t *c)
 
 /* ---- per-channel thread --------------------------------------------------- */
 
-/* The recording directory could not be set up when the channel started (a
- * card not mounted yet, a directory being replaced): try again at a
- * keyframe every REC_RETRY_SECS, so recording starts once it is there
- * without restarting the stream. */
+/* Set up recording into c->rec_dir, if it may go there (rec_place.h): never
+ * into a directory that would land on the root filesystem or in RAM, so a
+ * disk that is not mounted (yet, or any more) leaves recording off and
+ * reported, not written to the flash. Called when the channel starts and
+ * again every REC_RETRY_SECS at a keyframe while recording is off, so it
+ * starts by itself once the disk is there. Takes c->lock. */
+static void rec_setup(channel_t *c, vg_codec_t codec)
+{
+    char why[PATH_MAX_WHY], prefix[16];
+    int ch = c->idx + 1;
+    rec_place_t p = rec_place_check(c->rec_dir, c->allow_rootfs, NULL, why, sizeof why);
+    snprintf(prefix, sizeof prefix, "CAM%d", ch);
+    pthread_mutex_lock(c->lock);
+    if (p == REC_PLACE_OK) {
+        if (seg_init(&c->seg, c->rec_dir, prefix, c->seg_secs, c->keep) == 0) {
+            if (codec != VG_CODEC_NONE) seg_set_ext(&c->seg, codec == VG_CODEC_H264 ? "h264" : "h265");
+            c->rec_on = 1;
+            c->rec_fail_told = 0;
+            c->st.rec_state[0] = 0;         /* set up: channels_status says how it goes */
+        } else {
+            snprintf(why, sizeof why, "cannot create %s: %s", c->rec_dir, strerror(errno));
+            p = REC_PLACE_ERROR;
+        }
+    }
+    if (p != REC_PLACE_OK) snprintf(c->st.rec_state, sizeof c->st.rec_state, "%s", rec_place_name(p));
+    pthread_mutex_unlock(c->lock);
+    if (c->rec_told && p == c->rec_place) return;
+    c->rec_place = p;
+    c->rec_told = 1;
+    if (p == REC_PLACE_OK) {
+        vg_log("CAM%d: recording into %s, on %s", ch, c->rec_dir, why);
+        events_push(ch, "REC on");
+    } else {
+        vg_log("CAM%d: not recording into %s: %s; trying again every %d s", ch, c->rec_dir, why,
+               REC_RETRY_SECS);
+        events_push(ch, "REC %s", rec_place_name(p));
+    }
+}
+
+/* Recording is off: try again at a keyframe every REC_RETRY_SECS. */
 static void rec_retry(channel_t *c, vg_codec_t codec)
 {
     time_t now = time(NULL);
     if (now - c->rec_retry_at < REC_RETRY_SECS) return;
     c->rec_retry_at = now;
-    char prefix[16];
-    snprintf(prefix, sizeof prefix, "CAM%d", c->idx + 1);
+    rec_setup(c, codec);
+}
+
+/* While recording: is the directory still where it may record? Asked
+ * before every new segment and after a failed write, at most once a second
+ * (each is a stat and a read of mountinfo). A disk that was pulled or
+ * unmounted leaves the mount point behind on the root filesystem; a new
+ * segment opened there would go onto the flash. So recording goes off and
+ * waits for the disk as at the start, rather than trying the files again. */
+static void rec_check(channel_t *c)
+{
+    time_t now = time(NULL);
+    if (now == c->rec_checked_at) return;
+    c->rec_checked_at = now;
+    char why[PATH_MAX_WHY];
+    rec_place_t p = rec_place_check(c->rec_dir, c->allow_rootfs, NULL, why, sizeof why);
+    if (p == REC_PLACE_OK) return;
     pthread_mutex_lock(c->lock);
-    if (seg_init(&c->seg, c->rec_dir, prefix, c->seg_secs, c->keep) == 0) {
-        seg_set_ext(&c->seg, codec == VG_CODEC_H264 ? "h264" : "h265");
-        c->rec_on = 1;
-    }
+    seg_close(&c->seg);                 /* its tail is lost with the disk */
+    c->rec_on = 0;
+    snprintf(c->st.rec_state, sizeof c->st.rec_state, "%s", rec_place_name(p));
     pthread_mutex_unlock(c->lock);
-    if (c->rec_on) {
-        vg_log("CAM%d: recording into %s", c->idx + 1, c->rec_dir);
-        events_push(c->idx + 1, "REC on");
-    }
+    c->rec_retry_at = now;
+    c->rec_place = p;
+    vg_log("CAM%d: recording stopped: %s; trying again every %d s", c->idx + 1, why, REC_RETRY_SECS);
+    events_push(c->idx + 1, "REC %s", rec_place_name(p));
 }
 
 static void on_au(void *user, const vg_au_t *au)
@@ -198,6 +258,9 @@ static void on_au(void *user, const vg_au_t *au)
     }
 
     if (!c->rec_on && c->rec_dir[0] && au->key) rec_retry(c, au->codec);
+    /* A keyframe that will open a new segment (seg_write's own test). */
+    if (c->rec_on && au->key && (!c->seg.f || time(NULL) - c->seg.seg_start >= c->seg.seg_secs))
+        rec_check(c);
     if (c->rec_on) {
         pthread_mutex_lock(c->lock);
         int was_open = c->seg.f != NULL;
@@ -211,6 +274,7 @@ static void on_au(void *user, const vg_au_t *au)
         } else if (rc == 0 && is_open && !was_open) {
             c->rec_fail_told = 0;
         }
+        if (rc < 0) rec_check(c);
     }
     ++c->frames;
 }
@@ -338,7 +402,7 @@ static int slot_matches(const channel_t *c, const channels_config_t *cfg, int i)
     const char *url = i < cfg->n ? cfg->urls[i] : NULL;
     if (!c->active) return url == NULL;
     return url && !strcmp(c->url, url) && !strcmp(c->rec_dir, str_or_empty(cfg->rec_dir)) &&
-           c->seg_secs == cfg->seg_secs && c->keep == cfg->keep;
+           c->seg_secs == cfg->seg_secs && c->keep == cfg->keep && c->allow_rootfs == cfg->allow_rootfs;
 }
 
 /* Tear down a channel whose thread has been told to stop. */
@@ -383,20 +447,14 @@ static int slot_start(int i, const channels_config_t *cfg)
     snprintf(c->rec_dir, sizeof c->rec_dir, "%s", str_or_empty(cfg->rec_dir));
     c->seg_secs = cfg->seg_secs;
     c->keep = cfg->keep;
+    c->allow_rootfs = cfg->allow_rootfs;
     au_norm_init(&c->norm, VG_CODEC_NONE);
     c->st.configured = 1;
     snprintf(c->st.host, sizeof c->st.host, "%.63s", c->src->host);
     snprintf(c->st.name, sizeof c->st.name, "%s", name);
     if (cfg->rec_dir) {
-        char prefix[16];
-        snprintf(prefix, sizeof prefix, "CAM%d", i + 1);
-        if (seg_init(&c->seg, cfg->rec_dir, prefix, cfg->seg_secs, cfg->keep) == 0) {
-            c->rec_on = 1;
-        } else {
-            vg_log("cannot create %s, CAM%d not recorded; trying again every %d s", cfg->rec_dir, i + 1,
-                   REC_RETRY_SECS);
-            c->rec_retry_at = time(NULL);
-        }
+        rec_setup(c, VG_CODEC_NONE);
+        if (!c->rec_on) c->rec_retry_at = time(NULL);
     }
     if (g_have_tiles && hal_caps()->display && !c->src->ops->self_displayed)
         hal_display_set_tile(i, &g_tiles[i]);

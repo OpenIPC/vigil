@@ -35,7 +35,23 @@ static int check_abs_path(const char *v, char *msg, size_t cap, int empty_ok)
     return 0;
 }
 
-static int check_rec_path(const char *v, char *msg, size_t cap) { return check_abs_path(v, msg, cap, 1); }
+/* "." and ".." are refused: the directory is judged by the part of the path
+ * that exists (rec_place.c), and a ".." in the part still to be created
+ * could climb out of the disk it names. */
+static int check_rec_path(const char *v, char *msg, size_t cap)
+{
+    if (check_abs_path(v, msg, cap, 1) < 0) return -1;
+    for (const char *p = v; *p; ) {
+        while (*p == '/') ++p;
+        size_t n = strcspn(p, "/");
+        if ((n == 1 && p[0] == '.') || (n == 2 && p[0] == '.' && p[1] == '.')) {
+            snprintf(msg, cap, "must not contain \".\" or \"..\"");
+            return -1;
+        }
+        p += n;
+    }
+    return 0;
+}
 static int check_shadow(const char *v, char *msg, size_t cap) { return check_abs_path(v, msg, cap, 0); }
 
 /* "port" or "a.b.c.d:port" (IPv4: CivetWeb is built without IPv6); "" =
@@ -102,6 +118,12 @@ static const schema_field_t record_fields[] = {
     { .key = "keep", INT(config_record_t, keep), .def_int = 3, .min = 0, .max = SEG_KEEP_MAX,
       .live = 1, .label = "Segments kept per camera",
       .help = "0: all (the oldest recordings are deleted anyway when the disk runs low)." },
+    { .key = "allow_rootfs", BOOL(config_record_t, allow_rootfs), .def_int = 0, .live = 1,
+      .label = "Record onto the root filesystem",
+      .help = "Off: recording waits until a disk is mounted where the path leads, and never "
+              "writes to the root filesystem (on a board, its flash). On only where the root "
+              "filesystem is itself a disk. RAM and flash filesystems are refused either way, "
+              "the root included." },
 };
 
 static const schema_field_t api_fields[] = {

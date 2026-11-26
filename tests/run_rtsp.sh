@@ -7,7 +7,10 @@ set -u
 VIGILD=$1 CODEC=${2%%:*} AUTH=${2##*:}
 HERE=$(cd "$(dirname "$0")" && pwd)
 PORT=$((20000 + $$ % 20000))
-TMP=$(mktemp -d)
+# In the build tree, not /tmp: recordings need a disk (tmpfs is refused),
+# and allow_rootfs lets the build tree be on the root filesystem.
+TMP=$(mktemp -d "$PWD/vigil-test.XXXXXX")
+echo '{ "record": { "allow_rootfs": true } }' > "$TMP/vigil.json"
 trap 'kill $SRV 2>/dev/null; rm -rf "$TMP"' EXIT
 
 SAUTH=$AUTH
@@ -23,7 +26,7 @@ done
 CRED=root:123456@
 [ "$AUTH" = none ] && CRED=
 [ "$AUTH" = wrong ] && CRED=root:nope@
-"$VIGILD" -t 6 -o "$TMP/rec" -c "rtsp://${CRED}127.0.0.1:$PORT/test" >"$TMP/vigild.log" 2>&1
+"$VIGILD" -t 6 -f "$TMP/vigil.json" -o "$TMP/rec" -c "rtsp://${CRED}127.0.0.1:$PORT/test" >"$TMP/vigild.log" 2>&1
 cat "$TMP/vigild.log"
 
 if [ "$AUTH" = wrong ]; then

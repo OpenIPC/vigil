@@ -42,6 +42,7 @@ typedef struct {
     char path[192];                 /* seg_writer_t.dir; "" = not recording */
     int  segment;                   /* seconds */
     int  keep;                      /* segments per camera, 0 = all */
+    int  allow_rootfs;              /* the root filesystem counts as a disk (rec_place.h) */
 } config_record_t;
 
 typedef struct {

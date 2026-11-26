@@ -17,7 +17,7 @@ defaults. [vigil.example.json](vigil.example.json) shows every setting:
     { "url": "rtsp://admin:12345@192.168.1.10/stream=0", "name": "Gate", "enabled": true },
     { "url": "netip://admin:@192.168.1.11:34567/?ch=0&stream=main", "name": "Yard", "enabled": true }
   ],
-  "record": { "path": "/mnt/sda1/rec", "segment": 60, "keep": 0 },
+  "record": { "path": "/mnt/sda1/rec", "segment": 60, "keep": 0, "allow_rootfs": false },
   "api":    { "listen": "0.0.0.0:8080", "auth": true, "user": "root", "shadow": "/etc/shadow" }
 }
 ```
@@ -28,9 +28,10 @@ defaults. [vigil.example.json](vigil.example.json) shows every setting:
 | `cameras[].url` | string, required | | `rtsp://…`, `netip://…` or `capture:N` (formats in [architecture.md](architecture.md#sources-camera-protocols)). Checked with the source drivers' own URL parsers. |
 | `cameras[].name` | string, ≤ 31 | `""` | Shown in the status and on the tile instead of the host. |
 | `cameras[].enabled` | boolean | `true` | A disabled camera keeps its tile (and its CAMn number), empty. |
-| `record.path` | absolute path | `""` | Where streams are recorded. Empty: no recording. A directory that cannot be created yet (a card not mounted) is tried again every 10 s. |
+| `record.path` | absolute path, no `.` or `..` | `""` | Where streams are recorded. Empty: no recording. Used only on a disk: see [Where recordings may go](#where-recordings-may-go). |
 | `record.segment` | integer 10..3600 | 60 | Segment length in seconds. |
 | `record.keep` | integer 0..64 | 3 | Segments kept per camera; 0 keeps all (the free-space reserve still applies). 64 is what the segment writer can track. |
+| `record.allow_rootfs` | boolean | `false` | Count the root filesystem as a disk. For a host whose root filesystem is one; never on a board, where it is the flash. |
 | `api.listen` | `"port"` or `"a.b.c.d:port"` | `"0.0.0.0:8080"` | Where the API listens (IPv4). Empty: no API. Read at start only. |
 | `api.auth` | boolean | `true` | Require the system account's password. See [Authentication](#authentication). |
 | `api.user` | string | `"root"` | The account whose password the API asks for. |
@@ -63,6 +64,36 @@ schema defaults < the file < options. `-c` replaces the file's camera list,
 and `record.keep` (out-of-range values are brought into range, with a log
 line). Options are not written back by themselves; but the API's view, and
 what a `PUT` saves, is the configuration in force, options included.
+
+## Where recordings may go
+
+`vigild` creates the recording directory itself. With the disk it is meant
+for not mounted, that would create it on the root filesystem underneath the
+mount point and record there: on a board, onto the flash, until it wears out
+or fills up. So a directory is recorded to only when it is, or would be
+created, on a disk. The deepest part of `record.path` that exists decides:
+
+- it must not be on the root filesystem (its `st_dev` is not that of `/`),
+  unless `record.allow_rootfs` is on;
+- the filesystem it is on (the longest mount point in
+  `/proc/self/mountinfo` that holds it, after links are resolved) must not be
+  one without a disk — `tmpfs`, `ramfs`, `proc`, `sysfs` and the like — or
+  flash — `jffs2`, `ubifs`, `squashfs`, `cramfs`, `romfs`, `yaffs`; any other
+  type (`vfat`, `exfat`, `ext4`, `xfs`, `btrfs`, `ntfs`, `nfs`, `cifs`, FUSE, …)
+  is a disk. RAM and flash are refused whatever `allow_rootfs` says, a root
+  filesystem of that kind included. Where mountinfo cannot be read, a
+  directory off the root filesystem cannot be told apart from RAM, and is
+  refused (`error`);
+- it must not be mounted read-only.
+
+Only the part below that directory is created, so nothing is ever made
+above the mount point. Otherwise the channel does not record. It reports why
+(`rec_state`), and it looks again every 10 s, at a keyframe, so recording
+starts by itself once the disk is mounted. While recording, the directory is
+looked at again before every new segment and after a failed write, so a disk
+that goes away stops recording before a segment could be opened on the
+mount point left behind; the channel then waits for it the same way. The
+configuration is not changed: `record.path` stays what was set.
 
 ## What applies when
 
@@ -215,7 +246,8 @@ For example:
   "channels": [
     { "camera": 1, "url": "rtsp://admin:***@192.168.1.10/stream=0", "name": "Gate",
       "enabled": true, "host": "192.168.1.10", "running": true, "live": true,
-      "state": "live", "decoding": true, "recording": true, "rec_bytes": 73400320,
+      "state": "live", "decoding": true, "recording": true, "rec_state": "recording",
+      "rec_bytes": 73400320,
       "codec": "H.265", "width": 1920, "height": 1080, "fps": 25 }
   ]
 }
@@ -226,6 +258,12 @@ time). One channel per configured camera, in tile order. `running`: the
 channel has a source (it is enabled and its URL could be used); `live`:
 video arrived in the last 3 s; `state` is `live`, `off`, `CONNECTING` or the
 last error (`connect: Connection refused`, `login refused (Ret 203)`, …);
+`recording`: a segment is open; `rec_state` is `off` (no `record.path`);
+when recording is set up, `recording`, `ready` (no segment open yet: waiting
+for a keyframe or for the camera) or `failed` (the last write failed); when it
+is not, why: `waiting for disk` (the path leads onto the root filesystem:
+nothing is mounted there), `not a disk` (RAM or flash), `read-only`, `error`
+(not a directory, no permission, mountinfo unreadable; the log says which);
 `rec_bytes` counts what was written since the channel started; `fps` is
 averaged over 2 s; `codec` is `null` until the stream says.
 
@@ -264,7 +302,8 @@ answering.
 | `config` | On connect, and when a configuration is saved or applied | `{"generation": 8, "applied": 7}` |
 
 Events are the same ones the TV's event strip shows: `online`, `offline`,
-`down`, `no decoder`, `REC failed`, `REC on`, `added`, `restarted`, `removed`,
+`down`, `no decoder`, `REC failed`, `REC on`, `REC waiting for disk`,
+`REC not a disk`, `REC read-only`, `REC error`, `added`, `restarted`, `removed`,
 `bad URL`, `config applied`, `config: N camera(s) failed`. A client that
 wants to know when its change runs waits for a `config` message whose
 `applied` reached the generation its `PUT` produced (`status.config` after
