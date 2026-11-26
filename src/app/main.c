@@ -1,9 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* main.c — vigild: open DVR/NVR recorder.
  *
- *   hal_init (media system + HDMI on platforms that have it)
+ *   config_init (-f FILE) + command-line overrides
+ *   -> hal_init (media system + HDMI on platforms that have it)
  *   -> channels_start (one thread per camera: source -> decode + record)
- *   -> frontend_run (LVGL quad view, or status lines when headless)
+ *   -> frontend_run (LVGL quad view, or status lines when headless); on
+ *      this thread, a new configuration in the store is applied
+ *      (channels_apply)
  *   -> SIGINT/SIGTERM: channels_stop, hal_shutdown.
  */
 #include <errno.h>
@@ -16,6 +19,8 @@
 #include <unistd.h>
 
 #include "channel.h"
+#include "config.h"
+#include "events.h"
 #include "frontend.h"
 #include "hal.h"
 #include "log.h"
@@ -135,23 +140,60 @@ static void log_to_syslog_stop(void)
 
 static void usage(const char *argv0)
 {
-    printf("usage: %s [-c URL]... [-o DIR|none] [-S SECS] [-K N] [-t SECS] [-s]\n"
-           "  -c URL   camera source, in tile order (up to %d):\n"
+    printf("usage: %s [-f FILE] [-c URL]... [-o DIR|none] [-S SECS] [-K N] [-t SECS] [-s]\n"
+           "  -f FILE  configuration (default %s; missing = defaults)\n"
+           "  -c URL   camera source, in tile order (up to %d); replaces the file's cameras:\n"
            "             rtsp://[user:pass@]host[:554]/path\n"
            "             netip://[user:pass@]host[:34567]/[?ch=N&stream=main|extra]\n"
            "             capture:N   (local video input N, DVR boards)\n"
-           "  -o DIR   record the streams here as received (default /tmp/rec; none = off)\n"
+           "  -o DIR   record the streams here as received (none = off)\n"
            "  -S SECS  segment length (default 60)\n"
            "  -K N     segments kept per camera (default 3; 0 = keep all)\n"
            "  -t SECS  exit after SECS seconds (default: run until SIGINT)\n"
-           "  -s       log to syslog (tag vigil) instead of stderr\n",
-           argv0, CHANNEL_MAX);
+           "  -s       log to syslog (tag vigil) instead of stderr\n"
+           "Options override the file for this run.\n",
+           argv0, CONFIG_DEFAULT_PATH, CHANNEL_MAX);
+}
+
+/* -S / -K: out of range is brought into range, as the segment writer
+ * always did with -K, rather than refusing to start an NVR over it. */
+static int int_option(const char *opt, const char *v, const char *section, const char *key)
+{
+    const schema_field_t *f = schema_field(schema_section(&config_schema, section), key);
+    int n = atoi(v);
+    int c = n < f->min ? f->min : n > f->max ? f->max : n;
+    if (c != n) vg_log("%s %s: out of range %d..%d, using %d", opt, v, f->min, f->max, c);
+    return c;
+}
+
+/* ---- applying a new configuration (main thread) ------------------------------------ */
+
+static unsigned g_applied_gen;
+
+static void apply_config(void)
+{
+    if (config_generation() == g_applied_gen) return;
+    static vigil_config_t c;            /* channels_config_t points into it */
+    unsigned gen = config_get(&c);
+    channels_config_t cc;
+    config_to_channels(&c, &cc);
+    int failed = channels_apply(&cc);
+    g_applied_gen = gen;
+    config_mark_applied(gen);
+    if (failed) {
+        vg_log("configuration %u applied; %d camera(s) could not start", gen, failed);
+        events_push(0, "config: %d camera(s) failed", failed);
+    } else {
+        vg_log("configuration %u applied", gen);
+        events_push(0, "config applied");
+    }
 }
 
 int main(int argc, char **argv)
 {
-    channels_config_t cfg = { .rec_dir = "/tmp/rec", .seg_secs = 60, .keep = 3 };
-    int run_secs = 0, use_syslog = 0;
+    const char *cfg_path = CONFIG_DEFAULT_PATH, *rec_dir = NULL, *seg = NULL, *keep = NULL;
+    const char *urls[CHANNEL_MAX];
+    int n_urls = 0, run_secs = 0, use_syslog = 0;
 
     /* -s first, so that what parsing the rest has to say (a bad option, too
      * many cameras) reaches syslog too: at boot stdio is /dev/null. */
@@ -159,7 +201,7 @@ int main(int argc, char **argv)
         const char *a = argv[i];
         if (!strcmp(a, "-s"))
             use_syslog = 1;
-        else if (a[0] == '-' && a[1] && !a[2] && strchr("coSKt", a[1]))
+        else if (a[0] == '-' && a[1] && !a[2] && strchr("fcoSKt", a[1]))
             ++i;                                    /* skip the option's value */
     }
 
@@ -175,18 +217,20 @@ int main(int argc, char **argv)
         if (!strcmp(a, "-s"))
             continue;
         if (!strcmp(a, "-c") && v) {
-            if (cfg.n == CHANNEL_MAX) {
+            if (n_urls == CHANNEL_MAX) {
                 fprintf(stderr, "at most %d cameras\n", CHANNEL_MAX);
                 log_to_syslog_stop();
                 return 2;
             }
-            cfg.urls[cfg.n++] = v;
+            urls[n_urls++] = v;
+        } else if (!strcmp(a, "-f") && v) {
+            cfg_path = v;
         } else if (!strcmp(a, "-o") && v) {
-            cfg.rec_dir = strcmp(v, "none") ? v : NULL;
+            rec_dir = v;
         } else if (!strcmp(a, "-S") && v) {
-            cfg.seg_secs = atoi(v);
+            seg = v;
         } else if (!strcmp(a, "-K") && v) {
-            cfg.keep = atoi(v);
+            keep = v;
         } else if (!strcmp(a, "-t") && v) {
             run_secs = atoi(v);
         } else {
@@ -197,6 +241,41 @@ int main(int argc, char **argv)
         ++i;
     }
 
+    /* defaults < the file < the options */
+    config_init(cfg_path);
+    vigil_config_t cfg;
+    config_get(&cfg);
+    if (n_urls) {
+        cfg.n_cameras = n_urls;
+        for (int i = 0; i < n_urls; ++i) {
+            config_camera_t *cam = &cfg.cameras[i];
+            memset(cam, 0, sizeof *cam);
+            snprintf(cam->url, sizeof cam->url, "%s", urls[i]);
+            cam->enabled = 1;
+        }
+    }
+    if (rec_dir) snprintf(cfg.record.path, sizeof cfg.record.path, "%s", strcmp(rec_dir, "none") ? rec_dir : "");
+    if (seg) cfg.record.segment = int_option("-S", seg, "record", "segment");
+    if (keep) cfg.record.keep = int_option("-K", keep, "record", "keep");
+    schema_errors_t errs = { 0 };
+    if (schema_validate(&config_schema, &cfg, &errs) < 0) {
+        for (int i = 0; i < errs.n; ++i) {
+            /* Only an option can be wrong here: the file was checked. */
+            const char *p = errs.e[i].path;
+            int cam = -1;
+            if (sscanf(p, "cameras[%d]", &cam) == 1 && cam >= 0 && cam < n_urls) {
+                char red[512];
+                schema_redact_url(urls[cam], red, sizeof red);
+                vg_log("-c %s: %s", red, errs.e[i].msg);
+            } else {
+                vg_log("%s: %s", p, errs.e[i].msg);
+            }
+        }
+        log_to_syslog_stop();
+        return 2;
+    }
+    config_override(&cfg);
+
     if (hal_init(SCREEN_W, SCREEN_H, 60) < 0) {
         vg_log("platform init failed");
         log_to_syslog_stop();
@@ -205,13 +284,18 @@ int main(int argc, char **argv)
     const hal_caps_t *caps = hal_caps();
     vg_log("platform %s: display %s, decoder %s, capture inputs %d; %d camera(s)",
            caps->name, caps->display ? "yes" : "no", caps->decoder ? "yes" : "no",
-           caps->capture, cfg.n);
+           caps->capture, cfg.n_cameras);
 
     vg_rect_t tiles[CHANNEL_MAX];
     frontend_tiles(tiles, CHANNEL_MAX);
     int rc = 1;
-    if (channels_start(&cfg, caps->display ? tiles : NULL) == 0) {
-        rc = frontend_run(run_secs, &g_stop) < 0 ? 1 : 0;
+    static vigil_config_t running;      /* channels_config_t points into it */
+    g_applied_gen = config_get(&running);
+    channels_config_t cc;
+    config_to_channels(&running, &cc);
+    if (channels_start(&cc, caps->display ? tiles : NULL) == 0) {
+        config_mark_applied(g_applied_gen);
+        rc = frontend_run(run_secs, &g_stop, apply_config) < 0 ? 1 : 0;
         channels_stop();
     }
     hal_shutdown();

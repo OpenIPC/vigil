@@ -2,6 +2,7 @@
 /* test_core.c — unit tests for the hardware-free core. */
 #define _DEFAULT_SOURCE
 #include <dirent.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,10 +14,14 @@
 #include <pthread.h>
 
 #include "au_norm.h"
+#include "cJSON.h"
+#include "config.h"
+#include "events.h"
 #include "hal_capture.h"
 #include "rtp_depay.h"
 #include "source.h"
 #include "rtsp_client.h"
+#include "schema.h"
 #include "seg_writer.h"
 #include "sps.h"
 
@@ -508,6 +513,392 @@ static void test_seg_writer(void)
     if (system(cmd)) {}
 }
 
+
+/* ---- settings schema ------------------------------------------------------------- */
+
+/* A schema of its own, with every field type (vigild's has no enum yet). */
+typedef struct { char host[16]; int port; } t_item_t;
+typedef struct {
+    struct { char mode[8]; int level; int on; char tag[8]; } main;
+    t_item_t items[3];
+    int      n_items;
+} t_root_t;
+
+static int t_check_tag(const char *v, char *msg, size_t cap)
+{
+    if (strchr(v, ' ')) { snprintf(msg, cap, "no spaces"); return -1; }
+    return 0;
+}
+
+static const char *const t_modes[] = { "fast", "slow", NULL };
+static const schema_field_t t_main[] = {
+    { .key = "mode", .type = SCHEMA_ENUM, .off = offsetof(t_root_t, main.mode) - offsetof(t_root_t, main),
+      .size = 8, .def_str = "fast", .values = t_modes },
+    { .key = "level", .type = SCHEMA_INT, .off = offsetof(t_root_t, main.level) - offsetof(t_root_t, main),
+      .def_int = 5, .min = 1, .max = 10 },
+    { .key = "on", .type = SCHEMA_BOOL, .off = offsetof(t_root_t, main.on) - offsetof(t_root_t, main),
+      .def_int = 1 },
+    { .key = "tag", .type = SCHEMA_STRING, .off = offsetof(t_root_t, main.tag) - offsetof(t_root_t, main),
+      .size = 8, .def_str = "x", .check = t_check_tag },
+};
+static const schema_field_t t_item[] = {
+    { .key = "host", .type = SCHEMA_STRING, .off = offsetof(t_item_t, host), .size = 16, .required = 1 },
+    { .key = "port", .type = SCHEMA_INT, .off = offsetof(t_item_t, port), .def_int = 80, .min = 1, .max = 65535 },
+};
+static const schema_section_t t_sections[] = {
+    { .key = "main", .off = offsetof(t_root_t, main), .fields = t_main, .n_fields = 4 },
+    { .key = "items", .is_array = 1, .off = offsetof(t_root_t, items), .count_off = offsetof(t_root_t, n_items),
+      .item_size = sizeof(t_item_t), .max_items = 3, .fields = t_item, .n_fields = 2 },
+};
+static const schema_t t_schema = { .version = 1, .sections = t_sections, .n_sections = 2 };
+
+/* Parse `json` into a fresh t_root_t; returns schema_from_json's result. */
+static int t_parse(const char *json, t_root_t *r, int strict, schema_errors_t *errs)
+{
+    memset(r, 0, sizeof *r);
+    memset(errs, 0, sizeof *errs);
+    schema_defaults(&t_schema, r);
+    cJSON *doc = cJSON_Parse(json);
+    if (!doc) return -2;
+    int rc = schema_from_json(&t_schema, doc, r, strict, errs);
+    cJSON_Delete(doc);
+    return rc;
+}
+
+static int has_error(const schema_errors_t *e, const char *path, const char *msg_part)
+{
+    for (int i = 0; i < e->n; ++i)
+        if (!strcmp(e->e[i].path, path) && strstr(e->e[i].msg, msg_part)) return 1;
+    return 0;
+}
+
+static void test_schema(void)
+{
+    t_root_t r;
+    schema_errors_t e;
+
+    CHECK(t_parse("{}", &r, 1, &e) == 0 && !strcmp(r.main.mode, "fast") && r.main.level == 5 &&
+          r.main.on == 1 && !strcmp(r.main.tag, "x") && r.n_items == 0, "defaults");
+    CHECK(t_parse("{\"version\":1,\"main\":{\"mode\":\"slow\",\"level\":10,\"on\":false},"
+                  "\"items\":[{\"host\":\"a\"},{\"host\":\"b\",\"port\":554}]}", &r, 1, &e) == 0,
+          "good document: %s", e.n ? e.e[0].msg : "");
+    CHECK(!strcmp(r.main.mode, "slow") && r.main.level == 10 && r.main.on == 0 && r.n_items == 2 &&
+          r.items[0].port == 80 && r.items[1].port == 554 && !strcmp(r.items[1].host, "b"), "values");
+
+    /* limits, types, enums */
+    CHECK(t_parse("{\"main\":{\"level\":11}}", &r, 1, &e) < 0 && has_error(&e, "main.level", "out of range 1..10"),
+          "max");
+    CHECK(t_parse("{\"main\":{\"level\":0}}", &r, 1, &e) < 0 && has_error(&e, "main.level", "out of range"), "min");
+    CHECK(t_parse("{\"main\":{\"level\":2.5}}", &r, 1, &e) < 0 && has_error(&e, "main.level", "integer"),
+          "fraction");
+    CHECK(t_parse("{\"main\":{\"level\":1e12}}", &r, 1, &e) < 0 && has_error(&e, "main.level", "integer"),
+          "beyond int");
+    CHECK(t_parse("{\"main\":{\"level\":\"5\"}}", &r, 1, &e) < 0 && has_error(&e, "main.level", "integer"),
+          "string for int");
+    CHECK(t_parse("{\"main\":{\"on\":1}}", &r, 1, &e) < 0 && has_error(&e, "main.on", "true or false"),
+          "number for bool");
+    CHECK(t_parse("{\"main\":{\"mode\":\"medium\"}}", &r, 1, &e) < 0 &&
+          has_error(&e, "main.mode", "one of: fast, slow"), "enum");
+    CHECK(t_parse("{\"main\":{\"tag\":\"a b\"}}", &r, 1, &e) < 0 && has_error(&e, "main.tag", "no spaces"),
+          "custom check");
+    CHECK(t_parse("{\"main\":{\"tag\":\"12345678\"}}", &r, 1, &e) < 0 && has_error(&e, "main.tag", "at most 7"),
+          "too long");
+    CHECK(t_parse("{\"main\":{\"tag\":\"a\\nb\"}}", &r, 1, &e) < 0 && has_error(&e, "main.tag", "control"),
+          "control character");
+    CHECK(t_parse("{\"main\":[]}", &r, 1, &e) < 0 && has_error(&e, "main", "object"), "array for object");
+    CHECK(t_parse("{\"items\":{}}", &r, 1, &e) < 0 && has_error(&e, "items", "array"), "object for array");
+    CHECK(t_parse("{\"items\":[{},{},{},{}]}", &r, 1, &e) < 0 && has_error(&e, "items", "at most 3"),
+          "too many items");
+    CHECK(t_parse("{\"items\":[{\"port\":1}]}", &r, 1, &e) < 0 && has_error(&e, "items[0].host", "required"),
+          "required");
+    CHECK(t_parse("{\"items\":[{\"host\":\"\"}]}", &r, 1, &e) < 0 && has_error(&e, "items[0].host", "empty"),
+          "required but empty");
+    CHECK(t_parse("{\"version\":2}", &r, 1, &e) < 0 && has_error(&e, "version", "must be 1"), "version");
+    CHECK(t_parse("[]", &r, 1, &e) < 0, "not an object");
+
+    /* every error is reported, not only the first */
+    CHECK(t_parse("{\"main\":{\"level\":0,\"on\":2},\"items\":[{\"port\":0}]}", &r, 1, &e) < 0 && e.total == 4,
+          "all errors: %d", e.total);
+
+    /* unknown keys: errors from the API (strict), skipped in a file */
+    CHECK(t_parse("{\"main\":{\"levle\":3},\"extra\":{}}", &r, 1, &e) < 0 &&
+          has_error(&e, "main.levle", "unknown setting") && has_error(&e, "extra", "unknown section"),
+          "unknown keys, strict");
+    CHECK(t_parse("{\"main\":{\"levle\":3,\"level\":4},\"extra\":{}}", &r, 0, &e) == 0 && r.main.level == 4,
+          "unknown keys, lenient");
+
+    /* schema_validate: the same limits on a struct built in C */
+    t_parse("{}", &r, 1, &e);
+    r.main.level = 99;
+    snprintf(r.main.mode, sizeof r.main.mode, "x");
+    memset(&e, 0, sizeof e);
+    CHECK(schema_validate(&t_schema, &r, &e) < 0 && has_error(&e, "main.level", "range") &&
+          has_error(&e, "main.mode", "one of"), "validate");
+
+    /* to JSON and back */
+    t_parse("{\"main\":{\"mode\":\"slow\",\"level\":7,\"on\":false,\"tag\":\"t\"},\"items\":[{\"host\":\"h\",\"port\":9}]}",
+            &r, 1, &e);
+    cJSON *doc = schema_to_json(&t_schema, &r, 0);
+    char *text = cJSON_PrintUnformatted(doc);
+    cJSON_Delete(doc);
+    t_root_t r2;
+    CHECK(text && t_parse(text, &r2, 1, &e) == 0 && r2.main.level == 7 && !r2.main.on &&
+          !strcmp(r2.main.mode, "slow") && r2.n_items == 1 && r2.items[0].port == 9, "round trip: %s", text);
+    free(text);
+
+    /* the schema describes itself */
+    doc = schema_describe(&t_schema);
+    text = cJSON_PrintUnformatted(doc);
+    cJSON_Delete(doc);
+    CHECK(text && strstr(text, "\"path\":\"main.mode\"") && strstr(text, "\"values\":[\"fast\",\"slow\"]") &&
+          strstr(text, "\"path\":\"items[].port\"") && strstr(text, "\"min\":1,\"max\":65535"),
+          "describe: %s", text ? text : "");
+    free(text);
+}
+
+static void test_redact(void)
+{
+    static const char *const cases[][2] = {
+        { "rtsp://admin:12345@10.0.0.2/stream", "rtsp://admin:***@10.0.0.2/stream" },
+        { "rtsp://10.0.0.2:554/stream", "rtsp://10.0.0.2:554/stream" },
+        { "rtsp://admin@10.0.0.2/s", "rtsp://admin@10.0.0.2/s" },
+        { "netip://admin:@10.0.0.3:34567/?ch=0", "netip://admin:@10.0.0.3:34567/?ch=0" },
+        { "netip://admin:p@ss/w@10.0.0.3/?ch=0", "netip://admin:***@10.0.0.3/?ch=0" },
+        { "rtsp://u:pw@h/x?token=a@b", "rtsp://u:***@h/x?token=a@b" },
+        { "capture:0", "capture:0" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
+        char out[128];
+        schema_redact_url(cases[i][0], out, sizeof out);
+        CHECK(!strcmp(out, cases[i][1]), "redact %s -> %s", cases[i][0], out);
+    }
+}
+
+/* ---- configuration file and store ---------------------------------------------------------- */
+
+static void write_file(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fputs(text, f);
+    fclose(f);
+}
+
+static char *read_file(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+    char *b = calloc(1, 65536);
+    if (fread(b, 1, 65535, f)) {}
+    fclose(f);
+    return b;
+}
+
+static char *config_text(const vigil_config_t *c)
+{
+    cJSON *doc = schema_to_json(&config_schema, c, 0);
+    char *t = cJSON_PrintUnformatted(doc);
+    cJSON_Delete(doc);
+    return t;
+}
+
+static void test_config_file(void)
+{
+    char dir[] = "/tmp/vigil-cfg-XXXXXX", path[128], tmp[160], err[160];
+    if (!mkdtemp(dir)) return;
+    snprintf(path, sizeof path, "%s/vigil.json", dir);
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    vigil_config_t c, d;
+    schema_errors_t e = { 0 };
+
+    CHECK(config_load_file(path, &c, &e) == 1 && c.n_cameras == 0 && c.record.segment == 60 &&
+          c.record.keep == 3 && !c.record.path[0] && c.api.auth == 1 && !strcmp(c.api.listen, "0.0.0.0:8080"),
+          "missing file: defaults");
+
+    /* save + load: the same settings */
+    c.n_cameras = 2;
+    snprintf(c.cameras[0].url, sizeof c.cameras[0].url, "rtsp://admin:secret@10.0.0.2/stream");
+    snprintf(c.cameras[0].name, sizeof c.cameras[0].name, "Gate");
+    c.cameras[0].enabled = 1;
+    snprintf(c.cameras[1].url, sizeof c.cameras[1].url, "netip://admin:@10.0.0.3/?ch=1&stream=extra");
+    c.cameras[1].enabled = 0;
+    snprintf(c.record.path, sizeof c.record.path, "/mnt/sda1/rec");
+    c.record.segment = 300;
+    CHECK(config_save_file(path, &c, err, sizeof err) == 0, "save: %s", err);
+    struct stat st;
+    CHECK(stat(path, &st) == 0 && (st.st_mode & 0777) == 0600, "saved 0600 (it holds passwords)");
+    CHECK(stat(tmp, &st) < 0, "no .tmp left");
+    memset(&e, 0, sizeof e);
+    CHECK(config_load_file(path, &d, &e) == 0, "load what was saved: %s", e.n ? e.e[0].msg : "");
+    char *a = config_text(&c), *b = config_text(&d);
+    CHECK(a && b && !strcmp(a, b), "round trip:\n%s\n%s", a, b);
+    char *raw = read_file(path);
+    CHECK(raw && strstr(raw, "admin:secret@"), "the file keeps the password");
+    free(a);
+    free(b);
+    free(raw);
+
+    /* the documented example stays valid */
+    char example[512];
+    snprintf(example, sizeof example, "%s/../../docs/vigil.example.json", g_data);
+    memset(&e, 0, sizeof e);
+    CHECK(config_load_file(example, &d, &e) == 0 && d.n_cameras == 3 && !d.cameras[2].enabled,
+          "docs/vigil.example.json: %s", e.n ? e.e[0].msg : "");
+
+    /* invalid files: defaults, with the reason */
+    write_file(path, "{\"record\": {\"segment\": 60,}}");
+    memset(&e, 0, sizeof e);
+    CHECK(config_load_file(path, &d, &e) < 0 && e.n && strstr(e.e[0].msg, "not valid JSON") &&
+          d.record.segment == 60 && !d.n_cameras, "bad JSON: %s", e.n ? e.e[0].msg : "");
+    write_file(path, "{\"record\": {\"segment\": 5}, \"cameras\": [{\"url\": \"http://x/\"}]}");
+    memset(&e, 0, sizeof e);
+    CHECK(config_load_file(path, &d, &e) < 0 && has_error(&e, "record.segment", "range") &&
+          has_error(&e, "cameras[0].url", "not a camera URL") && !d.n_cameras, "bad values");
+    write_file(path, "{\"version\": 1, \"future\": {\"x\": 1}, \"record\": {\"segment\": 90, \"later\": true}}");
+    memset(&e, 0, sizeof e);
+    CHECK(config_load_file(path, &d, &e) == 0 && d.record.segment == 90, "a newer file's keys are skipped");
+    write_file(path, "{\"api\": {\"listen\": \"1.2.3:80\"}}");
+    memset(&e, 0, sizeof e);
+    CHECK(config_load_file(path, &d, &e) < 0 && has_error(&e, "api.listen", "IPv4"), "listen address");
+    write_file(path, "{\"api\": {\"listen\": \"0.0.0.0:0\"}}");
+    memset(&e, 0, sizeof e);
+    CHECK(config_load_file(path, &d, &e) < 0 && has_error(&e, "api.listen", "port"), "listen port");
+    write_file(path, "{\"record\": {\"path\": \"rec\"}}");
+    memset(&e, 0, sizeof e);
+    CHECK(config_load_file(path, &d, &e) < 0 && has_error(&e, "record.path", "absolute"), "relative path");
+
+    /* atomic save: a failed save leaves the old file as it was */
+    write_file(path, "old");
+    if (geteuid() != 0) {                       /* root writes anywhere */
+        chmod(dir, 0500);
+        CHECK(config_write_atomic(path, "new", 3, err, sizeof err) < 0 && strstr(err, ".tmp"),
+              "save into a read-only directory fails");
+        chmod(dir, 0700);
+        raw = read_file(path);
+        CHECK(raw && !strcmp(raw, "old"), "old file intact after a failed save");
+        free(raw);
+    }
+    CHECK(config_write_atomic(path, "new", 3, err, sizeof err) == 0, "save: %s", err);
+    raw = read_file(path);
+    CHECK(raw && !strcmp(raw, "new") && stat(tmp, &st) < 0, "replaced");
+    free(raw);
+
+    char cmd[64];
+    snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
+    if (system(cmd)) {}
+}
+
+static void test_config_store(void)
+{
+    char dir[] = "/tmp/vigil-cfg-XXXXXX", path[128], bad[140];
+    if (!mkdtemp(dir)) return;
+    snprintf(path, sizeof path, "%s/vigil.json", dir);
+    snprintf(bad, sizeof bad, "%s.bad", path);
+    write_file(path, "{\"record\": {\"segment\": 1}}");             /* invalid: defaults */
+    CHECK(config_init(path) < 0, "invalid file reported");
+    vigil_config_t c;
+    unsigned g0 = config_get(&c);
+    CHECK(c.record.segment == 60, "defaults in force");
+
+    schema_errors_t e = { 0 };
+    static const char cams[] = "[{\"url\":\"rtsp://admin:s3cret@10.0.0.2/live\",\"name\":\"Gate\"},"
+                               "{\"url\":\"netip://admin:@10.0.0.3/\",\"enabled\":false}]";
+    CHECK(config_put_json("cameras", cams, strlen(cams), &e) == CONFIG_OK, "put cameras: %s",
+          e.n ? e.e[0].msg : "");
+    unsigned g1 = config_get(&c);
+    CHECK(g1 == g0 + 1 && c.n_cameras == 2 && c.cameras[0].enabled && !c.cameras[1].enabled &&
+          !strcmp(c.cameras[0].url, "rtsp://admin:s3cret@10.0.0.2/live"), "stored");
+    struct stat st;
+    CHECK(stat(bad, &st) == 0, "the invalid file is kept as .bad");
+    char *raw = read_file(path);
+    CHECK(raw && strstr(raw, "s3cret"), "saved to the file");
+    free(raw);
+
+    /* redacted out, "***" in = keep; cameras may be reordered */
+    char *out = config_get_json("cameras", 1);
+    CHECK(out && strstr(out, "admin:***@10.0.0.2") && !strstr(out, "s3cret"), "redacted: %s", out ? out : "");
+    free(out);
+    out = config_get_json(NULL, 1);
+    CHECK(out && !strstr(out, "s3cret") && strstr(out, "\"record\""), "whole document redacted");
+    free(out);
+    static const char back[] = "[{\"url\":\"netip://admin:@10.0.0.3/\"},"
+                               "{\"url\":\"rtsp://admin:***@10.0.0.2/live\",\"name\":\"Gate 2\"}]";
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("cameras", back, strlen(back), &e) == CONFIG_OK, "put redacted back");
+    config_get(&c);
+    CHECK(!strcmp(c.cameras[1].url, "rtsp://admin:s3cret@10.0.0.2/live") && !strcmp(c.cameras[1].name, "Gate 2"),
+          "*** kept the stored password: %s", c.cameras[1].url);
+    static const char wrong[] = "[{\"url\":\"rtsp://admin:***@10.0.0.9/live\"}]";
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("cameras", wrong, strlen(wrong), &e) == CONFIG_EINVAL &&
+          has_error(&e, "cameras[0].url", "does not match"), "*** for an unknown camera");
+
+    /* errors change nothing */
+    unsigned g2 = config_generation();
+    raw = read_file(path);
+    static const char badrec[] = "{\"segment\": 4000, \"keep\": -1}";
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("record", badrec, strlen(badrec), &e) == CONFIG_EINVAL && e.total == 2 &&
+          has_error(&e, "record.segment", "range") && has_error(&e, "record.keep", "range"), "bad record");
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("record", "{\"segment\":", 11, &e) == CONFIG_EINVAL && e.n &&
+          strstr(e.e[0].msg, "JSON"), "bad JSON");
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("record", "{} {}", 5, &e) == CONFIG_EINVAL && e.n && strstr(e.e[0].msg, "byte 3"),
+          "trailing data after the document: %s", e.n ? e.e[0].msg : "");
+    CHECK(config_put_json("nope", "{}", 2, &e) == CONFIG_ENOENT, "unknown section");
+    char *raw2 = read_file(path);
+    CHECK(config_generation() == g2 && raw && raw2 && !strcmp(raw, raw2), "nothing changed on errors");
+    free(raw);
+    free(raw2);
+    CHECK(config_put_json("record", "{} \n", 4, &e) == CONFIG_OK, "trailing white space is fine");
+
+    /* the whole document: what it omits gets the defaults */
+    static const char whole[] = "{\"version\":1,\"record\":{\"path\":\"/rec\",\"segment\":120}}";
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json(NULL, whole, strlen(whole), &e) == CONFIG_OK, "put whole");
+    config_get(&c);
+    CHECK(c.n_cameras == 0 && c.record.segment == 120 && c.record.keep == 3 && !strcmp(c.record.path, "/rec"),
+          "whole document replaced");
+
+    channels_config_t cc;
+    c.n_cameras = 2;
+    snprintf(c.cameras[0].url, sizeof c.cameras[0].url, "capture:0");
+    c.cameras[0].enabled = 0;
+    snprintf(c.cameras[1].url, sizeof c.cameras[1].url, "capture:1");
+    c.cameras[1].enabled = 1;
+    config_to_channels(&c, &cc);
+    CHECK(cc.n == 2 && cc.urls[0] == NULL && !strcmp(cc.urls[1], "capture:1") && !strcmp(cc.rec_dir, "/rec") &&
+          cc.seg_secs == 120, "to channels: a disabled camera keeps its tile");
+
+    char cmd[64];
+    snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
+    if (system(cmd)) {}
+}
+
+/* ---- events: every reader sees every event ---------------------------------------- */
+
+static void test_events(void)
+{
+    uint64_t ui = events_head(), api = events_head();
+    events_push(2, "online");
+    events_push(0, "config %s", "applied");
+    event_t ev;
+    CHECK(events_next(&ui, &ev) && ev.ch == 2 && !strcmp(ev.text, "online"), "first reader");
+    CHECK(events_next(&ui, &ev) && ev.ch == 0 && !strcmp(ev.text, "config applied"), "first reader, 2");
+    CHECK(!events_next(&ui, &ev), "first reader drained");
+    CHECK(events_next(&api, &ev) && ev.ch == 2 && events_next(&api, &ev) && ev.ch == 0 && !ev.missed,
+          "second reader sees the same events");
+
+    /* a reader that falls behind skips to the oldest kept and is told */
+    uint64_t slow = events_head();
+    for (int i = 0; i < EVENTS_KEEP + 5; ++i) events_push(1, "e%d", i);
+    CHECK(events_next(&slow, &ev) && ev.missed == 5 && !strcmp(ev.text, "e5"), "missed %u, %s", ev.missed, ev.text);
+    int n = 1;
+    while (events_next(&slow, &ev)) ++n;
+    CHECK(n == EVENTS_KEEP && !strcmp(ev.text, "e68"), "kept %d, last %s", n, ev.text);
+}
+
 int main(int argc, char **argv)
 {
     g_data = argc > 1 ? argv[1] : "tests/data";
@@ -519,6 +910,11 @@ int main(int argc, char **argv)
     test_rtsp_helpers();
     test_capture_source();
     test_seg_writer();
+    test_schema();
+    test_redact();
+    test_config_file();
+    test_config_store();
+    test_events();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

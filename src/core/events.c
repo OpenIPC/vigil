@@ -1,44 +1,52 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* events.c — event queue (see events.h). */
+/* events.c — event ring (see events.h). */
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 
 #include "events.h"
 
-#define EVQ_LEN 16
-
-static struct { int ch; char text[40]; } g_q[EVQ_LEN];
-static int             g_head, g_n;
+static event_t         g_ring[EVENTS_KEEP];
+static uint64_t        g_last;          /* seq of the newest event, 0 = none */
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
 void events_push(int ch, const char *fmt, ...)
 {
-    char text[40];
+    char text[sizeof g_ring[0].text];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(text, sizeof text, fmt, ap);
     va_end(ap);
 
     pthread_mutex_lock(&g_lock);
-    int slot = (g_head + g_n) % EVQ_LEN;
-    if (g_n == EVQ_LEN) g_head = (g_head + 1) % EVQ_LEN;
-    else ++g_n;
-    g_q[slot].ch = ch;
-    snprintf(g_q[slot].text, sizeof g_q[slot].text, "%s", text);
+    event_t *e = &g_ring[g_last % EVENTS_KEEP];
+    e->seq = ++g_last;
+    e->ch = ch;
+    e->time = time(NULL);
+    e->missed = 0;
+    snprintf(e->text, sizeof e->text, "%s", text);
     pthread_mutex_unlock(&g_lock);
 }
 
-int events_pop(int *ch, char *text, size_t cap)
+int events_next(uint64_t *cursor, event_t *ev)
 {
     pthread_mutex_lock(&g_lock);
-    int got = g_n > 0;
+    int got = *cursor < g_last;
     if (got) {
-        *ch = g_q[g_head].ch;
-        snprintf(text, cap, "%s", g_q[g_head].text);
-        g_head = (g_head + 1) % EVQ_LEN;
-        --g_n;
+        uint64_t oldest = g_last > EVENTS_KEEP ? g_last - EVENTS_KEEP + 1 : 1;
+        uint64_t want = *cursor + 1 < oldest ? oldest : *cursor + 1;
+        *ev = g_ring[(want - 1) % EVENTS_KEEP];
+        ev->missed = (unsigned)(want - (*cursor + 1));
+        *cursor = want;
     }
     pthread_mutex_unlock(&g_lock);
     return got;
+}
+
+uint64_t events_head(void)
+{
+    pthread_mutex_lock(&g_lock);
+    uint64_t h = g_last;
+    pthread_mutex_unlock(&g_lock);
+    return h;
 }

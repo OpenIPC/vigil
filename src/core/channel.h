@@ -19,7 +19,8 @@
 #define CHANNEL_MAX  16
 
 typedef struct {
-    const char *urls[CHANNEL_MAX];  /* source URLs, in tile order */
+    const char *urls[CHANNEL_MAX];  /* source URLs, in tile order; NULL: an empty tile */
+    const char *names[CHANNEL_MAX]; /* optional display names (NULL or "") */
     int         n;
     const char *rec_dir;            /* NULL: do not record */
     int         seg_secs;           /* segment length */
@@ -35,17 +36,26 @@ typedef struct {
     vg_codec_t codec;
     unsigned   width, height, fps;  /* fps averaged over 2 s */
     char       host[64];
+    char       name[32];
     char       state[48];           /* "CONNECTING", the last error, ... */
 } channel_status_t;
 
 /* Start every configured channel. `tiles` (may be NULL) are the screen
- * rectangles for the decoders' output, n of them. Returns 0, or -1 on a
- * bad URL. */
+ * rectangles for the decoders' output, CHANNEL_MAX of them. Returns 0, or
+ * -1 on a bad URL (nothing is left running). */
 int  channels_start(const channels_config_t *cfg, const vg_rect_t *tiles);
+
+/* Make the running channels match `cfg`, from the thread that called
+ * channels_start: a channel whose URL and recording settings are unchanged
+ * keeps running (a new name is just taken over), the others are stopped
+ * and started again, together. Events say what happened. Returns the
+ * number of channels that could not be started. */
+int  channels_apply(const channels_config_t *cfg);
 void channels_stop(void);
 
-/* Snapshot of channel `idx` (0-based). */
+/* Snapshot of channel `idx` (0-based). Any thread, at any time. */
 void channels_status(int idx, channel_status_t *st);
+/* Tiles in use: the last configured channel + 1. */
 int  channels_count(void);
 
 #endif /* CHANNEL_H */

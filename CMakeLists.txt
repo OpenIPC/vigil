@@ -18,13 +18,24 @@ endif()
 add_compile_options(-Wall -Wno-unused-function)
 find_package(Threads REQUIRED)
 
+# cJSON (third_party/cJSON, MIT): the configuration file and the API's JSON.
+if(NOT EXISTS ${CMAKE_SOURCE_DIR}/third_party/cJSON/cJSON.c)
+  message(FATAL_ERROR "third_party/cJSON is empty: git submodule update --init")
+endif()
+add_library(cjson STATIC third_party/cJSON/cJSON.c)
+target_include_directories(cjson PUBLIC third_party/cJSON)
+target_link_libraries(cjson PUBLIC m)
+
 # ---- core: hardware-agnostic, builds and tests on any host ------------------
 add_library(vigil_core STATIC
   src/core/au_norm.c
   src/core/channel.c
+  src/core/config.c
+  src/core/config_schema.c
   src/core/events.c
   src/core/md5.c
   src/core/net.c
+  src/core/schema.c
   src/core/seg_writer.c
   src/core/sps.c
   src/core/source/rtp_depay.c
@@ -34,7 +45,7 @@ add_library(vigil_core STATIC
   src/core/source/source_netip.c
   src/core/source/source_rtsp.c)
 target_include_directories(vigil_core PUBLIC src/core src/core/source src/hal)
-target_link_libraries(vigil_core PUBLIC Threads::Threads)
+target_link_libraries(vigil_core PUBLIC cjson Threads::Threads)
 
 # ---- platform: sets VIGIL_PLATFORM_SOURCES / _LIBS / _DEFS, VIGIL_HAS_UI ----
 set(VIGIL_HAS_UI OFF)
