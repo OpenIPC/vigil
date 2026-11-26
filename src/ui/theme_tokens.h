@@ -17,6 +17,16 @@
 #define VG_COLOR_TEXT2               0x9AA3AF
 #define VG_COLOR_CHIP                0x0B0D11
 #define VG_COLOR_FOCUS               0xFFFFFF
+#define VG_COLOR_MENU_TOP            0x16233A
+#define VG_COLOR_MENU_BOTTOM         0x0A0F18
+#define VG_COLOR_CARD                0x1A263A
+#define VG_COLOR_CARD_HOVER          0x233550
+#define VG_COLOR_ICON_PLAYBACK       0x4FA3F7
+#define VG_COLOR_ICON_AI             0xB07CF7
+#define VG_COLOR_ICON_ALARM          0xF25C3B
+#define VG_COLOR_ICON_OPERATION      0x2FC98A
+#define VG_COLOR_ICON_BACKUP         0xF5A623
+#define VG_COLOR_ICON_DISPLAY        0x3BC4D8
 
 #define VG_SPACE_XS                  4
 #define VG_SPACE_SM                  8
@@ -41,6 +51,10 @@
 #define VG_SIZE_ICON_DOT             10
 #define VG_SIZE_FOCUS_RING           3
 #define VG_SIZE_FOCUS_GAP            2
+#define VG_SIZE_CARD_W               376
+#define VG_SIZE_CARD_H               208
+#define VG_SIZE_ICON_CARD            96
+#define VG_SIZE_ICON_ROW             28
 #define VG_SIZE_PAGE_HEADER          56
 #define VG_SIZE_BUTTON               40
 #define VG_SIZE_CURSOR               19

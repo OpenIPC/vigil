@@ -537,11 +537,31 @@ ui_page_t *ui_page_push(const char *title)
     return p;
 }
 
+ui_page_t *ui_page_push_plain(void)
+{
+    if (g_depth == STACK_MAX) return NULL;
+    ui_page_t *p = calloc(1, sizeof *p);
+    if (!p) return NULL;
+    ui_popup_close();
+    p->group = lv_group_create();
+    p->scr = lv_obj_create(NULL);
+    ui_plain(p->scr);
+    lv_obj_add_style(p->scr, &ui_st_screen, 0);
+    lv_obj_add_event_cb(p->scr, page_deleted_cb, LV_EVENT_DELETE, p);
+    p->body = lv_obj_create(p->scr);
+    ui_plain(p->body);
+    lv_obj_set_size(p->body, LV_PCT(100), LV_PCT(100));
+    g_stack[g_depth++] = p;
+    lv_screen_load(p->scr);
+    focus_sync();
+    return p;
+}
+
 void ui_page_ready(ui_page_t *p)
 {
-    uint32_t n = lv_obj_get_child_count(p->actions);
+    uint32_t n = p->actions ? lv_obj_get_child_count(p->actions) : 0;
     for (uint32_t i = 0; i < n; ++i) lv_group_add_obj(p->group, lv_obj_get_child(p->actions, (int32_t)i));
-    if (g_kbd_used) lv_group_focus_next(p->group);      /* from Back to the first */
+    if (g_kbd_used && p->header) lv_group_focus_next(p->group);   /* from Back to the first */
 }
 
 void ui_page_close(ui_page_t *p)

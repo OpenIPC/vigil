@@ -476,16 +476,18 @@ static void test_menu_and_settings(void)
     move_to(W / 2, H - 1);
     run(300);
     click_text("Main menu");
-    CHECK(ui_page_top() && find("Recording", 0) && find("Cameras", 0) && find("System", 0), "main menu");
+    CHECK(ui_page_top() && find("STORAGE", 0) && find("CAMERA", 0) && find("SYSTEM", 0) && find("PLAYBACK", 0) &&
+          find("DISPLAY", 0) && find("MANAGEMENT", 0), "main menu: cards and the management row");
     shot("menu");
 
-    lv_obj_t *rec = lv_obj_get_parent(find("Recording", 0));
+    lv_obj_t *rec = lv_obj_get_parent(find("STORAGE", 0));
     int rx, ry;
     center_of(rec, &rx, &ry);
     move_to(rx, ry);
     CHECK(lv_obj_has_state(rec, LV_STATE_HOVERED), "the tile under the pointer is hovered");
-    click_text("Recording");
+    click_text("STORAGE");
     CHECK(find("Recording directory", 0) && find("Segment length (s)", 0), "recording form from the schema");
+    CHECK(find("Not recording: no directory set.", 1), "the recording's state");
     lv_obj_t *path = textarea(0), *seg = textarea(1);
     CHECK(path && seg && !strcmp(lv_textarea_get_text(seg), "60"), "values from the store");
 
@@ -515,7 +517,7 @@ static void test_menu_and_settings(void)
     button(BTN_RIGHT);                          /* back to the menu */
     CHECK(find("Main menu", 0), "back from the form");
 
-    click_text("HTTP API");
+    click_text("NETWORK");
     CHECK(find("applies after restart", 1), "non-live setting marked");
     click_text("Listen on");                    /* the label: no keyboard */
     lv_obj_t *listen = textarea(0);
@@ -529,12 +531,20 @@ static void test_menu_and_settings(void)
     shot("keyboard");
     button(BTN_RIGHT);                          /* closes the keyboard */
     button(BTN_RIGHT);                          /* leaves the page (unchanged) */
-    CHECK(find("System", 0) && !ui_popup_is_open(), "back in the menu");
+    CHECK(find("SYSTEM", 0) && !ui_popup_is_open(), "back in the menu");
+
+    /* A function vigil does not have yet: said so. */
+    click_text("BACKUP");
+    CHECK(ui_popup_is_open() && find("Backup is not available yet", 1), "BACKUP: not there yet");
+    button(BTN_RIGHT);
+    click_text("DISPLAY");
+    CHECK(find("top right", 0), "DISPLAY: the display page");
+    button(BTN_RIGHT);
 }
 
 static void test_cameras(void)
 {
-    click_text("Cameras");
+    click_text("CAMERA");
     CHECK(find("rtsp://admin:***@192.168.1.10/stream1", 0), "URL redacted as in the API");
     shot("cameras");
     lv_obj_t *edit = find("Edit", 1);
@@ -581,7 +591,7 @@ static void test_cameras(void)
 static void test_system(void)
 {
     run(VG_DURATION_TOAST);
-    click_text("System");
+    click_text("SYSTEM");
     CHECK(find("vigild 0.1.0", 0) && find("0 d 01:02:03", 0), "system page");
     shot("system");
     button(BTN_RIGHT);
@@ -601,7 +611,7 @@ static void test_same_redacted_urls(void)
     move_to(W / 2, H - 1);
     run(300);
     click_text("Main menu");
-    click_text("Cameras");
+    click_text("CAMERA");
     lv_obj_t *edit = find_nth(lv_screen_active(), LV_SYMBOL_EDIT "  Edit", 1);
     int x, y;
     center_of(edit, &x, &y);
@@ -628,7 +638,7 @@ static void test_same_redacted_urls(void)
 
 static void test_stale_and_cancel(void)
 {
-    click_text("Recording");
+    click_text("STORAGE");
     lv_obj_t *seg = textarea(1);
     lv_textarea_set_text(seg, "300");
     schema_errors_t se = { 0 };
@@ -838,10 +848,22 @@ static void test_keyboard_live(void)
 static void test_keyboard_settings(void)
 {
     key(KEY_M);
-    CHECK(ui_page_top() && find("Recording", 0), "M: main menu");
-    CHECK(has_focus(lv_obj_get_parent(find("Cameras", 0))), "first tile focused");
+    CHECK(ui_page_top() && find("STORAGE", 0), "M: main menu");
+    lv_obj_t *card1 = lv_obj_get_parent(lv_obj_get_parent(find("PLAYBACK", 0)));
+    CHECK(has_focus(card1), "the first card focused");
     key(KEY_RIGHT);
-    CHECK(has_focus(lv_obj_get_parent(find("Recording", 0))), "Right: Recording");
+    key(KEY_DOWN);
+    CHECK(has_focus(lv_obj_get_parent(lv_obj_get_parent(find("BACKUP", 0)))), "Right, Down: BACKUP");
+    shot("menu_focus");
+    key(KEY_ENTER);
+    CHECK(ui_popup_is_open() && find("Backup is not available yet", 1), "Enter: not there yet");
+    key(KEY_ENTER);
+    CHECK(!ui_popup_is_open(), "Enter: closed");
+    key(KEY_TAB);
+    CHECK(has_focus(lv_obj_get_parent(find("CAMERA", 0))), "Tab: the management row");
+    key(KEY_RIGHT);
+    key(KEY_RIGHT);
+    CHECK(has_focus(lv_obj_get_parent(find("STORAGE", 0))), "Right, Right: STORAGE");
     key(KEY_ENTER);
     lv_obj_t *path = textarea(0), *seg = textarea(1);
     CHECK(find("Recording directory", 0) && focused() == path, "Enter: the form, its first field focused");
@@ -898,8 +920,9 @@ static void test_keyboard_settings(void)
 
     /* The camera list: rows by the arrows, Enter edits, Space toggles. */
     key(KEY_LEFT);
+    key(KEY_LEFT);
     key(KEY_ENTER);
-    CHECK(find("Add", 1), "the camera list");
+    CHECK(find("Add", 1), "Left, Left: CAMERA, the camera list");
     CHECK(c.n_cameras == 1, "one camera left by the steps before");
     key(KEY_DOWN);
     CHECK(focused() && lv_obj_check_type(focused(), &lv_button_class) && find("Add", 1) &&

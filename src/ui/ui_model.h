@@ -31,6 +31,8 @@ typedef struct {
     int      live;              /* video is arriving */
     int      recording;
     int      motion;            /* the camera reports motion */
+    char     rec_state[24];     /* "" (not recording), "recording", "ready", "failed",
+                                   "waiting for disk", "not a disk", "read-only", "error" */
     uint64_t rec_bytes;
     char     name[32];          /* "" : the UI shows "CAM n" */
     char     state[48];         /* not live: "CONNECTING" or the last error */

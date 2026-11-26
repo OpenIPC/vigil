@@ -23,6 +23,7 @@
  * Secret values (camera URLs) are shown redacted, as the API shows them,
  * and an unchanged one keeps the stored password.
  */
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -527,6 +528,35 @@ static void form_close(ui_page_t *p)
     free(f);
 }
 
+/* Storage: what the recording does now, from the channels' states
+ * ("Recording: 2 cameras. Waiting for disk: 2 cameras."). */
+static void storage_state(lv_obj_t *parent)
+{
+    const char *states[UI_MAX_CHANNELS];
+    int counts[UI_MAX_CHANNELS], n = 0;
+    for (int ch = 0; ch < ui_model()->channels && ch < UI_MAX_CHANNELS; ++ch) {
+        const ui_chan_t *st = ui_channel(ch);
+        if (!st->configured || !st->rec_state[0]) continue;
+        int k = 0;
+        while (k < n && strcmp(states[k], st->rec_state)) ++k;
+        if (k == n) {
+            states[n] = st->rec_state;
+            counts[n++] = 0;
+        }
+        ++counts[k];
+    }
+    char text[256] = "";
+    for (int k = 0; k < n; ++k) {
+        size_t len = strlen(text);
+        snprintf(text + len, sizeof text - len, "%s%c%s: %d camera%s.", k ? "  " : "", toupper((unsigned char)states[k][0]),
+                 states[k] + 1, counts[k], counts[k] == 1 ? "" : "s");
+    }
+    lv_obj_t *l = ui_label(parent, "", VG_FONT_MD_LV, UI_C(TEXT));
+    lv_label_set_text_fmt(l, LV_SYMBOL_DRIVE "  %s", n ? text : "Not recording: no directory set.");
+    lv_obj_set_width(l, LV_PCT(100));
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+}
+
 void ui_form_open(int sec, int item)
 {
     const ui_section_t *s = section(sec);
@@ -572,6 +602,7 @@ void ui_form_open(int sec, int item)
         lv_obj_set_width(h, LV_PCT(100));
         lv_label_set_long_mode(h, LV_LABEL_LONG_WRAP);
     }
+    if (!strcmp(s->key, "record")) storage_state(p->body);
     f->general = ui_label(p->body, "", VG_FONT_MD_LV, UI_C(BAD));
     lv_obj_set_width(f->general, LV_PCT(100));
     lv_label_set_long_mode(f->general, LV_LABEL_LONG_WRAP);

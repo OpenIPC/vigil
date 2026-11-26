@@ -63,7 +63,7 @@ target_compile_definitions(vigil_platform PRIVATE ${VIGIL_PLATFORM_DEFS})
 set(VIGILD_SOURCES src/app/main.c src/app/frontend_common.c)
 # The UI (src/ui: LVGL and hal_ui.h only) as a library: vigild links it on
 # platforms with a display, the host build for its screenshot tests.
-set(VIGIL_UI_SOURCES src/ui/ui_app.c src/ui/ui_cursor.c src/ui/ui_form.c
+set(VIGIL_UI_SOURCES src/ui/ui_app.c src/ui/icons.c src/ui/ui_cursor.c src/ui/ui_form.c
     src/ui/ui_layout.c src/ui/ui_live.c src/ui/ui_menu.c src/ui/ui_system.c src/ui/ui_theme.c)
 if(VIGIL_HAS_UI OR (BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING))
   include(cmake/lvgl.cmake)

@@ -51,6 +51,7 @@ static void chan_status(int idx, ui_chan_t *st)
     st->live = cs.live;
     st->recording = cs.recording;
     st->motion = cs.motion;
+    snprintf(st->rec_state, sizeof st->rec_state, "%s", cs.rec_state);
     st->rec_bytes = cs.rec_bytes;
     snprintf(st->name, sizeof st->name, "%s", cs.name);
     snprintf(st->state, sizeof st->state, "%s", cs.state);

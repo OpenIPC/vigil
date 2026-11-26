@@ -16,13 +16,15 @@ live view                  tiles over the whole screen, clock in a corner
  |  navigation bar         bottom edge; Main menu, layouts, < page >, Pin, totals, clock
  |  context menu           right button: Main menu, Channels, Playback, Record, PTZ,
  |                         Display, Split > (layouts); full screen, pages, pin
- +-> Main menu             one tile per settings section + System
-      +-> Cameras          the camera list: Add, Edit, Remove
+ +-> Main menu             cards: PLAYBACK, AI, ALARM, OPERATION, BACKUP, DISPLAY
+      |                    MANAGEMENT: CAMERA, NETWORK, STORAGE, SYSTEM, ACCOUNT
+      +-> CAMERA           the camera list: Add, Edit, Remove
       |    +-> a camera    form: URL, name, enabled
-      +-> Recording        form
-      +-> HTTP API         form
-      +-> System           platform, version, uptime, memory, storage (read-only)
-      +-> Display          output, clock corner, layouts (read-only for now)
+      +-> STORAGE          the recording's state, and its form
+      +-> NETWORK          the HTTP API's form
+      +-> SYSTEM           platform, version, uptime, memory, storage (read-only)
+      |   (OPERATION)
+      +-> DISPLAY          output, clock corner, layouts (read-only for now)
 ```
 
 **Live view.** The tiles take the whole screen (2x2 on a 1280x720 output:
@@ -92,12 +94,30 @@ hi3520dv200 capture pipeline), only the 2x2 view is offered.
 The 16- and 64-channel pictures here come from the headless test, which
 fakes those capabilities.
 
-**Main menu and pages.** Every page has a header with Back, its title,
-its actions (Save, Cancel, Add) and the clock. Back is the header button,
-the **right mouse button** or **Esc**, which go back one level (closing the
-on-screen keyboard or a question first).
+**Main menu.** A bar at the top (vigil and the role, "Main menu", the
+clock, **LIVE** back to the live view, and the account icon, muted: there
+are no accounts yet, so there is no log-out either), six function cards
+(3 x 2, a large icon, an upper-case title and what it is for), and the
+**MANAGEMENT** row of the settings. The cards: PLAYBACK, AI, ALARM,
+OPERATION (the System page), BACKUP and DISPLAY (the Display page).
+PLAYBACK, AI, ALARM and BACKUP are not in vigil yet: their cards are
+there and say "not available yet", the same as Playback and PTZ in the
+context menu. Six cards fill one page at 1280x720, so there are no page
+dots. The management row: CAMERA (the camera list), NETWORK (the HTTP
+API), STORAGE (the recording: what it is doing now, from each channel's
+recording state, and its settings), any other section of the schema with
+its own label, SYSTEM, and ACCOUNT (not there yet). The arrows move over
+the cards and along the row, Tab goes from the cards to the row to LIVE,
+Esc and the right button go back to the live view. The background is a
+dark navy vertical gradient (`menu_top`, `menu_bottom`), the cards a
+little lighter (`card`, `card_hover`).
 
 ![Main menu](../tests/ui/menu.png)
+
+**Pages.** Every other page has a header with Back, its title, its
+actions (Save, Cancel, Add) and the clock. Back is the header button, the
+**right mouse button** or **Esc**, which go back one level (closing the
+on-screen keyboard or a question first).
 
 ## Architecture
 
@@ -200,8 +220,9 @@ first and saves at once.
 
 Nothing else: the HTTP API, `GET /api/v1/schema`, the configuration file
 and the on-screen settings page all follow from the row. A new section
-gets its own tile in the main menu (give it a symbol in
-`ui_menu.c:section_symbol`, or it gets a generic one).
+gets its own button in the main menu's management row (give it a name
+and an icon in `ui_menu.c:section_look`, or it gets its label and the
+settings icon).
 
 ## Design tokens
 
@@ -220,6 +241,22 @@ Both outputs are committed, so building needs no Python; the
 `theme_tokens` test fails when they do not match `theme.json`. To change
 the look: edit `theme.json`, run `scripts/gen-theme.py`, regenerate the
 reference screenshots (below), commit all of it.
+
+### Icons
+
+The main menu's icons are [Tabler Icons](https://tabler.io/icons) (MIT,
+`src/ui/icons/LICENSE`; the SVGs are in `src/ui/icons/`, from release
+3.50.0). `scripts/gen-icons.py` renders each at the size it is shown at
+(96 px on the cards, 28 px in the management row and the top bar) into
+`src/ui/icons.c` and `icons.h` as LVGL **A8** images: alpha only, one byte
+a pixel, coloured when drawn with `image_recolor` from the tokens
+(`icon_playback`, `icon_ai`, ... for the cards). That is a quarter of
+ARGB8888: six 96 px and five 28 px icons take 59 KB. Rendering uses
+librsvg and cairo through ctypes (no Python packages); the generated files
+are committed and record a hash of each source and of the parameters, so
+the `ui_icons` test (`gen-icons.py --check`) needs neither library. To add
+an icon: put its SVG in `src/ui/icons/`, add a line to the script's
+`ICONS`, run it, commit all three.
 
 Everything drawn over a video tile is opaque and has no shadow: on a
 colour-keyed layer (HiSilicon hifb, SigmaStar GOP) a half-transparent pixel

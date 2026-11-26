@@ -26,6 +26,8 @@ if(Python3_FOUND)
   # src/ui/theme_tokens.h and web/theme.css are generated from src/ui/theme.json
   # and committed: they must match it.
   add_test(NAME theme_tokens COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-theme.py --check)
+  # src/ui/icons.[ch] are rendered from src/ui/icons/*.svg and committed.
+  add_test(NAME ui_icons COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen-icons.py --check)
   if(TARGET test_ui)
     # Screenshots of the main screens against tests/ui/*.png
     # (UPDATE=1 ctest -R ui_screens rewrites them).

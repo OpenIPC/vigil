@@ -90,6 +90,9 @@ struct ui_page {
 };
 
 ui_page_t *ui_page_push(const char *title);
+/* A page without the header: `body` is the whole screen, laid out by the
+ * caller (the main menu). */
+ui_page_t *ui_page_push_plain(void);
 /* The page is built: its actions join the focus order after the body
  * (whose widgets the builder added to p->group), and with a keyboard in
  * use the focus starts on the first of them. */
