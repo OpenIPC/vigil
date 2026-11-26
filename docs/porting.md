@@ -77,6 +77,11 @@ static const hal_caps_t g_caps = {
 };
 ```
 
+`.max_channels` also decides the UI's layouts (2x2 up to 4 channels, 3x3
+from 5, 4x4 from 10). Set `.fixed_tiles` when the platform places the
+tiles itself and `hal_display_set_tile` cannot move them: the UI then
+offers only the 2x2 view.
+
 `hal_init(w, h, fps)` brings up the vendor media system and the display
 output at w×h (1280×720 today). If it fails, it must undo what it already
 brought up itself: vigild then exits without calling `hal_shutdown()`.
@@ -113,8 +118,13 @@ MI_DISP, linked with MI_SYS_BindChnPort).
 ## 4. Display: `hal_display.h`
 
 `hal_display_set_tile(ch, r)` puts channel `ch`'s video into rectangle `r`
-(screen pixels, from `frontend_tiles()`). Keep the source's aspect ratio
-inside it, with black bars. `hal_display_clear_tile(ch)` blanks it.
+(screen pixels). Keep the source's aspect ratio inside it, with black bars.
+It is called when a channel starts (the 2x2 tiles of `frontend_tiles()`)
+and again, from the main thread while the decoders run, whenever the UI
+changes the layout or shows a channel full screen: the tile may move and
+grow. `hal_display_clear_tile(ch)` hides the channel until it is placed
+again; nothing of its picture may stay on screen, including in parts of
+the screen no other tile covers now.
 
 ## 5. UI: `hal_ui.h`
 

@@ -22,6 +22,12 @@ fbdev.ko sets its size and format from `/config/fbdev.ini` (1280x720,
 ARGB8888 on OpenIPC); vigild checks them and paints tiles magenta,
 which the GOP's colour key makes see-through.
 
+Layouts and full screen ([ui.md](../ui.md)) move a channel's input port
+window (`hal_display_set_tile`). The decoder keeps the output size it was
+opened with, so a channel opened in a 2x2 tile and then shown full screen
+is scaled up by the display (softer than a decode at full size) until its
+decoder is opened again.
+
 The SDK has no `mi_hdmi`. The HDMI transmitter is
 [opensigmastar](https://github.com/OpenIPC/opensigmastar)'s
 `open_hdmitx.ko`, built from SigmaStar's source, and vigild switches it on
@@ -66,5 +72,8 @@ The display runs at 1280x720 (720p60), the size of vigil's layout.
 Only in emulation: [qemu-bench](https://github.com/OpenIPC/qemu-bench)'s
 `ssr621q` machine, whose decoder and display are emulated (OpenIPC firmware
 image, four cameras over RTSP and NETIP, H.264 and H.265; see the pull
-request that added the platform). Nothing has run on an SSR621Q board yet.
+request that added the platform). The UI (live view, navigation bar,
+context menu, full screen and back, settings saved and applied) was driven
+there with the machine's emulated USB mouse. Nothing has run on an SSR621Q
+board yet.
 The HDMI and VGA signals, hot-plug and decoder limits are unverified.

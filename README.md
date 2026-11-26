@@ -1,8 +1,8 @@
 # vigil
 
 Open-source DVR/NVR software for cheap recorder hardware running
-[OpenIPC](https://openipc.org). It shows cameras on HDMI in a 2×2 view
-with a small status UI and records their streams to disk. One code base
+[OpenIPC](https://openipc.org). It shows cameras on HDMI with a
+mouse-driven UI and records their streams to disk. One code base
 runs on HiSilicon, Rockchip and SigmaStar boards; plain Linux / cloud hosts
 are part of the design.
 
@@ -20,6 +20,10 @@ are part of the design.
   **HTTP/WebSocket API** to read and change it while video keeps running,
   with live status and events; login with the system account
   ([docs/api.md](docs/api.md)).
+- **On-screen UI** with a USB mouse: live view in 1x1 or 2x2 with paging
+  and double-click full screen, a context menu and an auto-hiding
+  navigation bar, and settings pages built from the same schema as the
+  API ([docs/ui.md](docs/ui.md)).
 
 ## Platforms
 
@@ -51,6 +55,8 @@ For a board, see its page under [docs/platforms](docs/platforms/).
   protocol sources, HAL and platforms, and how a stream flows through it.
 - [Configuration and HTTP API](docs/api.md): the configuration file, the
   endpoints, the WebSocket, authentication and password redaction.
+- [On-screen UI](docs/ui.md): screens, data binding, schema-driven
+  settings, design tokens, mouse input, headless tests.
 - [Adding a platform](docs/porting.md): what a new SoC family has to
   implement.
 - Platforms: [HiSilicon](docs/platforms/hisilicon.md),

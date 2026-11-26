@@ -11,7 +11,7 @@ before changing anything structural.
 
 `vigil` is the DVR/NVR application for cheap recorder boards running OpenIPC:
 one daemon, `vigild`, that takes cameras over RTSP or NETIP (or local analog
-inputs on DVR boards), shows them on HDMI in a 2x2 view with an LVGL UI, and
+inputs on DVR boards), shows them on HDMI with a mouse-driven LVGL UI, and
 records the compressed streams without re-encoding. One source tree builds for
 HiSilicon (hi3536dv100, hi3520dv200), Rockchip (RK3588) and a hardware-free
 `generic` platform used by CI and as a plain Linux recorder.
@@ -32,7 +32,9 @@ its HTTP API (`docs/api.md`) edits; options override the file.
   missing something: extend `src/hal/*.h` for every platform instead.
 - **`src/ui` knows LVGL and `hal_ui.h` only.** The UI runs on the main thread;
   channel threads reach it only through `channels_status()` snapshots and the
-  `events` ring.
+  `events` ring. Everything else comes through `ui_model.h`, filled by
+  `src/app/ui_bridge.c`; settings pages save through `config_put_json`,
+  like the API.
 - **`src/api` (CivetWeb threads) never drives channels or the UI.** It reads
   snapshots (`channels_status`, `config_get`, its own `events` cursor) and
   writes the configuration store; the main thread applies a new generation.
@@ -58,14 +60,19 @@ its HTTP API (`docs/api.md`) edits; options override the file.
 - `src/hal/` — the platform contract, declarations only.
 - `src/platform/<name>/` — one HAL implementation per SoC family;
   `src/platform/hisilicon/common/` is shared by the two HiSilicon SoCs.
-- `src/ui/`, `src/app/` — LVGL screens; `main.c` and the UI or headless loop.
+- `src/ui/` — the LVGL app (`docs/ui.md`): live view, menus, settings pages
+  built from the schema; `theme.json` is the design tokens' source
+  (`scripts/gen-theme.py` generates `theme_tokens.h` and `web/theme.css`).
+- `src/app/` — `main.c`, the UI or headless loop, the UI's model
+  (`ui_bridge.c`) and mouse input (`input_evdev.c`).
 - `src/api/` — the HTTP/WebSocket API (`docs/api.md`) and its password check.
 - `cmake/platforms/<name>.cmake` — sources, includes, libraries per platform.
 - `scripts/` — board bring-up (HiSilicon module staging, Rockchip library build).
 - `tests/` — `test_core.c` unit tests, `test_api.c` (password check), a NETIP
   camera emulator, a GStreamer RTSP server, the scripts that run `vigild`
-  against them, and `api_test.py` (the API end to end).
-- `docs/` — architecture, porting guide, one page per platform.
+  against them, `api_test.py` (the API end to end), and `test_ui.c` with
+  `ui_compare.py` (the UI headless, screenshots against `tests/ui/*.png`).
+- `docs/` — architecture, the UI, porting guide, one page per platform.
 
 ## Build
 
@@ -94,8 +101,11 @@ GStreamer RTSP server), including misbehaving-server cases; the end-to-end tests
 decode the recordings with ffmpeg. They record into the build tree with
 `record.allow_rootfs` on: `vigild` records only onto a disk, and refuses
 `/tmp` where it is tmpfs. `api_e2e` drives the HTTP/WebSocket API of a
-running `vigild`. A parser or protocol change comes with a test
-in `tests/test_core.c` that fails without it.
+running `vigild`. `ui_screens` runs the UI on an in-memory display and
+compares screenshots with `tests/ui/*.png`; after an intended change to the
+look, regenerate them (`UPDATE=1 ctest -R ui_screens`) and commit them. A
+parser or protocol change comes with a test in `tests/test_core.c` that
+fails without it.
 
 CI (`.github/workflows/ci.yml`): the generic build + ctest on x86, and a
 compile-only Rockchip build on an arm64 runner. The HiSilicon platforms are not

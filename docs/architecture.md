@@ -2,8 +2,8 @@
 
 vigil is one program, `vigild`, that turns a cheap recorder board into a
 DVR/NVR: it takes video from cameras, shows it on the HDMI output in a
-2×2 grid ("quad view") with a small UI on top, and records the streams to
-disk. The same source tree builds for very different hardware. This page
+grid of tiles with a mouse-driven UI on top ([ui.md](ui.md)), and records
+the streams to disk. The same source tree builds for very different hardware. This page
 explains how the code is split so that this works.
 
 ## Terms
@@ -44,7 +44,8 @@ decoder and capture inputs can mix the two.
 src/core                 src/ui           src/api      HTTP/WebSocket API
  channel  source/*  au_norm  sps          (CivetWeb, crypt)
  seg_writer  events  net  md5
- config  schema                LVGL screens; draws through hal_ui
+ config  schema                LVGL app: live view, menus, schema-driven
+                               settings; sees only ui_model.h and hal_ui.h
    |                        |                |
    +-----------+------------+----------------+
                |
@@ -60,7 +61,8 @@ Rules that keep the layers apart:
 - `src/core` is plain C11 + POSIX. It never includes a vendor header and
   never uses `#ifdef` to test which platform it is on. It builds and runs
   its tests on any Linux host. CI runs them on x86.
-- `src/ui` only knows LVGL and `hal_ui.h`.
+- `src/ui` only knows LVGL and `hal_ui.h`. What it shows and changes comes
+  through `ui_model.h`, which `src/app/ui_bridge.c` fills from the core.
 - `src/api` knows CivetWeb, `crypt(3)` and the core's public headers. It
   reads snapshots and writes the configuration store; it never drives the
   channels or the UI itself.
@@ -172,7 +174,9 @@ then bumps the generation. Precedence at start: defaults < the file <
 command-line options.
 
 Applying is the main thread's job, so the UI is never touched from
-elsewhere. The frontend loop (LVGL or headless) calls a tick several times
+elsewhere. The on-screen settings pages ([ui.md](ui.md)) write through
+`config_put_json` too, so a change made on the screen is checked, saved
+and applied exactly like one made through the API. The frontend loop (LVGL or headless) calls a tick several times
 a second; when the generation moved, it hands the new camera list and
 recording settings to `channels_apply()`. That compares each tile with
 what runs there: a renamed camera keeps its stream, a changed URL or a
@@ -225,12 +229,18 @@ portable and cheap on small CPUs.
 
 ## Screen layout
 
-`frontend.h` fixes the layout at 1280×720: a 40-pixel header, a 2×2 grid
-of tiles, and an 80-pixel event strip. The tile rectangles go to the
-platform (`hal_display_set_tile`). LVGL draws the header, the strip and a
-label on each tile, and paints the rest of each tile as a "hole" so the
-video plane underneath shows through: a magenta colour key on HiSilicon
-hifb, full transparency on Rockchip's alpha-blended plane.
+The screen is 1280×720: a 40-pixel header, a grid of 1, 4, 9 or 16 tiles,
+and an 80-pixel event strip (`src/ui/ui_layout.c`, sizes from the design
+tokens). Channels start in the 2×2 grid (`frontend_tiles`); the UI moves
+them for another layout, another page or one channel full screen through
+`channels_set_tiles()`, which places each running channel with
+`hal_display_set_tile` (or hides it with `hal_display_clear_tile`) from the
+main thread. LVGL draws the header, the strip and chips on each tile, and
+paints the rest of each tile as a "hole" so the video plane underneath
+shows through: a colour key on HiSilicon hifb and SigmaStar's GOP, full
+transparency on Rockchip's alpha-blended plane. The screens, the
+schema-driven settings pages, mouse input and the UI tests are described in
+[ui.md](ui.md).
 
 ## Build
 
@@ -241,7 +251,9 @@ CMakeLists.txt
   vigil_platform  object library: the files listed by cmake/platforms/<p>.cmake
   vigil_api       static library: src/api + CivetWeb (cmake/api.cmake;
                   -DVIGIL_API=OFF leaves it and libcrypt out)
-  vigild          src/app + LVGL UI (when the platform has a display)
+  lvgl, vigil_ui  LVGL and src/ui (platforms with a display; host builds
+                  for the UI tests)
+  vigild          src/app + vigil_ui (when the platform has a display)
 cmake/platforms/<p>.cmake   sources, include paths, SDK/library paths
 cmake/toolchains/cross.cmake   cross compiling: -DCROSS_PREFIX=…/bin/<triplet>-
 ```
@@ -257,8 +269,15 @@ adding a platform is covered in [porting.md](porting.md).
   RTSP framing and helpers, the capture source (with a fake HAL), the
   segment writer, the settings schema (types, limits, enums, unknown keys),
   the configuration file (round trip, atomic save, invalid files), the
-  store (sections, password redaction and `***`), and the event ring.
+  store (sections, password redaction and `***`), the event ring, and
+  channels following a new layout (`channels_set_tiles`, with a fake
+  HAL).
 - `api_auth`: Basic credentials and the shadow/`crypt(3)` check.
+- `theme_tokens`: the generated `theme_tokens.h` and `web/theme.css` match
+  `src/ui/theme.json`.
+- `ui_screens`: the UI on an in-memory display, driven through the evdev
+  reader with a fake mouse, saving through the real store; widget checks
+  and screenshots compared with `tests/ui/*.png` ([ui.md](ui.md)).
 - `api_e2e`: `vigild` with a temporary configuration, shadow file and port,
   driven over HTTP and a WebSocket by `tests/api_test.py`: authentication
   and lockout, a camera added from the NETIP emulator coming up live,
