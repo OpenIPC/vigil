@@ -11,6 +11,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/statvfs.h>
 
 #include "sys.h"
@@ -582,6 +583,24 @@ static ino_t node_ino(const char *name)
     return stat(sys_path(p, sizeof p, dev), &st) == 0 ? st.st_ino : 0;
 }
 
+/* /dev/<part> as the kernel numbers it (/sys/block/<disk>/<part>/dev),
+ * made when it is missing. mdev handles each uevent in a process of its
+ * own, so the "remove" of the old partition can run after the "add" of
+ * the new one and delete the node it just made: seen in QEMU on ssr621q,
+ * /dev/sda1 gone while /proc/partitions listed sda1. */
+static int ensure_node(const char *disk, const char *part)
+{
+    char rel[160], buf[32], p[512];
+    if (node_ino(part)) return 0;
+    snprintf(rel, sizeof rel, "/sys/block/%s/%s/dev", disk, part);
+    unsigned maj, min;
+    if (sys_read(rel, buf, sizeof buf) <= 0 || sscanf(buf, "%u:%u", &maj, &min) != 2) return -1;
+    snprintf(rel, sizeof rel, "/dev/%s", part);
+    if (mknod(sys_path(p, sizeof p, rel), S_IFBLK | 0660, makedev(maj, min)) < 0 && errno != EEXIST) return -1;
+    chmod(p, 0660);                         /* as mdev.conf makes it, whatever our umask */
+    return 0;
+}
+
 /* After a new partition table the kernel announces the partitions again:
  * mdev removes /dev/<part> (if it was there) and makes it anew, and
  * automount.sh, run for each, tries to mount the new partition and then
@@ -589,20 +608,16 @@ static ino_t node_ino(const char *name)
  * race: in QEMU on ssr621q the mkfs went to a node about to be replaced
  * and the mount point vanished under the mount. So: wait for a node that
  * is not the old one, then let automount.sh's attempt pass. */
-static int wait_for(const char *name, ino_t old)
+static int wait_for(const char *disk, const char *name, ino_t old)
 {
-    int tries = g_settle_ms ? 100 : 1;
+    int tries = g_settle_ms ? 50 : 1;
     for (int i = 0; i < tries; ++i) {
         ino_t now = node_ino(name);
         if (now && (now != old || !g_settle_ms)) break;
-        if (i + 1 == tries) {
-            if (!now) return -1;
-            break;                          /* the old node stayed: use it */
-        }
         usleep(100 * 1000);
     }
     if (g_settle_ms) usleep((useconds_t)g_settle_ms * 1000);
-    return 0;
+    return ensure_node(disk, name);
 }
 
 int sys_disk_format(const char *name, const char *fs, char *msg, size_t cap)
@@ -654,7 +669,7 @@ int sys_disk_format(const char *name, const char *fs, char *msg, size_t cap)
                      name, strerror(errno));
             goto out;
         }
-        if (!whole && wait_for(target, old_node) < 0) {
+        if (!whole && wait_for(name, target, old_node) < 0) {
             snprintf(msg, cap, "%s did not appear after the new partition table", target);
             goto out;
         }
