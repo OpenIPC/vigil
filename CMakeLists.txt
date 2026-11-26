@@ -15,6 +15,8 @@ if(NOT EXISTS ${CMAKE_SOURCE_DIR}/cmake/platforms/${VIGIL_PLATFORM}.cmake)
   message(FATAL_ERROR "Unknown VIGIL_PLATFORM '${VIGIL_PLATFORM}'")
 endif()
 
+option(VIGIL_API "HTTP/WebSocket API (CivetWeb, docs/api.md)" ON)
+
 add_compile_options(-Wall -Wno-unused-function)
 find_package(Threads REQUIRED)
 
@@ -65,10 +67,20 @@ else()
   list(APPEND VIGILD_SOURCES src/app/frontend_headless.c)
 endif()
 
+# ---- API: CivetWeb + crypt(3); -DVIGIL_API=OFF drops both --------------------
+if(VIGIL_API)
+  include(cmake/api.cmake)
+else()
+  list(APPEND VIGILD_SOURCES src/api/api_none.c)
+endif()
+
 add_executable(vigild ${VIGILD_SOURCES} $<TARGET_OBJECTS:vigil_platform>)
-target_include_directories(vigild PRIVATE src/app src/ui ${VIGIL_PLATFORM_INCLUDES})
+target_include_directories(vigild PRIVATE src/app src/api src/ui ${VIGIL_PLATFORM_INCLUDES})
 target_compile_definitions(vigild PRIVATE ${VIGIL_PLATFORM_DEFS})
 target_link_libraries(vigild PRIVATE vigil_core ${VIGIL_PLATFORM_LIBS})
+if(VIGIL_API)
+  target_link_libraries(vigild PRIVATE vigil_api)
+endif()
 if(VIGIL_HAS_UI)
   target_link_libraries(vigild PRIVATE lvgl)
 endif()

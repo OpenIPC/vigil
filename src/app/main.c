@@ -4,10 +4,11 @@
  *   config_init (-f FILE) + command-line overrides
  *   -> hal_init (media system + HDMI on platforms that have it)
  *   -> channels_start (one thread per camera: source -> decode + record)
+ *   -> api_start (HTTP/WebSocket API on its own threads, if configured)
  *   -> frontend_run (LVGL quad view, or status lines when headless); on
- *      this thread, a new configuration in the store is applied
+ *      this thread, a configuration the API saved is applied
  *      (channels_apply)
- *   -> SIGINT/SIGTERM: channels_stop, hal_shutdown.
+ *   -> SIGINT/SIGTERM: api_stop, channels_stop, hal_shutdown.
  */
 #include <errno.h>
 #include <pthread.h>
@@ -18,6 +19,7 @@
 #include <syslog.h>
 #include <unistd.h>
 
+#include "api.h"
 #include "channel.h"
 #include "config.h"
 #include "events.h"
@@ -151,7 +153,7 @@ static void usage(const char *argv0)
            "  -K N     segments kept per camera (default 3; 0 = keep all)\n"
            "  -t SECS  exit after SECS seconds (default: run until SIGINT)\n"
            "  -s       log to syslog (tag vigil) instead of stderr\n"
-           "Options override the file for this run.\n",
+           "Options override the file for this run; the API saves what is in force.\n",
            argv0, CONFIG_DEFAULT_PATH, CHANNEL_MAX);
 }
 
@@ -169,6 +171,7 @@ static int int_option(const char *opt, const char *v, const char *section, const
 /* ---- applying a new configuration (main thread) ------------------------------------ */
 
 static unsigned g_applied_gen;
+static char     g_api_listen[64];
 
 static void apply_config(void)
 {
@@ -187,6 +190,8 @@ static void apply_config(void)
         vg_log("configuration %u applied", gen);
         events_push(0, "config applied");
     }
+    if (strcmp(c.api.listen, g_api_listen) != 0)
+        vg_log("api.listen is now '%s'; it takes effect when vigild starts again", c.api.listen);
 }
 
 int main(int argc, char **argv)
@@ -275,6 +280,7 @@ int main(int argc, char **argv)
         return 2;
     }
     config_override(&cfg);
+    snprintf(g_api_listen, sizeof g_api_listen, "%s", cfg.api.listen);
 
     if (hal_init(SCREEN_W, SCREEN_H, 60) < 0) {
         vg_log("platform init failed");
@@ -295,7 +301,9 @@ int main(int argc, char **argv)
     config_to_channels(&running, &cc);
     if (channels_start(&cc, caps->display ? tiles : NULL) == 0) {
         config_mark_applied(g_applied_gen);
+        api_start();                    /* failing to start it is logged, not fatal */
         rc = frontend_run(run_secs, &g_stop, apply_config) < 0 ? 1 : 0;
+        api_stop();
         channels_stop();
     }
     hal_shutdown();

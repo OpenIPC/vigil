@@ -39,13 +39,14 @@ decoder and capture inputs can mix the two.
 ```
             src/app      vigild: command line, channels, UI or status loop
                |
-   +-----------+------------+
-   |                        |
-src/core                 src/ui            LVGL screens; draws through hal_ui
- channel  source/*  au_norm  sps
+   +-----------+------------+----------------+
+   |                        |                |
+src/core                 src/ui           src/api      HTTP/WebSocket API
+ channel  source/*  au_norm  sps          (CivetWeb, crypt)
  seg_writer  events  net  md5
-   |                        |
-   +-----------+------------+
+ config  schema                LVGL screens; draws through hal_ui
+   |                        |                |
+   +-----------+------------+----------------+
                |
             src/hal        hal.h, hal_decoder.h, hal_display.h,
                |           hal_capture.h, hal_ui.h — declarations only
@@ -60,6 +61,9 @@ Rules that keep the layers apart:
   never uses `#ifdef` to test which platform it is on. It builds and runs
   its tests on any Linux host. CI runs them on x86.
 - `src/ui` only knows LVGL and `hal_ui.h`.
+- `src/api` knows CivetWeb, `crypt(3)` and the core's public headers. It
+  reads snapshots and writes the configuration store; it never drives the
+  channels or the UI itself.
 - A platform provides every HAL function. Functions it cannot support
   return an error, and `hal_caps()` reports what it can do. The core reads
   those capabilities at run time and does not assume them.
@@ -135,9 +139,51 @@ failure and retries at the next keyframe.
 
 Channel threads never touch the UI. They publish a status snapshot
 (`channels_status()`: live, fps, codec, size, recording, last error) and
-short events ("CAM2 offline") through a thread-safe queue (`events.c`).
-The UI thread reads both. Without a display, `frontend_headless.c` prints
-the same status to the log.
+short events ("CAM2 offline") through a thread-safe ring (`events.c`).
+The ring has many readers, each with its own cursor: the UI thread's event
+strip and the API's WebSocket feed both see every event, and a reader that
+falls behind skips ahead and is told how many it missed. Without a display,
+`frontend_headless.c` prints the status to the log.
+
+## Configuration
+
+The settings live in one JSON file (`/etc/vigil.json`, `-f FILE`; format
+and API in [api.md](api.md)). Each setting is one row of a table,
+`config_schema.c`: its place in `vigil_config_t`, type, default, limits,
+label, help text, and whether it applies at run time. A generic engine
+(`schema.c`) does every job from that table: defaults, parsing and
+checking JSON (every error with its path), checking a struct built in C
+(the command-line options), writing JSON with camera passwords redacted,
+and describing the table itself so a UI can build its forms from it.
+Adding a setting is a row and a struct member.
+
+`config.c` is the store: the settings in force behind a mutex, with a
+generation counter. Readers take snapshots (`config_get`); a writer
+(`config_put_json`) validates the new document, saves it atomically
+(temporary file, `fsync`, `rename`, `fsync` of the directory) and only
+then bumps the generation. Precedence at start: defaults < the file <
+command-line options.
+
+Applying is the main thread's job, so the UI is never touched from
+elsewhere. The frontend loop (LVGL or headless) calls a tick several times
+a second; when the generation moved, it hands the new camera list and
+recording settings to `channels_apply()`. That compares each tile with
+what runs there: a renamed camera keeps its stream, a changed URL or a
+changed recording setting stops and restarts just those channels (all the
+stops first, so their timeouts overlap). Each channel has its own stop
+flag, and its status lock outlives restarts, so `channels_status()` is
+safe from any thread at any time. The outcome goes out as events.
+
+## Threads
+
+| Thread | Does |
+|---|---|
+| main | `hal_init`, the frontend loop (LVGL or headless), applying configurations, `hal_shutdown` |
+| one per channel | source → `au_norm` → decoder and recorder (`channel.c`) |
+| platform threads | e.g. capture readers (hi3520dv200), as each platform needs |
+| CivetWeb master + up to 8 workers (started on demand) | HTTP requests and WebSocket sessions (`src/api`) |
+| API pusher | status, events and configuration changes to the WebSocket clients |
+| log reader (`-s`) | turns stdout/stderr lines into syslog messages |
 
 ## Sources (camera protocols)
 
@@ -182,8 +228,11 @@ hifb, full transparency on Rockchip's alpha-blended plane.
 
 ```
 CMakeLists.txt
+  cjson           static library: third_party/cJSON (MIT)
   vigil_core      static library: src/core (+ host unit tests)
   vigil_platform  object library: the files listed by cmake/platforms/<p>.cmake
+  vigil_api       static library: src/api + CivetWeb (cmake/api.cmake;
+                  -DVIGIL_API=OFF leaves it and libcrypt out)
   vigild          src/app + LVGL UI (when the platform has a display)
 cmake/platforms/<p>.cmake   sources, include paths, SDK/library paths
 cmake/toolchains/cross.cmake   cross compiling: -DCROSS_PREFIX=…/bin/<triplet>-
@@ -197,8 +246,16 @@ adding a platform is covered in [porting.md](porting.md).
 `ctest` in a generic build runs:
 
 - `core`: unit tests for SPS parsing, the normalizer, RTP depacketizing,
-  RTSP framing and helpers, the capture source (with a fake HAL) and the
-  segment writer.
+  RTSP framing and helpers, the capture source (with a fake HAL), the
+  segment writer, the settings schema (types, limits, enums, unknown keys),
+  the configuration file (round trip, atomic save, invalid files), the
+  store (sections, password redaction and `***`), and the event ring.
+- `api_auth`: Basic credentials and the shadow/`crypt(3)` check.
+- `api_e2e`: `vigild` with a temporary configuration, shadow file and port,
+  driven over HTTP and a WebSocket by `tests/api_test.py`: authentication
+  and lockout, a camera added from the NETIP emulator coming up live,
+  invalid configurations refused with every error, redaction, and the
+  pushed status, event and configuration messages.
 - `netip_*`: `vigild` against `tests/netip_server.py`, a NETIP camera
   emulator, with H.264 and H.265 clips and a wrong password.
 - `fault_*`: misbehaving servers. A NETIP login that is never answered

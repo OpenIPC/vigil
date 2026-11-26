@@ -43,12 +43,18 @@ mkdir -p ~/rec
 
 | Option | Meaning |
 |---|---|
-| `-c URL` | A camera, repeated for each one, in tile order (formats in [architecture.md](../architecture.md#sources-camera-protocols)) |
-| `-o DIR` | Where to record (default `/tmp/rec`); `none` disables recording |
-| `-S SECS` | Segment length (default 60) |
-| `-K N` | Segments kept per camera (default 3; 0 keeps all, limited only by the free-space reserve) |
+| `-f FILE` | The configuration file (default `/etc/vigil.json`; see [api.md](../api.md)) |
+| `-c URL` | A camera, repeated for each one, in tile order (formats in [architecture.md](../architecture.md#sources-camera-protocols)); replaces the file's cameras |
+| `-o DIR` | Where to record; `none` disables recording (default: `record.path` from the file, which is empty — no recording — unless set) |
+| `-S SECS` | Segment length, 10..3600 (default 60) |
+| `-K N` | Segments kept per camera, 0..64 (default 3; 0 keeps all, limited only by the free-space reserve) |
 | `-t SECS` | Exit after SECS seconds (default: run until SIGINT/SIGTERM) |
 | `-s` | Log to syslog (tag `vigil`, facility daemon) instead of stderr, including what the platform and vendor libraries print |
+
+Options override the configuration file for that run. The same settings,
+and the HTTP API that reads and changes them while `vigild` runs (on port
+8080 unless `api.listen` says otherwise), are described in
+[api.md](../api.md).
 
 Recordings are named `CAM<n>_<YYYYmmdd>_<HHMMSS>.h264` or `.h265`. They
 are raw elementary streams that ffmpeg and VLC play directly, and that
