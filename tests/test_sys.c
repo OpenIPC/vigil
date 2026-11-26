@@ -12,6 +12,7 @@ void test_sys_seams(void);
 void test_sys_net(void);
 void test_sys_time(void);
 void test_sys_curl(void);
+void test_sys_disk(void);
 
 void test_sys_seams(void)
 {
@@ -58,6 +59,7 @@ int main(void)
     test_sys_net();
     test_sys_time();
     test_sys_curl();
+    test_sys_disk();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

@@ -88,6 +88,8 @@ add_library(vigil_sys STATIC
   src/sys/sys.c
   src/sys/sys_net.c
   src/sys/sys_curl.c
+  src/sys/sys_disk.c
+  src/sys/sys_nas.c
   src/sys/sys_time.c)
 target_include_directories(vigil_sys PUBLIC src/sys)
 target_link_libraries(vigil_sys PUBLIC vigil_core)
