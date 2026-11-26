@@ -134,6 +134,7 @@ typedef struct {
     int  auth;
     char user[32];
     char shadow[192];
+    char users[192];                /* vigil's own accounts (src/api/users.h) */
 } config_api_t;
 
 typedef struct {

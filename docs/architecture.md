@@ -305,7 +305,9 @@ adding a platform is covered in [porting.md](porting.md).
   store (sections, password redaction and `***`), the event ring, and
   channels following a new layout (`channels_set_tiles`, with a fake
   HAL).
-- `api_auth`: Basic credentials and the shadow/`crypt(3)` check.
+- `api_auth`: Basic credentials, the shadow/`crypt(3)` check, the accounts
+  file (hashing, logging in, the root fallback, built-in groups) and the
+  table of permissions per endpoint.
 - `theme_tokens`: the generated `theme_tokens.h` and `web/theme.css` match
   `src/ui/theme.json`.
 - `ui_screens`: the UI on an in-memory display, driven through the evdev

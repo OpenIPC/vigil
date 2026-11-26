@@ -116,21 +116,25 @@ static int shadow_hash(const char *shadow, const char *user, char *hash, size_t 
 /* crypt() keeps its result in a static buffer. */
 static pthread_mutex_t g_crypt_lock = PTHREAD_MUTEX_INITIALIZER;
 
+int auth_crypt(const char *password, const char *setting, char *out, size_t cap)
+{
+    pthread_mutex_lock(&g_crypt_lock);
+    const char *r = crypt(password, setting);
+    /* libxcrypt answers an unknown method with "*0"/"*1", others with NULL. */
+    int rc = !r || r[0] == '*' || strlen(r) >= cap ? -1 : 0;
+    if (rc == 0) memcpy(out, r, strlen(r) + 1);
+    pthread_mutex_unlock(&g_crypt_lock);
+    return rc;
+}
+
 int auth_check_shadow(const char *shadow, const char *user, const char *password,
                       char *why, size_t cap)
 {
-    char hash[256];
+    char hash[256], r[256];
     if (shadow_hash(shadow, user, hash, sizeof hash, why, cap) < 0) return -1;
-    pthread_mutex_lock(&g_crypt_lock);
-    const char *r = crypt(password, hash);
-    int rc;
-    /* libxcrypt answers an unknown method with "*0"/"*1", others with NULL. */
-    if (!r || r[0] == '*') {
+    if (auth_crypt(password, hash, r, sizeof r) < 0) {
         snprintf(why, cap, "crypt() cannot check the hash of '%s' (method %.4s)", user, hash);
-        rc = -1;
-    } else {
-        rc = auth_equal(r, hash);
+        return -1;
     }
-    pthread_mutex_unlock(&g_crypt_lock);
-    return rc;
+    return auth_equal(r, hash);
 }
