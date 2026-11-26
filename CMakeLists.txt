@@ -31,12 +31,13 @@ target_link_libraries(cjson PUBLIC m)
 
 # libyaml (MIT): the configuration file is YAML. OpenIPC images carry it
 # (yaml-cli); on a host, libyaml-dev. pkg-config first; when cross compiling
-# only with a target sysroot to ask about (Buildroot sets CMAKE_SYSROOT),
-# since the host's pkg-config would describe the host's library. Otherwise
-# a search, which cross.cmake points at the toolchain's sysroot; or give
+# only when PKG_CONFIG_LIBDIR or PKG_CONFIG_SYSROOT_DIR point it at the
+# target, since otherwise it describes the host's library. Otherwise
+# a search, which cross.cmake points at the toolchain's sysroot (Buildroot's
+# toolchain file at staging, with CMAKE_SYSROOT); or give
 # -DLIBYAML_INCLUDE_DIR=… -DLIBYAML_LIBRARY=….
 find_package(PkgConfig QUIET)
-if(PKG_CONFIG_FOUND AND (NOT CMAKE_CROSSCOMPILING OR CMAKE_SYSROOT OR DEFINED ENV{PKG_CONFIG_LIBDIR}
+if(PKG_CONFIG_FOUND AND (NOT CMAKE_CROSSCOMPILING OR DEFINED ENV{PKG_CONFIG_LIBDIR}
                          OR DEFINED ENV{PKG_CONFIG_SYSROOT_DIR}))
   pkg_check_modules(LIBYAML QUIET IMPORTED_TARGET yaml-0.1)
 endif()

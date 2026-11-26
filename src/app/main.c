@@ -182,19 +182,30 @@ static int write_config(const char *out, const char *in, int loaded, const vigil
         return 1;
     }
     if (!strcmp(out, "-")) {
+        /* The caller's stdout, also under -s: the descriptor 1 then leads
+         * to syslog, and the text holds the cameras' passwords. */
+        int fd = g_saved_out >= 0 ? g_saved_out : STDOUT_FILENO;
         char *text = config_file_text(c, CONFIG_YAML);
-        int ok = text && fputs(text, stdout) >= 0 && fflush(stdout) == 0;
+        int ok = text != NULL;
+        fflush(stdout);
+        for (size_t len = ok ? strlen(text) : 0, done = 0; ok && done < len;) {
+            ssize_t n = write(fd, text + done, len - done);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) ok = 0;
+            else done += (size_t)n;
+        }
         free(text);
         if (!ok) vg_log("cannot write the configuration to stdout");
         return ok ? 0 : 1;
     }
     char err[700];
     int rc = config_save_file(out, c, err, sizeof err);
-    if (rc < 0) {
+    if (rc != 0) {
+        /* rc > 0: in place, but its directory was not synced; a caller
+         * that removes the original next must not take it as done. */
         vg_log("%s", err);
         return 1;
     }
-    if (rc > 0) vg_log("%s", err);
     vg_log("%s written", out);
     return 0;
 }

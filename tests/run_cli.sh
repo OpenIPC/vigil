@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # run_cli.sh VIGILD — command-line values that do not fit are refused, not
 # shortened: a shortened URL or path can still be valid and name another
-# camera, directory or configuration file.
+# camera, directory or configuration file. And -w, which writes the
+# configuration out.
 set -u
 VIGILD=$1
 TMP=$(mktemp -d)
@@ -29,5 +30,32 @@ expect_refused() {
 expect_refused "-c URL over 511 bytes" -f "$TMP/none.yaml" -o none -c "rtsp://u:topsecret@127.0.0.1/$long"
 expect_refused "-o path over 191 bytes" -f "$TMP/none.yaml" -o "/tmp/$long"
 expect_refused "-f path over 255 bytes" -f "/tmp/$long.yaml" -o none
+# -w: a JSON file converted to YAML, 0600; printed with -w -, also under -s
+# (where stdout is the syslog pipe: the passwords must not go there).
+printf '{"version": 1, "cameras": [{"url": "rtsp://u:topsecret@10.0.0.2/live", "name": "Gate"}]}\n' >"$TMP/old.json"
+if "$VIGILD" -f "$TMP/old.json" -w "$TMP/new.yaml" 2>"$TMP/log" &&
+   grep -q '^  - url: "rtsp://u:topsecret@10.0.0.2/live"$' "$TMP/new.yaml" &&
+   grep -q '^    name: Gate$' "$TMP/new.yaml" && [ "$(stat -c %a "$TMP/new.yaml")" = 600 ]; then
+    echo "ok: -w converts JSON to YAML"
+else
+    cat "$TMP/log"; echo "FAIL: -w converts JSON to YAML"; fail=1
+fi
+for s in "" -s; do
+    if "$VIGILD" $s -f "$TMP/new.yaml" -w - >"$TMP/out" 2>"$TMP/log" &&
+       grep -q '^version: 1$' "$TMP/out" && grep -q topsecret "$TMP/out" && cmp -s "$TMP/out" "$TMP/new.yaml"; then
+        echo "ok: -w - ${s:+with $s }prints the file"
+    else
+        echo "FAIL: -w - ${s:+with $s }prints the file"; fail=1
+    fi
+done
+printf 'record:\n  segment: 1\n' >"$TMP/bad.yaml"
+"$VIGILD" -f "$TMP/bad.yaml" -w "$TMP/out.yaml" >"$TMP/log" 2>&1
+rc=$?
+if [ $rc -eq 1 ] && [ ! -e "$TMP/out.yaml" ] && grep -q "not writing" "$TMP/log"; then
+    echo "ok: -w refuses a file that did not load"
+else
+    cat "$TMP/log"; echo "FAIL: -w over an invalid file: rc $rc"; fail=1
+fi
+
 [ $fail -eq 0 ] && echo PASS
 exit $fail
