@@ -18,5 +18,12 @@ extern const lv_image_dsc_t ui_icon_network;    /* 28 px, network.svg */
 extern const lv_image_dsc_t ui_icon_storage;    /* 28 px, database.svg */
 extern const lv_image_dsc_t ui_icon_system;    /* 28 px, settings.svg */
 extern const lv_image_dsc_t ui_icon_account;    /* 28 px, user-circle.svg */
+extern const lv_image_dsc_t ui_icon_rec;    /* 20 px, player-record-filled.svg */
+extern const lv_image_dsc_t ui_icon_ev_motion;    /* 20 px, activity.svg */
+extern const lv_image_dsc_t ui_icon_ev_human;    /* 20 px, walk.svg */
+extern const lv_image_dsc_t ui_icon_ev_face;    /* 20 px, face-id.svg */
+extern const lv_image_dsc_t ui_icon_ev_vehicle;    /* 20 px, car.svg */
+extern const lv_image_dsc_t ui_icon_add;    /* 72 px, plus.svg */
+extern const lv_image_dsc_t ui_icon_add_sm;    /* 36 px, plus.svg */
 
 #endif /* ICONS_H */

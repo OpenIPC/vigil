@@ -24,12 +24,21 @@ void config_defaults(vigil_config_t *c)
     schema_defaults(&config_schema, c);
 }
 
+void config_trim(vigil_config_t *c)
+{
+    while (c->n_cameras > 0 && !c->cameras[c->n_cameras - 1].url[0]) --c->n_cameras;
+}
+
 void config_to_channels(const vigil_config_t *c, channels_config_t *cc)
 {
     memset(cc, 0, sizeof *cc);
     cc->n = c->n_cameras;
     for (int i = 0; i < c->n_cameras && i < CHANNEL_MAX; ++i) {
-        cc->urls[i] = c->cameras[i].enabled ? c->cameras[i].url : NULL;
+        /* An empty URL is an empty slot: cameras are in tile order, so a
+         * camera can sit at channel 7 with nothing at 3 to 6. */
+        int has = c->cameras[i].url[0] != 0;
+        cc->urls[i] = has && c->cameras[i].enabled ? c->cameras[i].url : NULL;
+        cc->disabled[i] = has && !c->cameras[i].enabled;
         cc->names[i] = c->cameras[i].name;
         cc->sub_urls[i] = c->cameras[i].sub_url;
     }
@@ -395,6 +404,7 @@ config_rc_t config_put_json_at(const char *section, const char *body, size_t len
         pthread_mutex_unlock(&g_write);
         return CONFIG_EINVAL;
     }
+    config_trim(&nc);
 
     char err[700];
     if (g_file_bad) {

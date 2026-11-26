@@ -14,8 +14,9 @@ configuration schema, and how to run and test it without a board.
 ```
 live view                  tiles over the whole screen, clock in a corner
  |  navigation bar         bottom edge; Main menu, layouts, < page >, Pin, totals, clock
+ |  page arrows            < > at the left and right edges, half way down
  |  context menu           right button: Main menu, Channels, Playback, Record, PTZ,
- |                         Display, Split > (layouts); full screen, pages, pin
+ |                         Display, Split > (layouts)
  +-> Main menu             cards: PLAYBACK, AI, ALARM, OPERATION, BACKUP, DISPLAY
       |                    MANAGEMENT: CAMERA, NETWORK, STORAGE, SYSTEM, ACCOUNT
       +-> CAMERA           the camera list: Add, Edit, Remove
@@ -23,7 +24,8 @@ live view                  tiles over the whole screen, clock in a corner
       +-> STORAGE          the recording's state, and its form
       +-> NETWORK          the HTTP API's form
       +-> SYSTEM           platform, version, uptime, memory, storage (read-only)
-      |   (OPERATION)
+      |   (OPERATION) +-> Channel info: every channel's state, stream, codec,
+      |                   size, fps, recording, events
       +-> DISPLAY          output, clock corner, layouts (read-only for now)
 ```
 
@@ -31,21 +33,43 @@ live view                  tiles over the whole screen, clock in a corner
 four 640x360 tiles); there is no header or footer bar. Each tile is a
 *hole*: LVGL paints it in the colour the platform keys out (or fully
 transparent where the UI layer has alpha, `hal_ui_hole`), so the decoded
-video below shows through. On it sit small opaque chips: top left the
-camera's name from the configuration (or `CAM n`) with its status icons, a
-red dot and `REC` while the channel records and an eye
-(`LV_SYMBOL_EYE_OPEN`) while the camera reports motion; bottom left the
-stream (`H.265 1920x1080 25 fps`); in the middle the state when there is
-no picture (`Connecting...`, `No video` with the reason, `No camera`). A
-tile flashes when its camera has an event.
+video below shows through. On it sit small opaque chips: bottom left the
+camera's name from the configuration (or `CAM n`); bottom right icons only,
+a red dot while the channel records and an amber icon for each event the
+camera reports now (motion, human, face, vehicle; each held 5 s after the
+camera's last report); nothing at the top left. The stream's codec, size
+and frame rate are not on the tiles but on the Channel info page
+(System). The middle of a tile says something only when there is no
+picture:
+
+| `status` (core `ch_state_t`) | Tile |
+|---|---|
+| `connecting` | Connecting... |
+| `offline`: refused, timed out, no route, connection lost | Offline |
+| `auth`: RTSP 401/403, NETIP login 203/205/206 | Authentication error |
+| `codec`: neither H.264 nor H.265 | Unsupported codec |
+| `no_video`: connected, no video for 3 s | No video |
+| `error`: anything else | No video, and the error |
+| `disabled` | Disabled |
+| `live`, but no decoder free | No decoder |
+| `empty`: no camera in this slot | a large "+" |
+
+The **"+"** of an empty slot (a click, or Enter on its tile) opens the
+camera form for that channel ("Cameras 7: new"); saving puts the camera at
+that position, the slots before it staying empty. There is a tile for
+every channel the platform shows (`hal_caps()->max_channels`), paged by
+the layout. A tile flashes when its camera has an event.
+
+![Every state, 16 channels](../tests/ui/split16.png)
 
 The date and time are in a corner of the screen (top right;
 `CLOCK_CORNER` in `ui_live.c` picks another corner or none, until the UI
 has settings of its own), in an opaque chip like the tiles' labels.
 
-Motion is wired through (`motion` in the channel status and in
-`ui_chan_t`) but nothing reports it yet: the icon appears once a source
-does (camera alarms over NETIP or ONVIF events are the next step).
+Camera events are wired through (`channels_report_events`, `events` in the
+channel status, the API and `ui_chan_t`) but nothing reports them yet:
+the icons appear once a source does (camera alarms over NETIP and ONVIF
+events are the next step).
 
 **Events.** The live view has no event list; the HTTP API's WebSocket
 carries every event. A tile shows its channel's state all the time, so
@@ -65,13 +89,21 @@ unless pinned. Besides the actions it shows the LIVE and REC totals and the
 clock. **Double-clicking** a tile shows that channel full screen;
 double-clicking again returns to the layout before.
 
+**Page arrows.** With more channels than windows, a round arrow comes up
+while the pointer moves within 80 pixels of the left or right edge in the
+middle third of the height: previous page on the left, next on the right.
+It goes when the pointer leaves, or after 2 s without moving. Opaque, like
+every chip over the video. PgUp/PgDn and `[`/`]` do the same.
+
+![Page arrow](../tests/ui/page_arrow.png)
+
 The **context menu** (right button, or the Menu key) is, in this order:
 **Main menu**; **Channels** (the camera list); **Playback**; **Record**
 (the recording settings); **PTZ**; **Display** (output, clock corner and
 layouts, read-only until the UI has settings of its own); **Split**, a
-submenu of the layouts. Then, for the tile under the pointer, "Full
-screen" (or "Back to the grid"), the pages when there are several, and
-pinning the navigation bar. Playback and PTZ are not in vigil yet: they
+submenu of the layouts; nothing else (full screen is a double click or
+Enter, pages the arrows, pinning the bar its own button). Playback and
+PTZ are not in vigil yet: they
 are in the menu, muted, and say "not available yet" when chosen; they are
 placeholders for what comes next.
 
@@ -196,7 +228,7 @@ time:
 
 | Schema type | Widget |
 |---|---|
-| string | one-line text area; the on-screen keyboard opens on it (not once a keyboard is in use) |
+| string | one-line text area; the on-screen keyboard opens next to it (not once a keyboard is in use) |
 | integer | text area for digits with `-` / `+` buttons kept within min..max; the range is shown |
 | boolean | switch |
 | enum | drop-down list of the values |
@@ -225,7 +257,31 @@ replaced by `***`. A URL saved back unchanged keeps the stored password
 Leaving a page with unsaved changes asks first. Removing a camera asks
 first and saves at once.
 
+**Camera slots.** Cameras are in channel order (`cameras[i]` is channel
+i + 1), so a camera with an empty `url` is an empty slot: a camera can be
+on channel 7 with 3 to 6 empty. The list shows an empty slot as "Empty"
+with "Add here"; removing a camera empties its slot rather than moving the
+later cameras up; empty slots at the end are not saved (`config_trim`). In
+YAML an empty slot is `- url: ""` (or `- ~` by hand). In the UI model a
+section with positions is `ui_section_t.slots`; `ui_form_open_slot(sec,
+slot)` opens the form for a new item at a position.
+
 ![The camera list](../tests/ui/cameras.png)
+
+### The on-screen keyboard
+
+For text entry with the mouse only (`ui_osk.c`): about 560 x 190 pixels,
+a popup attached to the field, directly below it or above it when the
+screen ends first, aligned with it and kept on the screen; it never covers
+the field. Digits on top, QWERTY, Shift (one capital; twice, caps lock),
+`#+=` to a page of every symbol a URL or a password needs
+(`: / @ . - _ ? & = % # ! $ * + ~ , ; ' " ( ) [ ] { } < > \ | ^` and the
+backquote), cursor keys, space and done. A number field gets digits and
+`-`. It closes on done, Esc or the right button, and a click outside; a
+click on another text field of the page moves it there. Once a keyboard
+has been used, it does not open at all.
+
+![The on-screen keyboard](../tests/ui/osk.png)
 
 ### Adding a setting to both UIs
 
@@ -277,7 +333,11 @@ an icon: put its SVG in `src/ui/icons/`, add a line to the script's
 
 Everything drawn over a video tile is opaque and has no shadow: on a
 colour-keyed layer (HiSilicon hifb, SigmaStar GOP) a half-transparent pixel
-is a blend with the key colour and shows as a pink fringe.
+is a blend with the key colour and shows as a pink fringe. For the same reason the chips over the video are square (a
+rounded corner's soft edge is such a blend), and the round page arrows and
+the "+" of an empty channel stand on a disc with hard edges (`ui_disc`:
+every pixel opaque or not drawn, like the mouse pointer). Text keeps its
+smoothing; its edges lie on the chip's own opaque background.
 
 ## Input
 
@@ -400,7 +460,12 @@ cameras (named, recording, one with motion, one connecting, one failing;
 `menu-p1.png`, `menu-focus.png`, `not-available.png`, `cameras.png`,
 `camera-form.png`, `camera-form-keyboard.png`, `confirm-discard.png`,
 `record.png`, `record-focus.png`, `validation-error.png`, `network.png`,
-`display.png`, `system.png`, `help-f1.png`. They are for people reviewing
+`display.png`, `system.png`, `help-f1.png`, and since then the page
+arrows (`live-page-arrow-next.png`, `-prev`), every tile state and the
+empty slots' "+" (`live-16.png`), `live-empty-plus-hover.png`,
+`camera-add-channel-4.png`, the Channel info page (`channel-info.png`,
+`channel-info-16.png`) and the on-screen keyboard (`osk-letters.png`,
+`osk-shifted.png`, `osk-symbols.png`, `osk-above.png`). They are for people reviewing
 a change to the UI, not committed: run it after changing a screen or a
 menu and look at the set. The `ui_screenshots` test only checks that the
 walk still gets through every screen; the references above guard the

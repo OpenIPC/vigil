@@ -9,8 +9,8 @@ version: 1
 # Cameras: In tile order: the first is CAM1. At most 16. Each one:
 #   url: Source URL. rtsp://[user:pass@]host[:554]/path,
 #     netip://[user:pass@]host[:34567]/[?ch=N&stream=main|extra] or capture:N.
-#     The password is shown as *** and kept when sent back unchanged.
-#     Required.
+#     The password is shown as *** and kept when sent back unchanged. Empty:
+#     no camera in this channel (the list is in channel order).
 #   name: Name. Shown in the status and the API; empty: the camera's host.
 #   enabled: Enabled. A disabled camera keeps its tile, empty. Default true.
 #   sub_url: Sub-stream URL. Used in multi-window views; the main URL is used

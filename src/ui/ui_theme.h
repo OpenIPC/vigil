@@ -53,6 +53,14 @@ void ui_btn_accent(lv_obj_t *btn);
 /* The label inside a ui_btn. */
 lv_obj_t *ui_btn_label(lv_obj_t *btn);
 
+/* An A8 icon (icons.h) in colour `rgb` (0xRRGGBB); not clickable. */
+lv_obj_t *ui_icon(lv_obj_t *parent, const lv_image_dsc_t *img, uint32_t rgb);
+
+/* A round button `d` pixels across for over the video: a disc with hard
+ * edges (no blend with a key colour), accent while hovered. Add its
+ * content as children, centred. */
+lv_obj_t *ui_disc_button(lv_obj_t *parent, int d);
+
 lv_obj_t *ui_label(lv_obj_t *parent, const char *text, const lv_font_t *font, lv_color_t color);
 
 #endif /* UI_THEME_H */

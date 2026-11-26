@@ -77,17 +77,6 @@ static void live_cb(lv_event_t *e)
     ui_app_back();
 }
 
-static lv_obj_t *icon(lv_obj_t *parent, const lv_image_dsc_t *img, uint32_t color)
-{
-    lv_obj_t *i = lv_image_create(parent);
-    lv_image_set_src(i, img);
-    /* A8: the colour is the recolour */
-    lv_obj_set_style_image_recolor(i, lv_color_hex(color), 0);
-    lv_obj_set_style_image_recolor_opa(i, LV_OPA_COVER, 0);
-    ui_inert(i);
-    return i;
-}
-
 /* A clickable surface with the card look: hover and focus per the tokens. */
 static lv_obj_t *surface(lv_obj_t *parent)
 {
@@ -116,7 +105,7 @@ static void card(lv_obj_t *grid, const card_t *c)
     lv_obj_set_flex_flow(b, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(b, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_add_event_cb(b, card_cb, LV_EVENT_CLICKED, (void *)c);
-    icon(b, c->icon, c->color);
+    ui_icon(b, c->icon, c->color);
     lv_obj_t *col = lv_obj_create(b);
     ui_plain(col);
     ui_inert(col);
@@ -159,7 +148,7 @@ static void mgmt_btn(lv_obj_t *row, const lv_image_dsc_t *img, const char *label
     lv_obj_set_flex_flow(b, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(b, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_add_event_cb(b, mgmt_cb, LV_EVENT_CLICKED, m);
-    icon(b, img, VG_COLOR_TEXT);
+    ui_icon(b, img, VG_COLOR_TEXT);
     char up[48];
     size_t i = 0;
     for (; label[i] && i < sizeof up - 1; ++i) up[i] = (char)toupper((unsigned char)label[i]);
@@ -209,7 +198,7 @@ static void top_bar(ui_page_t *p)
     lv_group_add_obj(p->group, live);
     /* Accounts do not exist yet: the icon is there, muted, and does
      * nothing; there is no log-out until there is a log-in. */
-    icon(bar, &ui_icon_account, VG_COLOR_TEXT2);
+    ui_icon(bar, &ui_icon_account, VG_COLOR_TEXT2);
 }
 
 void ui_menu_open(void)

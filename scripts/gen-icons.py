@@ -43,6 +43,14 @@ ICONS = [
     ("storage", "database.svg", 28, 2),
     ("system", "settings.svg", 28, 2),
     ("account", "user-circle.svg", 28, 2),
+    # On the video tiles: what the channel is doing, and an empty slot.
+    ("rec", "player-record-filled.svg", 20, 2),
+    ("ev_motion", "activity.svg", 20, 2.25),
+    ("ev_human", "walk.svg", 20, 2.25),
+    ("ev_face", "face-id.svg", 20, 2.25),
+    ("ev_vehicle", "car.svg", 20, 2.25),
+    ("add", "plus.svg", 72, 1.5),
+    ("add_sm", "plus.svg", 36, 2),
 ]
 
 

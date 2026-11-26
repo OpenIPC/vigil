@@ -214,8 +214,12 @@ static int netip_open(source_t *s)
     char hash[9], req[512], reply[4096];
     n->session = 0;
     n->seq = 0;
+    s->fail = SRC_FAIL_OTHER;
     n->fd = net_connect(n->host, n->port, 3000, s->stop, s->err, sizeof s->err);
-    if (n->fd < 0) return -1;
+    if (n->fd < 0) {
+        s->fail = SRC_FAIL_UNREACHABLE;
+        return -1;
+    }
 
     sofia_hash(n->pass, hash);
     snprintf(req, sizeof req,
@@ -224,8 +228,10 @@ static int netip_open(source_t *s)
     if (transact(s, MSG_LOGIN, req, reply, sizeof reply) < 0) goto fail;
     int ret = json_int(reply, "Ret", -1);
     if (ret != 100 && ret != 515) {
-        snprintf(s->err, sizeof s->err, "login refused (Ret %d)%s", ret,
-                 ret == 203 || ret == 205 ? ": user/password" : "");
+        /* 203 wrong password, 205 no such user, 206 locked out */
+        int auth = ret == 203 || ret == 205 || ret == 206;
+        snprintf(s->err, sizeof s->err, "login refused (Ret %d)%s", ret, auth ? ": user/password" : "");
+        if (auth) s->fail = SRC_FAIL_AUTH;
         goto fail;
     }
     n->alive = json_int(reply, "AliveInterval", 20);

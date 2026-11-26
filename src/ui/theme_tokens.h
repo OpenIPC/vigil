@@ -55,6 +55,9 @@
 #define VG_SIZE_CARD_H               208
 #define VG_SIZE_ICON_CARD            96
 #define VG_SIZE_ICON_ROW             28
+#define VG_SIZE_PAGE_ARROW           48
+#define VG_SIZE_OSK_W                560
+#define VG_SIZE_OSK_H                190
 #define VG_SIZE_PAGE_HEADER          56
 #define VG_SIZE_BUTTON               40
 #define VG_SIZE_CURSOR               19

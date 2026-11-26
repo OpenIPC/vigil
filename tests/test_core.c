@@ -950,8 +950,8 @@ static void test_config_file(void)
           !strcmp(d.cameras[1].url, "netip://admin:@192.168.1.11:34567/?ch=0&stream=main") && d.record.keep == 0,
           "a camera given as its URL: %s %s", e.n ? e.e[0].path : "", e.n ? e.e[0].msg : "");
     CHECK(load_text(path, "cameras:\n  - http://x/\n  -\n", &d, &e) < 0 &&
-          has_error(&e, "cameras[0].url", "not a camera URL") && has_error(&e, "cameras[1]", "object"),
-          "a bad URL, an empty item");
+          has_error(&e, "cameras[0].url", "not a camera URL") && e.total == 1,
+          "a bad URL; an empty item is an empty slot");
     CHECK(load_text(path, "cameras:\nrecord:\n", &d, &e) == 0 && d.n_cameras == 0 && d.record.segment == 60,
           "an empty section: no cameras, defaults");
     CHECK(load_text(path, "{\"version\": 1, \"record\": {\"segment\": 120, \"allow_rootfs\": true}}", &d, &e) == 0 &&
@@ -976,8 +976,8 @@ static void test_config_file(void)
           !d.n_cameras, "bad values");
     CHECK(load_text(path, "record: [1, 2]\ncameras:\n  url: capture:0\n", &d, &e) < 0 &&
           has_error(&e, "record", "object") && has_error(&e, "cameras", "array"), "wrong shapes");
-    CHECK(load_text(path, "cameras:\n  - name: x\n", &d, &e) < 0 && has_error(&e, "cameras[0].url", "required"),
-          "required");
+    CHECK(load_text(path, "cameras:\n  - name: x\n", &d, &e) == 0 && d.n_cameras == 1 && !d.cameras[0].url[0],
+          "no url: an empty slot");
     CHECK(load_text(path, "version: 2\n", &d, &e) < 0 && has_error(&e, "version", "must be 1"), "version");
     CHECK(load_text(path, "api:\n  listen: 1.2.3:80\n", &d, &e) < 0 && has_error(&e, "api.listen", "IPv4"),
           "listen address");
@@ -1828,6 +1828,225 @@ static void test_channel_substream(void)
     if (system(cmd)) {}
 }
 
+/* ---- empty camera slots, channel states, events ------------------------------------ */
+
+static void test_camera_slots(void)
+{
+    char dir[] = "/tmp/vigil-slots-XXXXXX", path[128], err[160];
+    if (!mkdtemp(dir)) return;
+    vigil_config_t c, d;
+    schema_errors_t e = { 0 };
+    for (int fmt = 0; fmt < 2; ++fmt) {
+        snprintf(path, sizeof path, "%s/vigil.%s", dir, fmt ? "json" : "yaml");
+        config_defaults(&c);
+        c.n_cameras = 4;
+        snprintf(c.cameras[0].url, sizeof c.cameras[0].url, "rtsp://10.0.0.1/a");
+        snprintf(c.cameras[3].url, sizeof c.cameras[3].url, "rtsp://10.0.0.4/a");
+        for (int i = 0; i < 4; ++i) c.cameras[i].enabled = 1;
+        CHECK(config_save_file(path, &c, err, sizeof err) == 0, "save with empty slots: %s", err);
+        memset(&e, 0, sizeof e);
+        CHECK(config_load_file(path, &d, &e) == 0 && d.n_cameras == 4 && !d.cameras[1].url[0] &&
+              !d.cameras[2].url[0] && !strcmp(d.cameras[3].url, "rtsp://10.0.0.4/a"),
+              "%s: empty slots between cameras round-trip (%d)", fmt ? "JSON" : "YAML", d.n_cameras);
+    }
+    /* A YAML slot left empty by hand ("- ~") is an empty slot too. */
+    snprintf(path, sizeof path, "%s/hand.yaml", dir);
+    FILE *f = fopen(path, "w");
+    fputs("version: 1\ncameras:\n  - rtsp://10.0.0.1/a\n  - ~\n  - rtsp://10.0.0.3/a\n", f);
+    fclose(f);
+    memset(&e, 0, sizeof e);
+    CHECK(config_load_file(path, &d, &e) == 0 && d.n_cameras == 3 && !d.cameras[1].url[0] &&
+          !strcmp(d.cameras[2].url, "rtsp://10.0.0.3/a"), "\"- ~\" is an empty slot");
+
+    channels_config_t cc;
+    d.cameras[2].enabled = 0;
+    config_to_channels(&d, &cc);
+    CHECK(cc.urls[0] && !cc.urls[1] && !cc.disabled[1] && !cc.urls[2] && cc.disabled[2],
+          "empty slot: no URL, not disabled; switched off: no URL, disabled");
+
+    /* Through the store, as the UI and the API add a camera at channel 4
+     * with 2 and 3 empty; trailing empty slots are not kept. */
+    snprintf(path, sizeof path, "%s/store.yaml", dir);
+    CHECK(config_init(path) == 0, "store");
+    static const char put[] = "[{\"url\":\"rtsp://10.0.0.1/a\"},{\"url\":\"\"},{\"url\":\"\"},"
+                              "{\"url\":\"rtsp://10.0.0.4/a\",\"name\":\"Four\"},{\"url\":\"\"},{\"url\":\"\"}]";
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("cameras", put, strlen(put), &e) == CONFIG_OK, "put with empty slots: %s",
+          e.n ? e.e[0].msg : "");
+    config_get(&c);
+    CHECK(c.n_cameras == 4 && !strcmp(c.cameras[3].name, "Four") && !c.cameras[1].url[0],
+          "camera at channel 4 kept there, trailing slots trimmed (%d)", c.n_cameras);
+    config_load_file(path, &d, &e);
+    CHECK(d.n_cameras == 4 && !strcmp(d.cameras[3].url, "rtsp://10.0.0.4/a"), "and so in the file");
+    char cmd[200];
+    snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
+    if (system(cmd)) {}
+}
+
+/* A one-connection-at-a-time server on loopback that answers each request
+ * with `reply` (RTSP: per request until the blank line; NETIP: per
+ * message). */
+static struct {
+    int fd, netip;
+    const char *reply;
+    volatile int stop;
+    pthread_t t;
+} g_srv;
+
+static int srv_recv(int fd, void *b, size_t len)
+{
+    size_t got = 0;
+    while (got < len) {
+        ssize_t r = recv(fd, (char *)b + got, len - got, 0);
+        if (r <= 0) return -1;
+        got += (size_t)r;
+    }
+    return 0;
+}
+
+static void *srv_thread(void *arg)
+{
+    (void)arg;
+    while (!g_srv.stop) {
+        int c = accept(g_srv.fd, NULL, NULL);
+        if (c < 0) break;
+        char buf[4096];
+        for (;;) {
+            if (g_srv.netip) {
+                uint8_t h[20];
+                if (srv_recv(c, h, 20) < 0) break;
+                uint32_t len = h[16] | h[17] << 8 | h[18] << 16 | (uint32_t)h[19] << 24;
+                if (len >= sizeof buf || srv_recv(c, buf, len) < 0) break;
+                cam_send(c, (h[14] | h[15] << 8) + 1, g_srv.reply, strlen(g_srv.reply));
+                continue;
+            }
+            size_t got = 0;
+            while (got < sizeof buf - 1 && !strstr(buf, "\r\n\r\n")) {
+                ssize_t r = recv(c, buf + got, sizeof buf - 1 - got, 0);
+                if (r <= 0) goto done;
+                got += (size_t)r;
+                buf[got] = 0;
+            }
+            const char *cs = strstr(buf, "CSeq:");
+            char reply[2048];
+            snprintf(reply, sizeof reply, g_srv.reply, cs ? atoi(cs + 5) : 1);
+            if (send(c, reply, strlen(reply), MSG_NOSIGNAL) < 0) break;
+            buf[0] = 0;
+        }
+    done:
+        close(c);
+    }
+    return NULL;
+}
+
+static int srv_start(int netip, const char *reply)
+{
+    memset(&g_srv, 0, sizeof g_srv);
+    g_srv.netip = netip;
+    g_srv.reply = reply;
+    g_srv.fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    socklen_t al = sizeof a;
+    if (bind(g_srv.fd, (struct sockaddr *)&a, sizeof a) < 0 || listen(g_srv.fd, 4) < 0 ||
+        getsockname(g_srv.fd, (struct sockaddr *)&a, &al) < 0)
+        return 0;
+    pthread_create(&g_srv.t, NULL, srv_thread, NULL);
+    return ntohs(a.sin_port);
+}
+
+static void srv_stop(void)
+{
+    g_srv.stop = 1;
+    shutdown(g_srv.fd, SHUT_RDWR);
+    close(g_srv.fd);
+    pthread_join(g_srv.t, NULL);
+}
+
+/* How a source failed, for the tile: unreachable, refused credentials,
+ * a codec vigil has not. */
+static src_fail_t open_fail(const char *url, char *err, size_t cap)
+{
+    source_t *s = source_create(url, 0);
+    if (!s) return (src_fail_t)-1;
+    static const volatile int no_stop;
+    s->stop = &no_stop;
+    int rc = s->ops->open(s);
+    src_fail_t f = rc < 0 ? s->fail : (src_fail_t)-2;
+    snprintf(err, cap, "%s", s->err);
+    if (rc == 0) s->ops->close(s);
+    source_destroy(s);
+    return f;
+}
+
+static void test_fail_kinds(void)
+{
+    char url[128], err[160];
+    int fd = socket(AF_INET, SOCK_STREAM, 0);       /* bound, never listening: refused */
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    socklen_t al = sizeof a;
+    bind(fd, (struct sockaddr *)&a, sizeof a);
+    getsockname(fd, (struct sockaddr *)&a, &al);
+    snprintf(url, sizeof url, "rtsp://127.0.0.1:%d/live", ntohs(a.sin_port));
+    CHECK(open_fail(url, err, sizeof err) == SRC_FAIL_UNREACHABLE, "RTSP refused: unreachable (%s)", err);
+    snprintf(url, sizeof url, "netip://127.0.0.1:%d/", ntohs(a.sin_port));
+    CHECK(open_fail(url, err, sizeof err) == SRC_FAIL_UNREACHABLE, "NETIP refused: unreachable (%s)", err);
+    close(fd);
+
+    int port = srv_start(0, "RTSP/1.0 401 Unauthorized\r\nCSeq: %d\r\n"
+                            "WWW-Authenticate: Basic realm=\"cam\"\r\n\r\n");
+    snprintf(url, sizeof url, "rtsp://admin:wrong@127.0.0.1:%d/live", port);
+    CHECK(port && open_fail(url, err, sizeof err) == SRC_FAIL_AUTH, "RTSP 401 with a password: auth (%s)", err);
+    srv_stop();
+    port = srv_start(0, "RTSP/1.0 200 OK\r\nCSeq: %d\r\nContent-Type: application/sdp\r\nContent-Length: 51\r\n\r\n"
+                        "v=0\r\nm=video 0 RTP/AVP 26\r\na=rtpmap:26 JPEG/90000\r\n");
+    snprintf(url, sizeof url, "rtsp://127.0.0.1:%d/live", port);
+    CHECK(port && open_fail(url, err, sizeof err) == SRC_FAIL_CODEC, "RTSP MJPEG only: codec (%s)", err);
+    srv_stop();
+    port = srv_start(0, "RTSP/1.0 404 Not Found\r\nCSeq: %d\r\n\r\n");
+    snprintf(url, sizeof url, "rtsp://127.0.0.1:%d/nothing", port);
+    CHECK(port && open_fail(url, err, sizeof err) == SRC_FAIL_OTHER, "RTSP 404: other (%s)", err);
+    srv_stop();
+    port = srv_start(1, "{\"Ret\":203}\n");
+    snprintf(url, sizeof url, "netip://admin:wrong@127.0.0.1:%d/", port);
+    CHECK(port && open_fail(url, err, sizeof err) == SRC_FAIL_AUTH, "NETIP login 203: auth (%s)", err);
+
+    /* ... and what the channel says: auth for that camera, disabled for a
+     * camera switched off, nothing for an empty slot. */
+    channels_config_t cc = { .urls = { url }, .n = 3, .seg_secs = 60 };
+    cc.disabled[1] = 1;
+    cc.names[1] = "Gate";
+    CHECK(channels_start(&cc, NULL) == 0, "start");
+    channel_status_t st;
+    WAIT_FOR((channels_status(0, &st), st.status == CH_AUTH), 3000);
+    CHECK(st.status == CH_AUTH && !strcmp(ch_state_name(st.status), "auth"), "channel: auth (%s, %s)",
+          ch_state_name(st.status), st.state);
+    channels_status(1, &st);
+    CHECK(st.status == CH_DISABLED && !strcmp(st.name, "Gate"), "switched off: disabled, named");
+    channels_status(2, &st);
+    CHECK(st.status == CH_EMPTY && !st.configured, "empty slot: empty");
+    channels_stop();
+    srv_stop();
+}
+
+static void test_channel_events(void)
+{
+    time_t last[CH_EV_TYPES] = { 0 };
+    CHECK(channel_events_held(last, 1000) == 0, "nothing reported");
+    last[0] = 1000;
+    last[3] = 997;
+    CHECK(channel_events_held(last, 1000) == (CH_EV_MOTION | CH_EV_VEHICLE), "motion and vehicle held");
+    CHECK(channel_events_held(last, 1000 + CHANNEL_EVENT_HOLD - 1) == CH_EV_MOTION, "vehicle's hold over");
+    CHECK(channel_events_held(last, 1000 + CHANNEL_EVENT_HOLD) == 0, "both over");
+    CHECK(!strcmp(ch_event_name(1), "human") && !strcmp(ch_event_name(2), "face") && !ch_event_name(CH_EV_TYPES),
+          "names");
+    channels_report_events(5, CH_EV_HUMAN | CH_EV_FACE);
+    /* Not running: no status to show it on; the report is kept for when
+     * it is, within the hold. */
+    channel_status_t st;
+    channels_status(5, &st);
+    CHECK(st.events == 0 && st.status == CH_EMPTY, "an empty slot shows no events");
+}
+
 int main(int argc, char **argv)
 {
     g_data = argc > 1 ? argv[1] : "tests/data";
@@ -1850,6 +2069,9 @@ int main(int argc, char **argv)
     test_channel_decode();
     test_sub_url();
     test_channel_substream();
+    test_camera_slots();
+    test_fail_kinds();
+    test_channel_events();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

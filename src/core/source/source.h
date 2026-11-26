@@ -22,6 +22,14 @@
 
 typedef struct source source_t;
 
+/* Why a source failed, as far as the protocol tells: what the tile says. */
+typedef enum {
+    SRC_FAIL_OTHER = 0,
+    SRC_FAIL_UNREACHABLE,           /* refused, timed out, no route, no such host, lost */
+    SRC_FAIL_AUTH,                  /* the camera refused the user or the password */
+    SRC_FAIL_CODEC,                 /* video, but not H.264 or H.265 */
+} src_fail_t;
+
 typedef struct {
     const char *scheme;
     /* Parse s->url and set up s->priv. Returns 0, or -1 (bad URL). */
@@ -49,6 +57,7 @@ struct source {
     char        url[512];
     char        host[128];          /* for status lines */
     char        err[160];           /* last error */
+    src_fail_t  fail;               /* ... and what kind it is */
     vg_codec_t  codec;
     /* Out-of-band parameter sets (e.g. from the SDP), valid after open. */
     const uint8_t *ps[SOURCE_PS_MAX];

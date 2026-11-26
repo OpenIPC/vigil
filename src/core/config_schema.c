@@ -16,6 +16,7 @@
  * a channel can be created from (cheap: no connection is made). */
 static int check_url(const char *v, char *msg, size_t cap)
 {
+    if (!*v) return 0;                  /* an empty slot (camera_fields: url) */
     source_t *s = source_create(v, 0);
     if (!s) {
         snprintf(msg, cap, "not a camera URL (schemes: %s)", source_schemes());
@@ -101,11 +102,12 @@ static int check_user(const char *v, char *msg, size_t cap)
 #define BOOL(T, M) .type = SCHEMA_BOOL, .off = offsetof(T, M)
 
 static const schema_field_t camera_fields[] = {
-    { .key = "url", STR(config_camera_t, url), .required = 1, .secret = SCHEMA_SECRET_URL,
+    { .key = "url", STR(config_camera_t, url), .def_str = "", .secret = SCHEMA_SECRET_URL,
       .live = 1, .check = check_url, .label = "Source URL",
       .help = "rtsp://[user:pass@]host[:554]/path, "
               "netip://[user:pass@]host[:34567]/[?ch=N&stream=main|extra] or capture:N. "
-              "The password is shown as *** and kept when sent back unchanged." },
+              "The password is shown as *** and kept when sent back unchanged. "
+              "Empty: no camera in this channel (the list is in channel order)." },
     { .key = "name", STR(config_camera_t, name), .def_str = "", .live = 1,
       .label = "Name", .help = "Shown in the status and the API; empty: the camera's host." },
     { .key = "enabled", BOOL(config_camera_t, enabled), .def_int = 1, .live = 1,

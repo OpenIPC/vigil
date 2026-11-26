@@ -38,6 +38,7 @@ static int rtsp_src_open(source_t *s)
     r->rtsp.stop = s->stop;
     if (rtsp_open(&r->rtsp, 3000) < 0) {
         snprintf(s->err, sizeof s->err, "%s", r->rtsp.err);
+        s->fail = (src_fail_t)r->rtsp.fail;
         return -1;
     }
     s->codec = r->rtsp.codec;
@@ -65,6 +66,7 @@ static int rtsp_src_poll(source_t *s, au_emit_fn emit, void *user)
     int rc = rtsp_read(&r->rtsp, &p, &n, &chan);
     if (rc < 0) {
         snprintf(s->err, sizeof s->err, "%s", r->rtsp.err);
+        s->fail = SRC_FAIL_UNREACHABLE;             /* the camera went away */
         return -1;
     }
     /* RTP arrives on the channel SETUP assigned; RTCP on the next one. */

@@ -112,6 +112,11 @@ static channel_t       g_ch[CHANNEL_MAX];
 static pthread_mutex_t g_locks[CHANNEL_MAX], g_dec_locks[CHANNEL_MAX];
 static pthread_once_t  g_once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t g_n_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Per slot, under g_locks: switched off (with its name), and when each
+ * event type was last reported. Kept whether a channel runs or not. */
+static char            g_disabled[CHANNEL_MAX];
+static char            g_off_name[CHANNEL_MAX][32];
+static time_t          g_ev_last[CHANNEL_MAX][CH_EV_TYPES];
 static int             g_n;         /* tiles in use */
 static int             g_can_decode;
 static int             g_running;   /* past the first apply: changes are news */
@@ -131,11 +136,55 @@ static void locks_init(void)
     }
 }
 
+const char *ch_state_name(ch_state_t s)
+{
+    static const char *const names[] = { "empty", "disabled", "connecting", "live", "no_video",
+                                         "offline", "auth", "codec", "error" };
+    return (unsigned)s < sizeof names / sizeof names[0] ? names[s] : "error";
+}
+
+const char *ch_event_name(int bit)
+{
+    static const char *const names[CH_EV_TYPES] = { "motion", "human", "face", "vehicle" };
+    return bit >= 0 && bit < CH_EV_TYPES ? names[bit] : NULL;
+}
+
+unsigned channel_events_held(const time_t last[CH_EV_TYPES], time_t now)
+{
+    unsigned bits = 0;
+    for (int b = 0; b < CH_EV_TYPES; ++b)
+        if (last[b] && now >= last[b] && now - last[b] < CHANNEL_EVENT_HOLD) bits |= 1u << b;
+    return bits;
+}
+
+void channels_report_events(int idx, unsigned bits)
+{
+    if (idx < 0 || idx >= CHANNEL_MAX) return;
+    pthread_once(&g_once, locks_init);
+    time_t now = time(NULL);
+    pthread_mutex_lock(&g_locks[idx]);
+    for (int b = 0; b < CH_EV_TYPES; ++b)
+        if (bits & (1u << b)) g_ev_last[idx][b] = now;
+    pthread_mutex_unlock(&g_locks[idx]);
+}
+
+/* What a failed source means for the tile. */
+static ch_state_t fail_state(src_fail_t f)
+{
+    switch (f) {
+    case SRC_FAIL_UNREACHABLE: return CH_OFFLINE;
+    case SRC_FAIL_AUTH:        return CH_AUTH;
+    case SRC_FAIL_CODEC:       return CH_CODEC;
+    default:                   return CH_ERROR;
+    }
+}
+
 /* The main session's state: what the status says about the camera. */
-static void set_state(channel_t *c, int live, const char *fmt, ...)
+static void set_state(channel_t *c, int live, ch_state_t status, const char *fmt, ...)
 {
     pthread_mutex_lock(c->lock);
     c->s[S_MAIN].live = live;
+    c->st.status = status;
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(c->st.state, sizeof c->st.state, fmt, ap);
@@ -152,7 +201,12 @@ void channels_status(int idx, channel_status_t *st)
     pthread_once(&g_once, locks_init);
     channel_t *c = &g_ch[idx];
     pthread_mutex_lock(&g_locks[idx]);
-    if (c->active) {
+    if (!c->active) {
+        if (g_disabled[idx]) {
+            st->status = CH_DISABLED;
+            snprintf(st->name, sizeof st->name, "%s", g_off_name[idx]);
+        }
+    } else {
         *st = c->st;
         /* The stream on screen: the decoder's, else the one the tile waits
          * for once it is up, else the main one. */
@@ -161,6 +215,9 @@ void channels_status(int idx, channel_status_t *st)
                   : view == S_SUB && c->s[S_SUB].thread_up && c->s[S_SUB].live ? S_SUB : S_MAIN;
         const sess_t *v = &c->s[shown];
         st->live = c->s[S_MAIN].live;
+        /* Connected, but no video for LIVE_SECS. */
+        if (st->status == CH_LIVE && !st->live) st->status = CH_NO_VIDEO;
+        st->events = channel_events_held(g_ev_last[idx], time(NULL));
         st->decoding = holder != VIEW_NONE;
         st->no_decoder = !st->decoding && view != VIEW_NONE && atomic_load(&c->dec_told);
         st->codec = v->codec ? v->codec : c->s[S_MAIN].codec;
@@ -451,9 +508,9 @@ static void *sess_thread(void *arg)
     const char *tag = main ? "" : " sub";
 
     while (!s->stop && sess_wanted(s)) {
-        if (main) set_state(c, 0, "CONNECTING");
+        if (main) set_state(c, 0, CH_CONNECTING, "CONNECTING");
         if (s->src->ops->open(s->src) < 0) {
-            if (main) set_state(c, 0, "%.40s", s->src->err);
+            if (main) set_state(c, 0, fail_state(s->src->fail), "%.40s", s->src->err);
             if (!told_fail) {
                 vg_log("CAM%d%s %s: %s", ch, tag, s->src->host, s->src->err);
                 if (main) events_push(ch, "down");
@@ -489,7 +546,7 @@ static void *sess_thread(void *arg)
         vg_log("CAM%d%s %s: online", ch, tag, s->src->host);
         if (main) {
             events_push(ch, "online");
-            set_state(c, 1, "");
+            set_state(c, 1, CH_LIVE, "");
         } else {
             pthread_mutex_lock(c->lock);
             s->live = 1;
@@ -736,6 +793,13 @@ int channels_apply(const channels_config_t *cfg)
         int used = 0;
         for (int i = limit; i < cfg->n; ++i) used |= cfg->urls[i] != NULL;
         if (used) vg_log("%s shows at most %d channels; using the first %d", caps->name, limit, limit);
+    }
+
+    for (int i = 0; i < CHANNEL_MAX; ++i) {
+        pthread_mutex_lock(&g_locks[i]);
+        g_disabled[i] = i < cfg->n && i < limit && cfg->disabled[i];
+        snprintf(g_off_name[i], sizeof g_off_name[i], "%s", g_disabled[i] && cfg->names[i] ? cfg->names[i] : "");
+        pthread_mutex_unlock(&g_locks[i]);
     }
 
     /* Stop every channel that changes first, all at once: each stop may

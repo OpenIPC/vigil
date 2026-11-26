@@ -25,28 +25,34 @@
 #include <string.h>
 
 #include "hal_ui.h"
+#include "icons.h"
 #include "ui_app.h"
 #include "ui_layout.h"
 #include "ui_theme.h"
 
 #define NAV_EDGE   3            /* px from the bottom that bring the bar up */
 #define NAV_POLL   100          /* ms */
+#define ARROW_EDGE 80           /* px from the left or right edge that bring up a page arrow */
+#define ARROW_IDLE 2000         /* ms without the pointer moving that put it away */
 
 /* Where the clock is: LV_ALIGN_TOP_LEFT, _TOP_RIGHT, _BOTTOM_LEFT,
  * _BOTTOM_RIGHT, or LV_ALIGN_DEFAULT for none. A constant until the UI
  * has settings of its own. */
 #define CLOCK_CORNER LV_ALIGN_TOP_RIGHT
 
+#define N_EVENT_ICONS 4
+
 typedef struct {
     int         ch;
     lv_obj_t   *obj;
-    lv_obj_t   *title;          /* top-left chip: name, REC, motion */
-    lv_obj_t   *rec, *motion;
-    lv_obj_t   *mid, *mid_l1, *mid_l2; /* centre chip: state */
-    lv_obj_t   *info, *info_l;  /* bottom-left chip: stream */
+    lv_obj_t   *name_chip, *name;      /* bottom left */
+    lv_obj_t   *icons, *rec;           /* bottom right: REC, then the events */
+    lv_obj_t   *ev[N_EVENT_ICONS];
+    lv_obj_t   *mid, *mid_l1, *mid_l2; /* centre: the state, when there is no picture */
+    lv_obj_t   *add;                   /* centre: "+" on an empty slot */
     lv_obj_t   *flash;
     lv_timer_t *flash_timer;
-    int         tiny;           /* too narrow for the stream line */
+    int         tiny;                  /* small tile: one line of state, a smaller "+" */
 } cell_t;
 
 #define N_LAYOUTS 7                    /* ui_n_layouts */
@@ -56,6 +62,9 @@ static struct {
     lv_group_t *group;                  /* the grid, then the navigation bar */
     int        sel_ch;                  /* the tile the keyboard selected (its channel) */
     lv_obj_t  *nav, *nav_page, *nav_prev, *nav_next, *nav_pin;
+    lv_obj_t  *arrow[2];                /* previous / next page, at the screen's edges */
+    lv_point_t arrow_pt;                /* where the pointer was */
+    uint32_t   arrow_moved_ms;          /* ... and when it last moved */
     lv_obj_t  *layout_btn[N_LAYOUTS];
     int        sw, sh;
     int        layout, page;
@@ -97,6 +106,14 @@ const char *ui_live_clock_corner(void)
     }
 }
 
+/* The settings section with `key`, or -1. */
+static int section_of(const char *key)
+{
+    for (int i = 0; i < ui_model()->n_sections; ++i)
+        if (!strcmp(ui_model()->sections[i].key, key)) return i;
+    return -1;
+}
+
 /* ---- one tile ----------------------------------------------------------------------- */
 
 static lv_obj_t *chip(lv_obj_t *parent)
@@ -112,61 +129,65 @@ static lv_obj_t *chip(lv_obj_t *parent)
     return c;
 }
 
+static void show(lv_obj_t *o, int on)
+{
+    if (on) lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* What the centre says when there is no picture. */
+static const char *status_text(const ui_chan_t *st, lv_color_t *col, const char **detail)
+{
+    *col = UI_C(BAD);
+    *detail = "";
+    switch (st->status) {
+    case UI_CH_DISABLED:   *col = UI_C(TEXT2); return "Disabled";
+    case UI_CH_CONNECTING: *col = UI_C(WARN); return "Connecting...";
+    case UI_CH_LIVE:       *col = UI_C(WARN); return "No decoder";      /* live, nothing to show it */
+    case UI_CH_NO_VIDEO:   return "No video";
+    case UI_CH_OFFLINE:    return "Offline";
+    case UI_CH_AUTH:       return "Authentication error";
+    case UI_CH_CODEC:      return "Unsupported codec";
+    default:               *detail = st->state; return "No video";
+    }
+}
+
 static void cell_update(cell_t *c)
 {
-    if (c->ch < 0) {
-        lv_obj_add_flag(lv_obj_get_parent(c->title), LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(c->mid, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(c->info, LV_OBJ_FLAG_HIDDEN);
+    if (c->ch < 0) {                    /* past the platform's channels */
+        show(c->name_chip, 0);
+        show(c->icons, 0);
+        show(c->mid, 0);
+        show(c->add, 0);
         return;
     }
     const ui_chan_t *st = ui_channel(c->ch);
     char buf[64];
     ui_chan_title(c->ch, buf, sizeof buf);
-    lv_label_set_text(c->title, buf);
-    if (st->recording) lv_obj_remove_flag(c->rec, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(c->rec, LV_OBJ_FLAG_HIDDEN);
-    if (st->motion) lv_obj_remove_flag(c->motion, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(c->motion, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(c->name, buf);
+    int empty = st->status == UI_CH_EMPTY;
+    lv_obj_set_style_text_color(c->name, empty ? UI_C(TEXT2) : UI_C(TEXT), 0);
 
-    if (st->configured && st->live) {
-        if (st->no_decoder) {           /* video arrives, nothing to show it with */
-            lv_obj_remove_flag(c->mid, LV_OBJ_FLAG_HIDDEN);
-            lv_label_set_text(c->mid_l1, "No decoder");
-            lv_obj_set_style_text_color(c->mid_l1, UI_C(WARN), 0);
-            lv_obj_add_flag(c->mid_l2, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(c->mid, LV_OBJ_FLAG_HIDDEN);
-        }
-        if (c->tiny) lv_obj_add_flag(c->info, LV_OBJ_FLAG_HIDDEN);
-        else lv_obj_remove_flag(c->info, LV_OBJ_FLAG_HIDDEN);
-        if (st->width)
-            snprintf(buf, sizeof buf, "%s  %ux%u  %u fps", st->codec, st->width, st->height, st->fps);
-        else
-            snprintf(buf, sizeof buf, "%u fps", st->fps);
-        lv_label_set_text(c->info_l, buf);
+    show(c->rec, st->recording);
+    int any = st->recording;
+    for (int i = 0; i < N_EVENT_ICONS; ++i) {
+        show(c->ev[i], (st->events >> i) & 1);
+        any |= (st->events >> i) & 1;
+    }
+    show(c->icons, any);
+
+    show(c->add, empty);
+    if (empty || (st->status == UI_CH_LIVE && !st->no_decoder)) {
+        show(c->mid, 0);
         return;
     }
-    lv_obj_add_flag(c->info, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_remove_flag(c->mid, LV_OBJ_FLAG_HIDDEN);
-    const char *l1, *l2 = "";
     lv_color_t col;
-    if (!st->configured) {
-        l1 = "No camera";
-        col = UI_C(TEXT2);
-    } else if (!st->state[0] || !strcmp(st->state, "CONNECTING")) {
-        l1 = "Connecting...";
-        col = UI_C(WARN);
-    } else {
-        l1 = "No video";
-        l2 = st->state;
-        col = UI_C(BAD);
-    }
-    lv_label_set_text(c->mid_l1, l1);
+    const char *detail;
+    lv_label_set_text(c->mid_l1, status_text(st, &col, &detail));
     lv_obj_set_style_text_color(c->mid_l1, col, 0);
-    lv_label_set_text(c->mid_l2, l2);
-    if (*l2 && !c->tiny) lv_obj_remove_flag(c->mid_l2, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(c->mid_l2, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(c->mid_l2, detail);
+    show(c->mid_l2, *detail && !c->tiny);
+    show(c->mid, 1);
 }
 
 static void cell_observer_cb(lv_observer_t *o, lv_subject_t *s)
@@ -197,13 +218,30 @@ static void toggle_full_screen(int ch)
 /* After the click's event: the new layout deletes the tile clicked. */
 static void full_screen_async(void *ch) { toggle_full_screen((int)(intptr_t)ch); }
 
+/* Channels -> a new camera on channel `ch` (after the click's event). */
+static void add_async(void *ch)
+{
+    int sec = section_of("cameras");
+    if (sec >= 0) ui_form_open_slot(sec, (int)(intptr_t)ch);
+}
+
+static void add_click_cb(lv_event_t *e)
+{
+    cell_t *c = lv_event_get_user_data(e);
+    if (c->ch >= 0) lv_async_call(add_async, (void *)(intptr_t)c->ch);
+}
+
 static void cell_click_cb(lv_event_t *e)
 {
     cell_t *c = lv_event_get_user_data(e);
     lv_indev_t *in = lv_indev_active();
     if (in && lv_indev_get_type(in) == LV_INDEV_TYPE_KEYPAD) {
-        /* Enter on the selected tile (gridnav passes the click on). */
-        if (c->ch >= 0) lv_async_call(full_screen_async, (void *)(intptr_t)c->ch);
+        /* Enter on the selected tile (gridnav passes the click on): an
+         * empty one adds a camera there, another goes full screen. */
+        if (c->ch >= 0 && ui_channel(c->ch)->status == UI_CH_EMPTY)
+            lv_async_call(add_async, (void *)(intptr_t)c->ch);
+        else if (c->ch >= 0)
+            lv_async_call(full_screen_async, (void *)(intptr_t)c->ch);
         return;
     }
     /* The keyboard's selection follows the mouse: Enter after a click
@@ -280,27 +318,21 @@ static void cell_build(cell_t *c, const ui_cell_t *g)
 
     int small = g->w < 400;
     c->tiny = g->w < 240;
-    lv_obj_t *t = chip(o);
-    lv_obj_align(t, LV_ALIGN_TOP_LEFT, VG_SPACE_SM, VG_SPACE_SM + clock_offset(g, 1, 140));
-    c->title = ui_label(t, "", small ? VG_FONT_SM_LV : VG_FONT_MD_LV, UI_C(TEXT));
-    /* REC: a red dot and the word, as on a camcorder. */
-    c->rec = lv_obj_create(t);
-    ui_plain(c->rec);
-    lv_obj_remove_flag(c->rec, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_size(c->rec, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_layout(c->rec, LV_LAYOUT_FLEX);
-    lv_obj_set_flex_flow(c->rec, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(c->rec, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(c->rec, VG_SPACE_XS, 0);
-    lv_obj_t *dot = lv_obj_create(c->rec);
-    ui_plain(dot);
-    lv_obj_remove_flag(dot, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_size(dot, VG_SIZE_ICON_DOT, VG_SIZE_ICON_DOT);
-    lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(dot, UI_C(BAD), 0);
-    lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-    ui_label(c->rec, "REC", VG_FONT_SM_LV, UI_C(BAD));
-    c->motion = ui_label(t, LV_SYMBOL_EYE_OPEN, VG_FONT_SM_LV, UI_C(WARN));
+    int edge = clock_offset(g, 0, 200);
+    c->name_chip = chip(o);
+    lv_obj_align(c->name_chip, LV_ALIGN_BOTTOM_LEFT, VG_SPACE_SM, -VG_SPACE_SM - edge);
+    c->name = ui_label(c->name_chip, "", small ? VG_FONT_SM_LV : VG_FONT_MD_LV, UI_C(TEXT));
+    lv_obj_set_style_max_width(c->name, g->w / 2, 0);
+    lv_label_set_long_mode(c->name, LV_LABEL_LONG_CLIP);
+
+    /* Icons only, small, in the design tokens' colours. */
+    static const lv_image_dsc_t *const ev_img[N_EVENT_ICONS] = { &ui_icon_ev_motion, &ui_icon_ev_human,
+                                                                 &ui_icon_ev_face, &ui_icon_ev_vehicle };
+    c->icons = chip(o);
+    lv_obj_set_style_pad_ver(c->icons, VG_SPACE_XS, 0);
+    lv_obj_align(c->icons, LV_ALIGN_BOTTOM_RIGHT, -VG_SPACE_SM, -VG_SPACE_SM);
+    c->rec = ui_icon(c->icons, &ui_icon_rec, VG_COLOR_BAD);
+    for (int i = 0; i < N_EVENT_ICONS; ++i) c->ev[i] = ui_icon(c->icons, ev_img[i], VG_COLOR_WARN);
 
     c->mid = chip(o);
     lv_obj_set_flex_flow(c->mid, LV_FLEX_FLOW_COLUMN);
@@ -314,10 +346,13 @@ static void cell_build(cell_t *c, const ui_cell_t *g)
     lv_obj_set_style_text_align(c->mid_l2, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(c->mid_l2, LV_LABEL_LONG_WRAP);
 
-    c->info = chip(o);
-    lv_obj_align(c->info, LV_ALIGN_BOTTOM_LEFT, VG_SPACE_SM,
-                 -VG_SPACE_SM - clock_offset(g, 0, 200));
-    c->info_l = ui_label(c->info, "", VG_FONT_SM_LV, UI_C(TEXT2));
+    /* An empty slot: a large "+" that adds a camera on this channel. Two
+     * sizes rendered: LVGL does not scale A8 images. */
+    c->add = ui_disc_button(o, small ? 52 : 88);
+    lv_obj_center(c->add);
+    lv_obj_add_event_cb(c->add, add_click_cb, LV_EVENT_CLICKED, c);
+    lv_obj_center(ui_icon(c->add, small ? &ui_icon_add_sm : &ui_icon_add, VG_COLOR_TEXT2));
+    lv_obj_add_flag(c->add, LV_OBJ_FLAG_HIDDEN);
 
     c->flash = lv_obj_create(o);
     ui_plain(c->flash);
@@ -424,13 +459,6 @@ static void make_clock(void)
 enum { ACT_MENU = 1, ACT_PREV, ACT_NEXT, ACT_PIN, ACT_FULL, ACT_CONTEXT, ACT_ESC, ACT_CHANNELS, ACT_RECORD,
        ACT_DISPLAY, ACT_LAYOUT = 100 };
 
-/* The settings section with `key`, or -1. */
-static int section_of(const char *key)
-{
-    for (int i = 0; i < ui_model()->n_sections; ++i)
-        if (!strcmp(ui_model()->sections[i].key, key)) return i;
-    return -1;
-}
 
 static void nav_show(int show)
 {
@@ -502,10 +530,29 @@ static void pinned_cb(lv_observer_t *o, lv_subject_t *s)
     }
 }
 
+/* The page arrows: one comes up while the pointer is near its edge
+ * around the middle of the screen and moving, when there is more than
+ * one page. */
+static void arrows_poll(void)
+{
+    lv_point_t p;
+    int has = ui_pointer(&p), side = -1;
+    if (has && (p.x != L.arrow_pt.x || p.y != L.arrow_pt.y)) {
+        L.arrow_pt = p;
+        L.arrow_moved_ms = lv_tick_get();
+    }
+    if (has && lv_screen_active() == L.scr && !ui_popup_is_open() &&
+        ui_layout_pages(L.layout, n_channels()) > 1 && !ui_model()->fixed_tiles &&
+        lv_tick_elaps(L.arrow_moved_ms) < ARROW_IDLE && p.y >= L.sh / 3 && p.y < L.sh * 2 / 3)
+        side = p.x < ARROW_EDGE ? 0 : p.x >= L.sw - ARROW_EDGE ? 1 : -1;
+    for (int i = 0; i < 2; ++i) show(L.arrow[i], i == side);
+}
+
 static void nav_poll_cb(lv_timer_t *t)
 {
     (void)t;
     lv_point_t p;
+    arrows_poll();
     if (lv_screen_active() != L.scr) return;
     if (lv_subject_get_int(&ui_subj_nav_pinned)) return;
     if (!ui_pointer(&p)) p.y = 0;                /* no mouse: up only while it has the focus */
@@ -527,6 +574,27 @@ static void nav_focused_cb(lv_event_t *e)
 {
     (void)e;
     nav_show(1);
+}
+
+static void arrow_cb(lv_event_t *e)
+{
+    int next = (int)(intptr_t)lv_event_get_user_data(e);
+    L.arrow_moved_ms = lv_tick_get();               /* stays up for the next click */
+    do_action(next ? ACT_NEXT : ACT_PREV, -1);
+}
+
+/* Round, opaque (a colour key shows any blend over video as a fringe). */
+static void make_arrows(void)
+{
+    for (int i = 0; i < 2; ++i) {
+        lv_obj_t *b = ui_disc_button(L.scr, VG_SIZE_PAGE_ARROW);
+        lv_obj_align(b, i ? LV_ALIGN_RIGHT_MID : LV_ALIGN_LEFT_MID, i ? -VG_SPACE_LG : VG_SPACE_LG, 0);
+        lv_obj_t *l = ui_label(b, i ? LV_SYMBOL_RIGHT : LV_SYMBOL_LEFT, VG_FONT_LG_LV, UI_C(TEXT));
+        lv_obj_center(l);
+        lv_obj_add_event_cb(b, arrow_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);
+        L.arrow[i] = b;
+    }
 }
 
 static lv_obj_t *nav_btn(const char *sym, const char *text, int act)
@@ -629,17 +697,6 @@ static void menu_sep(lv_obj_t *panel)
     lv_obj_set_style_bg_opa(s, LV_OPA_COVER, 0);
 }
 
-/* The channel in the tile under `at`, or -1. */
-static int channel_at(const lv_point_t *at)
-{
-    for (int i = 0; at && i < L.n_cells; ++i) {
-        lv_area_t a;
-        lv_obj_get_coords(L.cells[i].obj, &a);
-        if (at->x >= a.x1 && at->x <= a.x2 && at->y >= a.y1 && at->y <= a.y2) return L.cells[i].ch;
-    }
-    return -1;
-}
-
 /* Not there yet (playback, PTZ): in the menu, muted, so it already has
  * the product's shape; choosing one says so (ui_not_yet), as the main
  * menu's cards of such features do. */
@@ -694,8 +751,9 @@ static void split_key_cb(lv_event_t *e)
     if (lv_event_get_key(e) == LV_KEY_RIGHT && !ui_popup_sub_is_open()) split_open(lv_event_get_target(e));
 }
 
-/* Main menu, Channels, Playback, Record, PTZ, Display, Split; then what
- * concerns the tile under the pointer, the pages, and the bar. */
+/* Main menu, Channels, Playback, Record, PTZ, Display, Split: nothing
+ * else (full screen is a double click or Enter, pages the edge arrows or
+ * PgUp/PgDn, pinning the bar its own button). */
 void ui_live_context_menu(const lv_point_t *at)
 {
     lv_obj_t *panel = ui_popup_open(at, 260);
@@ -711,25 +769,7 @@ void ui_live_context_menu(const lv_point_t *at)
         ui_label(split, LV_SYMBOL_RIGHT, VG_FONT_SM_LV, UI_C(TEXT2));
         lv_obj_add_event_cb(split, split_click_cb, LV_EVENT_CLICKED, NULL);
         lv_obj_add_event_cb(split, split_key_cb, LV_EVENT_KEY, NULL);
-
-        int ch = channel_at(at);
-        int pages = ui_layout_pages(L.layout, n_channels()) > 1;
-        if (ch >= 0 || pages) menu_sep(panel);
-        if (ch >= 0) {
-            char buf[64], t[40];
-            ui_chan_title(ch, t, sizeof t);
-            snprintf(buf, sizeof buf, L.layout == 1 ? "Back to the grid" : "Full screen: %s", t);
-            menu_item(panel, LV_SYMBOL_IMAGE, buf, ACT_FULL, ch);
-        }
-        if (pages) {
-            menu_item(panel, LV_SYMBOL_LEFT, "Previous page", ACT_PREV, -1);
-            menu_item(panel, LV_SYMBOL_RIGHT, "Next page", ACT_NEXT, -1);
-        }
     }
-    menu_sep(panel);
-    menu_item(panel, LV_SYMBOL_DOWNLOAD,
-              lv_subject_get_int(&ui_subj_nav_pinned) ? "Unpin navigation bar" : "Pin navigation bar",
-              ACT_PIN, -1);
     /* Left and Right go to the item (Right opens Split). */
     ui_popup_focus(panel, NULL, LV_GRIDNAV_CTRL_ROLLOVER | LV_GRIDNAV_CTRL_VERTICAL_MOVE_ONLY);
     ui_popup_place(at);
@@ -881,6 +921,7 @@ lv_obj_t *ui_live_create(void)
     if (L.hole_opa < LV_OPA_COVER) lv_obj_set_style_bg_opa(L.scr, LV_OPA_TRANSP, 0);
 
     make_clock();
+    make_arrows();
     make_nav();
     set_layout(n_channels() > 1 && layout_offered(4) ? 4 : 1, 0);
     return L.scr;

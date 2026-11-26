@@ -43,6 +43,15 @@ static const vigil_config_t *cfg(void)
 
 /* ---- live view -------------------------------------------------------------------- */
 
+/* The UI's copies of the core's states and event bits. */
+_Static_assert((int)UI_CH_EMPTY == (int)CH_EMPTY && (int)UI_CH_DISABLED == (int)CH_DISABLED &&
+                   (int)UI_CH_LIVE == (int)CH_LIVE && (int)UI_CH_AUTH == (int)CH_AUTH &&
+                   (int)UI_CH_ERROR == (int)CH_ERROR,
+               "ui_ch_status_t follows ch_state_t");
+_Static_assert((unsigned)UI_EV_MOTION == (unsigned)CH_EV_MOTION && (unsigned)UI_EV_HUMAN == (unsigned)CH_EV_HUMAN &&
+                   (unsigned)UI_EV_FACE == (unsigned)CH_EV_FACE && (unsigned)UI_EV_VEHICLE == (unsigned)CH_EV_VEHICLE,
+               "UI_EV_* are CH_EV_*");
+
 static void chan_status(int idx, ui_chan_t *st)
 {
     channel_status_t cs;
@@ -50,7 +59,9 @@ static void chan_status(int idx, ui_chan_t *st)
     st->configured = cs.configured;
     st->live = cs.live;
     st->recording = cs.recording;
-    st->motion = cs.motion;
+    st->status = (ui_ch_status_t)cs.status;         /* the same order (ui_model.h) */
+    st->events = cs.events;                         /* the same bits */
+    snprintf(st->view, sizeof st->view, "%s", cs.view);
     snprintf(st->rec_state, sizeof st->rec_state, "%s", cs.rec_state);
     st->rec_bytes = cs.rec_bytes;
     snprintf(st->name, sizeof st->name, "%s", cs.name);
@@ -291,6 +302,8 @@ static int sections_build(void)
         }
         g_sections[i] = (ui_section_t){ .key = s->key, .label = s->label ? s->label : s->key,
                                         .help = s->help ? s->help : "", .is_array = s->is_array,
+                                        /* cameras[i] is channel i + 1 (config_to_channels) */
+                                        .slots = !strcmp(s->key, "cameras"),
                                         .max_items = s->max_items, .fields = fs,
                                         .n_fields = s->n_fields };
     }
