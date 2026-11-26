@@ -405,7 +405,7 @@ static int system_time(struct mg_connection *conn, const char *m)
         }
     }
     cJSON_Delete(b);
-    if (rc != MGMT_OK) return answer(conn, rc, has(b, "time") ? "time" : "zone", err);
+    if (rc != MGMT_OK) return answer(conn, rc, set_clock ? "time" : "zone", err);
     return send_json(conn, 200, time_json());
 }
 
