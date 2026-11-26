@@ -544,9 +544,11 @@ void channels_set_tiles(const vg_rect_t *tiles)
         /* Only this thread starts and stops channels: active and src are
          * stable here. */
         if (!c->active || !c->src || c->src->ops->self_displayed) continue;
-        if (g_tiles[i].w > 0 && g_tiles[i].h > 0)
-            hal_display_set_tile(i, &g_tiles[i]);
-        else
+        if (g_tiles[i].w > 0 && g_tiles[i].h > 0) {
+            if (hal_display_set_tile(i, &g_tiles[i]) < 0)
+                vg_log("CAM%d: cannot move its picture to %dx%d at %d,%d", i + 1, g_tiles[i].w,
+                       g_tiles[i].h, g_tiles[i].x, g_tiles[i].y);
+        } else
             hal_display_clear_tile(i);
     }
 }

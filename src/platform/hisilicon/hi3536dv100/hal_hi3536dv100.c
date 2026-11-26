@@ -106,7 +106,9 @@ int hal_display_set_tile(int ch, const vg_rect_t *r)
         vp.stAspectRatio.u32BgColor = 0x000000;
         HI_MPI_VO_SetChnParam(HI_DISPLAY_VO_LAYER, ch, &vp);
     }
-    if ((rc = HI_MPI_VO_EnableChn(HI_DISPLAY_VO_LAYER, ch)) != HI_SUCCESS) {
+    /* A move (another layout, full screen) changes the attributes of a
+     * channel that is already enabled. */
+    if (!g_ch[ch].vo_up && (rc = HI_MPI_VO_EnableChn(HI_DISPLAY_VO_LAYER, ch)) != HI_SUCCESS) {
         fprintf(stderr, "hi3536dv100: VO_EnableChn(%d) 0x%x\n", ch, rc);
         return -1;
     }
