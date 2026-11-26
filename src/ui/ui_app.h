@@ -139,7 +139,9 @@ void      ui_help_toggle(void);
  * rather than moving the focus. */
 #define UI_FLAG_ARROWS LV_OBJ_FLAG_USER_1
 /* Make `o` a gridnav container that takes the arrows, its clickable
- * children the items. */
+ * children the items; a pointer press on one makes it the keyboard's.
+ * Call it after anything that handles LV_EVENT_DELETE is added to `o`
+ * (an observer bound to it): see ui_app.c. */
 void      ui_gridnav(lv_obj_t *o, lv_gridnav_ctrl_t ctrl);
 /* Make `item` the gridnav container `cont`'s current item (marked
  * focused only while `cont` has the focus). */

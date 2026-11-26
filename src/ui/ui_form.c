@@ -818,9 +818,11 @@ void ui_list_open(int sec)
     lv_obj_set_size(l->table, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_layout(l->table, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(l->table, LV_FLEX_FLOW_COLUMN);
+    lv_subject_add_observer_obj(&ui_subj_config, list_config_cb, l->table, l);
     /* Up and Down go through the rows, and past the ends to Back and Add. */
     ui_gridnav(l->table, LV_GRIDNAV_CTRL_NONE);
+    if (lv_obj_get_child_count(l->table) > 1 && lv_obj_has_flag(lv_obj_get_child(l->table, 1), LV_OBJ_FLAG_CLICKABLE))
+        ui_gridnav_focus(l->table, lv_obj_get_child(l->table, 1));     /* the first row, not the header */
     lv_group_add_obj(p->group, l->table);
-    lv_subject_add_observer_obj(&ui_subj_config, list_config_cb, l->table, l);
     ui_page_ready(p);
 }

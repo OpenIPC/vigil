@@ -62,14 +62,46 @@ void ui_app_set_keypad(lv_indev_t *indev)
     focus_sync();
 }
 
+/* A press with the pointer on an item: it becomes the keyboard's item,
+ * so Enter after a click means what was clicked and only one thing has
+ * the ring. */
+static void item_pressed_cb(lv_event_t *e)
+{
+    lv_indev_t *in = lv_indev_active();
+    if (!in || lv_indev_get_type(in) != LV_INDEV_TYPE_POINTER) return;
+    lv_obj_t *item = lv_event_get_current_target(e);
+    lv_obj_t *cont = lv_obj_get_parent(item);
+    if (cont && lv_obj_has_flag(item, LV_OBJ_FLAG_CLICKABLE)) ui_gridnav_focus(cont, item);
+}
+
+static void item_hook(lv_obj_t *item)
+{
+    /* LVGL marks a clicked object outside a group focused by itself; the
+     * gridnav's item must move there, or two would have the ring. */
+    lv_obj_add_event_cb(item, item_pressed_cb, LV_EVENT_PRESSED, NULL);
+}
+
+static void child_created_cb(lv_event_t *e)
+{
+    lv_obj_t *child = lv_event_get_target(e);
+    if (lv_obj_get_parent(child) == lv_event_get_current_target(e)) item_hook(child);
+}
+
 void ui_gridnav(lv_obj_t *o, lv_gridnav_ctrl_t ctrl)
 {
+    for (uint32_t i = 0; i < lv_obj_get_child_count(o); ++i) item_hook(lv_obj_get_child(o, (int32_t)i));
+    lv_obj_add_event_cb(o, child_created_cb, LV_EVENT_CHILD_CREATED, NULL);
+    /* Last: on LV_EVENT_DELETE gridnav removes its own callback while
+     * LVGL 9.2 walks the list, which skips the next callback and runs the
+     * last one twice; nothing after it may handle DELETE (an observer's
+     * unsubscribe would be run twice). */
     lv_gridnav_add(o, ctrl);
     lv_obj_add_flag(o, UI_FLAG_ARROWS);
 }
 
 void ui_gridnav_focus(lv_obj_t *cont, lv_obj_t *item)
 {
+    if (!lv_obj_has_flag(cont, UI_FLAG_ARROWS)) return;    /* not (yet) a gridnav container */
     lv_gridnav_set_focused(cont, item, LV_ANIM_OFF);
     if (!lv_obj_has_state(cont, LV_STATE_FOCUSED)) lv_obj_remove_state(item, LV_STATE_FOCUSED | LV_STATE_FOCUS_KEY);
 }

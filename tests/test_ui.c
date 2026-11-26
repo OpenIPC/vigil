@@ -870,12 +870,22 @@ static void test_keyboard_settings(void)
     CHECK(has_focus(card1), "the first card focused");
     key(KEY_RIGHT);
     key(KEY_DOWN);
-    CHECK(has_focus(lv_obj_get_parent(lv_obj_get_parent(find("BACKUP", 0)))), "Right, Down: BACKUP");
+    lv_obj_t *backup = lv_obj_get_parent(lv_obj_get_parent(find("BACKUP", 0)));
+    CHECK(has_focus(backup), "Right, Down: BACKUP");
     shot("menu_focus");
     key(KEY_ENTER);
     CHECK(ui_popup_is_open() && find("Backup is not available yet", 1), "Enter: not there yet");
     key(KEY_ENTER);
     CHECK(!ui_popup_is_open(), "Enter: closed");
+
+    /* The mouse on another card: the ring moves there, one ring only. */
+    click_text("DISPLAY");
+    CHECK(find("top right", 0), "a click on DISPLAY opens it");
+    key(KEY_ESC);
+    lv_obj_t *display = lv_obj_get_parent(lv_obj_get_parent(find("DISPLAY", 0)));
+    CHECK(has_focus(display) && !has_focus(backup) && !has_focus(card1), "the clicked card has the ring, alone");
+    key(KEY_LEFT);
+    CHECK(has_focus(backup), "and the arrows go on from it");
     key(KEY_TAB);
     CHECK(has_focus(lv_obj_get_parent(find("CAMERA", 0))), "Tab: the management row");
     key(KEY_RIGHT);
