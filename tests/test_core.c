@@ -1665,6 +1665,11 @@ static void test_channel_decode(void)
     int has = dec_count(g_dec_open, 0) ? 0 : 1, other = 1 - has;
     CHECK(dec_count(g_dec_open, has) && dec_count(g_dec_sent, has) > 0, "one channel decodes");
     CHECK(!dec_count(g_dec_open, other) && dec_count(g_dec_fails, other) > 0, "the other has no decoder");
+    channel_status_t st;
+    channels_status(other, &st);
+    CHECK(st.no_decoder && !st.decoding, "its status says no decoder");
+    channels_status(has, &st);
+    CHECK(!st.no_decoder && st.decoding, "the decoding one's does not");
 
     /* The decoding channel leaves the screen: it frees its decoder, and
      * the other takes it at its next keyframe, not after the 10 s retry. */
@@ -1675,7 +1680,6 @@ static void test_channel_decode(void)
     CHECK(!dec_count(g_dec_open, has), "hidden channel freed its decoder");
     CHECK(dec_count(g_dec_open, other) && dec_count(g_dec_opens, other) == 1, "shown channel took it");
     usleep(500 * 1000);
-    channel_status_t st;
     channels_status(has, &st);
     CHECK(st.live && !st.decoding && st.width == 640 && st.height == 360 && !st.view[0],
           "hidden channel live, not decoding, size known (%d %d %ux%u '%s')", st.live, st.decoding,

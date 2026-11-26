@@ -41,6 +41,9 @@ typedef struct {
     int        configured;          /* a source is set for this tile */
     int        live;                /* video arrived within the last 3 s */
     int        decoding;            /* a decoder is running */
+    int        no_decoder;          /* the tile wants a picture but the platform has no
+                                       decoder for it now (memory, decoder channels);
+                                       asked for again */
     char       view[8];             /* the stream on screen (or about to be): "main",
                                        "sub", or "" (off screen, or none to decode);
                                        codec, size and fps are that stream's */

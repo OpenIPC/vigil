@@ -183,7 +183,9 @@ and a sub-stream no longer shown keeps its connection for 5 s, so flipping
 between full screen and a layout does not reconnect. The tile's stream line
 (`H.264 352x288 10 fps`) is the stream on screen; recording always takes
 the main stream. Where decoders are scarce (`dec_shown_only`, SigmaStar)
-channels not on the page decode nothing.
+channels not on the page decode nothing, and a tile whose camera is live
+but which got no decoder (out of media memory or decoder channels) says
+**No decoder** until one is free.
 
 ## Settings pages from the schema
 

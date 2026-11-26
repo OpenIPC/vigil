@@ -101,7 +101,7 @@ struct channel {
     unsigned        dec_gen;        /* the holder's au_norm info_gen */
     time_t          dec_failed_at;
     unsigned        dec_failed_frees; /* g_dec_frees when it failed */
-    int             dec_told;       /* the failure was reported */
+    atomic_int      dec_told;       /* the failure was reported (status: no_decoder) */
 
     /* Status (read by the UI and the API under `lock`). */
     pthread_mutex_t *lock;          /* g_locks[idx]: outlives every restart */
@@ -162,6 +162,7 @@ void channels_status(int idx, channel_status_t *st)
         const sess_t *v = &c->s[shown];
         st->live = c->s[S_MAIN].live;
         st->decoding = holder != VIEW_NONE;
+        st->no_decoder = !st->decoding && view != VIEW_NONE && atomic_load(&c->dec_told);
         st->codec = v->codec ? v->codec : c->s[S_MAIN].codec;
         st->width = v->width;
         st->height = v->height;
@@ -215,11 +216,11 @@ static int decoder_ensure(channel_t *c, sess_t *s, vg_codec_t codec)
     if (hal_dec_open(c->idx, codec, si) < 0) {
         /* Said once until it works: with more cameras than decoders it
          * fails again at every retry. */
-        if (!c->dec_told) {
+        if (!atomic_load(&c->dec_told)) {
             vg_log("CAM%d%s: no decoder for %s %ux%u", c->idx + 1, tag, vg_codec_name(codec),
                    si->width, si->height);
             events_push(c->idx + 1, "no decoder");
-            c->dec_told = 1;
+            atomic_store(&c->dec_told, 1);
         }
         c->dec_failed_at = time(NULL);
         c->dec_failed_frees = frees;
@@ -231,7 +232,7 @@ static int decoder_ensure(channel_t *c, sess_t *s, vg_codec_t codec)
     c->dec_codec = codec;
     c->dec_gen = s->norm.info_gen;
     c->dec_failed_at = 0;
-    c->dec_told = 0;
+    atomic_store(&c->dec_told, 0);
     return 1;
 }
 

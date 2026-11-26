@@ -37,6 +37,7 @@ typedef struct {
     char     name[32];          /* "" : the UI shows "CAM n" */
     char     state[48];         /* not live: "CONNECTING" or the last error */
     char     codec[8];          /* "H.264", "H.265", "" */
+    int      no_decoder;        /* live, but the platform has no decoder for it now */
     unsigned width, height, fps;
 } ui_chan_t;
 
