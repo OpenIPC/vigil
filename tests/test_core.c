@@ -17,10 +17,14 @@
 #include <pthread.h>
 
 #include "au_norm.h"
+#include "channel.h"
 #include "cJSON.h"
 #include "config.h"
 #include "events.h"
+#include "hal.h"
 #include "hal_capture.h"
+#include "hal_decoder.h"
+#include "hal_display.h"
 #include "net.h"
 #include "rec_place.h"
 #include "rtp_depay.h"
@@ -968,6 +972,19 @@ static void test_config_store(void)
     CHECK(c.n_cameras == 0 && c.record.segment == 120 && c.record.keep == 3 && !strcmp(c.record.path, "/rec"),
           "whole document replaced");
 
+    /* A write built from an old generation is refused, under the
+     * writers' lock. */
+    static const char K5[] = "{\"path\":\"/rec\",\"segment\":120,\"keep\":5}",
+                      K6[] = "{\"path\":\"/rec\",\"segment\":120,\"keep\":6}";
+    memset(&e, 0, sizeof e);
+    unsigned gen = config_generation();
+    CHECK(config_put_json_at("record", K5, strlen(K5), gen, &e) == CONFIG_OK, "current generation");
+    CHECK(config_generation() == gen + 1, "generation moved");
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json_at("record", K6, strlen(K6), gen, &e) == CONFIG_ESTALE && e.n, "stale refused");
+    config_get(&c);
+    CHECK(c.record.keep == 5 && config_generation() == gen + 1, "nothing changed");
+
     channels_config_t cc;
     c.n_cameras = 2;
     snprintf(c.cameras[0].url, sizeof c.cameras[0].url, "capture:0");
@@ -1153,6 +1170,78 @@ static void test_rec_place(void)
     CHECK(!c.record.allow_rootfs, "allow_rootfs is off by default");
 }
 
+/* ---- channels: tiles follow the layout ------------------------------------------ */
+
+/* A display platform with four decoders that never get a picture: the
+ * channels below point at a closed port and keep reconnecting. */
+static const hal_caps_t g_fake_caps = { .name = "fake", .display = 1, .decoder = 1,
+                                        .dec_max_w = 1920, .dec_max_h = 1080, .max_channels = 4 };
+const hal_caps_t *hal_caps(void) { return &g_fake_caps; }
+int  hal_dec_open(int ch, vg_codec_t c, const vg_stream_info_t *si) { (void)ch; (void)c; (void)si; return -1; }
+int  hal_dec_send(int ch, const vg_au_t *au) { (void)ch; (void)au; return -1; }
+void hal_dec_reset(int ch) { (void)ch; }
+void hal_dec_close(int ch) { (void)ch; }
+
+static vg_rect_t g_tile_at[CHANNEL_MAX];    /* w == 0: cleared */
+static int       g_tile_sets[CHANNEL_MAX], g_tile_clears[CHANNEL_MAX];
+int hal_display_set_tile(int ch, const vg_rect_t *r)
+{
+    g_tile_at[ch] = *r;
+    ++g_tile_sets[ch];
+    return 0;
+}
+void hal_display_clear_tile(int ch)
+{
+    memset(&g_tile_at[ch], 0, sizeof g_tile_at[ch]);
+    ++g_tile_clears[ch];
+}
+
+static int rect_eq(vg_rect_t a, vg_rect_t b) { return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h; }
+
+static void test_channel_tiles(void)
+{
+    /* A port nothing listens on: connecting fails at once, the channels
+     * stay up and retry. */
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    socklen_t al = sizeof a;
+    bind(fd, (struct sockaddr *)&a, sizeof a);
+    getsockname(fd, (struct sockaddr *)&a, &al);
+    char url0[64], url1[64], url1b[64];
+    snprintf(url0, sizeof url0, "netip://127.0.0.1:%d/", ntohs(a.sin_port));
+    snprintf(url1, sizeof url1, "netip://127.0.0.1:%d/?ch=1", ntohs(a.sin_port));
+    snprintf(url1b, sizeof url1b, "netip://127.0.0.1:%d/?ch=2", ntohs(a.sin_port));
+
+    vg_rect_t quad[CHANNEL_MAX] = { { 0, 40, 640, 300 }, { 640, 40, 640, 300 },
+                                    { 0, 340, 640, 300 }, { 640, 340, 640, 300 } };
+    channels_config_t cc = { .urls = { url0, url1 }, .n = 2, .seg_secs = 60 };
+    CHECK(channels_start(&cc, quad) == 0, "start");
+    CHECK(rect_eq(g_tile_at[0], quad[0]) && rect_eq(g_tile_at[1], quad[1]), "quad tiles");
+    CHECK(g_tile_sets[2] == 0 && g_tile_sets[3] == 0, "no tile for an empty slot");
+
+    /* Channel 2 full screen: channel 1 is hidden, the empty slots untouched. */
+    vg_rect_t one[CHANNEL_MAX] = { { 0 } };
+    one[1] = (vg_rect_t){ 0, 40, 1280, 600 };
+    channels_set_tiles(one);
+    CHECK(rect_eq(g_tile_at[1], one[1]), "channel 2 full screen");
+    CHECK(g_tile_at[0].w == 0 && g_tile_clears[0] == 1, "channel 1 hidden");
+    CHECK(g_tile_sets[2] == 0 && g_tile_clears[2] == 0, "empty slot untouched");
+
+    /* A channel started while hidden stays hidden; one shown starts in
+     * its new tile. */
+    int sets0 = g_tile_sets[0];
+    cc.urls[1] = url1b;
+    cc.urls[0] = url1;
+    CHECK(channels_apply(&cc) == 0, "apply");
+    CHECK(g_tile_sets[0] == sets0 && g_tile_at[0].w == 0, "restarted hidden channel not shown");
+    CHECK(rect_eq(g_tile_at[1], one[1]), "restarted channel in its full-screen tile");
+
+    channels_set_tiles(quad);
+    CHECK(rect_eq(g_tile_at[0], quad[0]) && rect_eq(g_tile_at[1], quad[1]), "back to quad");
+    channels_stop();
+    close(fd);
+}
+
 int main(int argc, char **argv)
 {
     g_data = argc > 1 ? argv[1] : "tests/data";
@@ -1171,6 +1260,7 @@ int main(int argc, char **argv)
     test_config_file();
     test_config_store();
     test_events();
+    test_channel_tiles();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

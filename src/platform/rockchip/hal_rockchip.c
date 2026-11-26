@@ -64,6 +64,10 @@ static pthread_t       g_comp;
 static volatile int    g_comp_stop;
 static int             g_comp_up;
 static volatile sig_atomic_t g_shot;
+/* Tiles moved (another layout, a channel full screen): both mosaic buffers
+ * are cleared and every shown channel is composed again, or a part no tile
+ * covers any more would keep its old picture. */
+static int             g_repaint;
 
 const hal_caps_t *hal_caps(void) { return &g_caps; }
 
@@ -134,9 +138,17 @@ static void *compositor(void *arg)
     clock_gettime(CLOCK_MONOTONIC, &next);
     while (!g_comp_stop) {
         rk_buf_t *back = rk_display_back();
+        int repaint = __atomic_load_n(&g_repaint, __ATOMIC_ACQUIRE);
+        if (repaint) {
+            __atomic_compare_exchange_n(&g_repaint, &repaint, repaint - 1, 0, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE);
+            vg_rect_t all = { 0, 0, (int)back->width, (int)back->height };
+            tile_clear(back, &all);
+        }
         for (int i = 0; i < MAX_CH; ++i) {
             chan_t *c = &g_ch[i];
             pthread_mutex_lock(&c->lock);
+            if (repaint && c->tile_set && c->frame && !c->fresh) c->fresh = 1;
             /* Both mosaic buffers must get each new picture, so a frame is
              * composed twice (once per buffer) before it is stale. */
             if (c->tile_set && c->frame && c->fresh) {
@@ -204,6 +216,7 @@ int hal_display_set_tile(int ch, const vg_rect_t *r)
     g_ch[ch].tile_set = 1;
     g_ch[ch].clear = 2;
     pthread_mutex_unlock(&g_ch[ch].lock);
+    __atomic_store_n(&g_repaint, 2, __ATOMIC_RELEASE);
     return 0;
 }
 
@@ -211,8 +224,10 @@ void hal_display_clear_tile(int ch)
 {
     if (ch < 0 || ch >= MAX_CH) return;
     pthread_mutex_lock(&g_ch[ch].lock);
-    g_ch[ch].clear = 2;
+    g_ch[ch].tile_set = 0;              /* not composed until placed again */
+    g_ch[ch].clear = 0;
     pthread_mutex_unlock(&g_ch[ch].lock);
+    __atomic_store_n(&g_repaint, 2, __ATOMIC_RELEASE);
 }
 
 /* ---- decoder ------------------------------------------------------------------ */

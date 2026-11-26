@@ -1,12 +1,13 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /**
- * lv_conf.h — minimal LVGL v9.2 config for vigild's quad view.
+ * lv_conf.h — LVGL v9.2 config for vigild's UI (live view, menus, forms).
  *
  * Target: 1280x720 on the platform's UI layer (hal_ui.h). The colour depth
  * comes from the platform's CMake file (VIGIL_UI_COLOR_DEPTH, passed as
  * LV_COLOR_DEPTH): 16 (RGB565) on hi3520dv200, 32 (ARGB8888) elsewhere.
- * No input devices (signage mode). The tick comes from frontend_ui.c
- * (lv_tick_set_cb on CLOCK_MONOTONIC).
+ * Input: a mouse or touch screen through src/app/input_evdev.c (its own
+ * evdev reader, not LV_USE_EVDEV, which has no right button). The tick
+ * comes from frontend_ui.c (lv_tick_set_cb on CLOCK_MONOTONIC).
  */
 #ifndef LV_CONF_H
 #define LV_CONF_H
@@ -21,10 +22,12 @@
 
 /* ----- Memory ---------------------------------------------------------- */
 #define LV_USE_STDLIB_MALLOC            LV_STDLIB_BUILTIN
-/* 512 KiB heap = headroom for two 150 KiB partial-render buffers + widgets.
- * LVGL's lv_linux_fbdev_set_file() lv_malloc's the draw buffers (LV_LINUX_FBDEV_BUFFER_SIZE
- * each, 2 of them). 96 KiB was too tight and triggered a buf1==NULL assert. */
-#define LV_MEM_SIZE                     (512U * 1024U)
+/* LVGL's lv_linux_fbdev_set_file() lv_malloc's the draw buffers
+ * (LV_LINUX_FBDEV_BUFFER_SIZE each, 2 of them, 300 KiB); 96 KiB was too
+ * tight and triggered a buf1==NULL assert. The menus, forms and on-screen
+ * keyboard add about 70 KiB at their peak (test_ui prints it); the rest
+ * is headroom (a pool page costs RAM only once it is touched). */
+#define LV_MEM_SIZE                     (1024U * 1024U)
 #define LV_MEM_POOL_EXPAND_SIZE         0
 #define LV_USE_STDLIB_STRING            LV_STDLIB_BUILTIN
 #define LV_USE_STDLIB_SPRINTF           LV_STDLIB_BUILTIN
@@ -109,7 +112,7 @@
 #define LV_USE_LINE                     1
 #define LV_USE_LIST                     0
 #define LV_USE_BAR                      0
-#define LV_USE_BUTTON                   0
+#define LV_USE_BUTTON                   1
 #define LV_USE_IMAGE                    1
 #define LV_USE_ARC                      0
 #define LV_USE_ANIMIMG                  0
@@ -117,8 +120,8 @@
 #define LV_USE_CANVAS                   0
 #define LV_USE_CHART                    0
 #define LV_USE_CHECKBOX                 0
-#define LV_USE_DROPDOWN                 0
-#define LV_USE_KEYBOARD                 0
+#define LV_USE_DROPDOWN                 1
+#define LV_USE_KEYBOARD                 1
 #define LV_USE_MENU                     0
 #define LV_USE_MSGBOX                   0
 #define LV_USE_ROLLER                   0
@@ -127,14 +130,14 @@
 #define LV_USE_SPAN                     0
 #define LV_USE_SPINBOX                  0
 #define LV_USE_SPINNER                  0
-#define LV_USE_SWITCH                   0
+#define LV_USE_SWITCH                   1
 #define LV_USE_TABLE                    0
 #define LV_USE_TABVIEW                  0
-#define LV_USE_TEXTAREA                 0
+#define LV_USE_TEXTAREA                 1
 #define LV_USE_TILEVIEW                 0
 #define LV_USE_WIN                      0
-#define LV_USE_OBSERVER                 0
-#define LV_USE_BUTTONMATRIX             0
+#define LV_USE_OBSERVER                 1
+#define LV_USE_BUTTONMATRIX             1
 
 #define LV_USE_FLEX                     1
 #define LV_USE_GRID                     1
@@ -153,7 +156,7 @@
 #define LV_FONT_MONTSERRAT_14           1
 #define LV_FONT_MONTSERRAT_16           1
 #define LV_FONT_MONTSERRAT_18           0
-#define LV_FONT_MONTSERRAT_20           0
+#define LV_FONT_MONTSERRAT_20           1
 #define LV_FONT_MONTSERRAT_22           0
 #define LV_FONT_MONTSERRAT_24           1
 #define LV_FONT_MONTSERRAT_26           0

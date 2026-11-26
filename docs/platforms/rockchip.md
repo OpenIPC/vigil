@@ -106,4 +106,6 @@ and a NETIP H.264 stream. All four decoded and were composed with the UI,
 using about 5% CPU in total, and the recordings decoded cleanly.
 
 Not verified yet: output to a physical monitor (mode setting with a real
-connector), and RK356x boards.
+connector), RK356x boards, and the UI's layouts and full screen
+([ui.md](../ui.md)): moving tiles now clears both mosaic buffers, and a
+hidden channel is no longer composed; this has only been compiled.

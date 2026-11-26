@@ -116,6 +116,8 @@ typedef enum {
     CONFIG_EIO,                     /* not saved, nothing changed: errs->e[0] */
     CONFIG_EUNSYNCED,               /* the file was replaced and is in force, but
                                      * its directory sync failed: errs->e[0] */
+    CONFIG_ESTALE,                  /* config_put_json_at: another write came
+                                     * first; nothing changed */
 } config_rc_t;
 
 /* Replace one section (`section`) or the whole document (NULL) from JSON
@@ -125,6 +127,12 @@ typedef enum {
  * effect; nothing changes on EINVAL, ENOENT and EIO. */
 config_rc_t config_put_json(const char *section, const char *body, size_t len,
                             schema_errors_t *errs);
+
+/* The same, only if the settings in force are still generation `gen`
+ * (0: any), checked under the writers' lock: a client that built `body`
+ * from generation `gen` cannot overwrite a newer change it has not seen. */
+config_rc_t config_put_json_at(const char *section, const char *body, size_t len, unsigned gen,
+                               schema_errors_t *errs);
 
 /* The settings in force as JSON text (malloc'd; NULL for an unknown
  * section). `redact` hides camera passwords. */

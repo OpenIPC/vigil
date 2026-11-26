@@ -124,6 +124,11 @@ The decoder error counters stayed at 0, MMZ use was 113 MiB, and the
 recordings decoded cleanly. The HDMI output was captured with an HDMI
 capture input and showed live video in all four tiles with the UI on top.
 
+Not verified yet: the mouse-driven UI's layouts ([ui.md](../ui.md)). A
+channel shown full screen (1280x600) needs VPSS output pictures larger
+than the common pool's 640x320 blocks, which `hal_init` sizes for the 2x2
+tiles; full screen may stay black until that pool is sized for it.
+
 ## hi3520dv200 (DVR) — experimental
 
 The DVR path captures four analog cameras through the NVP6114 video

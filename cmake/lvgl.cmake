@@ -1,3 +1,4 @@
+include_guard(GLOBAL)
 # LVGL (third_party/lvgl, v9.2.2) as a static library, configured by
 # src/ui/lv_conf.h; the colour depth comes from the platform.
 file(GLOB_RECURSE LVGL_SOURCES ${CMAKE_SOURCE_DIR}/third_party/lvgl/src/*.c)

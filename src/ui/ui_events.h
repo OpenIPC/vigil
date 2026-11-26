@@ -1,24 +1,17 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* ui_events.h — bottom event strip: ring buffer of last N events. */
+/* ui_events.h — the live view's event strip: the last few events. */
 #ifndef UI_EVENTS_H
 #define UI_EVENTS_H
 
-#include "lvgl.h"
+#include <time.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include "lvgl.h"
 
 /* Build the strip into `parent`, anchored to the bottom, height `h`. */
 void ui_events_create(lv_obj_t *parent, int h);
 
-/* Push a new event onto the front of the strip. `kind` is a short text
- * like "Motion" / "Alarm" / "Boot"; channel 0 is shown as "SYS".
- * LVGL thread only. */
-void ui_events_push(int channel, const char *kind);
-
-#ifdef __cplusplus
-}
-#endif
+/* Put an event in front: "14:32:55  CAM2  offline"; channel 0 is "SYS".
+ * `who` names the channel (NULL: "CAMn"). */
+void ui_events_push(int channel, const char *who, time_t when, const char *text);
 
 #endif /* UI_EVENTS_H */
