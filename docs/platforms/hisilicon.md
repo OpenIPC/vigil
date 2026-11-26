@@ -31,6 +31,11 @@ the video wherever it sees that colour.
 - **A cross toolchain** for `arm-openipc-linux-gnueabi` (glibc), e.g. the
   one an OpenIPC firmware build for hi3536dv100 produces in
   `output-hi3536dv100/host/`.
+- **libyaml for the target** (`yaml.h`, `libyaml.so`): the configuration
+  file is YAML. `cmake/toolchains/cross.cmake` looks in the toolchain's
+  sysroot (OpenIPC firmware builds with `yaml-cli` have it); otherwise add a
+  firmware build's staging directory with `-DCMAKE_FIND_ROOT_PATH=<firmware>/output/staging`,
+  or give `-DLIBYAML_INCLUDE_DIR=… -DLIBYAML_LIBRARY=…`.
 - **Kernel modules**: the OpenIPC lite image ships none. Build them with
   [openhisilicon](https://github.com/OpenIPC/openhisilicon) for this SoC
   (`open_*.ko`: OSAL from source, the MPP modules relinked from the SDK).

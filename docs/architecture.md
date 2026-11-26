@@ -156,7 +156,7 @@ falls behind skips ahead and is told how many it missed. Without a display,
 
 ## Configuration
 
-The settings live in one JSON file (`/etc/vigil.json`, `-f FILE`; format
+The settings live in one YAML file (`/etc/vigil.yaml`, `-f FILE`; format
 and API in [api.md](api.md)). Each setting is one row of a table,
 `config_schema.c`: its place in `vigil_config_t`, type, default, limits,
 label, help text, and whether it applies at run time. A generic engine
@@ -164,7 +164,12 @@ label, help text, and whether it applies at run time. A generic engine
 checking JSON (every error with its path), checking a struct built in C
 (the command-line options), writing JSON with camera passwords redacted,
 and describing the table itself so a UI can build its forms from it.
-Adding a setting is a row and a struct member.
+Adding a setting is a row and a struct member. Inside, a configuration is
+always a JSON document (cJSON); the file is the one place it is YAML:
+`schema_yaml.c` reads the YAML with libyaml into that document, typing
+each scalar by the schema field it belongs to, and writes it back with
+the schema's labels and help as comments. A file named `*.json` is read
+and written as JSON instead.
 
 `config.c` is the store: the settings in force behind a mutex, with a
 generation counter. Readers take snapshots (`config_get`); a writer
@@ -247,6 +252,8 @@ schema-driven settings pages, mouse input and the UI tests are described in
 ```
 CMakeLists.txt
   cjson           static library: third_party/cJSON (MIT)
+  vigil_yaml      the system's libyaml (MIT), by pkg-config (yaml-0.1) or a
+                  search; cross builds look in the toolchain's sysroot
   vigil_core      static library: src/core (+ host unit tests)
   vigil_platform  object library: the files listed by cmake/platforms/<p>.cmake
   vigil_api       static library: src/api + CivetWeb (cmake/api.cmake;
@@ -268,7 +275,9 @@ adding a platform is covered in [porting.md](porting.md).
 - `core`: unit tests for SPS parsing, the normalizer, RTP depacketizing,
   RTSP framing and helpers, the capture source (with a fake HAL), the
   segment writer, the settings schema (types, limits, enums, unknown keys),
-  the configuration file (round trip, atomic save, invalid files), the
+  the configuration file (YAML round trip, the generated comments, quoting,
+  boolean spellings, invalid YAML, aliases, depth, `.json` files, atomic
+  save, `docs/vigil.example.yaml` being what vigild writes), the
   store (sections, password redaction and `***`), the event ring, and
   channels following a new layout (`channels_set_tiles`, with a fake
   HAL).
@@ -278,11 +287,12 @@ adding a platform is covered in [porting.md](porting.md).
 - `ui_screens`: the UI on an in-memory display, driven through the evdev
   reader with a fake mouse, saving through the real store; widget checks
   and screenshots compared with `tests/ui/*.png` ([ui.md](ui.md)).
-- `api_e2e`: `vigild` with a temporary configuration, shadow file and port,
+- `api_e2e`: `vigild` with a hand-written YAML configuration, shadow file and port,
   driven over HTTP and a WebSocket by `tests/api_test.py`: authentication
   and lockout, a camera added from the NETIP emulator coming up live,
-  invalid configurations refused with every error, redaction, and the
-  pushed status, event and configuration messages.
+  invalid configurations refused with every error, redaction, the file
+  saved as commented YAML (read back with `vigild -w`), and the pushed
+  status, event and configuration messages.
 - `netip_*`: `vigild` against `tests/netip_server.py`, a NETIP camera
   emulator, with H.264 and H.265 clips and a wrong password.
 - `fault_*`: misbehaving servers. A NETIP login that is never answered

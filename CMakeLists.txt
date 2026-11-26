@@ -29,6 +29,32 @@ add_library(cjson STATIC third_party/cJSON/cJSON.c)
 target_include_directories(cjson PUBLIC third_party/cJSON)
 target_link_libraries(cjson PUBLIC m)
 
+# libyaml (MIT): the configuration file is YAML. OpenIPC images carry it
+# (yaml-cli); on a host, libyaml-dev. pkg-config first; when cross compiling
+# only with a target sysroot to ask about (Buildroot sets CMAKE_SYSROOT),
+# since the host's pkg-config would describe the host's library. Otherwise
+# a search, which cross.cmake points at the toolchain's sysroot; or give
+# -DLIBYAML_INCLUDE_DIR=… -DLIBYAML_LIBRARY=….
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND AND (NOT CMAKE_CROSSCOMPILING OR CMAKE_SYSROOT OR DEFINED ENV{PKG_CONFIG_LIBDIR}
+                         OR DEFINED ENV{PKG_CONFIG_SYSROOT_DIR}))
+  pkg_check_modules(LIBYAML QUIET IMPORTED_TARGET yaml-0.1)
+endif()
+add_library(vigil_yaml INTERFACE)
+if(TARGET PkgConfig::LIBYAML)
+  target_link_libraries(vigil_yaml INTERFACE PkgConfig::LIBYAML)
+else()
+  find_path(LIBYAML_INCLUDE_DIR yaml.h)
+  find_library(LIBYAML_LIBRARY NAMES yaml)
+  if(NOT LIBYAML_INCLUDE_DIR OR NOT LIBYAML_LIBRARY)
+    message(FATAL_ERROR "libyaml not found (yaml.h, libyaml): apt install libyaml-dev; when "
+                        "cross compiling, the target's libyaml in the toolchain's sysroot, "
+                        "-DCMAKE_FIND_ROOT_PATH=<staging>, or -DLIBYAML_INCLUDE_DIR=… -DLIBYAML_LIBRARY=…")
+  endif()
+  target_include_directories(vigil_yaml INTERFACE ${LIBYAML_INCLUDE_DIR})
+  target_link_libraries(vigil_yaml INTERFACE ${LIBYAML_LIBRARY})
+endif()
+
 # ---- core: hardware-agnostic, builds and tests on any host ------------------
 add_library(vigil_core STATIC
   src/core/au_norm.c
@@ -39,6 +65,7 @@ add_library(vigil_core STATIC
   src/core/md5.c
   src/core/net.c
   src/core/schema.c
+  src/core/schema_yaml.c
   src/core/rec_place.c
   src/core/seg_writer.c
   src/core/sps.c
@@ -49,7 +76,7 @@ add_library(vigil_core STATIC
   src/core/source/source_netip.c
   src/core/source/source_rtsp.c)
 target_include_directories(vigil_core PUBLIC src/core src/core/source src/hal)
-target_link_libraries(vigil_core PUBLIC cjson Threads::Threads)
+target_link_libraries(vigil_core PUBLIC cjson vigil_yaml Threads::Threads)
 
 # ---- platform: sets VIGIL_PLATFORM_SOURCES / _LIBS / _DEFS, VIGIL_HAS_UI ----
 set(VIGIL_HAS_UI OFF)

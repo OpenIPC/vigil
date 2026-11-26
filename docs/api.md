@@ -1,26 +1,65 @@
 # Configuration and HTTP API
 
-`vigild` keeps its settings in one JSON file and serves them, together with
+`vigild` keeps its settings in one YAML file and serves them, as JSON, together with
 its status and live events, over a small HTTP/WebSocket API. A web page, a
 phone app or a script can read and change the configuration while video
 keeps running; the TV UI and the recorder do not stop.
 
 ## The configuration file
 
-Default `/etc/vigil.json`, or `vigild -f FILE`. A missing file means the
-defaults. [vigil.example.json](vigil.example.json) shows every setting:
+Default `/etc/vigil.yaml`, or `vigild -f FILE`. A missing file means the
+defaults. It is YAML, like majestic's `/etc/majestic.yaml`;
+[vigil.example.yaml](vigil.example.yaml) is a complete one, exactly as
+`vigild` writes it; in short:
 
-```json
-{
-  "version": 1,
-  "cameras": [
-    { "url": "rtsp://admin:12345@192.168.1.10/stream=0", "name": "Gate", "enabled": true },
-    { "url": "netip://admin:@192.168.1.11:34567/?ch=0&stream=main", "name": "Yard", "enabled": true }
-  ],
-  "record": { "path": "/mnt/sda1/rec", "segment": 60, "keep": 0, "allow_rootfs": false },
-  "api":    { "listen": "0.0.0.0:8080", "auth": true, "user": "root", "shadow": "/etc/shadow" }
-}
+```yaml
+version: 1
+cameras:
+  - url: "rtsp://admin:12345@192.168.1.10/stream=0"
+    name: Gate
+    enabled: true
+  - url: "netip://admin:@192.168.1.11:34567/?ch=0&stream=main"
+    name: Yard
+record:
+  path: /mnt/sda1/rec
+  segment: 60
+  keep: 0
+api:
+  listen: "0.0.0.0:8080"
+  auth: true
 ```
+
+Sections and settings may be left out (they get their defaults), in any
+order. Values are typed by the setting they belong to: a boolean is
+`true`/`false`, `yes`/`no` or `on`/`off` (any case), an integer is written
+in decimal (`060` is refused rather than read as octal), and a string
+setting takes the text as it is, so `name: 123` is the name "123". Quote
+a value that YAML would otherwise cut short or read differently: a URL
+with `?`, `#`, `&` or `: `, a password with special characters, leading or
+trailing spaces, or an empty string (`""`). `cameras:` with nothing after
+it is no cameras. JSON is also valid YAML, so a JSON document loads too.
+
+**Written by vigild.** When the configuration is saved (the API, the
+on-screen settings), the file is written anew: two-space indentation,
+`key: value`, the cameras as a list, values quoted where needed, and each
+section and setting preceded by its label, help text, limits and default
+as comments, taken from the schema below. The comments are generated each
+time: comments and formatting written by hand are not kept.
+
+**What the parser takes.** One document of maps, lists and scalars, up to
+256 KiB, 8 levels deep (vigild's own file needs 3) and 4096 values. Aliases (`*name`)
+are refused, so a small file cannot expand into a huge one; anchors and
+tags are ignored; a key given twice is an error. Text must be UTF-8.
+
+**JSON files.** A file whose name ends in `.json` is read and written as
+JSON, the format of earlier versions (`/etc/vigil.json`), so a
+configuration in that format keeps working where its path is given with
+`-f`. To convert one: `vigild -f /etc/vigil.json -w /etc/vigil.yaml`.
+`-w OUT` writes the configuration (the file, with any command-line options
+applied) to OUT, mode 0600, and exits without starting anything; `-w -`
+prints it as YAML. It refuses to write when the file failed to load, which
+would write the defaults instead. `vigild -f /dev/null -w -` prints the
+defaults, commented.
 
 | Setting | Type | Default | Meaning |
 |---|---|---|---|
@@ -41,8 +80,9 @@ defaults. [vigil.example.json](vigil.example.json) shows every setting:
 of date for a client.
 
 **Loading.** Every value is checked against the schema. A file that is not
-valid JSON, or holds an invalid value, is logged with each error and its
-path (`/etc/vigil.json: record.segment: 5 is out of range 10..3600`), and
+valid YAML (`/etc/vigil.yaml: not valid YAML: ... (line 7, column 3)`), or
+holds an invalid value, is logged with each error and its path
+(`/etc/vigil.yaml: record.segment: 5 is out of range 10..3600`), and
 `vigild` runs with the defaults; the file is left as it is, and kept as
 `FILE.bad` (a hard link, or a copy where the filesystem has no links) when
 a new configuration is saved over it. If no copy can be made, nothing is
@@ -317,7 +357,9 @@ websocat -H "Authorization: Basic $(printf root:PASSWORD | base64)" ws://192.168
 ## Inside
 
 - `src/core/schema.{h,c}`: the generic engine (defaults, JSON in and out,
-  checks, describing itself). `src/core/config_schema.c`: vigild's table.
+  checks, describing itself). `src/core/schema_yaml.{h,c}`: the file's YAML,
+  read with libyaml into the same JSON document and written with the
+  schema's help as comments. `src/core/config_schema.c`: vigild's table.
   `src/core/config.{h,c}`: the file and the thread-safe store with its
   generation counter.
 - `src/api/api.c`: CivetWeb ([third_party/civetweb](../third_party/civetweb),
@@ -332,7 +374,8 @@ websocat -H "Authorization: Basic $(printf root:PASSWORD | base64)" ws://192.168
   latest status is kept.
   `src/api/auth.c`: Basic credentials, the shadow file, `crypt(3)`.
 - JSON is parsed by cJSON ([third_party/cJSON](../third_party/cJSON), MIT),
-  bodies capped at 64 KiB.
+  bodies capped at 64 KiB; YAML by [libyaml](https://github.com/yaml/libyaml)
+  (MIT, the system's).
 - `-DVIGIL_API=OFF` builds `vigild` without CivetWeb and `crypt`
   (`src/api/api_none.c`); the configuration file still works.
 - If the port cannot be bound, `vigild` logs it and runs on without the API.

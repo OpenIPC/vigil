@@ -14,6 +14,7 @@
 #include "cJSON.h"
 #include "config.h"
 #include "log.h"
+#include "schema_yaml.h"
 
 #define FILE_MAX (256u << 10)       /* far above any real configuration */
 
@@ -49,6 +50,12 @@ static cJSON *parse_json(const char *text, size_t len, schema_errors_t *errs)
     return doc;
 }
 
+config_format_t config_format(const char *path)
+{
+    size_t n = strlen(path);
+    return n >= 5 && !strcmp(path + n - 5, ".json") ? CONFIG_JSON : CONFIG_YAML;
+}
+
 int config_load_file(const char *path, vigil_config_t *c, schema_errors_t *errs)
 {
     config_defaults(c);
@@ -69,7 +76,8 @@ int config_load_file(const char *path, vigil_config_t *c, schema_errors_t *errs)
         return -1;
     }
     buf[n] = 0;
-    cJSON *doc = parse_json(buf, n, errs);
+    cJSON *doc = config_format(path) == CONFIG_JSON ? parse_json(buf, n, errs)
+                                                    : schema_yaml_parse(&config_schema, buf, n, errs);
     free(buf);
     if (!doc) return -1;
     /* Not strict: a key this vigild does not know (a newer one wrote the
@@ -143,18 +151,43 @@ int config_write_atomic(const char *path, const char *data, size_t len, char *er
     return 0;
 }
 
-int config_save_file(const char *path, const vigil_config_t *c, char *err, size_t cap)
+static const char yaml_header[] =
+    "vigild configuration: https://github.com/OpenIPC/vigil/blob/main/docs/api.md\n"
+    "vigild rewrites this file when the settings are changed through its HTTP\n"
+    "API or on-screen UI. The comments come from vigild's own description of\n"
+    "each setting: comments and formatting written by hand are not kept.";
+
+char *config_file_text(const vigil_config_t *c, config_format_t fmt)
 {
     cJSON *doc = schema_to_json(&config_schema, c, 0);
-    char *text = doc ? cJSON_Print(doc) : NULL;
+    char *text = NULL;
+    if (doc && fmt == CONFIG_YAML) {
+        text = schema_yaml_emit(&config_schema, doc, yaml_header);
+    } else if (doc && (text = cJSON_Print(doc)) != NULL) {
+        /* cJSON_Print's terminator becomes the newline that ends a POSIX
+         * text file; the string needs one byte more for its own. */
+        size_t len = strlen(text);
+        char *t = realloc(text, len + 2);
+        if (t) {
+            t[len] = '\n';
+            t[len + 1] = 0;
+        } else {
+            free(text);
+        }
+        text = t;
+    }
     cJSON_Delete(doc);
+    return text;
+}
+
+int config_save_file(const char *path, const vigil_config_t *c, char *err, size_t cap)
+{
+    char *text = config_file_text(c, config_format(path));
     if (!text) {
         snprintf(err, cap, "out of memory");
         return -1;
     }
-    size_t len = strlen(text);
-    text[len] = '\n';                   /* cJSON_Print's terminator: a POSIX text file */
-    int rc = config_write_atomic(path, text, len + 1, err, cap);
+    int rc = config_write_atomic(path, text, strlen(text), err, cap);
     free(text);
     return rc;
 }

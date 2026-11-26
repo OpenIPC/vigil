@@ -126,6 +126,11 @@ cJSON *schema_section_to_json(const schema_section_t *sec, const void *root, int
 /* The schema as JSON, for UIs (see docs/api.md). */
 cJSON *schema_describe(const schema_t *s);
 
+/* One UTF-8 character at `s`: its length in bytes (1..4) and its code
+ * point in `*cp`; 0 when it is not well-formed UTF-8 (a stray or missing
+ * continuation byte, an overlong form, a surrogate, beyond U+10FFFF). */
+int schema_utf8_char(const char *s, unsigned *cp);
+
 /* "scheme://user:pass@host/..." -> "scheme://user:***@host/...". URLs
  * without a password, or with an empty one, are copied as they are. Errs
  * on the side of hiding too much: everything up to the last '@' in the URL

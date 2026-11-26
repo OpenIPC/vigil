@@ -73,14 +73,44 @@ void schema_defaults(const schema_t *s, void *root)
 
 /* ---- checks shared by JSON input and schema_validate ------------------------ */
 
+int schema_utf8_char(const char *s, unsigned *cp)
+{
+    const unsigned char *u = (const unsigned char *)s;
+    if (u[0] < 0x80) {
+        *cp = u[0];
+        return 1;
+    }
+    int n = u[0] >= 0xf0 ? 4 : u[0] >= 0xe0 ? 3 : u[0] >= 0xc2 ? 2 : 0;
+    if (!n || u[0] > 0xf4) return 0;
+    unsigned c = u[0] & (0x7fu >> n);
+    for (int i = 1; i < n; ++i) {
+        if ((u[i] & 0xc0) != 0x80) return 0;
+        c = c << 6 | (u[i] & 0x3f);
+    }
+    static const unsigned min[] = { 0, 0, 0x80, 0x800, 0x10000 };
+    if (c < min[n] || c > 0x10ffff || (c >= 0xd800 && c <= 0xdfff)) return 0;
+    *cp = c;
+    return n;
+}
+
 static int check_string(const schema_field_t *f, const char *v, const char *path,
                         schema_errors_t *errs)
 {
-    for (const unsigned char *p = (const unsigned char *)v; *p; ++p)
-        if (*p < 0x20 || *p == 0x7f) {
+    for (const char *p = v; *p;) {
+        unsigned c;
+        int n = schema_utf8_char(p, &c);
+        /* The file is YAML, which is Unicode text: a value that is not
+         * UTF-8 could be saved but never read back. */
+        if (!n) {
+            schema_error(errs, path, "not valid UTF-8 text");
+            return -1;
+        }
+        if (c < 0x20 || c == 0x7f) {
             schema_error(errs, path, "control characters are not allowed");
             return -1;
         }
+        p += n;
+    }
     if (strlen(v) >= f->size) {
         schema_error(errs, path, "too long (at most %zu bytes)", f->size - 1);
         return -1;

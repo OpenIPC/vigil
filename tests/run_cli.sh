@@ -26,8 +26,8 @@ expect_refused() {
     fi
 }
 
-expect_refused "-c URL over 511 bytes" -f "$TMP/none.json" -o none -c "rtsp://u:topsecret@127.0.0.1/$long"
-expect_refused "-o path over 191 bytes" -f "$TMP/none.json" -o "/tmp/$long"
-expect_refused "-f path over 255 bytes" -f "/tmp/$long.json" -o none
+expect_refused "-c URL over 511 bytes" -f "$TMP/none.yaml" -o none -c "rtsp://u:topsecret@127.0.0.1/$long"
+expect_refused "-o path over 191 bytes" -f "$TMP/none.yaml" -o "/tmp/$long"
+expect_refused "-f path over 255 bytes" -f "/tmp/$long.yaml" -o none
 [ $fail -eq 0 ] && echo PASS
 exit $fail

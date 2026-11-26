@@ -1,13 +1,25 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* config.h — vigild's settings: one JSON file and the store around it.
+/* config.h — vigild's settings: one YAML file and the store around it.
  *
- * The file (default /etc/vigil.json, -f FILE) is
+ * The file (default /etc/vigil.yaml, -f FILE) is YAML, like majestic's:
  *
- *   { "version": 1,
- *     "cameras": [ { "url": "rtsp://...", "name": "Gate", "enabled": true } ],
- *     "record":  { "path": "/mnt/sda1/rec", "segment": 60, "keep": 0 },
- *     "api":     { "listen": "0.0.0.0:8080", "auth": true,
- *                  "user": "root", "shadow": "/etc/shadow" } }
+ *   version: 1
+ *   cameras:
+ *     - url: "rtsp://admin:12345@192.168.1.10/stream=0"
+ *       name: Gate
+ *       enabled: true
+ *   record:
+ *     path: /mnt/sda1/rec
+ *     segment: 60
+ *     keep: 0
+ *   api:
+ *     listen: "0.0.0.0:8080"
+ *     auth: true
+ *
+ * and is written back with each setting's help text as a comment
+ * (schema_yaml.h). A file whose name ends in ".json" is read and written
+ * as JSON instead (the format of earlier versions). Inside vigild, and in
+ * the API, the settings are JSON (cJSON) either way.
  *
  * Every setting is a row of config_schema (config_schema.c): defaults,
  * validation, the API's GET /api/v1/schema and redaction all come from it.
@@ -30,7 +42,7 @@
 #include "schema.h"
 
 #define CONFIG_VERSION      1
-#define CONFIG_DEFAULT_PATH "/etc/vigil.json"
+#define CONFIG_DEFAULT_PATH "/etc/vigil.yaml"
 
 typedef struct {
     char url[512];                  /* source.h's URL buffer */
@@ -69,12 +81,22 @@ void config_to_channels(const vigil_config_t *c, channels_config_t *cc);
 
 /* ---- files ---------------------------------------------------------------------- */
 
+typedef enum { CONFIG_YAML, CONFIG_JSON } config_format_t;
+
+/* By the name: ".json" at the end is JSON, anything else YAML. */
+config_format_t config_format(const char *path);
+
+/* `c` as the text of a file in `fmt` (malloc'd, ends in a newline; NULL
+ * when out of memory). Not redacted: the file holds the passwords. */
+char *config_file_text(const vigil_config_t *c, config_format_t fmt);
+
 /* Read `path` into `c`. Returns 1 if there is no such file (`c` holds the
  * defaults), 0 when loaded, -1 when it cannot be read or is invalid
  * (`c` holds the defaults; `errs` says why). */
 int config_load_file(const char *path, vigil_config_t *c, schema_errors_t *errs);
 
-/* Write `c` to `path` atomically; returns as config_write_atomic. */
+/* Write `c` to `path` atomically, in the format its name says; returns
+ * as config_write_atomic. */
 int config_save_file(const char *path, const vigil_config_t *c, char *err, size_t cap);
 
 /* Replace `path` with `data` so that a crash or power cut at any moment

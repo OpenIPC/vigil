@@ -182,13 +182,30 @@ def main():
     shadow = os.path.join(tmp, "shadow")
     with open(shadow, "w") as f:
         f.write("root:%s:19000:0:99999:7:::\n" % HASH)
-    cfg_path = os.path.join(tmp, "vigil.json")
+    cfg_path = os.path.join(tmp, "vigil.yaml")
     rec = os.path.join(tmp, "rec")
+    # Written as a person would (a JSON string is a double-quoted YAML one).
     with open(cfg_path, "w") as f:
-        json.dump({"version": 1, "cameras": [],
-                   "record": {"path": rec, "segment": 60, "keep": 3, "allow_rootfs": True},
-                   "api": {"listen": "127.0.0.1:%d" % api_port, "auth": True,
-                           "user": "root", "shadow": shadow}}, f)
+        f.write("# a comment of my own\n"
+                "cameras: []\n"
+                "record:\n"
+                "  path: %s\n"
+                "  segment: 60\n"
+                "  keep: 3\n"
+                "  allow_rootfs: yes\n"
+                "api:\n"
+                "  listen: 127.0.0.1:%d\n"
+                "  auth: on\n"
+                "  user: root\n"
+                "  shadow: %s\n" % (json.dumps(rec), api_port, json.dumps(shadow)))
+
+    def file_config():
+        """The file as vigild reads it, through vigild -w into JSON."""
+        out = os.path.join(tmp, "check.json")
+        subprocess.run([vigild, "-f", cfg_path, "-w", out], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with open(out) as f:
+            return json.load(f)
 
     srv = subprocess.Popen([sys.executable, os.path.join(HERE, "netip_server.py"), clip,
                             "--port", str(cam_port), "--password", CAM_PASS],
@@ -219,7 +236,9 @@ def main():
         check(status and status["platform"]["name"] == "generic" and status["channels"] == [],
               "status: generic platform, no channels")
         st, _, cfg = api.json("GET", "/api/v1/config")
-        check(st == 200 and cfg["version"] == 1 and cfg["record"]["path"] == rec, "config: as in the file")
+        check(st == 200 and cfg["version"] == 1 and cfg["record"]["path"] == rec and
+              cfg["record"]["allow_rootfs"] is True and cfg["api"]["auth"] is True,
+              "config: as in the YAML file")
         st, _, schema = api.json("GET", "/api/v1/schema")
         secs = {s["key"]: s for s in schema["sections"]} if st == 200 else {}
         seg = [f for f in secs.get("record", {}).get("fields", []) if f["key"] == "segment"]
@@ -278,6 +297,11 @@ def main():
         disk = open(cfg_path).read()
         check(CAM_PASS in disk and (os.stat(cfg_path).st_mode & 0o777) == 0o600,
               "the file keeps the password, mode 0600")
+        check(disk.startswith("# vigild configuration") and "\ncameras:\n  - url: \"netip://admin:" in disk and
+              "    name: Emulator\n" in disk and "\n  # Segment length (s): " in disk and
+              "a comment of my own" not in disk,
+              "the file is saved as YAML, with the settings' help as comments")
+        check(file_config()["cameras"][0]["url"] == url, "and reads back as saved")
         gen = status["config"]["generation"] if status else 0
         events_before = len(ws.find(lambda m: m["type"] == "event"))
         cfg["cameras"][0]["name"] = "Gate"
@@ -334,7 +358,7 @@ def main():
                                        m["data"]["text"] == "REC waiting for disk"), 3),
               "WebSocket: event REC waiting for disk")
         check(api.json("GET", "/api/v1/config/record")[2]["path"] == onroot + "/rec" and
-              json.load(open(cfg_path))["record"]["path"] == onroot + "/rec",
+              file_config()["record"]["path"] == onroot + "/rec",
               "the configured path is kept, in force and in the file")
         if os.path.isdir("/dev/shm") and os.path.exists("/proc/self/mountinfo"):
             shm = "/dev/shm/vigil-test-%d-%d" % (os.getpid(), api_port)
