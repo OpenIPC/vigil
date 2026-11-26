@@ -56,7 +56,8 @@ static void open_fn(int fn, const char *later)
     }
     if (fn >= FN_SECTION) {
         int sec = fn - FN_SECTION;
-        if (ui_model()->sections[sec].is_array) ui_list_open(sec);
+        if (!strcmp(ui_model()->sections[sec].key, "cameras")) ui_channels_open();
+        else if (ui_model()->sections[sec].is_array) ui_list_open(sec);
         else ui_form_open(sec, -1);
     } else if (fn == FN_OPERATION || fn == FN_SYSTEM) {
         ui_system_open();
@@ -238,7 +239,8 @@ void ui_menu_open(void)
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     const ui_model_t *m = ui_model();
     int k = 0;
-    /* Camera, Network, Storage, then any other section in schema order. */
+    /* Camera, Network, Storage, then any other section in schema order
+     * (but the camera search's: it is on the Channels page). */
     int order[UI_MAX_ITEMS + 4], n = 0;
     static const char *const first[] = { "cameras", "api", "record" };
     for (int f = 0; f < 3; ++f)
@@ -246,7 +248,7 @@ void ui_menu_open(void)
             if (!strcmp(m->sections[i].key, first[f])) order[n++] = i;
     for (int i = 0; i < m->n_sections && n < (int)(sizeof order / sizeof order[0]); ++i)
         if (strcmp(m->sections[i].key, "cameras") && strcmp(m->sections[i].key, "api") &&
-            strcmp(m->sections[i].key, "record"))
+            strcmp(m->sections[i].key, "record") && strcmp(m->sections[i].key, "discovery"))
             order[n++] = i;
     for (int j = 0; j < n && k < (int)(sizeof g_mgmt / sizeof g_mgmt[0]) - 2; ++j) {
         int i = order[j];

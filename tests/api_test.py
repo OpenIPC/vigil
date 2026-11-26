@@ -242,7 +242,7 @@ def main():
         st, _, schema = api.json("GET", "/api/v1/schema")
         secs = {s["key"]: s for s in schema["sections"]} if st == 200 else {}
         seg = [f for f in secs.get("record", {}).get("fields", []) if f["key"] == "segment"]
-        check(set(secs) == {"cameras", "record", "api"} and seg and seg[0]["min"] == 10 and
+        check(set(secs) == {"cameras", "record", "api", "discovery"} and seg and seg[0]["min"] == 10 and
               seg[0]["max"] == 3600 and seg[0]["live"], "schema: sections and limits")
         st, _, _ = api.json("GET", "/api/v1/nothing")
         check(st == 404, "unknown endpoint: 404")

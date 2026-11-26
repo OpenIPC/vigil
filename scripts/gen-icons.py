@@ -51,6 +51,9 @@ ICONS = [
     ("ev_vehicle", "car.svg", 20, 2.25),
     ("add", "plus.svg", 72, 1.5),
     ("add_sm", "plus.svg", 36, 2),
+    # The Channels page: its two panes.
+    ("search", "search.svg", 24, 2),
+    ("channels", "device-cctv.svg", 24, 2),
 ]
 
 
