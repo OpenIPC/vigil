@@ -1039,6 +1039,16 @@ static void test_config_file(void)
           "bad JSON: %s", e.n ? e.e[0].msg : "");
     CHECK(load_text(jpath, "record:\n  segment: 90\n", &d, &e) < 0 && e.n && strstr(e.e[0].msg, "not valid JSON"),
           "a .json file is not read as YAML");
+    /* An earlier version took any bytes: such a file still loads and is
+     * saved as JSON, but cannot become YAML. */
+    CHECK(load_text(jpath, "{\"cameras\": [{\"url\": \"capture:0\", \"name\": \"Garage \xe9\"}]}", &d, &e) == 0 &&
+          !strcmp(d.cameras[0].name, "Garage \xe9"), "a .json file with a Latin-1 name loads");
+    CHECK(config_save_file(jpath, &d, err, sizeof err) == 0, "and is saved as JSON: %s", err);
+    CHECK(config_check_text(&d, CONFIG_JSON, err, sizeof err) == 0 &&
+          config_check_text(&d, CONFIG_YAML, err, sizeof err) < 0 && strstr(err, "cameras[0].name: not valid UTF-8"),
+          "not as YAML: %s", err);
+    CHECK(config_save_file(path2, &d, err, sizeof err) < 0 && strstr(err, "UTF-8") && access(path2, F_OK) < 0,
+          "a YAML save refuses it, writing nothing");
     free(a);
 
     /* atomic save: a failed save leaves the old file as it was */

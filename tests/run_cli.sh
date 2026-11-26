@@ -48,6 +48,14 @@ for s in "" -s; do
         echo "FAIL: -w - ${s:+with $s }prints the file"; fail=1
     fi
 done
+printf '{"cameras": [{"url": "capture:0", "name": "Garage \351"}]}\n' >"$TMP/latin1.json"
+"$VIGILD" -f "$TMP/latin1.json" -w "$TMP/latin1.yaml" >"$TMP/log" 2>&1
+rc=$?
+if [ $rc -eq 1 ] && [ ! -e "$TMP/latin1.yaml" ] && grep -q "cameras\[0\].name: not valid UTF-8" "$TMP/log"; then
+    echo "ok: -w names a value that is not UTF-8, writes no YAML"
+else
+    cat "$TMP/log"; echo "FAIL: -w over a Latin-1 name: rc $rc"; fail=1
+fi
 printf 'record:\n  segment: 1\n' >"$TMP/bad.yaml"
 "$VIGILD" -f "$TMP/bad.yaml" -w "$TMP/out.yaml" >"$TMP/log" 2>&1
 rc=$?

@@ -86,8 +86,14 @@ typedef enum { CONFIG_YAML, CONFIG_JSON } config_format_t;
 /* By the name: ".json" at the end is JSON, anything else YAML. */
 config_format_t config_format(const char *path);
 
+/* Whether `c` can be written in `fmt`: YAML takes UTF-8 text only (a
+ * value loaded from a .json file may be other bytes). 0, or -1 with `err`
+ * naming the setting. */
+int config_check_text(const vigil_config_t *c, config_format_t fmt, char *err, size_t cap);
+
 /* `c` as the text of a file in `fmt` (malloc'd, ends in a newline; NULL
- * when out of memory). Not redacted: the file holds the passwords. */
+ * when out of memory). Not redacted: the file holds the passwords. Check
+ * it with config_check_text first. */
 char *config_file_text(const vigil_config_t *c, config_format_t fmt);
 
 /* Read `path` into `c`. Returns 1 if there is no such file (`c` holds the

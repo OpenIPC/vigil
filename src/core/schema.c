@@ -96,21 +96,11 @@ int schema_utf8_char(const char *s, unsigned *cp)
 static int check_string(const schema_field_t *f, const char *v, const char *path,
                         schema_errors_t *errs)
 {
-    for (const char *p = v; *p;) {
-        unsigned c;
-        int n = schema_utf8_char(p, &c);
-        /* The file is YAML, which is Unicode text: a value that is not
-         * UTF-8 could be saved but never read back. */
-        if (!n) {
-            schema_error(errs, path, "not valid UTF-8 text");
-            return -1;
-        }
-        if (c < 0x20 || c == 0x7f) {
+    for (const unsigned char *p = (const unsigned char *)v; *p; ++p)
+        if (*p < 0x20 || *p == 0x7f) {
             schema_error(errs, path, "control characters are not allowed");
             return -1;
         }
-        p += n;
-    }
     if (strlen(v) >= f->size) {
         schema_error(errs, path, "too long (at most %zu bytes)", f->size - 1);
         return -1;
@@ -331,6 +321,45 @@ int schema_validate(const schema_t *s, const void *root, schema_errors_t *errs)
         }
         for (int k = 0; k < n; ++k)
             if (object_validate(sec, k, (const char *)root + sec->off + sec->item_size * (size_t)k, errs) < 0)
+                rc = -1;
+    }
+    return rc;
+}
+
+static int object_utf8(const schema_section_t *sec, int item, const void *base, schema_errors_t *errs)
+{
+    char path[64];
+    int rc = 0;
+    for (int i = 0; i < sec->n_fields; ++i) {
+        const schema_field_t *f = &sec->fields[i];
+        if (f->type != SCHEMA_STRING && f->type != SCHEMA_ENUM) continue;
+        const char *v = cstr_at(base, f);
+        unsigned c;
+        for (int n; *v; v += n)
+            if (!(n = schema_utf8_char(v, &c))) {
+                field_path(path, sizeof path, sec, item, f->key);
+                schema_error(errs, path, "not valid UTF-8 text");
+                rc = -1;
+                break;
+            }
+    }
+    return rc;
+}
+
+int schema_check_utf8(const schema_t *s, const schema_section_t *only, const void *root,
+                      schema_errors_t *errs)
+{
+    int rc = 0;
+    for (int i = 0; i < s->n_sections; ++i) {
+        const schema_section_t *sec = &s->sections[i];
+        if (only && only != sec) continue;
+        if (!sec->is_array) {
+            if (object_utf8(sec, -1, (const char *)root + sec->off, errs) < 0) rc = -1;
+            continue;
+        }
+        int n = *(const int *)(const void *)((const char *)root + sec->count_off);
+        for (int k = 0; k < n && k < sec->max_items; ++k)
+            if (object_utf8(sec, k, (const char *)root + sec->off + sec->item_size * (size_t)k, errs) < 0)
                 rc = -1;
     }
     return rc;

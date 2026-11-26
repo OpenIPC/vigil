@@ -185,6 +185,11 @@ static int write_config(const char *out, const char *in, int loaded, const vigil
         /* The caller's stdout, also under -s: the descriptor 1 then leads
          * to syslog, and the text holds the cameras' passwords. */
         int fd = g_saved_out >= 0 ? g_saved_out : STDOUT_FILENO;
+        char err[200];
+        if (config_check_text(c, CONFIG_YAML, err, sizeof err) < 0) {
+            vg_log("%s", err);
+            return 1;
+        }
         char *text = config_file_text(c, CONFIG_YAML);
         int ok = text != NULL;
         fflush(stdout);

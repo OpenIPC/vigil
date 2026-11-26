@@ -52,10 +52,10 @@ time: comments and formatting written by hand are not kept.
 **What the parser takes.** One document of maps, lists and scalars, up to
 256 KiB, 8 levels deep (vigild's own file needs 3) and 4096 values. Aliases (`*name`)
 are refused, so a small file cannot expand into a huge one; anchors and
-tags are ignored; a key given twice is an error. Text must be UTF-8, in
-a `.json` file too: a value that is not (possible in a JSON file written
-by an earlier version) is refused with the setting's path, since it could
-not be saved as YAML and read back.
+tags are ignored; a key given twice is an error. Text is UTF-8: values
+sent through the API must be. A `.json` file written by an earlier
+version may hold other bytes; it still loads and is saved as JSON, but is
+not converted to YAML (`-w` names the setting to fix).
 
 **JSON files.** A file whose name ends in `.json` is read and written as
 JSON, the format of earlier versions (`/etc/vigil.json`), so a

@@ -119,6 +119,12 @@ int schema_section_from_json(const schema_t *s, const schema_section_t *sec,
 /* Check limits on a struct (e.g. one changed from C). Returns 0 or -1. */
 int schema_validate(const schema_t *s, const void *root, schema_errors_t *errs);
 
+/* Every string of `root` (of section `only`, unless NULL) is UTF-8.
+ * Not part of schema_validate: a JSON file may hold other bytes and still
+ * load; YAML, which is Unicode text, cannot carry them. Returns 0 or -1. */
+int schema_check_utf8(const schema_t *s, const schema_section_t *only, const void *root,
+                      schema_errors_t *errs);
+
 /* `root` as JSON ({"version": N, sections...}); `redact` hides secrets. */
 cJSON *schema_to_json(const schema_t *s, const void *root, int redact);
 cJSON *schema_section_to_json(const schema_section_t *sec, const void *root, int redact);

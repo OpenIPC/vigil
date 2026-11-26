@@ -157,6 +157,14 @@ static const char yaml_header[] =
     "API or on-screen UI. The comments come from vigild's own description of\n"
     "each setting: comments and formatting written by hand are not kept.";
 
+int config_check_text(const vigil_config_t *c, config_format_t fmt, char *err, size_t cap)
+{
+    schema_errors_t errs = { 0 };
+    if (fmt != CONFIG_YAML || schema_check_utf8(&config_schema, NULL, c, &errs) == 0) return 0;
+    snprintf(err, cap, "%s: %s; it cannot be written as YAML", errs.e[0].path, errs.e[0].msg);
+    return -1;
+}
+
 char *config_file_text(const vigil_config_t *c, config_format_t fmt)
 {
     cJSON *doc = schema_to_json(&config_schema, c, 0);
@@ -182,6 +190,7 @@ char *config_file_text(const vigil_config_t *c, config_format_t fmt)
 
 int config_save_file(const char *path, const vigil_config_t *c, char *err, size_t cap)
 {
+    if (config_check_text(c, config_format(path), err, cap) < 0) return -1;
     char *text = config_file_text(c, config_format(path));
     if (!text) {
         snprintf(err, cap, "out of memory");
@@ -376,6 +385,9 @@ config_rc_t config_put_json_at(const char *section, const char *body, size_t len
         rc = schema_from_json(&config_schema, doc, &nc, 1, errs);
     }
     cJSON_Delete(doc);
+    /* What is sent must be UTF-8 (the file is YAML). Only what is sent:
+     * a value loaded from an older .json file is not the client's to fix. */
+    if (rc == 0) rc = schema_check_utf8(&config_schema, sec, &nc, errs);
     if (rc == 0) rc = resolve_secrets(&nc, &old, errs);
     if (rc == 0) rc = schema_validate(&config_schema, &nc, errs);
     if (rc < 0) {
