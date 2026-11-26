@@ -497,7 +497,8 @@ static int disk_action(struct mg_connection *conn, const char *m, const char *re
         const char *fs = jstr(b, "fs", nf ? fss[0] : "");
         rc = mgmt_disk_format(name, fs, jstr(b, "confirm", ""), err, sizeof err);
         cJSON_Delete(b);
-        return answer(conn, rc, strstr(err, "type") ? "confirm" : "fs", err);
+        return answer(conn, rc, strstr(err, "type the") ? "confirm" : strstr(err, "cannot make") ? "fs" : "name",
+                      err);
     }
     if (!strcmp(action, "mount")) rc = mgmt_disk_mount(name, err, sizeof err);
     else if (!strcmp(action, "unmount")) rc = mgmt_disk_unmount(name, err, sizeof err);
