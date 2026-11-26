@@ -87,9 +87,11 @@ target_link_libraries(vigil_core PUBLIC cjson vigil_yaml Threads::Threads)
 add_library(vigil_sys STATIC
   src/sys/sys.c
   src/sys/sys_net.c
+  src/sys/sys_curl.c
   src/sys/sys_time.c)
 target_include_directories(vigil_sys PUBLIC src/sys)
 target_link_libraries(vigil_sys PUBLIC vigil_core)
+target_compile_definitions(vigil_sys PRIVATE VIGIL_VERSION="${PROJECT_VERSION}")
 
 # ---- platform: sets VIGIL_PLATFORM_SOURCES / _LIBS / _DEFS, VIGIL_HAS_UI ----
 set(VIGIL_HAS_UI OFF)
