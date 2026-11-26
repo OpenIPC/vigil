@@ -38,6 +38,7 @@ add_library(vigil_core STATIC
   src/core/md5.c
   src/core/net.c
   src/core/schema.c
+  src/core/rec_place.c
   src/core/seg_writer.c
   src/core/sps.c
   src/core/source/rtp_depay.c

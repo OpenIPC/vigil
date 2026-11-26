@@ -2,6 +2,7 @@
 /* test_core.c — unit tests for the hardware-free core. */
 #define _DEFAULT_SOURCE
 #include <dirent.h>
+#include <errno.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +22,7 @@
 #include "events.h"
 #include "hal_capture.h"
 #include "net.h"
+#include "rec_place.h"
 #include "rtp_depay.h"
 #include "source.h"
 #include "rtsp_client.h"
@@ -1004,6 +1006,138 @@ static void test_events(void)
     CHECK(n == EVENTS_KEEP && !strcmp(ev.text, "e68"), "kept %d, last %s", n, ev.text);
 }
 
+/* ---- rec_place: where a recording may go ------------------------------------ */
+
+/* A pretend filesystem: path -> device, directory or not. Anything not listed
+ * does not exist (ENOTDIR under a listed file), as stat(2) would say. */
+typedef struct { const char *path; int dev; int dir; } fake_node_t;
+static const fake_node_t *g_fake;
+static const char *g_fake_link, *g_fake_target;    /* one symbolic link */
+
+static const fake_node_t *fake_find(const char *path)
+{
+    for (const fake_node_t *n = g_fake; n->path; ++n)
+        if (!strcmp(n->path, path)) return n;
+    return NULL;
+}
+
+static int fake_stat(const char *path, struct stat *st)
+{
+    char p[256];
+    snprintf(p, sizeof p, "%s", path);
+    if (g_fake_link && !strcmp(p, g_fake_link)) snprintf(p, sizeof p, "%s", g_fake_target);
+    const fake_node_t *n = fake_find(p);
+    if (n) {
+        memset(st, 0, sizeof *st);
+        st->st_dev = (dev_t)n->dev;
+        st->st_mode = n->dir ? S_IFDIR | 0755 : S_IFREG | 0644;
+        return 0;
+    }
+    /* A listed file on the way makes it ENOTDIR. */
+    for (char *s = strrchr(p, '/'); s && s != p; s = strrchr(p, '/')) {
+        *s = 0;
+        const fake_node_t *up = fake_find(p);
+        if (up) { errno = up->dir ? ENOENT : ENOTDIR; return -1; }
+    }
+    errno = ENOENT;
+    return -1;
+}
+
+static char *fake_realpath(const char *path, char *out)
+{
+    snprintf(out, 256, "%s", g_fake_link && !strcmp(path, g_fake_link) ? g_fake_target : path);
+    return out;
+}
+
+static void test_rec_place(void)
+{
+    char dir[] = "/tmp/vigil-recXXXXXX", mi[300], why[300];
+    if (!mkdtemp(dir)) return;
+    snprintf(mi, sizeof mi, "%s/mountinfo", dir);
+    /* An OpenIPC board: an overlay root over squashfs + jffs2, /tmp in RAM,
+     * a card at /mnt/mmcblk0p1, a disk at "/mnt/Disk One" (escaped), a
+     * read-only stick at /mnt/sdb1. */
+    FILE *f = fopen(mi, "w");
+    fputs("15 1 0:13 / / rw,relatime - overlay overlay rw,lowerdir=/,upperdir=/overlay/root\n"
+          "14 1 31:3 / /rom ro,relatime - squashfs /dev/root ro\n"
+          "16 15 31:5 / /overlay rw,relatime - jffs2 /dev/mtdblock5 rw\n"
+          "17 15 0:14 / /tmp rw,relatime - tmpfs tmpfs rw\n"
+          "30 15 179:1 / /mnt/mmcblk0p1 rw,relatime - vfat /dev/mmcblk0p1 rw,fmask=0022\n"
+          "31 15 8:1 / /mnt/Disk\\040One rw,relatime - ext4 /dev/sda1 rw\n"
+          "32 15 8:17 / /mnt/sdb1 ro,relatime - vfat /dev/sdb1 ro\n", f);
+    fclose(f);
+    static const fake_node_t board[] = {
+        { "/", 13, 1 }, { "/mnt", 13, 1 }, { "/mnt/file", 13, 0 }, { "/rom", 3, 1 },
+        { "/overlay", 5, 1 }, { "/tmp", 14, 1 }, { "/mnt/mmcblk0p1", 101, 1 },
+        { "/mnt/mmcblk0p1/rec", 101, 1 }, { "/mnt/Disk One", 102, 1 }, { "/mnt/sdb1", 103, 1 },
+        { NULL, 0, 0 },
+    };
+    g_fake = board;
+    g_fake_link = g_fake_target = NULL;
+    rec_place_ops_t ops = { fake_stat, fake_realpath, mi };
+    struct { const char *path; int allow; rec_place_t want; const char *note; } T[] = {
+        { "/mnt/sda1/rec",           0, REC_PLACE_NO_DISK,  "no disk mounted: would land on the overlay" },
+        { "/mnt/sda1/rec",           1, REC_PLACE_OK,       "allow_rootfs: the root is a disk" },
+        { "/mnt/mmcblk0p1/rec",      0, REC_PLACE_OK,       "a card, the directory there" },
+        { "/mnt/mmcblk0p1/new/rec/", 0, REC_PLACE_OK,       "a card, the directory still to be made" },
+        { "/mnt/mmcblk0p1",          0, REC_PLACE_OK,       "the card's own mount point" },
+        { "/mnt/Disk One/rec",       0, REC_PLACE_OK,       "an escaped mount point" },
+        { "/mnt/sdb1/rec",           0, REC_PLACE_READONLY, "a stick mounted read-only" },
+        { "/tmp/rec",                0, REC_PLACE_NOT_DISK, "RAM" },
+        { "/tmp/rec",                1, REC_PLACE_NOT_DISK, "RAM, allow_rootfs or not" },
+        { "/overlay/rec",            0, REC_PLACE_NOT_DISK, "the jffs2 flash partition itself" },
+        { "/rom/rec",                1, REC_PLACE_NOT_DISK, "the squashfs" },
+        { "/mnt/file/rec",           0, REC_PLACE_ERROR,    "a file in the way" },
+        { "/mnt/file",               1, REC_PLACE_ERROR,    "a file, not a directory" },
+        { "rec",                     1, REC_PLACE_ERROR,    "a relative path" },
+    };
+    for (size_t i = 0; i < sizeof T / sizeof T[0]; ++i) {
+        rec_place_t got = rec_place_check(T[i].path, T[i].allow, &ops, why, sizeof why);
+        CHECK(got == T[i].want, "rec_place %s (allow_rootfs %d, %s): %s, want %s (%s)", T[i].path,
+              T[i].allow, T[i].note, rec_place_name(got), rec_place_name(T[i].want), why);
+    }
+    /* A link on the root that leads into RAM is judged by where it leads. */
+    static const fake_node_t linked[] = {
+        { "/", 13, 1 }, { "/mnt", 13, 1 }, { "/tmp", 14, 1 }, { "/tmp/x", 14, 1 }, { NULL, 0, 0 },
+    };
+    g_fake = linked;
+    g_fake_link = "/mnt/rec";
+    g_fake_target = "/tmp/x";
+    CHECK(rec_place_check("/mnt/rec/cams", 1, &ops, why, sizeof why) == REC_PLACE_NOT_DISK,
+          "a link into tmpfs: %s", why);
+    g_fake_link = g_fake_target = NULL;
+    /* Without mountinfo (not Linux) only the root check is left. */
+    g_fake = board;
+    rec_place_ops_t nomi = { fake_stat, fake_realpath, "/nonexistent/mountinfo" };
+    CHECK(rec_place_check("/mnt/sda1/rec", 0, &nomi, why, sizeof why) == REC_PLACE_NO_DISK,
+          "no mountinfo: still not the root filesystem (%s)", why);
+    CHECK(rec_place_check("/mnt/mmcblk0p1/rec", 0, &nomi, why, sizeof why) == REC_PLACE_OK,
+          "no mountinfo: another device is a disk (%s)", why);
+    unlink(mi);
+    rmdir(dir);
+
+    /* The real thing, on this host: /dev/shm is tmpfs on Linux. */
+    struct stat st;
+    if (stat("/dev/shm", &st) == 0 && stat("/proc/self/mountinfo", &st) == 0)
+        CHECK(rec_place_check("/dev/shm/vigil-test/rec", 1, NULL, why, sizeof why) == REC_PLACE_NOT_DISK,
+              "/dev/shm on this host: %s", why);
+
+    /* record.path: "." and ".." are refused before anything is judged. */
+    vigil_config_t c;
+    config_defaults(&c);
+    schema_errors_t e = { 0 };
+    snprintf(c.record.path, sizeof c.record.path, "/mnt/mmcblk0p1/x/../../../flash");
+    CHECK(schema_validate(&config_schema, &c, &e) < 0 && e.n == 1 && !strcmp(e.e[0].path, "record.path"),
+          "record.path with \"..\" refused");
+    memset(&e, 0, sizeof e);
+    snprintf(c.record.path, sizeof c.record.path, "/mnt/./rec");
+    CHECK(schema_validate(&config_schema, &c, &e) < 0, "record.path with \".\" refused");
+    memset(&e, 0, sizeof e);
+    snprintf(c.record.path, sizeof c.record.path, "/mnt/..rec/.x");
+    CHECK(schema_validate(&config_schema, &c, &e) == 0, "names starting with dots are fine");
+    CHECK(!c.record.allow_rootfs, "allow_rootfs is off by default");
+}
+
 int main(int argc, char **argv)
 {
     g_data = argc > 1 ? argv[1] : "tests/data";
@@ -1015,6 +1149,7 @@ int main(int argc, char **argv)
     test_rtsp_helpers();
     test_capture_source();
     test_seg_writer();
+    test_rec_place();
     test_net_connect_stop();
     test_schema();
     test_redact();

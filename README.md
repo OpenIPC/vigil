@@ -13,7 +13,9 @@ are part of the design.
 - **Local analog inputs** on DVR boards: shown, then encoded in hardware
   for recording.
 - **Recording** into segments that play on their own, with a free-space
-  reserve: the oldest recordings are deleted when the disk fills up.
+  reserve: the oldest recordings are deleted when the disk fills up. Only
+  onto a disk: with none mounted where the path leads, nothing is written
+  to the root filesystem (a board's flash) or to RAM.
 - **Configuration** in one JSON file (`/etc/vigil.json`) and an
   **HTTP/WebSocket API** to read and change it while video keeps running,
   with live status and events; login with the system account

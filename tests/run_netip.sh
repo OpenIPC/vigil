@@ -6,7 +6,10 @@ set -u
 VIGILD=$1 CLIP=$2 MODE=${3:-ok}
 HERE=$(cd "$(dirname "$0")" && pwd)
 PORT=$((20000 + $$ % 20000))
-TMP=$(mktemp -d)
+# In the build tree, not /tmp: recordings need a disk (tmpfs is refused),
+# and allow_rootfs lets the build tree be on the root filesystem.
+TMP=$(mktemp -d "$PWD/vigil-test.XXXXXX")
+echo '{ "record": { "allow_rootfs": true } }' > "$TMP/vigil.json"
 trap 'kill $SRV 2>/dev/null; rm -rf "$TMP"' EXIT
 
 python3 "$HERE/netip_server.py" "$CLIP" --port $PORT --password secret >"$TMP/server.log" 2>&1 &
@@ -15,7 +18,7 @@ for i in 1 2 3 4 5 6 7 8 9 10; do grep -q netip_server "$TMP/server.log" && brea
 
 PASS=secret
 [ "$MODE" = badpass ] && PASS=wrong
-"$VIGILD" -t 6 -S 60 -o "$TMP/rec" -c "netip://admin:$PASS@127.0.0.1:$PORT/" >"$TMP/vigild.log" 2>&1
+"$VIGILD" -t 6 -f "$TMP/vigil.json" -S 60 -o "$TMP/rec" -c "netip://admin:$PASS@127.0.0.1:$PORT/" >"$TMP/vigild.log" 2>&1
 cat "$TMP/vigild.log"
 
 if [ "$MODE" = badpass ]; then

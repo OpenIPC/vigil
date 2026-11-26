@@ -175,7 +175,9 @@ class WebSocket:
 
 def main():
     vigild, clip = sys.argv[1], sys.argv[2]
-    tmp = tempfile.mkdtemp(prefix="vigil-api-")
+    # In the build tree, not /tmp: recordings need a disk (tmpfs is refused),
+    # and allow_rootfs lets the build tree be on the root filesystem.
+    tmp = tempfile.mkdtemp(prefix="vigil-api-", dir=os.getcwd())
     api_port, cam_port = free_port(), free_port()
     shadow = os.path.join(tmp, "shadow")
     with open(shadow, "w") as f:
@@ -184,7 +186,7 @@ def main():
     rec = os.path.join(tmp, "rec")
     with open(cfg_path, "w") as f:
         json.dump({"version": 1, "cameras": [],
-                   "record": {"path": rec, "segment": 60, "keep": 3},
+                   "record": {"path": rec, "segment": 60, "keep": 3, "allow_rootfs": True},
                    "api": {"listen": "127.0.0.1:%d" % api_port, "auth": True,
                            "user": "root", "shadow": shadow}}, f)
 
@@ -292,7 +294,7 @@ def main():
         check(d["config"]["generation"] > gen and d["channels"][0]["live"], "generation moved, still live")
 
         # ---- a recording setting restarts the camera, which comes back
-        st, _, _ = api.json("PUT", "/api/v1/config/record", {"path": rec, "segment": 120})
+        st, _, _ = api.json("PUT", "/api/v1/config/record", {"path": rec, "segment": 120, "allow_rootfs": True})
         check(st == 200 and wait_for(lambda: ws.find(lambda m: m["type"] == "event" and
                                                      m["data"]["text"] == "restarted"), 5),
               "record changed: CAM1 restarted")
@@ -301,7 +303,8 @@ def main():
         # ---- a recording directory that cannot be made yet is tried again
         blocker = os.path.join(tmp, "blocker")
         open(blocker, "w").close()                  # a file where a directory must go
-        st, _, _ = api.json("PUT", "/api/v1/config/record", {"path": os.path.join(blocker, "rec")})
+        st, _, _ = api.json("PUT", "/api/v1/config/record", {"path": os.path.join(blocker, "rec"),
+                                                             "allow_rootfs": True})
 
         def recording(want):
             def f():
@@ -314,7 +317,34 @@ def main():
         check(wait_for(recording(True), 20, 0.5), "the directory can be made now: recording starts by itself")
         check(wait_for(lambda: ws.find(lambda m: m["type"] == "event" and m["data"]["text"] == "REC on"), 3),
               "WebSocket: event REC on")
-        api.json("PUT", "/api/v1/config/record", {"path": rec, "segment": 120})
+
+        # ---- no disk where the path leads: nothing is written, the state says why
+        def rec_state(want):
+            def f():
+                ch = api.json("GET", "/api/v1/status")[2]["channels"]
+                return ch and ch[0]["live"] and not ch[0]["recording"] and ch[0]["rec_state"] == want
+            return f
+        onroot = "/vigil-test-%d-%d" % (os.getpid(), api_port)   # its parent is "/": the root filesystem
+        st, _, body = api.json("PUT", "/api/v1/config/record", {"path": onroot + "/rec"})
+        check(st == 200 and body["path"] == onroot + "/rec" and not body["allow_rootfs"],
+              "record.path on the root filesystem: accepted, allow_rootfs off by default")
+        check(wait_for(rec_state("waiting for disk"), 10), "status: live, not recording, rec_state waiting for disk")
+        check(not os.path.exists(onroot), "nothing created on the root filesystem")
+        check(wait_for(lambda: ws.find(lambda m: m["type"] == "event" and
+                                       m["data"]["text"] == "REC waiting for disk"), 3),
+              "WebSocket: event REC waiting for disk")
+        check(api.json("GET", "/api/v1/config/record")[2]["path"] == onroot + "/rec" and
+              json.load(open(cfg_path))["record"]["path"] == onroot + "/rec",
+              "the configured path is kept, in force and in the file")
+        if os.path.isdir("/dev/shm") and os.path.exists("/proc/self/mountinfo"):
+            shm = "/dev/shm/vigil-test-%d-%d" % (os.getpid(), api_port)
+            st, _, _ = api.json("PUT", "/api/v1/config/record", {"path": shm + "/rec", "allow_rootfs": True})
+            check(st == 200 and wait_for(rec_state("not a disk"), 10) and not os.path.exists(shm),
+                  "record.path in RAM (/dev/shm): not a disk, nothing created")
+        st, _, err = api.json("PUT", "/api/v1/config/record", {"path": rec + "/../../escape"})
+        check(st == 400 and err["errors"][0]["path"] == "record.path", "record.path with \"..\": 400")
+        api.json("PUT", "/api/v1/config/record", {"path": rec, "segment": 120, "allow_rootfs": True})
+        check(wait_for(recording(True), 20, 0.5), "back on the build tree: recording")
 
         # ---- a client that does not read: the others go on, shutdown does
         # not wait for it. (Smoke test: what the API sends in a test's time

@@ -135,6 +135,13 @@ them. If nothing can be deleted (there are no finished recordings, or the
 space is used by other files), writing fails: the channel reports the
 failure and retries at the next keyframe.
 
+Before a segment writer is set up, `rec_place.c` decides whether the
+directory may be recorded to at all: only on a disk, never on the root
+filesystem (a board's flash) unless `record.allow_rootfs` says it is a disk,
+never on RAM or flash filesystems ([api.md](api.md#where-recordings-may-go)).
+A channel whose directory is refused, or whose disk goes away, keeps its
+video and tries again every 10 s.
+
 ### Status and events
 
 Channel threads never touch the UI. They publish a status snapshot

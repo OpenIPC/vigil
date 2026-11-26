@@ -34,6 +34,7 @@ void config_to_channels(const vigil_config_t *c, channels_config_t *cc)
     cc->rec_dir = c->record.path[0] ? c->record.path : NULL;
     cc->seg_secs = c->record.segment;
     cc->keep = c->record.keep;
+    cc->allow_rootfs = c->record.allow_rootfs;
 }
 
 /* ---- files ---------------------------------------------------------------------- */
