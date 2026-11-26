@@ -198,6 +198,52 @@ use the saved settings: with unsaved changes they ask to save first).
 *UPnP*: the form, marked not active. *Alarm center*: the form and the last
 post. *P2P*: vigil has none, said so.
 
+**Storage** (also the context menu's Record). *Basic*: when the disk is
+full (Overwrite: the oldest recordings make room; Stop: recording stops
+until there is room), the segment length in minutes (the file keeps
+`record.segment` in seconds; a value that is not whole minutes is shown
+rounded with what is stored, and kept unless changed), the recording
+directory with a button for each mounted disk's `/mnt/<dev>/rec` and the
+network storage's, recording onto the root filesystem, and each camera's
+recording state. *Schedule*: a camera, a brush (Continuous, Motion only,
+Off) and the week as one drawn grid of 7 days by 48 half hours; click or
+drag to paint, or with the keyboard move a cursor with the arrows and paint
+with Space or Enter; copy a day to every day, a week to every camera,
+Always, Never. Edits to several cameras are kept until Save; a week that is
+all Continuous writes no entry. Motion only is explained: no camera source
+reports motion yet. *Disk Manager*: disks and their partitions (model or
+filesystem, size, free, mount point, state), refreshed every 2 s so a disk
+plugged in shows up; Format, Mount and Unmount per row (never on a device
+that holds the system); Format opens a panel in the page with the
+filesystem, a field to type the device's name and a Format button that
+works only when the name matches; it runs as a job. *Disk Quota*: per
+camera, the most gigabytes and days. *Network Storage*: whether SMB and NFS
+can be mounted here and why not, the share's state, its form, Test, and
+"Record here" (`record.path` = `/mnt/nas/rec`).
+
+![Storage, Schedule](../tests/ui/storage_schedule.png)
+
+**System.** *General*: the device name (the host name; shown in the main
+menu's bar and the API's status), the language (the languages there are),
+the date and time formats (the clock follows at once), the time now and
+"Set the clock", the time zone (a named one, described in words — offset,
+and when daylight saving time starts and ends — or Custom: an offset,
+daylight saving time with how far the clocks go forward and the week,
+weekday, month and time it starts and ends, previewed as its POSIX string),
+and NTP (on or off, servers, how often vigild checks, Sync now and the last
+sync). Save writes only the parts that changed. *HTTP API*: the API's form.
+
+![System, General](../tests/ui/system_general.png)
+
+**Account.** *Users*: name, group, enabled, password set; Add and Edit open
+an editor in the pane (an empty password on Edit keeps it), Remove asks
+first; the list follows changes made through the API. Changes apply at
+once. *Groups*: a row per group with a toggle per permission (Live,
+Playback, PTZ, Cameras, Storage, Network, System, Users), saved with Save;
+`admin` is read-only, `user` cannot be removed. The on-screen UI does not
+ask for a login yet: the accounts are enforced on the HTTP API, where the
+system account (root) always logs in as an administrator.
+
 ## Architecture
 
 ```
@@ -549,6 +595,10 @@ cameras (named, recording, one with motion, one connecting, one failing;
 `context-menu.png`, `context-split.png`, `context-split-16.png`,
 `menu-p1.png`, `menu-focus.png`, `not-available.png`, `cameras.png`,
 `camera-form.png`, `camera-form-keyboard.png`, `confirm-discard.png`,
+the settings screens (`network-*.png`, `storage-*.png`, `system-*.png`,
+`account-*.png`, `settings-discard.png`: every sub-page, the Ethernet
+question and error, the format panel, a painted schedule, a custom time
+zone, the user editor),
 `record.png`, `record-focus.png`, `validation-error.png`, `network.png`,
 `display.png`, `system.png`, `help-f1.png`, and since then the page
 arrows (`live-page-arrow-next.png`, `-prev`), every tile state and the

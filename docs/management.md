@@ -26,7 +26,7 @@ The same actions are in the HTTP API ([api.md](api.md#management)).
 | | Disk Quota | works | Per camera: the most space (GB) and the most days its recordings may take. |
 | | Network Storage | partial | SMB (CIFS) works on this firmware; NFS needs a kernel option the ssr621q kernel lacks (below). Test mounts, writes and reads a file. |
 | System | General | works | Device name (host name), language (English for now), date and time, time zone with DST, NTP, date and time format. |
-| Account | Users, Groups | works | vigild's own users in groups with permissions, enforced by the API ([api.md](api.md#accounts-and-permissions)). |
+| Account | Users, Groups | works | vigild's own users in groups with permissions, enforced by the API ([api.md](api.md#accounts-and-permissions)). The on-screen UI does not ask for a login yet. |
 
 ## Where things are kept
 
