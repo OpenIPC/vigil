@@ -5,6 +5,8 @@
  *   -> -w OUT: write that configuration to OUT and exit
  *   -> hal_init (media system + HDMI on platforms that have it)
  *   -> channels_start (one thread per camera: source -> decode + record)
+ *   -> mgmt_start (the management pages' jobs and timers: network
+ *      rollback, NTP, DDNS, network storage, alarm center, mail)
  *   -> api_start (HTTP/WebSocket API on its own threads, if configured)
  *   -> frontend_run (LVGL quad view, or status lines when headless); on
  *      this thread, a configuration the API saved is applied
@@ -27,6 +29,7 @@
 #include "frontend.h"
 #include "hal.h"
 #include "log.h"
+#include "mgmt.h"
 #include "source.h"
 
 static volatile sig_atomic_t g_stop;
@@ -383,9 +386,11 @@ int main(int argc, char **argv)
     rec_sched_set(weeks, config_to_schedule(&running, weeks));
     if (channels_start(&cc, caps->display ? tiles : NULL) == 0) {
         config_mark_applied(g_applied_gen);
+        if (mgmt_start() < 0) vg_log("mgmt: cannot start its threads; the management pages will not act");
         api_start();                    /* failing to start it is logged, not fatal */
         rc = frontend_run(run_secs, &g_stop, apply_config) < 0 ? 1 : 0;
         api_stop();
+        mgmt_stop();
         channels_stop();
     }
     hal_shutdown();

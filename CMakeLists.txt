@@ -85,6 +85,7 @@ target_link_libraries(vigil_core PUBLIC cjson vigil_yaml Threads::Threads)
 # management pages do, kept out of the POSIX-only core. Every file and
 # command goes through src/sys/sys.h, so the tests run it on a fake root.
 add_library(vigil_sys STATIC
+  src/sys/mgmt.c
   src/sys/sys.c
   src/sys/sys_net.c
   src/sys/sys_curl.c

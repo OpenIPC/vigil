@@ -253,3 +253,22 @@ void fake_have(const char *prog, int there)
 int fake_ran(const char *substr) { return strstr(fake_log, substr) != NULL; }
 
 void fake_clear_log(void) { fake_log[0] = 0; }
+
+/* ---- no platform: the core's channels are never started here ----------------------- */
+
+#include "hal.h"
+#include "hal_capture.h"
+#include "hal_decoder.h"
+#include "hal_display.h"
+
+static const hal_caps_t g_caps = { .name = "test" };
+const hal_caps_t *hal_caps(void) { return &g_caps; }
+int  hal_dec_open(int ch, vg_codec_t c, const vg_stream_info_t *si) { (void)ch; (void)c; (void)si; return -1; }
+int  hal_dec_send(int ch, const vg_au_t *au) { (void)ch; (void)au; return -1; }
+void hal_dec_reset(int ch) { (void)ch; }
+void hal_dec_close(int ch) { (void)ch; }
+int  hal_display_set_tile(int ch, const vg_rect_t *r) { (void)ch; (void)r; return 0; }
+void hal_display_clear_tile(int ch) { (void)ch; }
+int  hal_cap_start(int in, int ch, hal_cap_cb cb, void *user) { (void)in; (void)ch; (void)cb; (void)user; return -1; }
+int  hal_cap_signal(int in) { (void)in; return 0; }
+void hal_cap_stop(int in) { (void)in; }
