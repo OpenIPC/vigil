@@ -942,7 +942,16 @@ static void run_ip(job_args_t *a)
              * (devices lock an account after a few). */
             if (r.rc == DISC_OK || r.rc == DISC_EAUTH || r.rc == DISC_EINVAL) break;
         }
-        if (r.rc == DISC_OK) {
+        if (r.rc == DISC_ETIMEOUT || r.rc == DISC_EUNREACHABLE) {
+            /* No answer, or gone from the old address: the change may have
+             * been made all the same (a device that moves before it
+             * answers; an answer lost). Where it answers says. */
+            job_msg("looking for %s", r.new_ip);
+            if ((r.reprobed = reprobe(&devs[i], r.new_ip)) != 0) {
+                r.rc = DISC_OK;
+                snprintf(r.msg, sizeof r.msg, "changed (the request was not answered)");
+            }
+        } else if (r.rc == DISC_OK) {
             job_msg("looking for %s", r.new_ip);
             r.reprobed = reprobe(&devs[i], r.new_ip);
             if (!r.msg[0]) snprintf(r.msg, sizeof r.msg, r.reprobed ? "changed" : "changed; not seen at the new address yet");
@@ -991,14 +1000,17 @@ char *disc_cameras_with(const char *cameras, int ch, const char *url, const char
 
 /* The URLs for `d` over `proto` (0: by preference); the protocol used. */
 static unsigned device_urls(const disc_device_t *d, unsigned proto, const char *user, const char *pass,
-                            char *url, size_t ucap, char *sub, size_t scap, disc_rc_t *rc, char *err, size_t errcap)
+                            char *url, size_t ucap, char *sub, size_t scap, disc_rc_t *rc, char *err, size_t errcap,
+                            unsigned *tried)
 {
     unsigned order[3];
+    *tried = 0;
     int np = proto_order(d, proto, order);
     *rc = DISC_EUNSUPPORTED;
     snprintf(err, errcap, proto ? "the device did not answer %s" : "no protocol to add it with",
              disc_proto_name(proto));
     for (int p = 0; p < np && !g_stop; ++p) {
+        *tried = order[p];
         if (order[p] == DISC_ONVIF) {
             *rc = disc_onvif_stream_uris(d, user, pass, url, ucap, sub, scap, err, errcap);
         } else if (disc_url(d, order[p], user, pass, url, ucap, sub, scap) == 0) {
@@ -1088,7 +1100,7 @@ static void run_assign(job_args_t *a)
     }
     r.channel = ch;
     job_msg("adding %s to channel %d", d.ip, ch);
-    r.proto = device_urls(&d, a->proto, a->user, a->pass, url, sizeof url, sub, sizeof sub, &r.rc, r.msg, sizeof r.msg);
+    device_urls(&d, a->proto, a->user, a->pass, url, sizeof url, sub, sizeof sub, &r.rc, r.msg, sizeof r.msg, &r.proto);
     if (r.rc != DISC_OK) goto out;
     char name[32];
     device_name(&d, a->name, name, sizeof name);
@@ -1144,7 +1156,7 @@ static void run_autoadd(job_args_t *a)
         job_msg("%s", d->ip);
         job_progress(i * 100 / n);
         char url[512], sub[512], name[32];
-        r.proto = device_urls(d, 0, a->user, a->pass, url, sizeof url, sub, sizeof sub, &r.rc, r.msg, sizeof r.msg);
+        device_urls(d, 0, a->user, a->pass, url, sizeof url, sub, sizeof sub, &r.rc, r.msg, sizeof r.msg, &r.proto);
         if (r.rc == DISC_OK) {
             device_name(d, NULL, name, sizeof name);
             char *t = disc_cameras_with(cams, ch, url, sub, name);

@@ -94,10 +94,16 @@ class Device:
         self.mac = mac or "02:00:00:00:00:%02x" % (0x10 + index)
         self.name = "fake%d" % index
         self.args = args
+        self.index = index
         self.socks = []
         self.servers = []
         self.realm, self.random = "Login to fake%d" % index, "%d" % (1000 + index)
         self.sessions = set()
+
+    def tcp(self, k):
+        """TCP port k (netip, onvif, dahua): with --tcp-bind every device
+        shares one address, so each gets its own ports (base + index)."""
+        return self.args.tcp[k] + (self.index if self.args.tcp_bind else 0)
 
     # -- binding -------------------------------------------------------------
     def start(self):
@@ -110,17 +116,18 @@ class Device:
                     s.bind((self.ip, port))
                     self.socks.append(s)
                     threading.Thread(target=udp_loop, args=(s, [self], proto), daemon=True).start()
-        if a.shared:
+        if a.shared and not a.tcp_bind:
             return                  # discovery only: the addresses are made up
         if "netip" in self.protos:
-            self.serve_tcp(a.tcp[0], NetipTcp)
+            self.serve_tcp(self.tcp(0), NetipTcp)
         if "onvif" in self.protos:
-            self.serve_http(a.tcp[1], OnvifHttp)
+            self.serve_http(self.tcp(1), OnvifHttp)
         if "dhip" in self.protos:
-            self.serve_http(a.tcp[2], DahuaHttp)
+            self.serve_http(self.tcp(2), DahuaHttp)
 
     def serve_tcp(self, port, handler):
-        srv = socketserver.ThreadingTCPServer((self.ip, port), handler, bind_and_activate=False)
+        srv = socketserver.ThreadingTCPServer((self.args.tcp_bind or self.ip, port), handler,
+                                              bind_and_activate=False)
         srv.allow_reuse_address = True
         srv.daemon_threads = True
         srv.server_bind()
@@ -133,7 +140,7 @@ class Device:
         class Srv(socketserver.ThreadingMixIn, HTTPServer):
             allow_reuse_address = True
             daemon_threads = True
-        srv = Srv((self.ip, port), handler)
+        srv = Srv((self.args.tcp_bind or self.ip, port), handler)
         srv.device = self
         self.servers.append(srv)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -168,7 +175,7 @@ class Device:
         return {"BuildDate": "2024-01-01 00:00:00", "ChannelNum": 1, "DeviceType": 1,
                 "GateWay": iphex(self.gw), "HostIP": iphex(self.ip), "HostName": self.name,
                 "HttpPort": 80, "MAC": self.mac, "MaxBps": 0, "MonMode": "TCP", "SN": "SN" + self.mac[-5:],
-                "SSLPort": 8443, "Submask": iphex(self.mask), "TCPMaxConn": 10, "TCPPort": self.args.tcp[0],
+                "SSLPort": 8443, "Submask": iphex(self.mask), "TCPMaxConn": 10, "TCPPort": self.tcp(0),
                 "TransferPlan": "Quality", "UDPPort": 34568, "UseHSDownLoad": False,
                 "Version": "V5.00.R02.fake"}
 
@@ -187,11 +194,11 @@ class Device:
                 'onvif://www.onvif.org/MAC/%s</d:Scopes><d:XAddrs>http://%s:%d/onvif/device_service</d:XAddrs>'
                 '<d:MetadataVersion>1</d:MetadataVersion></d:ProbeMatch></d:ProbeMatches></SOAP-ENV:Body>'
                 '</SOAP-ENV:Envelope>' % (self.mac, relates, self.mac, self.name, self.mac.upper(), self.ip,
-                                         self.args.tcp[1]))
+                                         self.tcp(1)))
 
     def devinfo(self):
         return {"mac": self.mac, "method": "client.notifyDevInfo", "params": {"deviceInfo": {
-            "DeviceClass": "IPC", "DeviceType": "FAKE-DH", "HttpPort": self.args.tcp[2], "Port": 37777,
+            "DeviceClass": "IPC", "DeviceType": "FAKE-DH", "HttpPort": self.tcp(2), "Port": 37777,
             "IPv4Address": {"IPAddress": self.ip, "SubnetMask": self.mask, "DefaultGateway": self.gw,
                             "DhcpEnable": False},
             "MachineName": self.name, "SerialNo": "DH" + self.mac[-5:], "Vendor": "Fake",
@@ -343,15 +350,15 @@ class OnvifHttp(Quiet):
         log("onvif %s" % action)
         if action == "GetCapabilities":
             out = ("<tds:GetCapabilitiesResponse><tds:Capabilities><tt:Media><tt:XAddr>http://%s:%d/onvif/media"
-                   "</tt:XAddr></tt:Media></tds:Capabilities></tds:GetCapabilitiesResponse>" % (dev.ip, dev.args.tcp[1]))
+                   "</tt:XAddr></tt:Media></tds:Capabilities></tds:GetCapabilitiesResponse>" % (dev.ip, dev.tcp(1)))
         elif action == "GetProfiles":
             out = ('<trt:GetProfilesResponse><trt:Profiles token="main" fixed="true"><tt:Name>main</tt:Name>'
                    '</trt:Profiles><trt:Profiles token="sub"><tt:Name>sub</tt:Name></trt:Profiles>'
                    '</trt:GetProfilesResponse>')
         elif action == "GetStreamUri":
             tok = xml_text(body, "ProfileToken")
-            out = ("<trt:GetStreamUriResponse><trt:MediaUri><tt:Uri>rtsp://%s:554/%s?a=1&amp;b=2</tt:Uri>"
-                   "</trt:MediaUri></trt:GetStreamUriResponse>" % (dev.ip, tok))
+            out = ("<trt:GetStreamUriResponse><trt:MediaUri><tt:Uri>rtsp://%s:%d/%s?a=1&amp;b=2</tt:Uri>"
+                   "</trt:MediaUri></trt:GetStreamUriResponse>" % (dev.ip, dev.args.rtsp_port, tok))
         elif action == "GetNetworkInterfaces":
             out = ('<tds:GetNetworkInterfacesResponse><tds:NetworkInterfaces token="eth0"><tt:Enabled>true'
                    '</tt:Enabled></tds:NetworkInterfaces></tds:GetNetworkInterfacesResponse>')
@@ -418,6 +425,9 @@ def main():
     ap.add_argument("--password", default="")
     ap.add_argument("--ports", default="34569,3702,37810", help="UDP ports: netip,onvif,dhip")
     ap.add_argument("--tcp-ports", default="34567,8899,8080", help="TCP ports: netip, onvif http, dahua http")
+    ap.add_argument("--tcp-bind", help="serve TCP on this address instead of the device's, device i on "
+                    "the TCP ports + i (devices behind a NAT or a QEMU guestfwd)")
+    ap.add_argument("--rtsp-port", type=int, default=554, help="port of the RTSP URLs GetStreamUri gives")
     ap.add_argument("--shared", help="answer on 0.0.0.0, multicast on the interface with this address")
     ap.add_argument("--netip-reply-to", help="send NETIP answers to this broadcast address, port 34569")
     ap.add_argument("--no-udp-set", action="store_true", help="ignore NETIP's broadcast set (1532)")
@@ -430,6 +440,9 @@ def main():
     if a.shared:
         for proto, port, group in (("netip", a.ports[0], None), ("onvif", a.ports[1], "239.255.255.250"),
                                    ("dhip", a.ports[2], "239.255.255.251")):
+            mine = [d for d in devices if proto in d.protos]
+            if not mine:
+                continue
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -437,9 +450,7 @@ def main():
             if group:
                 s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
                              socket.inet_aton(group) + socket.inet_aton(a.shared))
-            mine = [d for d in devices if proto in d.protos]
-            if mine:
-                threading.Thread(target=udp_loop, args=(s, mine, proto), daemon=True).start()
+            threading.Thread(target=udp_loop, args=(s, mine, proto), daemon=True).start()
     log("ready: " + " ".join("%s@%s" % (",".join(sorted(d.protos)), d.ip) for d in devices))
     try:
         while True:
