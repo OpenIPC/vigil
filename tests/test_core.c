@@ -4,6 +4,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1384,15 +1385,53 @@ static void test_rec_place(void)
 
 /* ---- channels: tiles follow the layout ------------------------------------------ */
 
-/* A display platform with four decoders that never get a picture: the
- * channels below point at a closed port and keep reconnecting. */
-static const hal_caps_t g_fake_caps = { .name = "fake", .display = 1, .decoder = 1,
-                                        .dec_max_w = 1920, .dec_max_h = 1080, .max_channels = 4 };
+/* A display platform with four channels and `g_dec_slots` decoders (none
+ * at first: the tile tests' channels point at a closed port anyway). */
+static hal_caps_t g_fake_caps = { .name = "fake", .display = 1, .decoder = 1,
+                                  .dec_max_w = 1920, .dec_max_h = 1080, .max_channels = 4 };
 const hal_caps_t *hal_caps(void) { return &g_fake_caps; }
-int  hal_dec_open(int ch, vg_codec_t c, const vg_stream_info_t *si) { (void)ch; (void)c; (void)si; return -1; }
-int  hal_dec_send(int ch, const vg_au_t *au) { (void)ch; (void)au; return -1; }
+
+static pthread_mutex_t g_dec_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_dec_slots;                     /* decoders the fake platform has */
+static int g_dec_open[CHANNEL_MAX];         /* channel holds one */
+static int g_dec_opens[CHANNEL_MAX], g_dec_fails[CHANNEL_MAX], g_dec_sent[CHANNEL_MAX];
+
+static int dec_count(int *a, int ch)
+{
+    pthread_mutex_lock(&g_dec_lock);
+    int v = a[ch];
+    pthread_mutex_unlock(&g_dec_lock);
+    return v;
+}
+
+int hal_dec_open(int ch, vg_codec_t c, const vg_stream_info_t *si)
+{
+    (void)c; (void)si;
+    pthread_mutex_lock(&g_dec_lock);
+    int used = 0;
+    for (int i = 0; i < CHANNEL_MAX; ++i) used += g_dec_open[i] && i != ch;
+    int ok = used < g_dec_slots;
+    g_dec_open[ch] = ok;
+    ++*(ok ? &g_dec_opens[ch] : &g_dec_fails[ch]);
+    pthread_mutex_unlock(&g_dec_lock);
+    return ok ? 0 : -1;
+}
+int hal_dec_send(int ch, const vg_au_t *au)
+{
+    (void)au;
+    pthread_mutex_lock(&g_dec_lock);
+    int ok = g_dec_open[ch];
+    g_dec_sent[ch] += ok;
+    pthread_mutex_unlock(&g_dec_lock);
+    return ok ? 0 : -1;
+}
 void hal_dec_reset(int ch) { (void)ch; }
-void hal_dec_close(int ch) { (void)ch; }
+void hal_dec_close(int ch)
+{
+    pthread_mutex_lock(&g_dec_lock);
+    g_dec_open[ch] = 0;
+    pthread_mutex_unlock(&g_dec_lock);
+}
 
 static vg_rect_t g_tile_at[CHANNEL_MAX];    /* w == 0: cleared */
 static int       g_tile_sets[CHANNEL_MAX], g_tile_clears[CHANNEL_MAX];
@@ -1454,6 +1493,165 @@ static void test_channel_tiles(void)
     close(fd);
 }
 
+/* ---- channels: decoders only for the tiles on screen ------------------------------ */
+
+/* A NETIP camera on loopback: logs anyone in and streams a clip, one
+ * access unit per message, at about 100 fps (a keyframe every 0.25 s). */
+static struct {
+    int            fd, port;
+    volatile int   stop;
+    const uint8_t *clip;
+    size_t         clip_len;
+} g_cam;
+
+static void put_le32(uint8_t *p, size_t v)
+{
+    p[0] = v & 0xff; p[1] = v >> 8 & 0xff; p[2] = v >> 16 & 0xff; p[3] = v >> 24 & 0xff;
+}
+
+static int cam_send(int fd, int msgid, const void *body, size_t len)
+{
+    uint8_t h[20] = { 0xff, 1 };
+    h[14] = msgid & 0xff;
+    h[15] = msgid >> 8;
+    put_le32(h + 16, len);
+    return send(fd, h, 20, MSG_NOSIGNAL) == 20 && send(fd, body, len, MSG_NOSIGNAL) == (ssize_t)len ? 0 : -1;
+}
+
+static int cam_recv(int fd, uint8_t *b, size_t len)
+{
+    size_t got = 0;
+    while (got < len && !g_cam.stop) {
+        ssize_t r = recv(fd, b + got, len - got, 0);
+        if (r <= 0) return -1;
+        got += (size_t)r;
+    }
+    return got == len ? 0 : -1;
+}
+
+static void *cam_client(void *arg)
+{
+    int fd = (int)(intptr_t)arg;
+    static const char ok[] = "{\"Ret\":100,\"SessionID\":\"0x00000001\",\"AliveInterval\":20}\n";
+    uint8_t h[20], body[2048];
+    for (;;) {                                      /* login, claim, start */
+        if (cam_recv(fd, h, 20) < 0) goto out;
+        uint32_t len = h[16] | h[17] << 8 | h[18] << 16 | (uint32_t)h[19] << 24;
+        if (len > sizeof body || cam_recv(fd, body, len) < 0) goto out;
+        int msgid = h[14] | h[15] << 8;
+        if (msgid == 1000 || msgid == 1413) cam_send(fd, msgid + 1, ok, sizeof ok);
+        if (msgid == 1410) break;
+    }
+    /* The clip in a loop; a message per picture: an I-frame header (0x1FC:
+     * H.264, 100 fps, 640x360 in 8-pixel units) or a P-frame header, then
+     * the picture with the parameter sets before it. */
+    uint8_t *msg = malloc(16 + g_cam.clip_len + 4 * 64);
+    while (msg && !g_cam.stop) {
+        size_t pos = 0, nl, len = 0;
+        int key = 0;
+        const uint8_t *n;
+        while (!g_cam.stop && (n = au_next_nal(g_cam.clip, g_cam.clip_len, &pos, &nl)) != NULL) {
+            memcpy(msg + 16 + len, "\0\0\0\1", 4);
+            memcpy(msg + 20 + len, n, nl);
+            len += 4 + nl;
+            int t = n[0] & 0x1f;
+            key |= t == 5;
+            if (t < 1 || t > 5) continue;
+            static const uint8_t ihead[12] = { 0, 0, 1, 0xFC, 2, 100, 80, 45 };
+            static const uint8_t phead[4] = { 0, 0, 1, 0xFD };
+            size_t hl = key ? 16 : 8;
+            uint8_t *m = msg + 16 - hl;
+            memcpy(m, key ? ihead : phead, hl - 4);
+            put_le32(m + hl - 4, len);
+            if (cam_send(fd, 1412, m, hl + len) < 0) goto out_msg;
+            len = 0;
+            key = 0;
+            usleep(10 * 1000);
+        }
+    }
+out_msg:
+    free(msg);
+out:
+    close(fd);
+    return NULL;
+}
+
+static void *cam_server(void *arg)
+{
+    (void)arg;
+    while (!g_cam.stop) {
+        int c = accept(g_cam.fd, NULL, NULL);
+        if (c < 0) break;
+        pthread_t t;
+        if (pthread_create(&t, NULL, cam_client, (void *)(intptr_t)c) == 0) pthread_detach(t);
+        else close(c);
+    }
+    return NULL;
+}
+
+/* Wait up to `ms` for cond. */
+#define WAIT_FOR(cond, ms) do { for (int w_ = 0; w_ < (ms) / 20 && !(cond); ++w_) usleep(20 * 1000); } while (0)
+
+static void test_channel_decode(void)
+{
+    g_cam.clip = load("testsrc_640x360.h264", &g_cam.clip_len);
+    g_cam.fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    socklen_t al = sizeof a;
+    if (g_cam.fd < 0 || bind(g_cam.fd, (struct sockaddr *)&a, sizeof a) < 0 || listen(g_cam.fd, 8) < 0 ||
+        getsockname(g_cam.fd, (struct sockaddr *)&a, &al) < 0) {
+        fprintf(stderr, "channel decode test: no listener, skipped\n");
+        return;
+    }
+    pthread_t srv;
+    pthread_create(&srv, NULL, cam_server, NULL);
+    char url[64];
+    snprintf(url, sizeof url, "netip://127.0.0.1:%d/", ntohs(a.sin_port));
+
+    /* One decoder for two cameras, both on screen: one gets it, the
+     * other is told "no decoder" and keeps trying. */
+    g_fake_caps.dec_shown_only = 1;
+    g_dec_slots = 1;
+    vg_rect_t both[CHANNEL_MAX] = { { 0, 40, 640, 300 }, { 640, 40, 640, 300 } };
+    channels_config_t cc = { .urls = { url, url }, .n = 2, .seg_secs = 60 };
+    CHECK(channels_start(&cc, both) == 0, "start");
+    WAIT_FOR((dec_count(g_dec_open, 0) || dec_count(g_dec_open, 1)) &&
+             dec_count(g_dec_fails, 0) + dec_count(g_dec_fails, 1) > 0, 5000);
+    int has = dec_count(g_dec_open, 0) ? 0 : 1, other = 1 - has;
+    CHECK(dec_count(g_dec_open, has) && dec_count(g_dec_sent, has) > 0, "one channel decodes");
+    CHECK(!dec_count(g_dec_open, other) && dec_count(g_dec_fails, other) > 0, "the other has no decoder");
+
+    /* The decoding channel leaves the screen: it frees its decoder, and
+     * the other takes it at its next keyframe, not after the 10 s retry. */
+    vg_rect_t one[CHANNEL_MAX] = { { 0 } };
+    one[other] = (vg_rect_t){ 0, 40, 1280, 600 };
+    channels_set_tiles(one);
+    WAIT_FOR(dec_count(g_dec_open, other), 3000);
+    CHECK(!dec_count(g_dec_open, has), "hidden channel freed its decoder");
+    CHECK(dec_count(g_dec_open, other) && dec_count(g_dec_opens, other) == 1, "shown channel took it");
+    usleep(500 * 1000);
+    channel_status_t st;
+    channels_status(has, &st);
+    CHECK(st.live && !st.decoding && st.width == 640 && st.height == 360,
+          "hidden channel live, not decoding, size known (%d %d %ux%u)", st.live, st.decoding, st.width, st.height);
+    CHECK(dec_count(g_dec_opens, has) == 1, "hidden channel did not decode again");
+
+    /* Both back with a decoder each: the hidden one decodes again. */
+    g_dec_slots = 2;
+    channels_set_tiles(both);
+    WAIT_FOR(dec_count(g_dec_open, has), 3000);
+    CHECK(dec_count(g_dec_open, has) && dec_count(g_dec_open, other), "both decode");
+
+    channels_stop();
+    g_cam.stop = 1;
+    shutdown(g_cam.fd, SHUT_RDWR);
+    close(g_cam.fd);
+    pthread_join(srv, NULL);
+    g_fake_caps.dec_shown_only = 0;
+    g_dec_slots = 0;
+    free((void *)g_cam.clip);
+}
+
 int main(int argc, char **argv)
 {
     g_data = argc > 1 ? argv[1] : "tests/data";
@@ -1473,6 +1671,7 @@ int main(int argc, char **argv)
     test_config_store();
     test_events();
     test_channel_tiles();
+    test_channel_decode();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

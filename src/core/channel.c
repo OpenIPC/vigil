@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,7 +55,12 @@ typedef struct {
     vg_codec_t      dec_codec;
     unsigned        dec_gen;        /* au_norm info_gen it was built for */
     time_t          dec_failed_at;
+    unsigned        dec_failed_frees; /* g_dec_frees when it failed */
+    int             dec_told;       /* the failure was reported */
     int             dec_ok;         /* feeding the decoder since the last keyframe */
+    int             was_shown;
+    /* Its tile is on screen (set by channels_set_tiles' thread). */
+    atomic_int      shown;
 
     /* Status (read by the UI and the API under `lock`). */
     pthread_mutex_t *lock;          /* g_locks[idx]: outlives every restart */
@@ -72,6 +78,10 @@ static int             g_can_decode;
 static int             g_running;   /* past the first apply: changes are news */
 static vg_rect_t       g_tiles[CHANNEL_MAX];
 static int             g_have_tiles;
+static int             g_shown_only;   /* hal_caps()->dec_shown_only with a display */
+/* Decoders closed so far: a channel that could not get one (memory, the
+ * decoder's channels) tries again as soon as another lets its go. */
+static atomic_uint     g_dec_frees;
 
 static void locks_init(void)
 {
@@ -123,6 +133,7 @@ static void decoder_close(channel_t *c)
     if (!c->dec_up) return;
     hal_dec_close(c->idx);
     c->dec_up = 0;
+    atomic_fetch_add(&g_dec_frees, 1);
     pthread_mutex_lock(c->lock);
     c->st.decoding = 0;
     pthread_mutex_unlock(c->lock);
@@ -134,14 +145,24 @@ static int decoder_ensure(channel_t *c, vg_codec_t codec)
 {
     if (!c->norm.info_gen) return c->dec_up;            /* no SPS seen yet */
     if (c->dec_up && c->dec_codec == codec && c->dec_gen == c->norm.info_gen) return 1;
-    if (c->dec_failed_at && time(NULL) - c->dec_failed_at < DEC_RETRY_SECS) return 0;
+    if (c->dec_failed_at && time(NULL) - c->dec_failed_at < DEC_RETRY_SECS &&
+        atomic_load(&g_dec_frees) == c->dec_failed_frees)
+        return 0;
 
     decoder_close(c);
     const vg_stream_info_t *si = &c->norm.info;
+    /* Before the attempt: a decoder freed while it runs counts as news. */
+    unsigned frees = atomic_load(&g_dec_frees);
     if (hal_dec_open(c->idx, codec, si) < 0) {
-        vg_log("CAM%d: no decoder for %s %ux%u", c->idx + 1, vg_codec_name(codec), si->width, si->height);
-        events_push(c->idx + 1, "no decoder");
+        /* Said once until it works: with more cameras than decoders it
+         * fails again at every retry. */
+        if (!c->dec_told) {
+            vg_log("CAM%d: no decoder for %s %ux%u", c->idx + 1, vg_codec_name(codec), si->width, si->height);
+            events_push(c->idx + 1, "no decoder");
+            c->dec_told = 1;
+        }
         c->dec_failed_at = time(NULL);
+        c->dec_failed_frees = frees;
         return 0;
     }
     vg_log("CAM%d: decoder %s %ux%u, %u refs", c->idx + 1, vg_codec_name(codec), si->width, si->height, si->refs);
@@ -149,6 +170,7 @@ static int decoder_ensure(channel_t *c, vg_codec_t codec)
     c->dec_codec = codec;
     c->dec_gen = c->norm.info_gen;
     c->dec_failed_at = 0;
+    c->dec_told = 0;
     pthread_mutex_lock(c->lock);
     c->st.decoding = 1;
     c->st.width = si->width;
@@ -245,12 +267,21 @@ static void on_au(void *user, const vg_au_t *au)
 {
     channel_t *c = user;
 
-    if (g_can_decode && !c->src->ops->self_displayed) {
+    int shown = !g_shown_only || atomic_load(&c->shown);
+    if (shown && !c->was_shown) c->dec_failed_at = 0;   /* back on screen: try at once */
+    c->was_shown = shown;
+    if (g_can_decode && !c->src->ops->self_displayed && shown) {
         if (au->key) c->dec_ok = decoder_ensure(c, au->codec);
         /* A dropped AU breaks the reference chain: wait for the next
          * keyframe instead of feeding pictures that cannot decode. */
         if (c->dec_ok && hal_dec_send(c->idx, au) < 0) c->dec_ok = 0;
-    } else if (au->key && c->norm.info_gen) {
+    } else if (c->dec_up) {
+        /* Off screen on a platform whose decoders do not stretch to every
+         * channel: give the decoder to the channels shown. */
+        decoder_close(c);
+        c->dec_ok = 0;
+    }
+    if (!c->dec_up && au->key && c->norm.info_gen) {
         pthread_mutex_lock(c->lock);
         c->st.width = c->norm.info.width;
         c->st.height = c->norm.info.height;
@@ -458,6 +489,7 @@ static int slot_start(int i, const channels_config_t *cfg)
     }
     if (g_have_tiles && hal_caps()->display && !c->src->ops->self_displayed && g_tiles[i].w > 0)
         hal_display_set_tile(i, &g_tiles[i]);
+    atomic_store(&c->shown, !g_have_tiles || g_tiles[i].w > 0);
     if (pthread_create(&c->thread, NULL, channel_thread, c) != 0) {
         vg_log("CAM%d: cannot start its thread", i + 1);
         slot_teardown(c);
@@ -524,6 +556,7 @@ int channels_apply(const channels_config_t *cfg)
 int channels_start(const channels_config_t *cfg, const vg_rect_t *tiles)
 {
     g_can_decode = hal_caps()->decoder;
+    g_shown_only = hal_caps()->dec_shown_only && hal_caps()->display;
     g_running = 0;
     g_have_tiles = tiles != NULL;
     if (tiles) memcpy(g_tiles, tiles, sizeof g_tiles);
@@ -544,6 +577,7 @@ void channels_set_tiles(const vg_rect_t *tiles)
         /* Only this thread starts and stops channels: active and src are
          * stable here. */
         if (!c->active || !c->src || c->src->ops->self_displayed) continue;
+        atomic_store(&c->shown, g_tiles[i].w > 0 && g_tiles[i].h > 0);
         if (g_tiles[i].w > 0 && g_tiles[i].h > 0) {
             if (hal_display_set_tile(i, &g_tiles[i]) < 0)
                 vg_log("CAM%d: cannot move its picture to %dx%d at %d,%d", i + 1, g_tiles[i].w,

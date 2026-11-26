@@ -6,8 +6,10 @@
  * the platform has a decoder (hal_decoder.h, sized from the stream's SPS;
  * rebuilt when the stream changes) and records them as-is (seg_writer.h).
  * Sources the platform displays itself (local capture) are only recorded.
- * Recording does not depend on decoding. Lost connections reconnect with a
- * 1 -> 10 s back-off.
+ * Recording does not depend on decoding. A decoder that cannot be had (the
+ * platform out of memory or decoder channels) is asked for again after a
+ * while, or at once when another channel frees one. Lost connections
+ * reconnect with a 1 -> 10 s back-off.
  */
 #ifndef CHANNEL_H
 #define CHANNEL_H
@@ -65,7 +67,10 @@ void channels_stop(void);
  * shown), e.g. for another layout or one channel full screen. From the
  * thread that calls channels_apply. Running channels move at once, the
  * others start in their tile; sources the platform shows itself (local
- * capture) stay where the platform put them. */
+ * capture) stay where the platform put them. Where the decoders do not
+ * stretch to every channel (hal_caps()->dec_shown_only), a channel that
+ * leaves the screen frees its decoder and gets one again at the first
+ * keyframe after it comes back; recording is not affected. */
 void channels_set_tiles(const vg_rect_t *tiles);
 
 /* Snapshot of channel `idx` (0-based). Any thread, at any time. */

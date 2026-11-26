@@ -21,6 +21,11 @@ typedef struct {
     int      fixed_tiles;       /* the platform places the tiles itself, in the
                                  * quad view: hal_display_set_tile cannot move
                                  * them (no other layouts, no full screen) */
+    int      dec_shown_only;    /* decoders (memory, channel numbers) do not
+                                 * stretch to every channel at once: the core
+                                 * decodes only the channels with a tile on
+                                 * screen, and frees a channel's decoder when
+                                 * its tile goes (recording carries on) */
 } hal_caps_t;
 
 /* Bring up the media system and the display (w x h @ fps when the
