@@ -12,6 +12,7 @@
 
 #include "frontend.h"
 #include "hal_ui.h"
+#include "input_evdev.h"
 #include "log.h"
 #include "ui_app.h"
 #include "ui_bridge.h"
@@ -35,6 +36,7 @@ int frontend_run(int run_secs, volatile sig_atomic_t *stop, void (*tick)(void))
         return -1;
     }
     ui_app_create(&model);
+    ui_app_set_pointer(input_evdev_create(disp, ui_app_back, 1));
 
     time_t t0 = time(NULL);
     while (!*stop) {
@@ -43,6 +45,7 @@ int frontend_run(int run_secs, volatile sig_atomic_t *stop, void (*tick)(void))
         usleep((ms > 30 ? 30 : ms) * 1000u);
         if (run_secs > 0 && time(NULL) - t0 >= run_secs) break;
     }
+    input_evdev_delete();
     lv_deinit();
     return 0;
 }

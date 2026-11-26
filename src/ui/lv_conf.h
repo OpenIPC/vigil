@@ -5,7 +5,8 @@
  * Target: 1280x720 on the platform's UI layer (hal_ui.h). The colour depth
  * comes from the platform's CMake file (VIGIL_UI_COLOR_DEPTH, passed as
  * LV_COLOR_DEPTH): 16 (RGB565) on hi3520dv200, 32 (ARGB8888) elsewhere.
- * No input devices yet. The tick
+ * Input: a mouse or touch screen through src/app/input_evdev.c (its own
+ * evdev reader, not LV_USE_EVDEV, which has no right button). The tick
  * comes from frontend_ui.c (lv_tick_set_cb on CLOCK_MONOTONIC).
  */
 #ifndef LV_CONF_H
