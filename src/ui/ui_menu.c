@@ -186,6 +186,13 @@ static void top_bar(ui_page_t *p)
     ui_label(bar, LV_SYMBOL_VIDEO, VG_FONT_LG_LV, UI_C(ACCENT));
     ui_label(bar, "vigil", VG_FONT_XL_LV, UI_C(TEXT));
     ui_label(bar, ui_model()->role ? ui_model()->role : "", VG_FONT_SM_LV, UI_C(TEXT2));
+    /* The device name (System > General): which recorder this is. */
+    const ui_mgmt_t *mg = ui_model()->mgmt;
+    if (mg && mg->hostname_get) {
+        char host[64] = "";
+        mg->hostname_get(host, sizeof host);
+        if (host[0]) ui_label(bar, host, VG_FONT_MD_LV, UI_C(TEXT));
+    }
     lv_obj_t *title = ui_label(bar, "Main menu", VG_FONT_MD_LV, UI_C(TEXT2));
     lv_obj_set_style_pad_left(title, VG_SPACE_LG, 0);
     lv_obj_set_flex_grow(title, 1);
