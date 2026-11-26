@@ -223,7 +223,7 @@ static void users_list(users_t *u)
     u->gen = MG()->users_gen ? MG()->users_gen() : 0;
     ui_group_t g[UI_GROUPS_MAX];
     u->n_groups = MG()->groups(g, UI_GROUPS_MAX);
-    for (int i = 0; i < u->n_groups; ++i) snprintf(u->groups[i], sizeof u->groups[i], "%s", g[i].name);
+    for (int i = 0; i < u->n_groups; ++i) snprintf(u->groups[i], sizeof u->groups[i], "%.31s", g[i].name);
     u->n_users = MG()->users(u->users, UI_USERS_MAX);
     lv_obj_clean(u->list);
     lv_obj_t *h = trow(u->list, 1);
