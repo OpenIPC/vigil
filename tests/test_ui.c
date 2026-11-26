@@ -497,6 +497,97 @@ static void test_system(void)
     CHECK(!ui_page_top(), "back on the live view");
 }
 
+/* Two cameras whose URLs differ only in the password redact the same way;
+ * saving one must not give it (or the other) the other's password. */
+static void test_same_redacted_urls(void)
+{
+    static const char cams[] = "[{\"url\":\"rtsp://admin:one@192.168.1.20/s\",\"name\":\"A\"},"
+                               "{\"url\":\"rtsp://admin:two@192.168.1.20/s\",\"name\":\"B\"}]";
+    schema_errors_t se = { 0 };
+    CHECK(config_put_json("cameras", cams, strlen(cams), &se) == CONFIG_OK, "two cameras");
+    run(300);
+    move_to(W / 2, H - 1);
+    run(300);
+    click_text("Main menu");
+    click_text("Cameras");
+    lv_obj_t *edit = find_nth(lv_screen_active(), LV_SYMBOL_EDIT "  Edit", 1);
+    int x, y;
+    center_of(edit, &x, &y);
+    click_at(x, y);
+    lv_textarea_set_text(textarea(1), "B2");
+    click_text(SAVE);
+    vigil_config_t c;
+    config_get(&c);
+    CHECK(!strcmp(c.cameras[0].url, "rtsp://admin:one@192.168.1.20/s") &&
+          !strcmp(c.cameras[1].url, "rtsp://admin:two@192.168.1.20/s") && !strcmp(c.cameras[1].name, "B2"),
+          "each camera keeps its own password: %s, %s", c.cameras[0].url, c.cameras[1].url);
+
+    /* Changed through the API while the form is open: refused, nothing
+     * of the API's change lost, back to the (current) list. */
+    lv_textarea_set_text(textarea(1), "B3");
+    static const char cams2[] = "[{\"url\":\"rtsp://admin:two@192.168.1.20/s\",\"name\":\"B\"}]";
+    CHECK(config_put_json("cameras", cams2, strlen(cams2), &se) == CONFIG_OK, "API change");
+    click_text(SAVE);
+    config_get(&c);
+    CHECK(c.n_cameras == 1 && !strcmp(c.cameras[0].name, "B"), "stale camera form not saved");
+    CHECK(find("changed elsewhere", 1) && find("Add", 1), "toast, back in the list");
+    button(BTN_RIGHT);                          /* to the menu */
+}
+
+static void test_stale_and_cancel(void)
+{
+    click_text("Recording");
+    lv_obj_t *seg = textarea(1);
+    lv_textarea_set_text(seg, "300");
+    schema_errors_t se = { 0 };
+    CHECK(config_put_json("record", "{\"keep\":7}", 10, &se) == CONFIG_OK, "API change");
+    click_text(SAVE);
+    vigil_config_t c;
+    config_get(&c);
+    CHECK(c.record.keep == 7 && c.record.segment == 60, "stale form not saved (keep %d, segment %d)",
+          c.record.keep, c.record.segment);
+    CHECK(!strcmp(lv_textarea_get_text(textarea(2)), "7") && !strcmp(lv_textarea_get_text(seg), "60"),
+          "the form shows the settings now");
+    lv_textarea_set_text(seg, "120");
+    click_text("Cancel");
+    CHECK(ui_popup_is_open() && find("Discard the changes", 1), "Cancel with changes asks");
+    click_text("Discard");
+    CHECK(find("Main menu", 0) && !find("Recording directory", 0), "discarded");
+    button(BTN_RIGHT);
+    CHECK(!ui_page_top(), "back on the live view");
+}
+
+/* Two pointing devices: one's release must not end the other's press;
+ * unplugging a device that is pressed releases. */
+static void test_two_mice(lv_indev_t *ptr)
+{
+    int b[2];
+    if (pipe(b) < 0) return;
+    fcntl(b[0], F_SETFL, O_NONBLOCK);
+    input_evdev_attach(b[0], "second mouse", 0, 0, 0, 0, 0);
+    struct input_event dn = { .type = EV_KEY, .code = BTN_LEFT, .value = 1 }, up = dn,
+                       syn = { .type = EV_SYN, .code = SYN_REPORT };
+    up.value = 0;
+    move_to(640, 30);                           /* the header: nothing to click */
+    ev(EV_KEY, BTN_LEFT, 1);
+    ev(EV_SYN, SYN_REPORT, 0);
+    run(40);
+    if (write(b[1], &dn, sizeof dn) < 0 || write(b[1], &syn, sizeof syn) < 0) abort();
+    run(40);
+    ev(EV_KEY, BTN_LEFT, 0);
+    ev(EV_SYN, SYN_REPORT, 0);
+    run(40);
+    CHECK(lv_indev_get_state(ptr) == LV_INDEV_STATE_PRESSED, "still pressed by the second mouse");
+    if (write(b[1], &up, sizeof up) < 0 || write(b[1], &syn, sizeof syn) < 0) abort();
+    run(40);
+    CHECK(lv_indev_get_state(ptr) == LV_INDEV_STATE_RELEASED, "released by both");
+    if (write(b[1], &dn, sizeof dn) < 0 || write(b[1], &syn, sizeof syn) < 0) abort();
+    run(40);
+    close(b[1]);                                /* unplugged while pressed */
+    run(80);
+    CHECK(lv_indev_get_state(ptr) == LV_INDEV_STATE_RELEASED, "unplugging releases");
+}
+
 int main(int argc, char **argv)
 {
     g_out = argc > 1 ? argv[1] : ".";
@@ -532,7 +623,8 @@ int main(int argc, char **argv)
 
     if (pipe(g_mouse) < 0) return 1;
     fcntl(g_mouse[0], F_SETFL, O_NONBLOCK);
-    ui_app_set_pointer(input_evdev_create(disp, ui_app_back, 0));
+    lv_indev_t *ptr = input_evdev_create(disp, ui_app_back, 0);
+    ui_app_set_pointer(ptr);
     input_evdev_attach(g_mouse[0], "test mouse", 0, 0, 0, 0, 0);
     run(300);
 
@@ -542,6 +634,9 @@ int main(int argc, char **argv)
     test_menu_and_settings();
     test_cameras();
     test_system();
+    test_same_redacted_urls();
+    test_stale_and_cancel();
+    test_two_mice(ptr);
 
     lv_mem_monitor_t mon;
     lv_mem_monitor(&mon);

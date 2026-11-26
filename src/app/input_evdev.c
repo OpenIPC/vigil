@@ -44,6 +44,7 @@ typedef struct {
     ino_t ino;
     int   abs;                      /* absolute X/Y (touch screen, tablet) */
     int   min_x, max_x, min_y, max_y;
+    int   left;                     /* this device's button (or touch) is down */
 } dev_t_;
 
 typedef struct {
@@ -56,7 +57,7 @@ static struct {
     struct { char path[64]; ino_t ino; } ignored[IGNORE_MAX];
     int          n_ignored;
     int          w, h;
-    int          x, y, left;
+    int          x, y, left;        /* left: any device's button is down */
     press_t      queue[QUEUE_MAX];  /* button changes not yet given to LVGL */
     int          q_head, q_len;
     int          right;             /* right presses not yet handled */
@@ -75,14 +76,6 @@ static void cursor_visible(void)
     else lv_obj_add_flag(g.cursor, LV_OBJ_FLAG_HIDDEN);
 }
 
-static void dev_remove(int i)
-{
-    vg_log("input: %s gone", g.dev[i].path);
-    close(g.dev[i].fd);
-    g.dev[i] = g.dev[--g.n];
-    cursor_visible();
-}
-
 static void queue_press(void)
 {
     if (g.q_len == QUEUE_MAX) {                 /* keep the newest */
@@ -90,6 +83,27 @@ static void queue_press(void)
         --g.q_len;
     }
     g.queue[(g.q_head + g.q_len++) % QUEUE_MAX] = (press_t){ g.x, g.y, g.left };
+}
+
+/* The pointer is pressed while any device holds its button: one mouse
+ * must not release (or swallow) another's press. */
+static void buttons_changed(void)
+{
+    int any = 0;
+    for (int i = 0; i < g.n; ++i) any |= g.dev[i].left;
+    if (any != g.left) {
+        g.left = any;
+        queue_press();
+    }
+}
+
+static void dev_remove(int i)
+{
+    vg_log("input: %s gone", g.dev[i].path);
+    close(g.dev[i].fd);
+    g.dev[i] = g.dev[--g.n];
+    buttons_changed();                          /* unplugged while pressed: released */
+    cursor_visible();
 }
 
 static int scale(int v, int lo, int hi, int size)
@@ -117,10 +131,8 @@ static int dev_drain(dev_t_ *d)
                 else if (e->code == ABS_Y) g.y = scale(e->value, d->min_y, d->max_y, g.h);
             } else if (e->type == EV_KEY) {
                 if (e->code == BTN_LEFT || e->code == BTN_TOUCH) {
-                    if ((e->value != 0) != g.left) {
-                        g.left = e->value != 0;
-                        queue_press();
-                    }
+                    d->left = e->value != 0;
+                    buttons_changed();
                 } else if (e->code == BTN_RIGHT && e->value == 1) {
                     ++g.right;
                 }
@@ -193,10 +205,8 @@ static void ignore(const char *path, ino_t ino)
 static void probe(const char *path, ino_t ino)
 {
     int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-    if (fd < 0) {
-        ignore(path, ino);
-        return;
-    }
+    if (fd < 0)
+        return;                         /* not ignored: it may open on a later scan */
     unsigned long ev[NBITS(EV_MAX + 1)] = { 0 }, rel[NBITS(REL_MAX + 1)] = { 0 },
                   abs[NBITS(ABS_MAX + 1)] = { 0 }, key[NBITS(KEY_MAX + 1)] = { 0 };
     ioctl(fd, EVIOCGBIT(0, sizeof ev), ev);
