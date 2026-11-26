@@ -31,6 +31,17 @@ output at once; a larger one is enlarged by the display until the next
 keyframe, where a new decoder takes over at the new size (making the
 output larger on a running decoder scrambled the pictures in emulation).
 
+Whenever a decoder is replaced (a larger tile, the main stream in place of
+the sub-stream full screen, a reconnect), the port keeps showing the old
+decoder's last picture, enlarged, until the new one's first picture: the
+new decoder is made beside the old one when the heap and `mi_vdec` have
+room for both, else the old one goes without the port being cleared, and
+the port keeps the old picture's size until a picture of the new size has
+reached it (`RecvBuf_W/H` in `/proc/mi_modules/mi_disp/mi_disp0`; set at
+once, the display read the old picture at the wrong size). In emulation
+the new decoder's first picture comes about 5 s after the switch; an
+`MI_VDEC` channel bound to nothing decodes nothing there.
+
 ## Channels, decoders and memory
 
 | | limit | evidence |
@@ -145,7 +156,10 @@ efuse, `mi_vdec` takes 4 channels, 2x2 pages through all 16 cameras and
 channels), 4x4 decodes all 16 sub-streams and full screen switches to the
 main stream. In emulation a decoder made again right after another one on
 the same port took 10-40 s to show a picture (the emulated VPU); one on a
-fresh `MI_VDEC` channel shows it within a few seconds.
+fresh `MI_VDEC` channel shows it within about 5 s, the old picture staying
+up meanwhile. An `MI_VDEC` channel reused right after another camera gave
+it up showed a few of that camera's pictures first (only 4 numbers, none
+free for longer).
 
 The HDMI and VGA signals, hot-plug and decoder limits are unverified on
 hardware.

@@ -208,12 +208,15 @@ static int decoder_ensure(channel_t *c, sess_t *s, vg_codec_t codec)
         atomic_load(&g_dec_frees) == c->dec_failed_frees)
         return 0;
 
-    decoder_close(c);
     const vg_stream_info_t *si = &s->norm.info;
     const char *tag = s->id == S_SUB ? " sub" : "";
     /* Before the attempt: a decoder freed while it runs counts as news. */
     unsigned frees = atomic_load(&g_dec_frees);
+    /* hal_dec_open replaces a decoder the channel has (the other session's,
+     * or this one's for an older stream) without a close first: the
+     * platform may keep its picture up until the new one has one. */
     if (hal_dec_open(c->idx, codec, si) < 0) {
+        decoder_close(c);                   /* whatever the platform left */
         /* Said once until it works: with more cameras than decoders it
          * fails again at every retry. */
         if (!atomic_load(&c->dec_told)) {
