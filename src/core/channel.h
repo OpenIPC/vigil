@@ -19,6 +19,7 @@
 #define CHANNEL_H
 
 #include <stdint.h>
+#include <time.h>
 
 #include "vg_types.h"
 
@@ -30,6 +31,9 @@ typedef struct {
     /* Optional sub-streams, shown in small tiles (NULL or "": derived from
      * the URL where the protocol knows how, source_sub_url; else none) */
     const char *sub_urls[CHANNEL_MAX];
+    /* A camera in the slot but switched off (its url is NULL): the tile
+     * says "Disabled" rather than offering to add one. */
+    char        disabled[CHANNEL_MAX];
     int         n;
     const char *rec_dir;            /* NULL: do not record */
     int         seg_secs;           /* segment length */
@@ -37,8 +41,48 @@ typedef struct {
     int         allow_rootfs;       /* record onto the root filesystem too (rec_place.h) */
 } channels_config_t;
 
+/* What a channel is doing, for the tile and the API (ch_state_name). */
+typedef enum {
+    CH_EMPTY = 0,                   /* no camera in this slot */
+    CH_DISABLED,                    /* a camera, switched off */
+    CH_CONNECTING,
+    CH_LIVE,                        /* connected; video arrives (or `live` says not) */
+    CH_NO_VIDEO,                    /* connected, but no video for a while */
+    CH_OFFLINE,                     /* cannot be reached: refused, timed out, no route, lost */
+    CH_AUTH,                        /* the camera refused the user or the password */
+    CH_CODEC,                       /* its video is not H.264 or H.265 */
+    CH_ERROR,                       /* anything else: `state` has the text */
+} ch_state_t;
+
+/* "empty", "disabled", "connecting", "live", "no_video", "offline",
+ * "auth", "codec", "error" */
+const char *ch_state_name(ch_state_t s);
+
+/* Events a camera reports, as bits of channel_status_t.events. Each stays
+ * set for CHANNEL_EVENT_HOLD seconds after the camera last reported it.
+ * Room for more (line crossing, intrusion) after these. */
+enum {
+    CH_EV_MOTION  = 1u << 0,
+    CH_EV_HUMAN   = 1u << 1,
+    CH_EV_FACE    = 1u << 2,
+    CH_EV_VEHICLE = 1u << 3,
+    CH_EV_TYPES   = 4,
+};
+#define CHANNEL_EVENT_HOLD 5
+/* "motion", "human", "face", "vehicle"; NULL past the last. */
+const char *ch_event_name(int bit);
+
+/* A camera of channel `idx` reports events `bits` now (no source does
+ * yet: NETIP alarms and ONVIF events are to come). Any thread. */
+void channels_report_events(int idx, unsigned bits);
+/* The bits still held at `now`, given when each type was last reported
+ * (0: never). */
+unsigned channel_events_held(const time_t last[CH_EV_TYPES], time_t now);
+
 typedef struct {
     int        configured;          /* a source is set for this tile */
+    ch_state_t status;              /* what it is doing (state has the text) */
+    unsigned   events;              /* CH_EV_* the camera reports now */
     int        live;                /* video arrived within the last 3 s */
     int        decoding;            /* a decoder is running */
     int        no_decoder;          /* the tile wants a picture but the platform has no
@@ -48,8 +92,6 @@ typedef struct {
                                        "sub", or "" (off screen, or none to decode);
                                        codec, size and fps are that stream's */
     int        recording;           /* a segment is open */
-    int        motion;              /* the camera reports motion; always 0 for now:
-                                       no source reports it yet */
     char       rec_state[24];       /* "" (no recording asked for); set up: "recording",
                                        "ready" (no segment open yet: waiting for a keyframe
                                        or the camera), "failed" (the last write failed); not

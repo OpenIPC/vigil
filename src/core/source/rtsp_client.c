@@ -14,6 +14,7 @@
 #include "md5.h"
 #include "net.h"
 #include "rtsp_client.h"
+#include "source.h"
 
 #define BUF_MAX  (1u << 20)         /* an interleaved frame is at most 64 KiB */
 
@@ -162,6 +163,7 @@ int rtsp_init(rtsp_t *r, const char *url)
 static int tcp_connect(rtsp_t *r, int timeout_ms)
 {
     r->fd = net_connect(r->host, r->port, timeout_ms, r->stop, r->err, sizeof r->err);
+    if (r->fd < 0) r->fail = SRC_FAIL_UNREACHABLE;
     return r->fd < 0 ? -1 : 0;
 }
 
@@ -411,6 +413,7 @@ static int parse_sdp(rtsp_t *r, const char *sdp, const char *base)
     }
     if (r->codec == VG_CODEC_NONE) {
         set_err(r, "no H.264/H.265 video in SDP%s", NULL);
+        r->fail = SRC_FAIL_CODEC;
         return -1;
     }
     /* Resolve the control URL the way ffmpeg/live555 do: append to the base. */
@@ -439,6 +442,7 @@ int rtsp_open(rtsp_t *r, int connect_ms)
     r->codec = VG_CODEC_NONE;
     r->sprop_n = 0;
     r->err[0] = 0;
+    r->fail = SRC_FAIL_OTHER;
     r->handed_out = 0;
 
     if (tcp_connect(r, connect_ms) < 0) return -1;
@@ -449,6 +453,8 @@ int rtsp_open(rtsp_t *r, int connect_ms)
     int st = request(r, "DESCRIBE", r->url, "Accept: application/sdp\r\n", h, HEAD, b, BODY);
     if (st != 200) {
         if (st > 0) snprintf(r->err, sizeof r->err, "DESCRIBE: %d", st);
+        /* 401 after the retry with the credentials, or 403: refused. */
+        if (st == 401 || st == 403) r->fail = SRC_FAIL_AUTH;
         goto fail;
     }
     if (!header_get(h, "Content-Base", base, sizeof base) &&

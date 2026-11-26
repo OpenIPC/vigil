@@ -299,6 +299,10 @@ static cJSON *status_json(void)
         cJSON_AddBoolToObject(o, "running", st.configured);
         cJSON_AddBoolToObject(o, "live", st.live);
         cJSON_AddStringToObject(o, "state", st.configured ? (st.live ? "live" : st.state) : "off");
+        cJSON_AddStringToObject(o, "status", ch_state_name(st.status));
+        cJSON *ev = cJSON_AddArrayToObject(o, "events");
+        for (int b = 0; ev && ch_event_name(b); ++b)
+            if (st.events & (1u << b)) cJSON_AddItemToArray(ev, cJSON_CreateString(ch_event_name(b)));
         cJSON_AddBoolToObject(o, "decoding", st.decoding);
         cJSON_AddStringToObject(o, "view", st.view);
         cJSON_AddBoolToObject(o, "no_decoder", st.no_decoder);

@@ -292,7 +292,7 @@ For example:
   "channels": [
     { "camera": 1, "url": "rtsp://admin:***@192.168.1.10/stream=0", "name": "Gate",
       "enabled": true, "host": "192.168.1.10", "running": true, "live": true,
-      "state": "live", "decoding": true, "view": "main", "no_decoder": false, "recording": true, "rec_state": "recording",
+      "state": "live", "status": "live", "events": ["motion"], "decoding": true, "view": "main", "no_decoder": false, "recording": true, "rec_state": "recording",
       "rec_bytes": 73400320,
       "codec": "H.265", "width": 1920, "height": 1080, "fps": 25 }
   ]
@@ -300,10 +300,19 @@ For example:
 ```
 
 `uptime` is seconds since the API started, `time` the board's clock (Unix
-time). One channel per configured camera, in tile order. `running`: the
+time). One channel per camera slot, in tile order (an empty slot, a camera
+whose `url` is `""`, is `status: "empty"`). `running`: the
 channel has a source (it is enabled and its URL could be used); `live`:
 video arrived in the last 3 s; `state` is `live`, `off`, `CONNECTING` or the
 last error (`connect: Connection refused`, `login refused (Ret 203)`, …);
+`status` says the same in one word: `empty` (no camera in this slot),
+`disabled`, `connecting`, `live`, `no_video` (connected, no video for 3 s),
+`offline` (refused, timed out, no route, lost), `auth` (the camera refused
+the user or the password: RTSP 401 or 403, NETIP login 203, 205, 206),
+`codec` (neither H.264 nor H.265) or `error` (anything else; `state` has
+the text); `events` are the events the camera reports now, each held 5 s
+after the last report: `motion`, `human`, `face`, `vehicle` (no source
+reports them yet: camera alarms over NETIP and ONVIF events are to come);
 `recording`: a segment is open; `rec_state` is `off` (no `record.path`);
 when recording is set up, `recording`, `ready` (no segment open yet: waiting
 for a keyframe or for the camera) or `failed` (the last write failed); when it

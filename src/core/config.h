@@ -78,6 +78,11 @@ void config_defaults(vigil_config_t *c);
 
 /* Pointers into `c` (which must outlive `cc`); a disabled camera keeps its
  * tile, with no source. */
+/* Drop the empty camera slots at the end of the list (the ones between
+ * cameras stay: they keep the later cameras on their channels). Done to
+ * what config_put_json saves. */
+void config_trim(vigil_config_t *c);
+
 void config_to_channels(const vigil_config_t *c, channels_config_t *cc);
 
 /* ---- files ---------------------------------------------------------------------- */
