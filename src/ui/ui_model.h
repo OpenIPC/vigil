@@ -20,7 +20,7 @@
 #include <stdint.h>
 #include <time.h>
 
-#define UI_MAX_CHANNELS 16
+#define UI_MAX_CHANNELS 64          /* the largest layout; platforms have fewer */
 #define UI_ERRORS_MAX   16
 #define UI_MAX_ITEMS    16          /* items of an array section */
 
@@ -30,6 +30,9 @@ typedef struct {
     int      configured;        /* a camera is set for this channel */
     int      live;              /* video is arriving */
     int      recording;
+    int      motion;            /* the camera reports motion */
+    char     rec_state[24];     /* "" (not recording), "recording", "ready", "failed",
+                                   "waiting for disk", "not a disk", "read-only", "error" */
     uint64_t rec_bytes;
     char     name[32];          /* "" : the UI shows "CAM n" */
     char     state[48];         /* not live: "CONNECTING" or the last error */

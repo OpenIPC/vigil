@@ -33,6 +33,8 @@ typedef struct {
     int        live;                /* video arrived within the last 3 s */
     int        decoding;            /* a decoder is running */
     int        recording;           /* a segment is open */
+    int        motion;              /* the camera reports motion; always 0 for now:
+                                       no source reports it yet */
     char       rec_state[24];       /* "" (no recording asked for); set up: "recording",
                                        "ready" (no segment open yet: waiting for a keyframe
                                        or the camera), "failed" (the last write failed); not

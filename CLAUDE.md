@@ -11,7 +11,7 @@ before changing anything structural.
 
 `vigil` is the DVR/NVR application for cheap recorder boards running OpenIPC:
 one daemon, `vigild`, that takes cameras over RTSP or NETIP (or local analog
-inputs on DVR boards), shows them on HDMI with a mouse-driven LVGL UI, and
+inputs on DVR boards), shows them on HDMI with an LVGL UI for mouse and keyboard, and
 records the compressed streams without re-encoding. One source tree builds for
 HiSilicon (hi3536dv100, hi3520dv200), Rockchip (RK3588) and a hardware-free
 `generic` platform used by CI and as a plain Linux recorder.
@@ -66,7 +66,7 @@ comments; options override the file.
   built from the schema; `theme.json` is the design tokens' source
   (`scripts/gen-theme.py` generates `theme_tokens.h` and `web/theme.css`).
 - `src/app/` — `main.c`, the UI or headless loop, the UI's model
-  (`ui_bridge.c`) and mouse input (`input_evdev.c`).
+  (`ui_bridge.c`) and mouse and keyboard input (`input_evdev.c`).
 - `src/api/` — the HTTP/WebSocket API (`docs/api.md`) and its password check.
 - `cmake/platforms/<name>.cmake` — sources, includes, libraries per platform.
 - `scripts/` — board bring-up (HiSilicon module staging, Rockchip library build).

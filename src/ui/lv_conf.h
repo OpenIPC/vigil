@@ -185,7 +185,7 @@
 #define LV_USE_PROFILER                 0
 #define LV_USE_SNAPSHOT                 0
 #define LV_USE_MONKEY                   0
-#define LV_USE_GRIDNAV                  0
+#define LV_USE_GRIDNAV                  1
 #define LV_USE_FRAGMENT                 0
 #define LV_USE_IMGFONT                  0
 #define LV_USE_MSG                      0
