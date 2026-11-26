@@ -215,6 +215,8 @@ static int zones(void)
 
 static const char *zone_name(int i) { return i >= 0 && i < zones() ? tz_zones[i].name : NULL; }
 
+static const char *zone_tz(int i) { return i >= 0 && i < zones() ? tz_zones[i].posix : NULL; }
+
 static int tz_parse_(const char *s, ui_tz_rule_t *u)
 {
     tz_rule_t r;
@@ -348,7 +350,7 @@ static const ui_mgmt_t g_mgmt = {
     .curl = curl_available, .job = job,
     .disks = disks, .disk_formats = sys_disk_formats, .disk_format = mgmt_disk_format,
     .disk_mount = mgmt_disk_mount, .disk_unmount = mgmt_disk_unmount,
-    .time_get = time_get, .zones = zones, .zone_name = zone_name, .tz_parse = tz_parse_,
+    .time_get = time_get, .zones = zones, .zone_name = zone_name, .zone_tz = zone_tz, .tz_parse = tz_parse_,
     .tz_build = tz_build_, .time_set = time_set, .ntp_set = ntp_set, .ntp_sync = ntp_sync_now,
     .hostname_get = hostname_get, .hostname_set = mgmt_hostname_set,
 #ifdef VIGIL_HAVE_USERS
