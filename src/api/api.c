@@ -16,6 +16,7 @@
 #include "cJSON.h"
 
 #include "api.h"
+#include "api_int.h"
 #include "auth.h"
 #include "channel.h"
 #include "config.h"
@@ -23,6 +24,7 @@
 #include "hal.h"
 #include "log.h"
 #include "md5.h"
+#include "sys_time.h"
 
 #define BODY_MAX        (64u << 10)  /* a full configuration is ~10 KiB */
 #define WS_MAX          4            /* each WebSocket holds a CivetWeb worker and a writer */
@@ -47,7 +49,7 @@ static time_t mono(void)
 
 /* ---- responses ---------------------------------------------------------------- */
 
-static int send_text(struct mg_connection *conn, int status, const char *text, const char *extra_hdr,
+int send_text(struct mg_connection *conn, int status, const char *text, const char *extra_hdr,
                      const char *extra_val)
 {
     size_t len = strlen(text);
@@ -73,7 +75,7 @@ static int send_text(struct mg_connection *conn, int status, const char *text, c
     return status;
 }
 
-static int send_json(struct mg_connection *conn, int status, cJSON *doc)
+int send_json(struct mg_connection *conn, int status, cJSON *doc)
 {
     char *text = doc ? cJSON_Print(doc) : NULL;
     cJSON_Delete(doc);
@@ -83,7 +85,7 @@ static int send_json(struct mg_connection *conn, int status, cJSON *doc)
     return rc;
 }
 
-static int send_error(struct mg_connection *conn, int status, const char *msg,
+int send_error(struct mg_connection *conn, int status, const char *msg,
                       const schema_errors_t *errs)
 {
     cJSON *doc = cJSON_CreateObject();
@@ -262,6 +264,9 @@ static cJSON *status_json(void)
     unsigned gen = config_get(c);
 
     cJSON_AddStringToObject(doc, "version", VIGIL_VERSION);
+    char host[64];
+    host_get(host, sizeof host);
+    cJSON_AddStringToObject(doc, "hostname", host);
     cJSON_AddNumberToObject(doc, "uptime", (double)(mono() - g_t0));
     cJSON_AddNumberToObject(doc, "time", (double)time(NULL));
     cJSON *cfg = cJSON_AddObjectToObject(doc, "config");
@@ -339,7 +344,7 @@ static void status_signature(char *out, size_t cap)
 /* ---- requests ---------------------------------------------------------------------- */
 
 /* The body, NUL-terminated; NULL with *status set on failure. */
-static char *read_body(struct mg_connection *conn, size_t *len, int *status)
+char *read_body(struct mg_connection *conn, size_t *len, int *status)
 {
     const struct mg_request_info *ri = mg_get_request_info(conn);
     if (ri->content_length > (long long)BODY_MAX) {
@@ -367,7 +372,7 @@ static char *read_body(struct mg_connection *conn, size_t *len, int *status)
     return buf;
 }
 
-static int method_not_allowed(struct mg_connection *conn, const char *allow)
+int method_not_allowed(struct mg_connection *conn, const char *allow)
 {
     cJSON *doc = cJSON_CreateObject();
     cJSON_AddStringToObject(doc, "error", "method not allowed");
@@ -426,6 +431,8 @@ static int request_handler(struct mg_connection *conn, void *cbdata)
     if (!strcmp(uri, "/api/v1/config")) return handle_config(conn, NULL);
     if (!strncmp(uri, "/api/v1/config/", 15)) return handle_config(conn, uri + 15);
     if (!strcmp(uri, "/api/v1/ws")) return send_error(conn, 400, "WebSocket upgrade required", NULL);
+    int rc = api_mgmt_request(conn, uri, m);
+    if (rc) return rc;
     return send_error(conn, 404, "not found", NULL);
 }
 
