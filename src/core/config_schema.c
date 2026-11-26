@@ -386,13 +386,19 @@ static const schema_field_t api_fields[] = {
                                     "Empty: no API. Takes effect when vigild starts." },
     { .key = "auth", BOOL(config_api_t, auth), .def_int = 1, .live = 1,
       .label = "Require a password",
-      .help = "HTTP Basic authentication against the system account. Turning it off lets "
-              "anyone on the network change the configuration." },
+      .help = "HTTP Basic authentication: vigil's users (api.users), or the system account. "
+              "Turning it off lets anyone on the network change the configuration." },
     { .key = "user", STR(config_api_t, user), .def_str = "root", .live = 1, .check = check_user,
-      .label = "Account", .help = "The system account whose password the API asks for." },
+      .label = "Account", .help = "The system account that logs in with every permission "
+                                  "(also as \"admin\" while no user of that name exists)." },
     { .key = "shadow", STR(config_api_t, shadow), .def_str = "/etc/shadow", .live = 1,
       .check = check_shadow, .label = "Password file",
       .help = "The shadow file holding the account's password hash." },
+    { .key = "users", STR(config_api_t, users), .def_str = "/etc/vigil.users.yaml", .live = 1,
+      .check = check_shadow, .label = "Accounts file",
+      .help = "vigil's own users and groups, with their permissions (written by the API and "
+              "the UI, mode 0600). The account above always logs in too, with every "
+              "permission, so nobody is locked out." },
 };
 
 #define N(a) (int)(sizeof(a) / sizeof((a)[0]))

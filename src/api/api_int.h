@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* api_int.h — what the API's request files share (api.c, api_mgmt.c). */
+/* api_int.h — what the API's request files share (api.c, api_mgmt.c, api_users.c). */
 #ifndef API_INT_H
 #define API_INT_H
 
@@ -23,5 +23,18 @@ char *read_body(struct mg_connection *conn, size_t *len, int *status);
 /* /api/v1/network/..., /api/v1/system/..., /api/v1/disks..., /api/v1/storage/...,
  * /api/v1/jobs/... (api_mgmt.c); 0 when `uri` is not one of them. */
 int api_mgmt_request(struct mg_connection *conn, const char *uri, const char *method);
+
+/* The permissions (users.h PERM_*) a request needs, all of them; 0: any
+ * logged-in user. One table for every endpoint (api_perm.c). */
+unsigned api_perm_needed(const char *method, const char *uri);
+
+/* Who sent the request being handled on this thread, as the
+ * authorization hook found: the user ("" when api.auth is off) and the
+ * permissions. */
+const char *api_request_user(void);
+unsigned    api_request_perms(void);
+
+/* /api/v1/me, /api/v1/users..., /api/v1/groups... (api_users.c). */
+int api_users_request(struct mg_connection *conn, const char *uri, const char *method);
 
 #endif /* API_INT_H */

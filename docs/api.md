@@ -78,9 +78,10 @@ defaults, commented.
 | `record.keep` | integer 0..64 | 3 | Segments kept per camera; 0 keeps all (the free-space reserve still applies). 64 is what the segment writer can track. |
 | `record.allow_rootfs` | boolean | `false` | Count the root filesystem as a disk. For a host whose root filesystem is one; never on a board, where it is the flash. |
 | `api.listen` | `"port"` or `"a.b.c.d:port"` | `"0.0.0.0:8080"` | Where the API listens (IPv4). Empty: no API. Read at start only. |
-| `api.auth` | boolean | `true` | Require the system account's password. See [Authentication](#authentication). |
-| `api.user` | string | `"root"` | The account whose password the API asks for. |
+| `api.auth` | boolean | `true` | Require a login. See [Authentication](#authentication). |
+| `api.user` | string | `"root"` | The system account: it logs in with every permission (and as `admin` while no user of that name exists). |
 | `api.shadow` | absolute path | `"/etc/shadow"` | The shadow file holding that account's password hash. |
+| `api.users` | absolute path | `"/etc/vigil.users.yaml"` | vigil's own users and groups ([Accounts and permissions](#accounts-and-permissions)). |
 
 `GET /api/v1/schema` returns this table as data (below), so it is never out
 of date for a client.
@@ -159,11 +160,14 @@ strip, in the log and on the WebSocket. `status.config` shows the saved
 
 ## Authentication
 
-HTTP Basic, checked against the system account: the hash of `api.user`
-in `api.shadow` is verified with `crypt(3)` (whatever methods the C library
-supports: `$1$`, `$5$`, `$6$`, …), and compared in constant time. Without
-credentials, or with wrong ones, the answer is `401` with
-`WWW-Authenticate: Basic realm="vigil"`.
+HTTP Basic, checked against vigil's own users ([Accounts and
+permissions](#accounts-and-permissions)) or the system account: the hash
+of `api.user` in `api.shadow` is verified with `crypt(3)` (whatever
+methods the C library supports: `$1$`, `$5$`, `$6$`, …), and compared in
+constant time. Without credentials, or with wrong ones, the answer is
+`401` with `WWW-Authenticate: Basic realm="vigil"`; a user who logged in
+but lacks the permission an endpoint needs gets `403`
+`{"error": "permission denied", "needs": "storage"}`.
 
 - A failed login is answered after one second. From the fifth failure in a
   row **from one client address**, every login from that address (even a
@@ -182,13 +186,14 @@ credentials, or with wrong ones, the answer is `401` with
   `root`) or a locked one (`!`, `*`) cannot log in: set a password with
   `passwd`. The reason is logged once.
 - A good login is remembered for five minutes (as a keyed digest, not the
-  password), so a polling client does not run `crypt()` every time; a change
-  to the shadow file ends it.
+  password, four logins at a time), so a polling client does not run
+  `crypt()` every time; a change to the shadow file or the users file ends
+  it, so a disabled user or a new password counts at once.
 - Basic authentication sends the password in clear on every request. The
   API has no TLS: use it on a trusted network, or put a TLS proxy or an SSH
   tunnel in front.
-- `"auth": false` turns all of this off: **anyone who can reach the port can
-  change the configuration** (and point a camera URL anywhere). `vigild`
+- `"auth": false` turns all of this off, permissions included: **anyone who
+  can reach the port can change the configuration** (and point a camera URL anywhere). `vigild`
   logs `listening … WITHOUT authentication`. Only for a closed network or
   with `listen` on `127.0.0.1`.
 
@@ -197,6 +202,83 @@ refuses an `Origin` that is not the host it was asked for: a page elsewhere
 cannot read the NVR through the user's login. Plain HTTP calls from another
 origin are stopped by the browser itself (`PUT` needs a CORS preflight, which
 gets a `401`).
+
+## Accounts and permissions
+
+Besides the system account, vigil has users of its own, each in a group
+that says what its users may do. They are kept in `api.users`
+(`/etc/vigil.users.yaml`, mode 0600), commented YAML written by `vigild`
+like `vigil.yaml`; passwords are stored as `crypt(3)` hashes (SHA-512,
+`$6$`, with a random salt; SHA-256 or MD5 where the C library has no
+SHA-512) and never leave `vigild`: the API shows `"password_set": true`.
+
+Permissions: `live` (live view, status, events), `playback`, `ptz`,
+`cameras` (the camera list, discovery), `storage` (recording, schedule,
+quota, disks, network storage), `network` (network, DDNS, UPnP, mail,
+alarm center), `system` (time, host name, the UI's settings, the whole
+configuration), `users` (accounts, and the `api` section, which decides
+who gets in at all). Two groups always exist: **admin**, every
+permission, which cannot be changed or deleted, and **user**, live view
+and playback to start with, which can be changed but not deleted. At most
+16 groups and 32 users; user and group names are 1 to 31 of `a-z 0-9 _ . -`.
+
+**Logging in.** A user of the file, enabled, with its password, gets its
+group's permissions. The system account (`api.user`, `root`) always logs
+in, with every permission, whatever the file says, so a broken or lost
+users file never locks the owner out; `admin` is that account too, with
+its password, until a user named `admin` is created. A user named `root`
+cannot be created.
+
+**Migration.** Nothing changes for an existing installation: with no users
+file, only `root` (and `admin`, as its other name) can log in, with every
+permission, as before. Users added through the API or the on-screen
+settings create the file. If it cannot be loaded (invalid YAML, a bad
+name), its users cannot log in (logged), `root` still can, and nothing is
+saved over it until it is fixed or removed.
+
+| Endpoint | Needs |
+|---|---|
+| `GET /status`, `/ws` | `live` |
+| `GET /schema`, `/me`, `/jobs/…` | a login |
+| `GET /config` | `system` |
+| `PUT /config` | every permission |
+| `/config/cameras` | `cameras` |
+| `/config/record`, `schedule`, `quota`, `nas` | `storage` |
+| `/config/ddns`, `upnp`, `smtp`, `alarm` | `network` |
+| `/config/time`, `ui` | `system` |
+| `/config/api` | `users` |
+| `/network/…` | `network` |
+| `/system/…` | `system` |
+| `/disks…`, `/storage/…` | `storage` |
+| `/discovery…`, `/channels/…` | `cameras` |
+| `/users…`, `/groups…` | `users` |
+| anything else | `system` |
+
+The table is one function, `api_perm_needed` (`src/api/api_perm.c`),
+read before any request is dispatched: an endpoint not listed there needs
+`system`, never nothing.
+
+| Method and path | |
+|---|---|
+| `GET /api/v1/me` | `{"user": "anna", "permissions": ["live", "playback"]}` (`user` is `""` with `api.auth` off). |
+| `GET /api/v1/users` | `[{"name", "group", "enabled", "password_set"}]` |
+| `POST /api/v1/users` | `{"name", "password", "group": "user", "enabled": true}` → `201` and the user. The password: 4 to 128 characters. |
+| `GET`, `PUT`, `DELETE /api/v1/users/<name>` | `PUT` takes any of `group`, `enabled`, `password` (a user is not renamed). |
+| `GET /api/v1/groups` | `[{"name", "builtin", "editable", "members", "permissions": {"live": true, …}}]` |
+| `POST /api/v1/groups` | `{"name", "permissions": {"live": true}}` (missing permissions are off) → `201`. |
+| `GET`, `PUT`, `DELETE /api/v1/groups/<name>` | `PUT {"permissions": {…}}` changes the ones it names. |
+
+Invalid values are `400` with the usual `errors` list (`user.password`:
+"at least 4 characters", `group.permissions.fly`: "unknown permission");
+an unknown name `404`; a name taken, a group that still has users, or a
+change to a built-in group that is not allowed `409`. Every change is
+logged, without passwords.
+
+```sh
+curl -u root:PASSWORD -X POST $NVR/api/v1/groups -d '{"name": "viewer", "permissions": {"live": true}}'
+curl -u root:PASSWORD -X POST $NVR/api/v1/users -d '{"name": "anna", "group": "viewer", "password": "s3cret"}'
+curl -u anna:s3cret $NVR/api/v1/me
+```
 
 ## Passwords in camera URLs
 
@@ -393,7 +475,10 @@ websocat -H "Authorization: Basic $(printf root:PASSWORD | base64)" ws://192.168
   is dropped), never the other clients or shutdown. A slow client loses the
   oldest of its 32 queued events and configuration messages, and only its
   latest status is kept.
-  `src/api/auth.c`: Basic credentials, the shadow file, `crypt(3)`.
+  `src/api/auth.c`: Basic credentials, the shadow file, `crypt(3)`;
+  `src/api/users.c`: the accounts file and logging in; `src/api/api_perm.c`:
+  which permission each endpoint needs; `src/api/api_users.c`: the
+  accounts' endpoints.
 - JSON is parsed by cJSON ([third_party/cJSON](../third_party/cJSON), MIT),
   bodies capped at 64 KiB; YAML by [libyaml](https://github.com/yaml/libyaml)
   (MIT, the system's).

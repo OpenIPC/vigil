@@ -25,6 +25,7 @@
 #include "log.h"
 #include "md5.h"
 #include "sys_time.h"
+#include "users.h"
 
 #define BODY_MAX        (64u << 10)  /* a full configuration is ~10 KiB */
 #define WS_MAX          4            /* each WebSocket holds a CivetWeb worker and a writer */
@@ -117,18 +118,37 @@ typedef struct {
     time_t locked_until, last;              /* monotonic */
 } fail_entry_t;
 
+/* Good logins are remembered (as keyed digests, not passwords) for
+ * CACHE_SECS, a few at once so that clients of different users polling
+ * side by side do not push each other out; each stays valid only while
+ * the shadow file and the users file are the ones it was checked
+ * against. */
+#define CACHE_N 4
+typedef struct {
+    unsigned char d[16];                    /* md5(key, user:password:shadow:users) */
+    time_t        at;                       /* monotonic; 0: empty */
+    struct stat   shadow_st, users_st;      /* st_ino 0: the file was not there */
+    unsigned      perms;
+} cache_entry_t;
+
 static pthread_mutex_t g_auth_lock = PTHREAD_MUTEX_INITIALIZER;
 static fail_entry_t    g_failed[FAIL_ADDRS];
 static unsigned char   g_cache_key[16];     /* random, so the cache is no password hash */
-static unsigned char   g_cache[16];         /* md5(key, user:password:shadow) of the last good login */
-static time_t          g_cache_at;
-static struct stat     g_cache_st;          /* the shadow file it was checked against */
+static cache_entry_t   g_cache[CACHE_N];
 static char            g_why_told[160];     /* last "cannot check" reason logged */
 
-static void cache_digest(const char *user, const char *pass, const char *shadow, unsigned char d[16])
+/* The authorization hook and the request handler of one request run on
+ * the same CivetWeb worker thread: the hook leaves who it let in here. */
+static _Thread_local unsigned t_perms;
+static _Thread_local char     t_user[USERS_NAME_MAX + 96];
+
+const char *api_request_user(void) { return t_user; }
+unsigned    api_request_perms(void) { return t_perms; }
+
+static void cache_digest(const char *user, const char *pass, const char *files, unsigned char d[16])
 {
-    char buf[512];
-    int n = snprintf(buf, sizeof buf, "%.16s%s:%s:%s", (const char *)g_cache_key, user, pass, shadow);
+    char buf[768];
+    int n = snprintf(buf, sizeof buf, "%.16s%s:%s:%s", (const char *)g_cache_key, user, pass, files);
     md5_raw(buf, n < 0 ? 0 : (size_t)n >= sizeof buf ? sizeof buf - 1 : (size_t)n, d);
     volatile char *w = buf;
     for (size_t i = 0; i < sizeof buf; ++i) w[i] = 0;
@@ -138,6 +158,11 @@ static int same_file(const struct stat *a, const struct stat *b)
 {
     return a->st_ino == b->st_ino && a->st_dev == b->st_dev && a->st_mtime == b->st_mtime &&
            a->st_size == b->st_size;
+}
+
+static void stat_or_none(const char *path, struct stat *st)
+{
+    if (stat(path, st) < 0) memset(st, 0, sizeof *st);
 }
 
 /* The entry for `addr` (caller holds g_auth_lock); with `make`, a new one
@@ -178,7 +203,12 @@ static int auth_handler(struct mg_connection *conn, void *cbdata)
     config_get(c);
     config_api_t api = c->api;
     free(c);
-    if (!api.auth) return 1;
+    t_perms = 0;
+    t_user[0] = 0;
+    if (!api.auth) {
+        t_perms = PERM_ALL;
+        return 1;
+    }
 
     const char *hdr = mg_get_header(conn, "Authorization");
     if (!hdr) {
@@ -200,25 +230,43 @@ static int auth_handler(struct mg_connection *conn, void *cbdata)
 
     char user[128], pass[256], why[160] = "";
     int ok = 0;
-    if (auth_parse_basic(hdr, user, sizeof user, pass, sizeof pass) == 0 && !strcmp(user, api.user)) {
+    unsigned perms = 0;
+    if (auth_parse_basic(hdr, user, sizeof user, pass, sizeof pass) == 0) {
         unsigned char d[16];
-        struct stat st;
-        int have_st = stat(api.shadow, &st) == 0;
-        cache_digest(user, pass, api.shadow, d);
+        struct stat sh, us;
+        char files[400];
+        stat_or_none(api.shadow, &sh);
+        stat_or_none(api.users, &us);
+        snprintf(files, sizeof files, "%s:%s", api.shadow, api.users);
+        cache_digest(user, pass, files, d);
         pthread_mutex_lock(&g_auth_lock);
-        ok = have_st && g_cache_at && now - g_cache_at < CACHE_SECS && same_file(&st, &g_cache_st) &&
-             memcmp(d, g_cache, sizeof d) == 0;
+        for (int i = 0; i < CACHE_N && !ok; ++i) {
+            cache_entry_t *ce = &g_cache[i];
+            if (ce->at && now - ce->at < CACHE_SECS && same_file(&sh, &ce->shadow_st) &&
+                same_file(&us, &ce->users_st) && memcmp(d, ce->d, sizeof d) == 0) {
+                ok = 1;
+                perms = ce->perms;
+            }
+        }
         pthread_mutex_unlock(&g_auth_lock);
         if (!ok) {
-            int rc = auth_check_shadow(api.shadow, api.user, pass, why, sizeof why);
-            ok = rc == 1;
-            if (ok && have_st) {
+            ok = users_login(user, pass, &perms, why, sizeof why) == 1;
+            if (ok) {
                 pthread_mutex_lock(&g_auth_lock);
-                memcpy(g_cache, d, sizeof d);
-                g_cache_at = now;
-                g_cache_st = st;
+                cache_entry_t *ce = &g_cache[0];
+                for (int i = 1; i < CACHE_N; ++i)
+                    if (g_cache[i].at < ce->at) ce = &g_cache[i];
+                memcpy(ce->d, d, sizeof d);
+                ce->at = now;
+                ce->shadow_st = sh;
+                ce->users_st = us;
+                ce->perms = perms;
                 pthread_mutex_unlock(&g_auth_lock);
             }
+        }
+        if (ok) {
+            t_perms = perms;
+            snprintf(t_user, sizeof t_user, "%s", user);
         }
     }
     volatile char *w = pass;
@@ -409,12 +457,31 @@ static int handle_config(struct mg_connection *conn, const char *section)
     return rc;
 }
 
+/* 403, naming the first permission the user lacks. */
+static int send_denied(struct mg_connection *conn, unsigned missing)
+{
+    const char *name = "";
+    for (int i = 0; i < PERM_N; ++i)
+        if (missing & (1u << i)) {
+            name = users_perm_names[i];
+            break;
+        }
+    vg_log("api: %s %s refused to %s: needs %s", mg_get_request_info(conn)->request_method,
+           mg_get_request_info(conn)->local_uri, t_user[0] ? t_user : "?", name);
+    cJSON *doc = cJSON_CreateObject();
+    cJSON_AddStringToObject(doc, "error", "permission denied");
+    cJSON_AddStringToObject(doc, "needs", name);
+    return send_json(conn, 403, doc);
+}
+
 static int request_handler(struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
     const struct mg_request_info *ri = mg_get_request_info(conn);
     const char *uri = ri->local_uri, *m = ri->request_method;
     int get = !strcmp(m, "GET") || !strcmp(m, "HEAD");
+    unsigned need = api_perm_needed(m, uri);
+    if ((t_perms & need) != need) return send_denied(conn, need & ~t_perms);
 
     if (!strcmp(uri, "/api/v1/status")) {
         if (!get) return method_not_allowed(conn, "GET, HEAD");
@@ -431,6 +498,8 @@ static int request_handler(struct mg_connection *conn, void *cbdata)
     if (!strcmp(uri, "/api/v1/config")) return handle_config(conn, NULL);
     if (!strncmp(uri, "/api/v1/config/", 15)) return handle_config(conn, uri + 15);
     if (!strcmp(uri, "/api/v1/ws")) return send_error(conn, 400, "WebSocket upgrade required", NULL);
+    if (!strcmp(uri, "/api/v1/me") || !strncmp(uri, "/api/v1/users", 13) || !strncmp(uri, "/api/v1/groups", 14))
+        return api_users_request(conn, uri, m);
     int rc = api_mgmt_request(conn, uri, m);
     if (rc) return rc;
     return send_error(conn, 404, "not found", NULL);
@@ -596,6 +665,10 @@ static int origin_ok(const struct mg_connection *conn)
 static int ws_connect(const struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
+    if (!(t_perms & PERM_LIVE)) {
+        send_denied((struct mg_connection *)conn, PERM_LIVE);
+        return 1;
+    }
     if (!origin_ok(conn)) {
         vg_log("api: WebSocket from %s refused: Origin %s is not this host",
                mg_get_request_info(conn)->remote_addr, mg_get_header(conn, "Origin"));

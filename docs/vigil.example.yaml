@@ -184,12 +184,18 @@ api:
   # Listen on: IPv4 address and port of the HTTP API, or just the port. Empty:
   # no API. Takes effect when vigild starts. Default 0.0.0.0:8080.
   listen: "0.0.0.0:8080"
-  # Require a password: HTTP Basic authentication against the system account.
-  # Turning it off lets anyone on the network change the configuration.
-  # Default true.
+  # Require a password: HTTP Basic authentication: vigil's users (api.users),
+  # or the system account. Turning it off lets anyone on the network change
+  # the configuration. Default true.
   auth: true
-  # Account: The system account whose password the API asks for. Default root.
+  # Account: The system account that logs in with every permission (also as
+  # "admin" while no user of that name exists). Default root.
   user: root
   # Password file: The shadow file holding the account's password hash.
   # Default /etc/shadow.
   shadow: /etc/shadow
+  # Accounts file: vigil's own users and groups, with their permissions
+  # (written by the API and the UI, mode 0600). The account above always logs
+  # in too, with every permission, so nobody is locked out. Default
+  # /etc/vigil.users.yaml.
+  users: /etc/vigil.users.yaml
