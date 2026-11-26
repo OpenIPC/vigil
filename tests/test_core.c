@@ -972,6 +972,19 @@ static void test_config_store(void)
     CHECK(c.n_cameras == 0 && c.record.segment == 120 && c.record.keep == 3 && !strcmp(c.record.path, "/rec"),
           "whole document replaced");
 
+    /* A write built from an old generation is refused, under the
+     * writers' lock. */
+    static const char K5[] = "{\"path\":\"/rec\",\"segment\":120,\"keep\":5}",
+                      K6[] = "{\"path\":\"/rec\",\"segment\":120,\"keep\":6}";
+    memset(&e, 0, sizeof e);
+    unsigned gen = config_generation();
+    CHECK(config_put_json_at("record", K5, strlen(K5), gen, &e) == CONFIG_OK, "current generation");
+    CHECK(config_generation() == gen + 1, "generation moved");
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json_at("record", K6, strlen(K6), gen, &e) == CONFIG_ESTALE && e.n, "stale refused");
+    config_get(&c);
+    CHECK(c.record.keep == 5 && config_generation() == gen + 1, "nothing changed");
+
     channels_config_t cc;
     c.n_cameras = 2;
     snprintf(c.cameras[0].url, sizeof c.cameras[0].url, "capture:0");

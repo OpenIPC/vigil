@@ -22,6 +22,7 @@
 
 #define UI_MAX_CHANNELS 16
 #define UI_ERRORS_MAX   16
+#define UI_MAX_ITEMS    16          /* items of an array section */
 
 /* ---- live view ------------------------------------------------------------------ */
 
@@ -90,6 +91,7 @@ typedef enum {
     UI_SAVE_INVALID,            /* nothing changed: errs says why, per field */
     UI_SAVE_FAILED,             /* not saved (I/O): errs->e[0] */
     UI_SAVE_UNSYNCED,           /* in force, but may not survive a power cut */
+    UI_SAVE_STALE,              /* the settings changed since `gen`: nothing saved */
 } ui_save_rc_t;
 
 typedef struct {
@@ -119,8 +121,14 @@ typedef struct ui_model {
     void     (*get_value)(int sec, int item, int field, char *buf, size_t cap);
     /* Replace section `sec` with `values` (n_items x n_fields strings, item
      * by item; n_items is ignored for an object section) through the
-     * configuration store, as PUT /api/v1/config/<section> does. */
-    ui_save_rc_t (*save)(int sec, int n_items, const char *const *values, ui_errors_t *errs);
+     * configuration store, as PUT /api/v1/config/<section> does, but only
+     * if the settings are still generation `gen` (the one the values were
+     * read from). `origin[k]` is the stored item that item k was read from
+     * (-1: new; NULL for an object section): an unchanged redacted secret
+     * keeps that item's own secret, even when another item's redacts the
+     * same way. */
+    ui_save_rc_t (*save)(int sec, int n_items, const char *const *values, const int *origin,
+                         unsigned gen, ui_errors_t *errs);
 
     /* system page */
     int (*system_info)(ui_info_t *info, int max);

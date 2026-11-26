@@ -25,6 +25,8 @@
 #define VIGIL_VERSION "dev"
 #endif
 
+#define FIELDS_MAX 32                   /* per section; sections_build checks */
+
 static ui_section_t *g_sections;
 static uint64_t      g_ev_cursor;
 
@@ -167,14 +169,45 @@ static void map_error(const schema_section_t *s, const schema_error_t *se, ui_er
         snprintf(ue->msg, sizeof ue->msg, "%s: %s", se->path, se->msg);
 }
 
-static ui_save_rc_t save(int sec, int n_items, const char *const *values, ui_errors_t *errs)
+static void one_error(ui_errors_t *errs, const char *msg)
+{
+    snprintf(errs->e[0].msg, sizeof errs->e[0].msg, "%s", msg);
+    errs->e[0].item = errs->e[0].field = -1;
+    errs->n = errs->total = 1;
+}
+
+static ui_save_rc_t save(int sec, int n_items, const char *const *values, const int *origin,
+                         unsigned gen, ui_errors_t *errs)
 {
     const schema_section_t *s = ssec(sec);
+    cfg();                              /* the snapshot of the generation in force */
+    memset(errs, 0, sizeof *errs);
+    if (gen && g_cfg_gen != gen) {
+        one_error(errs, "the settings were changed elsewhere meanwhile");
+        return UI_SAVE_STALE;
+    }
     cJSON *doc;
     if (s->is_array) {
+        int stored = item_count(sec);
         doc = cJSON_CreateArray();
         for (int k = 0; doc && k < n_items; ++k) {
-            cJSON *o = object_json(s, values + (size_t)k * (size_t)s->n_fields);
+            const char *row[FIELDS_MAX];
+            const char *const *v = values + (size_t)k * (size_t)s->n_fields;
+            for (int i = 0; i < s->n_fields && i < FIELDS_MAX; ++i) {
+                row[i] = v[i];
+                /* An unchanged "***" stands for this item's own password:
+                 * the store would take the first camera whose URL redacts
+                 * the same way, maybe another one's. */
+                const schema_field_t *f = &s->fields[i];
+                int o = origin ? origin[k] : -1;
+                if (f->secret == SCHEMA_SECRET_URL && o >= 0 && o < stored) {
+                    char red[1024];
+                    const char *real = field_at(sec, o, f);
+                    schema_redact_url(real, red, sizeof red);
+                    if (!strcmp(red, v[i])) row[i] = real;
+                }
+            }
+            cJSON *o = object_json(s, row);
             if (!o || !cJSON_AddItemToArray(doc, o)) {
                 cJSON_Delete(o);
                 cJSON_Delete(doc);
@@ -186,15 +219,14 @@ static ui_save_rc_t save(int sec, int n_items, const char *const *values, ui_err
     }
     char *text = doc ? cJSON_PrintUnformatted(doc) : NULL;
     cJSON_Delete(doc);
-    memset(errs, 0, sizeof *errs);
     if (!text) {
-        snprintf(errs->e[0].msg, sizeof errs->e[0].msg, "out of memory");
-        errs->e[0].item = errs->e[0].field = -1;
-        errs->n = errs->total = 1;
+        one_error(errs, "out of memory");
         return UI_SAVE_FAILED;
     }
     schema_errors_t se = { 0 };
-    config_rc_t rc = config_put_json(s->key, text, strlen(text), &se);
+    config_rc_t rc = config_put_json_at(s->key, text, strlen(text), gen, &se);
+    /* It may hold camera passwords. */
+    memset(text, 0, strlen(text));
     free(text);
     for (int i = 0; i < se.n && i < UI_ERRORS_MAX; ++i) map_error(s, &se.e[i], &errs->e[i]);
     errs->n = se.n < UI_ERRORS_MAX ? se.n : UI_ERRORS_MAX;
@@ -203,6 +235,7 @@ static ui_save_rc_t save(int sec, int n_items, const char *const *values, ui_err
     case CONFIG_OK: return UI_SAVE_OK;
     case CONFIG_EINVAL: return UI_SAVE_INVALID;
     case CONFIG_EUNSYNCED: return UI_SAVE_UNSYNCED;
+    case CONFIG_ESTALE: return UI_SAVE_STALE;
     default: return UI_SAVE_FAILED;
     }
 }
@@ -217,6 +250,7 @@ static int sections_build(void)
     if (!g_sections) return -1;
     for (int i = 0; i < n; ++i) {
         const schema_section_t *s = ssec(i);
+        if (s->n_fields > FIELDS_MAX || s->max_items > UI_MAX_ITEMS) return -1;
         ui_field_t *fs = calloc((size_t)s->n_fields, sizeof *fs);
         if (!fs) return -1;
         for (int k = 0; k < s->n_fields; ++k) {

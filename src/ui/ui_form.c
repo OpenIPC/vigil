@@ -33,6 +33,7 @@ typedef struct {
     int        is_new;              /* item is being added */
     int        n_items, n_fields;
     char     **vals;                /* n_items x n_fields, as stored (redacted) */
+    unsigned   gen;                 /* the generation `vals` came from */
     ui_page_t *page;
     lv_obj_t  *w[FIELDS_MAX];       /* the value widget */
     lv_obj_t  *err[FIELDS_MAX];
@@ -57,10 +58,13 @@ static void vals_free(char **v, int n)
     free(v);
 }
 
-/* The section as stored, plus a new item with the defaults when adding. */
-static char **vals_load(int sec, int add, int *n_items)
+/* The section as stored, plus a new item with the defaults when adding;
+ * `gen`: the generation they were read from (taken first: if it moves
+ * while reading, the save is refused as stale, never mixed). */
+static char **vals_load(int sec, int add, int *n_items, unsigned *gen)
 {
     const ui_section_t *s = section(sec);
+    *gen = ui_model()->config_generation ? ui_model()->config_generation() : 0;
     int n = s->is_array ? ui_model()->item_count(sec) : 1;
     int total = n + (add ? 1 : 0);
     char **v = calloc((size_t)(total * s->n_fields + 1), sizeof *v);
@@ -79,10 +83,12 @@ static char **vals_load(int sec, int add, int *n_items)
     return v;
 }
 
-static ui_save_rc_t save_section(int sec, int n_items, char **v, ui_errors_t *errs)
+/* `origin`: as model->save (NULL for an object section). */
+static ui_save_rc_t save_section(int sec, int n_items, char **v, const int *origin, unsigned gen,
+                                 ui_errors_t *errs)
 {
     memset(errs, 0, sizeof *errs);
-    return ui_model()->save(sec, n_items, (const char *const *)v, errs);
+    return ui_model()->save(sec, n_items, (const char *const *)v, origin, gen, errs);
 }
 
 static void report(ui_save_rc_t rc, const ui_errors_t *errs, int restart_needed)
@@ -100,6 +106,10 @@ static void report(ui_save_rc_t rc, const ui_errors_t *errs, int restart_needed)
         break;
     case UI_SAVE_FAILED:
         ui_toast(UI_TOAST_BAD, "Not saved: %s", errs->n ? errs->e[0].msg : "error");
+        break;
+    case UI_SAVE_STALE:
+        ui_toast(UI_TOAST_WARN, "Not saved: the settings were changed elsewhere meanwhile "
+                                "(HTTP API). Showing them now; make the change again.");
         break;
     }
 }
@@ -345,6 +355,29 @@ static void form_title(form_t *f)
     else lv_label_set_text_fmt(f->page->title, "%s: %d", s->label, f->item + 1);
 }
 
+/* The widgets show f->vals' row again. */
+static void widgets_from_vals(form_t *f)
+{
+    const ui_section_t *s = section(f->sec);
+    for (int i = 0; i < f->n_fields; ++i) {
+        const char *v = f->vals[row_of(f) * f->n_fields + i];
+        switch (s->fields[i].kind) {
+        case UI_FIELD_STRING:
+        case UI_FIELD_INT:
+            lv_textarea_set_text(f->w[i], v);
+            break;
+        case UI_FIELD_BOOL:
+            if (!strcmp(v, "1")) lv_obj_add_state(f->w[i], LV_STATE_CHECKED);
+            else lv_obj_remove_state(f->w[i], LV_STATE_CHECKED);
+            break;
+        case UI_FIELD_ENUM:
+            for (int k = 0; s->fields[i].values && s->fields[i].values[k]; ++k)
+                if (!strcmp(s->fields[i].values[k], v)) lv_dropdown_set_selected(f->w[i], (uint32_t)k);
+            break;
+        }
+    }
+}
+
 static void save_cb(lv_event_t *e)
 {
     form_t *f = lv_event_get_user_data(e);
@@ -369,9 +402,15 @@ static void save_cb(lv_event_t *e)
         }
         ok = v[k] != NULL;
     }
+    /* Item k was read from stored item k; a new one from none. */
+    int origin[UI_MAX_ITEMS];
+    for (int k = 0; k < f->n_items && k < UI_MAX_ITEMS; ++k)
+        origin[k] = f->is_new && k == f->n_items - 1 ? -1 : k;
     ui_errors_t errs;
-    ui_save_rc_t rc = ok ? save_section(f->sec, f->n_items, v, &errs) : UI_SAVE_FAILED;
-    if (!ok) {
+    ui_save_rc_t rc = ok && f->n_items <= UI_MAX_ITEMS
+                          ? save_section(f->sec, f->n_items, v, s->is_array ? origin : NULL, f->gen, &errs)
+                          : UI_SAVE_FAILED;
+    if (rc == UI_SAVE_FAILED && !(ok && f->n_items <= UI_MAX_ITEMS)) {
         memset(&errs, 0, sizeof errs);
         snprintf(errs.e[0].msg, sizeof errs.e[0].msg, "out of memory");
         errs.n = errs.total = 1;
@@ -382,22 +421,28 @@ static void save_cb(lv_event_t *e)
         errors_show(f, &errs);
         return;
     }
-    if (rc != UI_SAVE_OK && rc != UI_SAVE_UNSYNCED) return;
+    if (rc == UI_SAVE_STALE && s->is_array) {
+        /* The list may have been reordered: which camera this form edits
+         * is no longer known. Back to the list, which shows it now. */
+        ui_page_close(f->page);
+        return;
+    }
+    if (rc != UI_SAVE_OK && rc != UI_SAVE_UNSYNCED && rc != UI_SAVE_STALE) return;
     /* What is stored now (secrets redacted again) is the new baseline. */
     int n;
-    char **nv = vals_load(f->sec, 0, &n);
+    unsigned gen;
+    char **nv = vals_load(f->sec, 0, &n, &gen);
     if (!nv) return;
     vals_free(f->vals, f->n_items * f->n_fields);
     f->vals = nv;
     f->n_items = n;
+    f->gen = gen;
     if (f->is_new) {
         f->is_new = 0;
         f->item = n - 1;
         form_title(f);
     }
-    for (int i = 0; i < f->n_fields; ++i)
-        if (s->fields[i].kind == UI_FIELD_STRING || s->fields[i].kind == UI_FIELD_INT)
-            lv_textarea_set_text(f->w[i], f->vals[row_of(f) * f->n_fields + i]);
+    widgets_from_vals(f);
 }
 
 static void discard_cb(void *user)
@@ -420,10 +465,12 @@ static int form_back(ui_page_t *p)
     return 0;
 }
 
+/* Cancel: like back, but the keyboard does not keep the page open. */
 static void cancel_cb(lv_event_t *e)
 {
     form_t *f = lv_event_get_user_data(e);
-    ui_page_close(f->page);
+    kb_hide(f);
+    if (!form_back(f->page)) ui_page_close(f->page);
 }
 
 static void form_close(ui_page_t *p)
@@ -453,7 +500,7 @@ void ui_form_open(int sec, int item)
     } else {
         f->item = -1;
     }
-    f->vals = vals_load(sec, f->is_new, &f->n_items);
+    f->vals = vals_load(sec, f->is_new, &f->n_items, &f->gen);
     ui_page_t *p = f->vals ? ui_page_push(s->label) : NULL;
     if (!p) {
         vals_free(f->vals, f->n_items * f->n_fields);
@@ -506,6 +553,7 @@ typedef struct {
     ui_page_t *page;
     lv_obj_t  *table, *add;
     int        remove_item;
+    unsigned   gen;                 /* the generation the rows show */
 } list_t;
 
 static int col_grow(const ui_field_t *fd)
@@ -560,17 +608,22 @@ static void remove_now(void *user)
     list_t *l = user;
     const ui_section_t *s = section(l->sec);
     int n;
-    char **v = vals_load(l->sec, 0, &n);
-    if (!v || l->remove_item >= n) {
+    unsigned gen;
+    char **v = vals_load(l->sec, 0, &n, &gen);
+    if (!v || l->remove_item >= n || n > UI_MAX_ITEMS) {
         vals_free(v, v ? n * s->n_fields : 0);
         return;
     }
+    int origin[UI_MAX_ITEMS];
+    for (int k = 0; k < n - 1; ++k) origin[k] = k < l->remove_item ? k : k + 1;
     /* Close the gap: every later item moves up a tile. */
     for (int f = 0; f < s->n_fields; ++f) free(v[l->remove_item * s->n_fields + f]);
     memmove(&v[l->remove_item * s->n_fields], &v[(l->remove_item + 1) * s->n_fields],
             sizeof *v * (size_t)((n - l->remove_item - 1) * s->n_fields));
     ui_errors_t errs;
-    ui_save_rc_t rc = save_section(l->sec, n - 1, v, &errs);
+    /* Refused if the list changed after it was shown: the row the user
+     * picked may be another camera now. */
+    ui_save_rc_t rc = save_section(l->sec, n - 1, v, origin, l->gen, &errs);
     vals_free(v, (n - 1) * s->n_fields);
     report(rc, &errs, 0);
 }
@@ -590,6 +643,7 @@ static void list_build(list_t *l)
     const ui_section_t *s = section(l->sec);
     const ui_model_t *m = ui_model();
     lv_obj_clean(l->table);
+    l->gen = m->config_generation ? m->config_generation() : 0;
     int n = m->item_count(l->sec);
     if (n >= s->max_items) lv_obj_add_state(l->add, LV_STATE_DISABLED);
     else lv_obj_remove_state(l->add, LV_STATE_DISABLED);

@@ -305,6 +305,12 @@ static int resolve_secrets(vigil_config_t *nc, const vigil_config_t *old, schema
 config_rc_t config_put_json(const char *section, const char *body, size_t len,
                             schema_errors_t *errs)
 {
+    return config_put_json_at(section, body, len, 0, errs);
+}
+
+config_rc_t config_put_json_at(const char *section, const char *body, size_t len, unsigned gen,
+                               schema_errors_t *errs)
+{
     const schema_section_t *sec = NULL;
     if (section && !(sec = schema_section(&config_schema, section))) return CONFIG_ENOENT;
 
@@ -321,7 +327,13 @@ config_rc_t config_put_json(const char *section, const char *body, size_t len,
 
     pthread_mutex_lock(&g_write);
     vigil_config_t old, nc;
-    config_get(&old);
+    unsigned cur = config_get(&old);
+    if (gen && cur != gen) {
+        pthread_mutex_unlock(&g_write);
+        cJSON_Delete(doc);
+        schema_error(errs, "", "the configuration changed meanwhile (generation %u, now %u)", gen, cur);
+        return CONFIG_ESTALE;
+    }
     int rc;
     if (sec) {
         nc = old;
