@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -18,6 +20,7 @@
 #include "config.h"
 #include "events.h"
 #include "hal_capture.h"
+#include "net.h"
 #include "rtp_depay.h"
 #include "source.h"
 #include "rtsp_client.h"
@@ -514,6 +517,59 @@ static void test_seg_writer(void)
 }
 
 
+/* ---- net_connect gives up on a stop -------------------------------------------- */
+
+static volatile int g_net_stop;
+
+static void *set_stop_later(void *arg)
+{
+    (void)arg;
+    usleep(300 * 1000);
+    g_net_stop = 1;
+    return NULL;
+}
+
+static double now_s(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec + tv.tv_usec / 1e6;
+}
+
+static void test_net_connect_stop(void)
+{
+    /* A listener whose accept queue is full: Linux drops further SYNs, so
+     * a connect stays pending as it does to a camera that is gone. */
+    int l = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    socklen_t al = sizeof a;
+    if (l < 0 || bind(l, (struct sockaddr *)&a, sizeof a) < 0 || listen(l, 0) < 0 ||
+        getsockname(l, (struct sockaddr *)&a, &al) < 0) {
+        fprintf(stderr, "net_connect test: no listener, skipped\n");
+        return;
+    }
+    int fill[4];
+    for (int i = 0; i < 4; ++i) {
+        fill[i] = socket(AF_INET, SOCK_STREAM, 0);
+        fcntl(fill[i], F_SETFL, O_NONBLOCK);
+        if (connect(fill[i], (struct sockaddr *)&a, sizeof a)) {}
+    }
+    usleep(100 * 1000);
+    char port[8], err[64];
+    snprintf(port, sizeof port, "%d", ntohs(a.sin_port));
+    pthread_t t;
+    g_net_stop = 0;
+    pthread_create(&t, NULL, set_stop_later, NULL);
+    double t0 = now_s();
+    int fd = net_connect("127.0.0.1", ntohs(a.sin_port), 5000, &g_net_stop, err, sizeof err);
+    double took = now_s() - t0;
+    pthread_join(t, NULL);
+    CHECK(fd < 0 && took < 1.5 && strstr(err, "stopped"), "connect: fd %d after %.1f s (%s)", fd, took, err);
+    if (fd >= 0) close(fd);
+    for (int i = 0; i < 4; ++i) close(fill[i]);
+    close(l);
+}
+
 /* ---- settings schema ------------------------------------------------------------- */
 
 /* A schema of its own, with every field type (vigild's has no enum yet). */
@@ -664,7 +720,13 @@ static void test_redact(void)
         { "rtsp://admin@10.0.0.2/s", "rtsp://admin@10.0.0.2/s" },
         { "netip://admin:@10.0.0.3:34567/?ch=0", "netip://admin:@10.0.0.3:34567/?ch=0" },
         { "netip://admin:p@ss/w@10.0.0.3/?ch=0", "netip://admin:***@10.0.0.3/?ch=0" },
-        { "rtsp://u:pw@h/x?token=a@b", "rtsp://u:***@h/x?token=a@b" },
+        /* the RTSP parser accepts '?' and '#' in a password */
+        { "rtsp://u:pa?ss@h/x", "rtsp://u:***@h/x" },
+        { "rtsp://u:pa#ss@h/x", "rtsp://u:***@h/x" },
+        { "netip://u:p?a@ss@h:34567/?ch=1", "netip://u:***@h:34567/?ch=1" },
+        /* an '@' in the query hides too much, never too little */
+        { "rtsp://u:pw@h/x?token=a@b", "rtsp://u:***@b" },
+        { "rtsp://h/x?token=a@b", "rtsp://h/x?token=a@b" },
         { "capture:0", "capture:0" },
     };
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
@@ -724,10 +786,24 @@ static void test_config_file(void)
     c.cameras[1].enabled = 0;
     snprintf(c.record.path, sizeof c.record.path, "/mnt/sda1/rec");
     c.record.segment = 300;
+    /* A world-readable file and a symlink where an older vigild put its
+     * temporary file: neither may receive the passwords. */
+    char victim[160];
+    snprintf(victim, sizeof victim, "%s/victim", dir);
+    write_file(victim, "victim");
+    chmod(victim, 0644);
+    if (symlink(victim, tmp)) {}
+    write_file(path, "{}");
+    chmod(path, 0644);
     CHECK(config_save_file(path, &c, err, sizeof err) == 0, "save: %s", err);
     struct stat st;
     CHECK(stat(path, &st) == 0 && (st.st_mode & 0777) == 0600, "saved 0600 (it holds passwords)");
-    CHECK(stat(tmp, &st) < 0, "no .tmp left");
+    char *v = read_file(victim);
+    CHECK(v && !strcmp(v, "victim"), "a symlink at PATH.tmp is not written through");
+    free(v);
+    unlink(tmp);
+    unlink(victim);
+    CHECK(count_files(dir) == 1, "no temporary file left: %d files", count_files(dir));
     memset(&e, 0, sizeof e);
     CHECK(config_load_file(path, &d, &e) == 0, "load what was saved: %s", e.n ? e.e[0].msg : "");
     char *a = config_text(&c), *b = config_text(&d);
@@ -771,7 +847,7 @@ static void test_config_file(void)
     write_file(path, "old");
     if (geteuid() != 0) {                       /* root writes anywhere */
         chmod(dir, 0500);
-        CHECK(config_write_atomic(path, "new", 3, err, sizeof err) < 0 && strstr(err, ".tmp"),
+        CHECK(config_write_atomic(path, "new", 3, err, sizeof err) < 0 && strstr(err, "cannot create"),
               "save into a read-only directory fails");
         chmod(dir, 0700);
         raw = read_file(path);
@@ -780,7 +856,7 @@ static void test_config_file(void)
     }
     CHECK(config_write_atomic(path, "new", 3, err, sizeof err) == 0, "save: %s", err);
     raw = read_file(path);
-    CHECK(raw && !strcmp(raw, "new") && stat(tmp, &st) < 0, "replaced");
+    CHECK(raw && !strcmp(raw, "new") && count_files(dir) == 1, "replaced");
     free(raw);
 
     char cmd[64];
@@ -794,8 +870,28 @@ static void test_config_store(void)
     if (!mkdtemp(dir)) return;
     snprintf(path, sizeof path, "%s/vigil.json", dir);
     snprintf(bad, sizeof bad, "%s.bad", path);
+    char longp[400];
+    memset(longp, 'a', sizeof longp - 1);
+    longp[0] = '/';
+    longp[sizeof longp - 1] = 0;
+    CHECK(config_init(longp) == -2, "a path too long to keep is refused, not shortened");
+
     write_file(path, "{\"record\": {\"segment\": 1}}");             /* invalid: defaults */
     CHECK(config_init(path) < 0, "invalid file reported");
+
+    /* The invalid file is not saved over unless a copy of it is kept. */
+    char inbad[160];
+    mkdir(bad, 0700);
+    snprintf(inbad, sizeof inbad, "%s/x", bad);
+    write_file(inbad, "x");
+    schema_errors_t eb = { 0 };
+    CHECK(config_put_json("record", "{}", 2, &eb) == CONFIG_EIO && eb.n && strstr(eb.e[0].msg, "not saving"),
+          "no copy, no save: %s", eb.n ? eb.e[0].msg : "");
+    char *still = read_file(path);
+    CHECK(still && strstr(still, "\"segment\": 1"), "the invalid file is still there");
+    free(still);
+    unlink(inbad);
+    rmdir(bad);
     vigil_config_t c;
     unsigned g0 = config_get(&c);
     CHECK(c.record.segment == 60, "defaults in force");
@@ -821,6 +917,15 @@ static void test_config_store(void)
     out = config_get_json(NULL, 1);
     CHECK(out && !strstr(out, "s3cret") && strstr(out, "\"record\""), "whole document redacted");
     free(out);
+    static const char odd[] = "[{\"url\":\"rtsp://admin:s3?cr#t@10.0.0.4/live\"}]";
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("cameras", odd, strlen(odd), &e) == CONFIG_OK, "a password with ? and #");
+    out = config_get_json(NULL, 1);
+    CHECK(out && !strstr(out, "s3?cr") && !strstr(out, "cr#t") && strstr(out, "admin:***@10.0.0.4/live"),
+          "a password with ? and # is redacted: %s", out ? out : "");
+    free(out);
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("cameras", cams, strlen(cams), &e) == CONFIG_OK, "put cameras again");
     static const char back[] = "[{\"url\":\"netip://admin:@10.0.0.3/\"},"
                                "{\"url\":\"rtsp://admin:***@10.0.0.2/live\",\"name\":\"Gate 2\"}]";
     memset(&e, 0, sizeof e);
@@ -910,6 +1015,7 @@ int main(int argc, char **argv)
     test_rtsp_helpers();
     test_capture_source();
     test_seg_writer();
+    test_net_connect_stop();
     test_schema();
     test_redact();
     test_config_file();

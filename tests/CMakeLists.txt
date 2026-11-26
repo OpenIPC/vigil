@@ -9,6 +9,8 @@ if(TARGET vigil_api)
   add_test(NAME api_auth COMMAND test_api)
 endif()
 
+add_test(NAME cli_too_long COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_cli.sh $<TARGET_FILE:vigild>)
+
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_FOUND)
   foreach(clip testsrc_640x360.h264 majestic_1080p.h265)

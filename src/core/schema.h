@@ -128,8 +128,8 @@ cJSON *schema_describe(const schema_t *s);
 
 /* "scheme://user:pass@host/..." -> "scheme://user:***@host/...". URLs
  * without a password, or with an empty one, are copied as they are. Errs
- * on the side of hiding too much: everything up to the last '@' before the
- * query counts as the credentials. */
+ * on the side of hiding too much: everything up to the last '@' in the URL
+ * counts as the credentials. */
 void schema_redact_url(const char *url, char *out, size_t cap);
 
 #endif /* SCHEMA_H */

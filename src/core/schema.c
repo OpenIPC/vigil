@@ -316,12 +316,11 @@ void schema_redact_url(const char *url, char *out, size_t cap)
         return;
     }
     auth += 3;
-    /* The last '@' before the query: a password holding '/' or '@' must
-     * not leave its tail visible. A path with '@' in it is hidden too. */
-    const char *end = auth + strcspn(auth, "?#");
-    const char *at = NULL;
-    for (const char *p = auth; p < end; ++p)
-        if (*p == '@') at = p;
+    /* The last '@' anywhere: the drivers' parsers do not agree on where
+     * the credentials end (RTSP takes '?' and '#' in a password, NETIP
+     * stops at '?'), and a password holding '/', '?', '#' or '@' must not
+     * leave its tail visible. A query with '@' in it is hidden as well. */
+    const char *at = strrchr(auth, '@');
     const char *colon = at ? memchr(auth, ':', (size_t)(at - auth)) : NULL;
     if (!colon || colon + 1 == at) {                    /* no password, or an empty one */
         snprintf(out, cap, "%s", url);

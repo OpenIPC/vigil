@@ -182,7 +182,8 @@ safe from any thread at any time. The outcome goes out as events.
 | one per channel | source → `au_norm` → decoder and recorder (`channel.c`) |
 | platform threads | e.g. capture readers (hi3520dv200), as each platform needs |
 | CivetWeb master + up to 8 workers (started on demand) | HTTP requests and WebSocket sessions (`src/api`) |
-| API pusher | status, events and configuration changes to the WebSocket clients |
+| API pusher | gathers status, events and configuration changes for the WebSocket clients |
+| API writers (4) | one per WebSocket client: writes its messages, so a stalled client stalls only itself |
 | log reader (`-s`) | turns stdout/stderr lines into syslog messages |
 
 ## Sources (camera protocols)

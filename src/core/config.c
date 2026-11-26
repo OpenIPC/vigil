@@ -98,16 +98,20 @@ static int write_all(int fd, const char *p, size_t len)
 int config_write_atomic(const char *path, const char *data, size_t len, char *err, size_t cap)
 {
     char tmp[512], dir[512];
-    if (snprintf(tmp, sizeof tmp, "%s.tmp", path) >= (int)sizeof tmp) {
+    if (snprintf(tmp, sizeof tmp, "%s.XXXXXX", path) >= (int)sizeof tmp) {
         snprintf(err, cap, "path too long");
         return -1;
     }
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    /* A fresh, exclusively created name: a fixed PATH.tmp could already be
+     * there as someone's world-readable file or a symlink, and the write
+     * would go into it. mkstemp creates 0600 (fchmod says so anyway). */
+    int fd = mkstemp(tmp);
     if (fd < 0) {
-        snprintf(err, cap, "cannot create %s: %s", tmp, strerror(errno));
+        snprintf(err, cap, "cannot create a file next to %s: %s", path, strerror(errno));
         return -1;
     }
-    if (write_all(fd, data, len) < 0 || fsync(fd) < 0) {
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    if (fchmod(fd, 0600) < 0 || write_all(fd, data, len) < 0 || fsync(fd) < 0) {
         snprintf(err, cap, "cannot write %s: %s", tmp, strerror(errno));
         close(fd);
         unlink(tmp);
@@ -124,13 +128,17 @@ int config_write_atomic(const char *path, const char *data, size_t len, char *er
         return -1;
     }
     /* The rename itself must reach the disk, or a power cut can bring the
-     * old file back after the API said "saved". */
+     * old file back after the API said "saved". A filesystem that cannot
+     * sync a directory at all (EINVAL) has nothing more to offer. */
     snprintf(dir, sizeof dir, "%s", path);
     int dfd = open(dirname(dir), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (dfd >= 0) {
-        fsync(dfd);
-        close(dfd);
+    int rc = dfd < 0 ? -1 : fsync(dfd);
+    if (rc < 0 && errno != EINVAL) {
+        snprintf(err, cap, "%s replaced, but syncing its directory failed: %s", path, strerror(errno));
+        if (dfd >= 0) close(dfd);
+        return 1;
     }
+    if (dfd >= 0) close(dfd);
     return 0;
 }
 
@@ -148,6 +156,32 @@ int config_save_file(const char *path, const vigil_config_t *c, char *err, size_
     int rc = config_write_atomic(path, text, len + 1, err, cap);
     free(text);
     return rc;
+}
+
+/* Keep the file at `path` as `bad` before it is replaced: a hard link
+ * where the filesystem has them (vfat has not), a copy otherwise. 0 when
+ * kept (or there is no file), -1 with `err`. */
+static int keep_copy(const char *path, const char *bad, char *err, size_t cap)
+{
+    if (unlink(bad) < 0 && errno != ENOENT) {
+        snprintf(err, cap, "cannot replace %s: %s", bad, strerror(errno));
+        return -1;
+    }
+    if (link(path, bad) == 0) return 0;
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        if (errno == ENOENT) return 0;
+        snprintf(err, cap, "cannot keep %s as %s: %s", path, bad, strerror(errno));
+        return -1;
+    }
+    char *buf = malloc(FILE_MAX + 1);
+    size_t n = buf ? fread(buf, 1, FILE_MAX + 1, f) : 0;
+    int bad_read = !buf || ferror(f) || n > FILE_MAX;
+    fclose(f);
+    int rc = bad_read ? -1 : config_write_atomic(bad, buf, n, err, cap);
+    free(buf);
+    if (bad_read) snprintf(err, cap, "cannot keep %s as %s: cannot read it", path, bad);
+    return rc < 0 ? -1 : 0;
 }
 
 /* ---- the store ---------------------------------------------------------------------- */
@@ -171,6 +205,10 @@ int config_init(const char *path)
 {
     vigil_config_t c;
     schema_errors_t errs = { 0 };
+    if (strlen(path) >= sizeof g_path) {
+        vg_log("%.64s...: the configuration path is too long (at most %zu bytes)", path, sizeof g_path - 1);
+        return -2;
+    }
     snprintf(g_path, sizeof g_path, "%s", path);
     int rc = config_load_file(g_path, &c, &errs);
     if (rc == 1) vg_log("%s: not there, using the defaults", g_path);
@@ -299,27 +337,40 @@ config_rc_t config_put_json(const char *section, const char *body, size_t len,
         return CONFIG_EINVAL;
     }
 
-    char err[160];
+    char err[700];
     if (g_file_bad) {
-        /* A link, not a rename: if the save below fails, the file the
-         * user wrote is still where it was. */
+        /* The file the user wrote failed to load; it is not replaced
+         * unless a copy of it is kept. */
         char bad[300];
         snprintf(bad, sizeof bad, "%s.bad", g_path);
-        unlink(bad);
-        if (link(g_path, bad) == 0) vg_log("the invalid %s is kept as %s", g_path, bad);
+        if (keep_copy(g_path, bad, err, sizeof err) < 0) {
+            pthread_mutex_unlock(&g_write);
+            vg_log("config: %s; not saving over it", err);
+            schema_error(errs, "", "%s; not saving over it", err);
+            return CONFIG_EIO;
+        }
+        vg_log("the invalid %s is kept as %s", g_path, bad);
     }
-    if (config_save_file(g_path, &nc, err, sizeof err) < 0) {
+    int saved = config_save_file(g_path, &nc, err, sizeof err);
+    if (saved < 0) {
         pthread_mutex_unlock(&g_write);
         vg_log("config: %s", err);
         schema_error(errs, "", "%s", err);
         return CONFIG_EIO;
     }
+    /* Saved, or at least renamed into place (saved == 1): the new file is
+     * what the next start reads, so it is also what runs now. */
     pthread_mutex_lock(&g_lock);
     g_cfg = nc;
     g_file_bad = 0;
     ++g_gen;
     pthread_mutex_unlock(&g_lock);
     pthread_mutex_unlock(&g_write);
+    if (saved > 0) {
+        vg_log("config: %s; it is in force, but may not survive a power cut", err);
+        schema_error(errs, "", "%s; the configuration is in force, but may not survive a power cut", err);
+        return CONFIG_EUNSYNCED;
+    }
     vg_log("config: %s saved", section ? section : "configuration");
     return CONFIG_OK;
 }

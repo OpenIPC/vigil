@@ -24,6 +24,7 @@
 #define LIVE_SECS          3        /* "live" while video arrived this recently */
 #define RECONNECT_MAX_SECS 10
 #define DEC_RETRY_SECS     10       /* retry a failed decoder setup */
+#define REC_RETRY_SECS     10       /* retry a recording directory that could not be set up */
 
 typedef struct {
     int             idx;
@@ -38,6 +39,7 @@ typedef struct {
     au_norm_t       norm;
     seg_writer_t    seg;
     int             rec_on, rec_fail_told;
+    time_t          rec_retry_at;   /* seg_init failed then: try again later */
     pthread_t       thread;
     int             thread_up;
 
@@ -156,6 +158,29 @@ static void rec_close(channel_t *c)
 
 /* ---- per-channel thread --------------------------------------------------- */
 
+/* The recording directory could not be set up when the channel started (a
+ * card not mounted yet, a directory being replaced): try again at a
+ * keyframe every REC_RETRY_SECS, so recording starts once it is there
+ * without restarting the stream. */
+static void rec_retry(channel_t *c, vg_codec_t codec)
+{
+    time_t now = time(NULL);
+    if (now - c->rec_retry_at < REC_RETRY_SECS) return;
+    c->rec_retry_at = now;
+    char prefix[16];
+    snprintf(prefix, sizeof prefix, "CAM%d", c->idx + 1);
+    pthread_mutex_lock(c->lock);
+    if (seg_init(&c->seg, c->rec_dir, prefix, c->seg_secs, c->keep) == 0) {
+        seg_set_ext(&c->seg, codec == VG_CODEC_H264 ? "h264" : "h265");
+        c->rec_on = 1;
+    }
+    pthread_mutex_unlock(c->lock);
+    if (c->rec_on) {
+        vg_log("CAM%d: recording into %s", c->idx + 1, c->rec_dir);
+        events_push(c->idx + 1, "REC on");
+    }
+}
+
 static void on_au(void *user, const vg_au_t *au)
 {
     channel_t *c = user;
@@ -172,6 +197,7 @@ static void on_au(void *user, const vg_au_t *au)
         pthread_mutex_unlock(c->lock);
     }
 
+    if (!c->rec_on && c->rec_dir[0] && au->key) rec_retry(c, au->codec);
     if (c->rec_on) {
         pthread_mutex_lock(c->lock);
         int was_open = c->seg.f != NULL;
@@ -364,10 +390,13 @@ static int slot_start(int i, const channels_config_t *cfg)
     if (cfg->rec_dir) {
         char prefix[16];
         snprintf(prefix, sizeof prefix, "CAM%d", i + 1);
-        if (seg_init(&c->seg, cfg->rec_dir, prefix, cfg->seg_secs, cfg->keep) == 0)
+        if (seg_init(&c->seg, cfg->rec_dir, prefix, cfg->seg_secs, cfg->keep) == 0) {
             c->rec_on = 1;
-        else
-            vg_log("cannot create %s, CAM%d not recorded", cfg->rec_dir, i + 1);
+        } else {
+            vg_log("cannot create %s, CAM%d not recorded; trying again every %d s", cfg->rec_dir, i + 1,
+                   REC_RETRY_SECS);
+            c->rec_retry_at = time(NULL);
+        }
     }
     if (g_have_tiles && hal_caps()->display && !c->src->ops->self_displayed)
         hal_display_set_tile(i, &g_tiles[i]);

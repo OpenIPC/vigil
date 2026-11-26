@@ -25,11 +25,12 @@
 #include "md5.h"
 
 #define BODY_MAX        (64u << 10)  /* a full configuration is ~10 KiB */
-#define WS_MAX          4            /* each WebSocket holds a CivetWeb worker */
+#define WS_MAX          4            /* each WebSocket holds a CivetWeb worker and a writer */
 #define THREADS         "8"          /* WS_MAX + room for plain requests */
 #define PUSH_MS         200
 #define STATUS_SECS     1
-#define FAIL_FREE       5            /* failed logins in a row that start a lockout */
+#define FAIL_FREE       5            /* failed logins in a row (per address) that start a lockout */
+#define FAIL_ADDRS      32           /* addresses whose failures are remembered */
 #define FAIL_DELAY_S    1            /* every failed login answers this late */
 #define LOCKOUT_MAX_S   60
 #define CACHE_SECS      300          /* a good password skips crypt() this long */
@@ -102,9 +103,20 @@ static int send_error(struct mg_connection *conn, int status, const char *msg,
 
 /* ---- authentication ------------------------------------------------------------- */
 
+/* Failed logins are counted per client address, and only that address is
+ * locked out: a global lockout would let anyone on the network keep the
+ * owner out with a few wrong passwords. What bounds guessing overall is
+ * that every failure is answered a second late on its worker (at most
+ * THREADS guesses a second, whatever the addresses) and that crypt() runs
+ * one at a time (auth.c). */
+typedef struct {
+    char   addr[48];
+    int    fails;                           /* in a row */
+    time_t locked_until, last;              /* monotonic */
+} fail_entry_t;
+
 static pthread_mutex_t g_auth_lock = PTHREAD_MUTEX_INITIALIZER;
-static int             g_fails;             /* failed logins in a row */
-static time_t          g_locked_until;      /* monotonic */
+static fail_entry_t    g_failed[FAIL_ADDRS];
 static unsigned char   g_cache_key[16];     /* random, so the cache is no password hash */
 static unsigned char   g_cache[16];         /* md5(key, user:password:shadow) of the last good login */
 static time_t          g_cache_at;
@@ -126,6 +138,22 @@ static int same_file(const struct stat *a, const struct stat *b)
            a->st_size == b->st_size;
 }
 
+/* The entry for `addr` (caller holds g_auth_lock); with `make`, a new one
+ * if there is none, replacing the one least recently failed. */
+static fail_entry_t *fail_entry(const char *addr, int make)
+{
+    fail_entry_t *oldest = &g_failed[0];
+    for (int i = 0; i < FAIL_ADDRS; ++i) {
+        fail_entry_t *f = &g_failed[i];
+        if (f->addr[0] && !strcmp(f->addr, addr)) return f;
+        if (!f->addr[0] || (oldest->addr[0] && f->last < oldest->last)) oldest = f;
+    }
+    if (!make) return NULL;
+    memset(oldest, 0, sizeof *oldest);
+    snprintf(oldest->addr, sizeof oldest->addr, "%s", addr);
+    return oldest;
+}
+
 static int send_401(struct mg_connection *conn)
 {
     return send_text(conn, 401, "{\"error\":\"authentication required\"}\n", "WWW-Authenticate",
@@ -134,9 +162,9 @@ static int send_401(struct mg_connection *conn)
 
 /* CivetWeb's authorization hook for everything under /api: 1 = go on.
  * Failed logins are answered after a delay, and after FAIL_FREE in a row
- * further attempts are refused for a doubling time, without looking at
- * the password: crypt() is slow on these CPUs by design, and an attacker
- * must not get to run it at will. */
+ * from one address, further attempts from it are refused for a doubling
+ * time without looking at the password: crypt() is slow on these CPUs by
+ * design, and an attacker must not get to run it at will. */
 static int auth_handler(struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
@@ -155,9 +183,11 @@ static int auth_handler(struct mg_connection *conn, void *cbdata)
         send_401(conn);
         return 0;
     }
+    const char *addr = mg_get_request_info(conn)->remote_addr;
     time_t now = mono();
     pthread_mutex_lock(&g_auth_lock);
-    time_t wait = g_locked_until - now;
+    fail_entry_t *fe = fail_entry(addr, 0);
+    time_t wait = fe ? fe->locked_until - now : 0;
     pthread_mutex_unlock(&g_auth_lock);
     if (wait > 0) {
         char ra[24];
@@ -193,21 +223,25 @@ static int auth_handler(struct mg_connection *conn, void *cbdata)
     for (size_t i = 0; i < sizeof pass; ++i) w[i] = 0;
 
     pthread_mutex_lock(&g_auth_lock);
+    int fails = 0;
+    fe = fail_entry(addr, !ok);
     if (ok) {
-        g_fails = 0;
-    } else if (++g_fails >= FAIL_FREE) {
-        int s = g_fails - FAIL_FREE + 1;
-        g_locked_until = mono() + (s >= 6 ? LOCKOUT_MAX_S : 1 << s);
+        if (fe) memset(fe, 0, sizeof *fe);
+    } else {
+        fails = ++fe->fails;
+        fe->last = mono();
+        if (fails >= FAIL_FREE) {
+            int s = fails - FAIL_FREE + 1;
+            fe->locked_until = fe->last + (s >= 6 ? LOCKOUT_MAX_S : 1 << s);
+        }
     }
-    int fails = g_fails;
     int tell = why[0] && strcmp(why, g_why_told) != 0;
     if (tell) snprintf(g_why_told, sizeof g_why_told, "%s", why);
     pthread_mutex_unlock(&g_auth_lock);
     if (ok) return 1;
 
-    const struct mg_request_info *ri = mg_get_request_info(conn);
     if (tell) vg_log("api: cannot check passwords: %s", why);
-    vg_log("api: login failed from %s (%d in a row)", ri->remote_addr, fails);
+    vg_log("api: login failed from %s (%d in a row)", addr, fails);
     sleep(FAIL_DELAY_S);
     send_401(conn);
     return 0;
@@ -351,6 +385,8 @@ static int handle_config(struct mg_connection *conn, const char *section)
         if (rc == CONFIG_ENOENT) return send_error(conn, 404, "no such section", NULL);
         if (rc == CONFIG_EINVAL) return send_error(conn, 400, "invalid configuration", &errs);
         if (rc == CONFIG_EIO) return send_error(conn, 500, "cannot save the configuration", &errs);
+        if (rc == CONFIG_EUNSYNCED)
+            return send_error(conn, 500, "the configuration is in force, but saving it is not confirmed", &errs);
     } else if (strcmp(m, "GET") != 0 && strcmp(m, "HEAD") != 0) {
         return method_not_allowed(conn, "GET, HEAD, PUT");
     }
@@ -388,13 +424,33 @@ static int request_handler(struct mg_connection *conn, void *cbdata)
 
 /* ---- WebSocket -------------------------------------------------------------------------- */
 
-static pthread_mutex_t        g_ws_lock = PTHREAD_MUTEX_INITIALIZER;
-static struct mg_connection  *g_ws[WS_MAX];
-static int                    g_ws_n;
-static int                    g_ws_pending;     /* connected, handshake not yet done */
-static pthread_t              g_pusher;
-static volatile int           g_pusher_stop;
-static int                    g_pusher_up;
+/* Each client has a slot with its own writer thread and mailbox: a client
+ * that stops reading blocks only its own writer (for up to CivetWeb's
+ * request timeout per frame, then it is dropped), never the pusher, the
+ * other clients, connects, closes or shutdown. Events and configuration
+ * messages queue (the oldest go when a slow client lets WS_QUEUE fill);
+ * of statuses only the latest is kept. */
+#define WS_QUEUE 32
+
+typedef struct {
+    const struct mg_connection *reserved;   /* connect accepted, handshake not done */
+    struct mg_connection       *conn;       /* ready: messages go here */
+    int             closing, busy, dead;
+    char           *q[WS_QUEUE];
+    int             q_head, q_n;
+    char           *status;
+    pthread_cond_t  wake;
+    pthread_t       thread;
+    int             thread_up;
+} ws_client_t;
+
+static pthread_mutex_t g_ws_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_ws_idle = PTHREAD_COND_INITIALIZER;   /* a write finished */
+static ws_client_t     g_wsc[WS_MAX];
+static int             g_ws_stop;
+static pthread_t       g_pusher;
+static volatile int    g_pusher_stop;
+static int             g_pusher_up;
 
 static char *message(const char *type, cJSON *data)
 {
@@ -421,13 +477,92 @@ static char *config_message(unsigned gen)
     return message("config", d);
 }
 
-/* Callers hold g_ws_lock, so a connection cannot close under the write
- * (ws_close takes the same lock). */
-static void broadcast(const char *text)
+static void client_clear(ws_client_t *c)
+{
+    for (int k = 0; k < c->q_n; ++k) free(c->q[(c->q_head + k) % WS_QUEUE]);
+    c->q_head = c->q_n = 0;
+    free(c->status);
+    c->status = NULL;
+}
+
+/* Into one client's mailbox (caller holds g_ws_lock); takes `text`. */
+static void post(ws_client_t *c, char *text, int is_status)
+{
+    if (!text || !c->conn || c->closing || c->dead) {
+        free(text);
+        return;
+    }
+    if (is_status) {
+        free(c->status);
+        c->status = text;
+    } else {
+        if (c->q_n == WS_QUEUE) {
+            free(c->q[c->q_head]);
+            c->q_head = (c->q_head + 1) % WS_QUEUE;
+            --c->q_n;
+        }
+        c->q[(c->q_head + c->q_n++) % WS_QUEUE] = text;
+    }
+    pthread_cond_signal(&c->wake);
+}
+
+static int clients(void)
+{
+    int n = 0;
+    pthread_mutex_lock(&g_ws_lock);
+    for (int i = 0; i < WS_MAX; ++i) n += g_wsc[i].conn != NULL;
+    pthread_mutex_unlock(&g_ws_lock);
+    return n;
+}
+
+/* A copy to every ready client; frees `text`. */
+static void broadcast(char *text, int is_status)
 {
     if (!text) return;
-    for (int i = 0; i < g_ws_n; ++i)
-        mg_websocket_write(g_ws[i], MG_WEBSOCKET_OPCODE_TEXT, text, strlen(text));
+    pthread_mutex_lock(&g_ws_lock);
+    for (int i = 0; i < WS_MAX; ++i)
+        if (g_wsc[i].conn) post(&g_wsc[i], strdup(text), is_status);
+    pthread_mutex_unlock(&g_ws_lock);
+    free(text);
+}
+
+static void *writer(void *arg)
+{
+    ws_client_t *c = arg;
+    pthread_mutex_lock(&g_ws_lock);
+    while (!g_ws_stop) {
+        char *msg = NULL;
+        if (c->conn && !c->closing && !c->dead) {
+            if (c->q_n) {
+                msg = c->q[c->q_head];
+                c->q_head = (c->q_head + 1) % WS_QUEUE;
+                --c->q_n;
+            } else if (c->status) {
+                msg = c->status;
+                c->status = NULL;
+            }
+        }
+        if (!msg) {
+            pthread_cond_wait(&c->wake, &g_ws_lock);
+            continue;
+        }
+        struct mg_connection *conn = c->conn;
+        c->busy = 1;
+        pthread_mutex_unlock(&g_ws_lock);
+        int rc = mg_websocket_write(conn, MG_WEBSOCKET_OPCODE_TEXT, msg, strlen(msg));
+        free(msg);
+        pthread_mutex_lock(&g_ws_lock);
+        c->busy = 0;
+        /* Failed or timed out: write no more. CivetWeb's own ping to it
+         * fails the same way and closes the connection. */
+        if (rc <= 0 && !c->dead) {
+            c->dead = 1;
+            client_clear(c);
+        }
+        pthread_cond_broadcast(&g_ws_idle);
+    }
+    pthread_mutex_unlock(&g_ws_lock);
+    return NULL;
 }
 
 /* A browser sends a page's Origin with its WebSocket upgrade, and its
@@ -452,13 +587,19 @@ static int ws_connect(const struct mg_connection *conn, void *cbdata)
                mg_get_request_info(conn)->remote_addr, mg_get_header(conn, "Origin"));
         return 1;
     }
+    int got = 0;
     pthread_mutex_lock(&g_ws_lock);
-    int full = g_ws_n + g_ws_pending >= WS_MAX;
-    if (!full) ++g_ws_pending;
+    for (int i = 0; i < WS_MAX && !got; ++i) {
+        ws_client_t *c = &g_wsc[i];
+        if (c->thread_up && !c->conn && !c->reserved) {
+            c->reserved = conn;
+            got = 1;
+        }
+    }
     pthread_mutex_unlock(&g_ws_lock);
-    if (full) vg_log("api: WebSocket from %s refused: %d clients already",
+    if (!got) vg_log("api: WebSocket from %s refused: %d clients already",
                      mg_get_request_info(conn)->remote_addr, WS_MAX);
-    return full;            /* nonzero: close */
+    return !got;            /* nonzero: close */
 }
 
 static void ws_ready(struct mg_connection *conn, void *cbdata)
@@ -468,10 +609,16 @@ static void ws_ready(struct mg_connection *conn, void *cbdata)
     char *st = message("status", status_json());
     char *cf = config_message(config_generation());
     pthread_mutex_lock(&g_ws_lock);
-    --g_ws_pending;
-    g_ws[g_ws_n++] = conn;
-    if (st) mg_websocket_write(conn, MG_WEBSOCKET_OPCODE_TEXT, st, strlen(st));
-    if (cf) mg_websocket_write(conn, MG_WEBSOCKET_OPCODE_TEXT, cf, strlen(cf));
+    for (int i = 0; i < WS_MAX; ++i) {
+        ws_client_t *c = &g_wsc[i];
+        if (c->reserved != conn) continue;
+        c->reserved = NULL;
+        c->conn = conn;
+        post(c, st, 1);
+        post(c, cf, 0);
+        st = cf = NULL;
+        break;
+    }
     pthread_mutex_unlock(&g_ws_lock);
     free(st);
     free(cf);
@@ -487,25 +634,33 @@ static int ws_data(struct mg_connection *conn, int bits, char *data, size_t len,
     return (bits & 0x0f) != MG_WEBSOCKET_OPCODE_CONNECTION_CLOSE;
 }
 
+/* CivetWeb frees the connection after this returns: wait for a write to
+ * it that is under way (it ends at its timeout, or at once on mg_stop). */
 static void ws_close(const struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
     pthread_mutex_lock(&g_ws_lock);
-    int found = 0;
-    for (int i = 0; i < g_ws_n; ++i)
-        if (g_ws[i] == conn) {
-            g_ws[i] = g_ws[--g_ws_n];
-            found = 1;
+    for (int i = 0; i < WS_MAX; ++i) {
+        ws_client_t *c = &g_wsc[i];
+        if (c->reserved == conn) {
+            c->reserved = NULL;
             break;
         }
-    if (!found && g_ws_pending > 0) --g_ws_pending;     /* closed before ready */
+        if (c->conn != conn) continue;
+        c->closing = 1;
+        while (c->busy) pthread_cond_wait(&g_ws_idle, &g_ws_lock);
+        client_clear(c);
+        c->conn = NULL;
+        c->closing = c->dead = 0;
+        break;
+    }
     pthread_mutex_unlock(&g_ws_lock);
 }
 
-/* One thread feeds every WebSocket: events as they come (from its own
- * events cursor, so the UI still sees them all), a config message when
- * the generation changes, the status every second and when a channel
- * changes state. */
+/* One thread watches for news and puts it in every client's mailbox:
+ * events as they come (from its own events cursor, so the UI still sees
+ * them all), a config message when the generation changes, the status
+ * every second and when a channel changes state. */
 static void *pusher(void *arg)
 {
     (void)arg;
@@ -516,13 +671,11 @@ static void *pusher(void *arg)
 
     while (!g_pusher_stop) {
         usleep(PUSH_MS * 1000);
-        pthread_mutex_lock(&g_ws_lock);
-        int clients = g_ws_n;
-        pthread_mutex_unlock(&g_ws_lock);
+        int n = clients();
 
         event_t ev;
         while (events_next(&cursor, &ev)) {
-            if (!clients) continue;
+            if (!n) continue;
             cJSON *d = cJSON_CreateObject();
             if (d) {
                 cJSON_AddNumberToObject(d, "seq", (double)ev.seq);
@@ -531,32 +684,20 @@ static void *pusher(void *arg)
                 cJSON_AddStringToObject(d, "text", ev.text);
                 if (ev.missed) cJSON_AddNumberToObject(d, "missed", ev.missed);
             }
-            char *text = message("event", d);
-            pthread_mutex_lock(&g_ws_lock);
-            broadcast(text);
-            pthread_mutex_unlock(&g_ws_lock);
-            free(text);
+            broadcast(message("event", d), 0);
         }
 
         unsigned g = config_generation(), a = config_applied();
         if (g != gen || a != applied) {
             gen = g;
             applied = a;
-            char *text = clients ? config_message(g) : NULL;
-            pthread_mutex_lock(&g_ws_lock);
-            broadcast(text);
-            pthread_mutex_unlock(&g_ws_lock);
-            free(text);
+            if (n) broadcast(config_message(g), 0);
         }
 
         status_signature(sig, sizeof sig);
         time_t now = mono();
-        if (clients && (now - last_status >= STATUS_SECS || strcmp(sig, last_sig) != 0)) {
-            char *text = message("status", status_json());
-            pthread_mutex_lock(&g_ws_lock);
-            broadcast(text);
-            pthread_mutex_unlock(&g_ws_lock);
-            free(text);
+        if (n && (now - last_status >= STATUS_SECS || strcmp(sig, last_sig) != 0)) {
+            broadcast(message("status", status_json()), 1);
             last_status = now;
         }
         memcpy(last_sig, sig, sizeof sig);
@@ -626,6 +767,12 @@ int api_start(void)
     mg_set_request_handler(g_ctx, "/api/v1", request_handler, NULL);
     mg_set_websocket_handler(g_ctx, "/api/v1/ws", ws_connect, ws_ready, ws_data, ws_close, NULL);
 
+    g_ws_stop = 0;
+    for (int i = 0; i < WS_MAX; ++i) {
+        ws_client_t *c = &g_wsc[i];
+        pthread_cond_init(&c->wake, NULL);
+        c->thread_up = pthread_create(&c->thread, NULL, writer, c) == 0;
+    }
     g_pusher_stop = 0;
     g_pusher_up = pthread_create(&g_pusher, NULL, pusher, NULL) == 0;
     if (!g_pusher_up) vg_log("api: cannot start the WebSocket thread; no pushed updates");
@@ -637,13 +784,25 @@ int api_start(void)
 void api_stop(void)
 {
     if (!g_ctx) return;
-    /* The pusher writes to connections mg_stop is about to close. */
     if (g_pusher_up) {
         g_pusher_stop = 1;
         pthread_join(g_pusher, NULL);
         g_pusher_up = 0;
     }
+    /* mg_stop cuts short any write in progress, and each connection's
+     * close (ws_close) waits for its writer to let go of it. */
     mg_stop(g_ctx);
     g_ctx = NULL;
+    pthread_mutex_lock(&g_ws_lock);
+    g_ws_stop = 1;
+    for (int i = 0; i < WS_MAX; ++i) pthread_cond_signal(&g_wsc[i].wake);
+    pthread_mutex_unlock(&g_ws_lock);
+    for (int i = 0; i < WS_MAX; ++i) {
+        ws_client_t *c = &g_wsc[i];
+        if (c->thread_up) pthread_join(c->thread, NULL);
+        c->thread_up = 0;
+        client_clear(c);
+        pthread_cond_destroy(&c->wake);
+    }
     mg_exit_library();
 }

@@ -247,9 +247,30 @@ int main(int argc, char **argv)
     }
 
     /* defaults < the file < the options */
-    config_init(cfg_path);
+    if (config_init(cfg_path) == -2) {
+        log_to_syslog_stop();
+        return 2;
+    }
     vigil_config_t cfg;
     config_get(&cfg);
+    /* A value that does not fit is refused, not shortened: a shortened URL
+     * or path can still be valid, and name another camera or directory. */
+    int too_long = 0;
+    for (int i = 0; i < n_urls; ++i)
+        if (strlen(urls[i]) >= sizeof cfg.cameras[0].url) {
+            char red[sizeof cfg.cameras[0].url];
+            schema_redact_url(urls[i], red, sizeof red);
+            vg_log("-c %.64s...: too long (at most %zu bytes)", red, sizeof cfg.cameras[0].url - 1);
+            too_long = 1;
+        }
+    if (rec_dir && strlen(rec_dir) >= sizeof cfg.record.path) {
+        vg_log("-o %.64s...: too long (at most %zu bytes)", rec_dir, sizeof cfg.record.path - 1);
+        too_long = 1;
+    }
+    if (too_long) {
+        log_to_syslog_stop();
+        return 2;
+    }
     if (n_urls) {
         cfg.n_cameras = n_urls;
         for (int i = 0; i < n_urls; ++i) {

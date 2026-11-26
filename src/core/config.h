@@ -73,14 +73,15 @@ void config_to_channels(const vigil_config_t *c, channels_config_t *cc);
  * (`c` holds the defaults; `errs` says why). */
 int config_load_file(const char *path, vigil_config_t *c, schema_errors_t *errs);
 
-/* Write `c` to `path` atomically (see config_write_atomic). Returns 0 or -1
- * with `err`. */
+/* Write `c` to `path` atomically; returns as config_write_atomic. */
 int config_save_file(const char *path, const vigil_config_t *c, char *err, size_t cap);
 
 /* Replace `path` with `data` so that a crash or power cut at any moment
- * leaves either the old file or the new one: write PATH.tmp (mode 0600,
- * the file holds camera passwords), fsync it, rename it over PATH, fsync
- * the directory. Returns 0 or -1 with `err`. */
+ * leaves either the old file or the new one: write a new, exclusively
+ * created PATH.XXXXXX (mode 0600, the file holds camera passwords), fsync
+ * it, rename it over PATH, fsync the directory. Returns 0; -1 with `err`
+ * when PATH is untouched; 1 with `err` when PATH was replaced but the
+ * directory could not be synced (the rename may not survive a power cut). */
 int config_write_atomic(const char *path, const char *data, size_t len, char *err, size_t cap);
 
 /* ---- the store (thread-safe) ------------------------------------------------------------ */
@@ -88,7 +89,9 @@ int config_write_atomic(const char *path, const char *data, size_t len, char *er
 /* Load `path` into the store and remember it for saves. A missing file
  * gives the defaults; an invalid one is logged field by field and the
  * defaults are used, the file left as it is (it is moved to PATH.bad when
- * a new configuration is saved over it). Returns 0, or -1 if invalid. */
+ * a new configuration is saved over it; if no copy can be kept, nothing is
+ * saved over it). Returns 0, -1 if invalid, -2 if `path` is too long to
+ * keep (nothing loaded: refuse to run rather than use a shortened path). */
 int config_init(const char *path);
 
 /* Replace the settings in force without saving (command-line options at
@@ -109,14 +112,16 @@ typedef enum {
     CONFIG_OK = 0,
     CONFIG_EINVAL,                  /* bad JSON or values: `errs` */
     CONFIG_ENOENT,                  /* no such section */
-    CONFIG_EIO,                     /* could not save: errs->e[0] */
+    CONFIG_EIO,                     /* not saved, nothing changed: errs->e[0] */
+    CONFIG_EUNSYNCED,               /* the file was replaced and is in force, but
+                                     * its directory sync failed: errs->e[0] */
 } config_rc_t;
 
 /* Replace one section (`section`) or the whole document (NULL) from JSON
  * text. Settings the JSON omits get their defaults. Unknown keys are
  * errors. A camera URL equal to the redacted form of a stored one (the
  * password shown as "***") keeps the stored URL. Saved before it takes
- * effect; nothing changes on error. */
+ * effect; nothing changes on EINVAL, ENOENT and EIO. */
 config_rc_t config_put_json(const char *section, const char *body, size_t len,
                             schema_errors_t *errs);
 

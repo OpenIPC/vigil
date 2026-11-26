@@ -12,6 +12,7 @@ errors, password redaction, and the WebSocket's status, event and config
 messages. Only the standard library: a minimal WebSocket client is below.
 """
 import base64
+import http.client
 import json
 import os
 import signal
@@ -93,8 +94,16 @@ class WebSocket:
     """Just enough RFC 6455 for a client: handshake, unmasked text frames
     from the server, pings answered, a reader thread collecting JSON."""
 
-    def __init__(self, port, auth, origin=None):
-        self.sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+    def __init__(self, port, auth, origin=None, stalled=False):
+        if stalled:
+            # A client that never reads, with a tiny receive window: the
+            # server's writes to it block once a few KiB are in flight.
+            self.sock = socket.socket()
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+            self.sock.settimeout(10)
+            self.sock.connect(("127.0.0.1", port))
+        else:
+            self.sock = socket.create_connection(("127.0.0.1", port), timeout=10)
         key = base64.b64encode(os.urandom(16)).decode()
         req = ("GET /api/v1/ws HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\n"
                "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n"
@@ -111,7 +120,7 @@ class WebSocket:
         self.messages = []
         self.lock = threading.Lock()
         self.closed = False
-        if self.status == 101:
+        if self.status == 101 and not stalled:
             self.thread = threading.Thread(target=self._reader, daemon=True)
             self.thread.start()
 
@@ -289,6 +298,42 @@ def main():
               "record changed: CAM1 restarted")
         check(wait_for(live, 20, 0.5), "and live again")
 
+        # ---- a recording directory that cannot be made yet is tried again
+        blocker = os.path.join(tmp, "blocker")
+        open(blocker, "w").close()                  # a file where a directory must go
+        st, _, _ = api.json("PUT", "/api/v1/config/record", {"path": os.path.join(blocker, "rec")})
+
+        def recording(want):
+            def f():
+                d = api.json("GET", "/api/v1/status")[2]
+                ch = d["channels"]
+                return ch and ch[0]["live"] and ch[0]["recording"] == want
+            return f
+        check(st == 200 and wait_for(recording(False), 10), "recording directory missing: live, not recording")
+        os.unlink(blocker)
+        check(wait_for(recording(True), 20, 0.5), "the directory can be made now: recording starts by itself")
+        check(wait_for(lambda: ws.find(lambda m: m["type"] == "event" and m["data"]["text"] == "REC on"), 3),
+              "WebSocket: event REC on")
+        api.json("PUT", "/api/v1/config/record", {"path": rec, "segment": 120})
+
+        # ---- a client that does not read: the others go on, shutdown does
+        # not wait for it. (Smoke test: what the API sends in a test's time
+        # fits in the kernel's socket buffers, so no write actually blocks.)
+        stalled = WebSocket(api_port, api.auth, stalled=True)
+        check(stalled.status == 101, "a second WebSocket client (it will not read)")
+        st, _, cams = api.json("GET", "/api/v1/config/cameras")
+        for i in range(100):
+            cams[0]["name"] = "Gate %d" % i
+            api.json("PUT", "/api/v1/config/cameras", cams)
+        t0 = time.time()
+        before = len(ws.find(lambda m: m["type"] == "status"))
+        got = wait_for(lambda: len(ws.find(lambda m: m["type"] == "status")) >= before + 3, 8)
+        check(got, "statuses keep coming to the other client (3 in %.1f s)" % (time.time() - t0))
+        check(wait_for(lambda: ws.find(lambda m: m["type"] == "event" and m["data"]["text"] == "config applied"
+                                       and m["data"]["seq"] > 0), 3) and
+              wait_for(lambda: api.json("GET", "/api/v1/status")[2]["channels"][0]["name"] == "Gate 99", 5),
+              "the configuration is applied meanwhile")
+
         # ---- invalid configurations change nothing
         before = open(cfg_path).read()
         st, _, err = api.json("PUT", "/api/v1/config",
@@ -319,22 +364,38 @@ def main():
         check(busy.returncode == 0 and "running without the API" in busy.stdout,
               "port taken: logged, vigild runs on without the API (rc %s)" % busy.returncode)
 
-        # ---- guessing: after 5 failures in a row the API stops checking for a while
-        wrong = Api(api_port, password="guess")
-        threads = [threading.Thread(target=wrong.call, args=("GET", "/api/v1/status")) for _ in range(6)]
+        # ---- guessing: after 5 failures in a row an address is locked out,
+        # and only that address: the owner elsewhere still gets in
+        def from_addr(src, password):
+            conn = http.client.HTTPConnection("127.0.0.1", api_port, timeout=10,
+                                              source_address=(src, 0))
+            tok = base64.b64encode(("root:%s" % password).encode()).decode()
+            conn.request("GET", "/api/v1/status", headers={"Authorization": "Basic " + tok})
+            r = conn.getresponse()
+            r.read()
+            conn.close()
+            return r.status, r.getheader("Retry-After")
+        threads = [threading.Thread(target=from_addr, args=("127.0.0.3", "guess")) for _ in range(6)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
-        st, hdr, _ = api.call("GET", "/api/v1/status")
-        check(st == 429 and int(hdr.get("Retry-After", "0")) >= 1,
-              "6 failed logins: even the right password gets 429 for a while (%s)" % st)
+        st, ra = from_addr("127.0.0.3", "secret")
+        check(st == 429 and int(ra or "0") >= 1,
+              "6 failed logins from one address: even the right password from it gets 429 (%s)" % st)
+        st, _ = from_addr("127.0.0.2", "secret")
+        check(st == 200, "the owner on another address still gets in (%s)" % st)
+        st, _, _ = api.call("GET", "/api/v1/status")
+        check(st == 200, "and so does the already logged-in client (%s)" % st)
     finally:
         if ws:
             ws.close()
+        # the stalled client stays connected: shutdown must not wait on it
+        t_stop = time.time()
         vd.send_signal(signal.SIGTERM)
         try:
             rc = vd.wait(10)
+            print("vigild stopped %.1f s after SIGTERM" % (time.time() - t_stop))
         except subprocess.TimeoutExpired:
             vd.kill()
             rc = None

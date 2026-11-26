@@ -161,7 +161,7 @@ int rtsp_init(rtsp_t *r, const char *url)
 
 static int tcp_connect(rtsp_t *r, int timeout_ms)
 {
-    r->fd = net_connect(r->host, r->port, timeout_ms, r->err, sizeof r->err);
+    r->fd = net_connect(r->host, r->port, timeout_ms, r->stop, r->err, sizeof r->err);
     return r->fd < 0 ? -1 : 0;
 }
 

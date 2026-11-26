@@ -28,7 +28,7 @@ defaults. [vigil.example.json](vigil.example.json) shows every setting:
 | `cameras[].url` | string, required | | `rtsp://…`, `netip://…` or `capture:N` (formats in [architecture.md](architecture.md#sources-camera-protocols)). Checked with the source drivers' own URL parsers. |
 | `cameras[].name` | string, ≤ 31 | `""` | Shown in the status and on the tile instead of the host. |
 | `cameras[].enabled` | boolean | `true` | A disabled camera keeps its tile (and its CAMn number), empty. |
-| `record.path` | absolute path | `""` | Where streams are recorded. Empty: no recording. |
+| `record.path` | absolute path | `""` | Where streams are recorded. Empty: no recording. A directory that cannot be created yet (a card not mounted) is tried again every 10 s. |
 | `record.segment` | integer 10..3600 | 60 | Segment length in seconds. |
 | `record.keep` | integer 0..64 | 3 | Segments kept per camera; 0 keeps all (the free-space reserve still applies). 64 is what the segment writer can track. |
 | `api.listen` | `"port"` or `"a.b.c.d:port"` | `"0.0.0.0:8080"` | Where the API listens (IPv4). Empty: no API. Read at start only. |
@@ -43,14 +43,19 @@ of date for a client.
 valid JSON, or holds an invalid value, is logged with each error and its
 path (`/etc/vigil.json: record.segment: 5 is out of range 10..3600`), and
 `vigild` runs with the defaults; the file is left as it is, and kept as
-`FILE.bad` when a new configuration is saved over it. Keys `vigild` does
+`FILE.bad` (a hard link, or a copy where the filesystem has no links) when
+a new configuration is saved over it. If no copy can be made, nothing is
+saved over it. Keys `vigild` does
 not know are skipped, so a configuration written by a newer `vigild` still
 loads in an older one.
 
-**Saving.** The API writes `FILE.tmp` (mode 0600: it holds camera
-passwords), `fsync`s it, renames it over `FILE` and `fsync`s the
+**Saving.** The API writes a new, exclusively created `FILE.XXXXXX` (mode
+0600: it holds camera passwords; a fixed name could already be someone's
+file or symlink), `fsync`s it, renames it over `FILE` and `fsync`s the
 directory, so a power cut leaves either the old or the new file, never a
-torn one. A new configuration takes effect only once it is saved.
+torn one. A new configuration takes effect only once it is saved. Paths
+that do not fit vigild's buffers (`-f` 255 bytes, `-c` 511, `-o` 191) are
+refused at startup rather than shortened.
 
 **Command-line options** override the file for that run. Precedence:
 schema defaults < the file < options. `-c` replaces the file's camera list,
@@ -83,10 +88,19 @@ supports: `$1$`, `$5$`, `$6$`, …), and compared in constant time. Without
 credentials, or with wrong ones, the answer is `401` with
 `WWW-Authenticate: Basic realm="vigil"`.
 
-- A failed login is answered after one second. From the fifth in a row on,
-  every login (even a right one) gets `429` with `Retry-After` for 2, 4, 8, …
-  up to 60 seconds, without the password being looked at. A success resets
-  the count.
+- A failed login is answered after one second. From the fifth failure in a
+  row **from one client address**, every login from that address (even a
+  right one) gets `429` with `Retry-After` for 2, 4, 8, … up to 60 seconds,
+  without the password being looked at; a success from it resets its count.
+  Other addresses are not affected, so a stranger on the network cannot lock
+  the owner out (32 addresses are tracked; the one that failed least
+  recently makes room). The trade-off: an attacker with many addresses
+  gets five tries per address before its lockout; what bounds guessing
+  overall is the one-second answer on each of the 8 workers (at most 8
+  guesses a second, whatever the addresses) and `crypt()` running one at a
+  time. While such a flood lasts, the API answers slowly for everyone; it
+  does not lock anyone out afterwards. Clients behind one NAT address share
+  a count.
 - An account without a password (an empty hash field, as OpenIPC ships
   `root`) or a locked one (`!`, `*`) cannot log in: set a password with
   `passwd`. The reason is logged once.
@@ -157,7 +171,10 @@ typos. On success it is saved, then applied, and the answer is the stored
 document (or section), redacted. Status codes: `200`; `400` invalid JSON or
 values; `401`/`429` authentication; `404` unknown path or section; `405`
 other methods (with `Allow`); `413` a body over 64 KiB; `500` the file could
-not be saved (the configuration in force is unchanged).
+not be saved (the configuration in force is unchanged), or — "the
+configuration is in force, but saving it is not confirmed" — the new file
+replaced the old one but its directory could not be synced, so it may not
+survive a power cut.
 
 ### Examples
 
@@ -247,7 +264,7 @@ answering.
 | `config` | On connect, and when a configuration is saved or applied | `{"generation": 8, "applied": 7}` |
 
 Events are the same ones the TV's event strip shows: `online`, `offline`,
-`down`, `no decoder`, `REC failed`, `added`, `restarted`, `removed`,
+`down`, `no decoder`, `REC failed`, `REC on`, `added`, `restarted`, `removed`,
 `bad URL`, `config applied`, `config: N camera(s) failed`. A client that
 wants to know when its change runs waits for a `config` message whose
 `applied` reached the generation its `PUT` produced (`status.config` after
@@ -267,8 +284,13 @@ websocat -H "Authorization: Basic $(printf root:PASSWORD | base64)" ws://192.168
 - `src/api/api.c`: CivetWeb ([third_party/civetweb](../third_party/civetweb),
   MIT) built with `NO_SSL NO_CGI NO_FILES NO_CACHING USE_WEBSOCKET`, on its
   own threads (a master thread and up to 8 workers, started on demand; a
-  WebSocket holds a worker for as long as it is open) plus one thread that
-  feeds the WebSockets.
+  WebSocket holds a worker for as long as it is open), one thread that
+  gathers status, events and configuration changes, and a writer thread per
+  WebSocket client with its own mailbox: a client that stops reading holds
+  up only its own writer (each frame times out after 10 s, then the client
+  is dropped), never the other clients or shutdown. A slow client loses the
+  oldest of its 32 queued events and configuration messages, and only its
+  latest status is kept.
   `src/api/auth.c`: Basic credentials, the shadow file, `crypt(3)`.
 - JSON is parsed by cJSON ([third_party/cJSON](../third_party/cJSON), MIT),
   bodies capped at 64 KiB.
