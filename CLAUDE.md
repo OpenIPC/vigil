@@ -20,7 +20,9 @@ On OpenIPC firmware it is meant to ship as the `vigil` package
 (`general/package/vigil` in OpenIPC/firmware, being added for hi3536dv100):
 started at boot by `/etc/init.d/S95vigil`, a copy of majestic's supervisor
 (restart on crash with back-off, give up after a crash loop), configured in
-`/etc/vigil.yaml`, and run with `-s` so its log goes to syslog.
+`/etc/vigil.yaml` (turned into command-line options), and run with `-s` so
+its log goes to syslog. `vigild` itself reads `/etc/vigil.json` (`-f`), which
+its HTTP API (`docs/api.md`) edits; options override the file.
 
 ## The layering rule (the one that must not be broken)
 
@@ -30,7 +32,12 @@ started at boot by `/etc/init.d/S95vigil`, a copy of majestic's supervisor
   missing something: extend `src/hal/*.h` for every platform instead.
 - **`src/ui` knows LVGL and `hal_ui.h` only.** The UI runs on the main thread;
   channel threads reach it only through `channels_status()` snapshots and the
-  `events` queue.
+  `events` ring.
+- **`src/api` (CivetWeb threads) never drives channels or the UI.** It reads
+  snapshots (`channels_status`, `config_get`, its own `events` cursor) and
+  writes the configuration store; the main thread applies a new generation.
+  Camera passwords never leave the process: redact URLs
+  (`schema_redact_url`) in API output and logs.
 - **Pixels never pass through the core.** Decoded or captured pictures stay
   inside the platform (VDEC→VPSS→VO, MPP→RGA→DRM). The core handles
   compressed access units only.
@@ -42,7 +49,9 @@ started at boot by `/etc/init.d/S95vigil`, a copy of majestic's supervisor
 ## Layout
 
 - `src/core/` — channel threads, the access-unit normalizer (`au_norm`), SPS
-  parsing, the segment writer, events, small net/md5 helpers.
+  parsing, the segment writer, events, small net/md5 helpers, and the
+  configuration: `schema.c` (generic engine), `config_schema.c` (every
+  setting as a table row), `config.c` (the file and the store).
 - `src/core/source/` — camera protocols behind `source_ops_t`: RTSP
   (`rtsp_client`, `rtp_depay`), NETIP, `capture:N`. A new protocol is one
   `source_<name>.c` listed in `source.c`.
@@ -50,10 +59,12 @@ started at boot by `/etc/init.d/S95vigil`, a copy of majestic's supervisor
 - `src/platform/<name>/` — one HAL implementation per SoC family;
   `src/platform/hisilicon/common/` is shared by the two HiSilicon SoCs.
 - `src/ui/`, `src/app/` — LVGL screens; `main.c` and the UI or headless loop.
+- `src/api/` — the HTTP/WebSocket API (`docs/api.md`) and its password check.
 - `cmake/platforms/<name>.cmake` — sources, includes, libraries per platform.
 - `scripts/` — board bring-up (HiSilicon module staging, Rockchip library build).
-- `tests/` — `test_core.c` unit tests, a NETIP camera emulator, a GStreamer
-  RTSP server, and the scripts that run `vigild` against them.
+- `tests/` — `test_core.c` unit tests, `test_api.c` (password check), a NETIP
+  camera emulator, a GStreamer RTSP server, the scripts that run `vigild`
+  against them, and `api_test.py` (the API end to end).
 - `docs/` — architecture, porting guide, one page per platform.
 
 ## Build
@@ -80,7 +91,8 @@ loading the HiSilicon kernel modules and the hi3520dv200 musl toolchain.
 `ctest` in a generic build runs the unit tests and end-to-end runs of `vigild`
 against `tests/netip_server.py` and `tests/rtsp_server.py` (skipped without the
 GStreamer RTSP server), including misbehaving-server cases; the end-to-end tests
-decode the recordings with ffmpeg. A parser or protocol change comes with a test
+decode the recordings with ffmpeg. `api_e2e` drives the HTTP/WebSocket API of a
+running `vigild`. A parser or protocol change comes with a test
 in `tests/test_core.c` that fails without it.
 
 CI (`.github/workflows/ci.yml`): the generic build + ctest on x86, and a
@@ -124,5 +136,8 @@ what the next line does.
   and carries the SDK headers the firmware build compiles vigil against.
   Revision-2 Hi3536DV100 chips need `open_vdec` with the SDK module's
   chip-revision check bypassed; without it, decoding silently never starts.
-- **LVGL** is a submodule (`third_party/lvgl`, v9.2.2); clone with
-  `--recursive`.
+- **LVGL** (`third_party/lvgl`, v9.2.2), **cJSON** (`third_party/cJSON`,
+  v1.7.19) and **CivetWeb** (`third_party/civetweb`, a master commit after
+  v1.16: v1.16 lacks later security fixes) are submodules; clone with
+  `--recursive`. A new setting is a row in `src/core/config_schema.c`, not
+  hand-written JSON code.

@@ -15,7 +15,13 @@
 
 #include "net.h"
 
-int net_connect(const char *host, int port, int timeout_ms, char *err, size_t errcap)
+/* Slices of the connect wait: a camera that drops SYNs would otherwise
+ * hold a channel's stop (a configuration change, a shutdown) for the whole
+ * timeout. */
+#define CONNECT_SLICE_MS 100
+
+int net_connect(const char *host, int port, int timeout_ms, const volatile int *stop,
+                char *err, size_t errcap)
 {
     struct addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_STREAM }, *ai;
     char ps[8];
@@ -33,18 +39,26 @@ int net_connect(const char *host, int port, int timeout_ms, char *err, size_t er
     fcntl(fd, F_SETFL, O_NONBLOCK);
     int rc = connect(fd, ai->ai_addr, ai->ai_addrlen);
     freeaddrinfo(ai);
+    int stopped = 0;
     if (rc < 0 && errno == EINPROGRESS) {
         struct pollfd pf = { .fd = fd, .events = POLLOUT };
-        int e = 0;
+        int e = 0, ready = 0;
         socklen_t el = sizeof e;
-        if (poll(&pf, 1, timeout_ms) == 1 &&
-            getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &el) == 0 && e == 0)
+        for (int left = timeout_ms; left > 0 && !ready; left -= CONNECT_SLICE_MS) {
+            if (stop && *stop) {
+                stopped = 1;
+                break;
+            }
+            ready = poll(&pf, 1, left < CONNECT_SLICE_MS ? left : CONNECT_SLICE_MS) == 1;
+        }
+        if (ready && getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &el) == 0 && e == 0)
             rc = 0;
         else
             errno = e ? e : ETIMEDOUT;
     }
     if (rc < 0) {
-        snprintf(err, errcap, "connect: %s", strerror(errno));
+        if (stopped) snprintf(err, errcap, "connect: stopped");
+        else snprintf(err, errcap, "connect: %s", strerror(errno));
         close(fd);
         return -1;
     }

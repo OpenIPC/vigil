@@ -17,7 +17,9 @@
 /* Tile rectangles of the quad view, for the decoders' output. */
 void frontend_tiles(vg_rect_t *tiles, int n);
 
-/* Run until *stop or run_secs elapse (0 = no limit). Returns 0 or -1. */
-int frontend_run(int run_secs, volatile sig_atomic_t *stop);
+/* Run until *stop or run_secs elapse (0 = no limit), calling tick() from
+ * this (the main) thread several times a second: that is where a new
+ * configuration is applied. Returns 0 or -1. */
+int frontend_run(int run_secs, volatile sig_atomic_t *stop, void (*tick)(void));
 
 #endif /* FRONTEND_H */

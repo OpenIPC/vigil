@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* frontend_ui.c — the LVGL quad view on platforms with a display. All LVGL
  * calls happen on this (the main) thread: channel threads reach the UI only
- * through channels_status() snapshots and the events queue. */
+ * through channels_status() snapshots and the events ring; a new
+ * configuration is applied here too, between frames (tick). */
 #define _DEFAULT_SOURCE
 #include <stdio.h>
 #include <time.h>
@@ -33,29 +34,31 @@ static void status_cb(int idx, ui_chan_status_t *st)
     st->live = cs.live;
     st->recording = cs.recording;
     st->rec_bytes = cs.rec_bytes;
+    const char *who = cs.name[0] ? cs.name : cs.host;
     if (!cs.configured)
         st->info[0] = 0;
     else if (cs.live && cs.width)
-        snprintf(st->info, sizeof st->info, "%.20s  %s %ux%u  %u fps", cs.host,
+        snprintf(st->info, sizeof st->info, "%.20s  %s %ux%u  %u fps", who,
                  vg_codec_name(cs.codec), cs.width, cs.height, cs.fps);
     else if (cs.live)
-        snprintf(st->info, sizeof st->info, "%.20s  %u fps", cs.host, cs.fps);
+        snprintf(st->info, sizeof st->info, "%.20s  %u fps", who, cs.fps);
     else
-        snprintf(st->info, sizeof st->info, "%.20s  %.24s", cs.host, cs.state);
+        snprintf(st->info, sizeof st->info, "%.20s  %.24s", who, cs.state);
 }
+
+static uint64_t g_ev_cursor;
 
 static void events_cb(lv_timer_t *t)
 {
     (void)t;
-    int ch;
-    char text[40];
-    while (events_pop(&ch, text, sizeof text)) {
-        ui_events_push(ch, text);
-        if (ch > 0) ui_home_flash_channel(ch);
+    event_t ev;
+    while (events_next(&g_ev_cursor, &ev)) {
+        ui_events_push(ev.ch, ev.text);
+        if (ev.ch > 0) ui_home_flash_channel(ev.ch);
     }
 }
 
-int frontend_run(int run_secs, volatile sig_atomic_t *stop)
+int frontend_run(int run_secs, volatile sig_atomic_t *stop, void (*tick)(void))
 {
     lv_init();
     lv_tick_set_cb(tick_ms);
@@ -71,6 +74,7 @@ int frontend_run(int run_secs, volatile sig_atomic_t *stop)
 
     time_t t0 = time(NULL);
     while (!*stop) {
+        tick();
         uint32_t ms = lv_timer_handler();
         usleep((ms > 50 ? 50 : ms) * 1000u);
         if (run_secs > 0 && time(NULL) - t0 >= run_secs) break;

@@ -214,7 +214,7 @@ static int netip_open(source_t *s)
     char hash[9], req[512], reply[4096];
     n->session = 0;
     n->seq = 0;
-    n->fd = net_connect(n->host, n->port, 3000, s->err, sizeof s->err);
+    n->fd = net_connect(n->host, n->port, 3000, s->stop, s->err, sizeof s->err);
     if (n->fd < 0) return -1;
 
     sofia_hash(n->pass, hash);

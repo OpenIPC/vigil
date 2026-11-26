@@ -13,20 +13,22 @@
 
 #define STATUS_SECS 10
 
-int frontend_run(int run_secs, volatile sig_atomic_t *stop)
+int frontend_run(int run_secs, volatile sig_atomic_t *stop, void (*tick)(void))
 {
     time_t t0 = time(NULL), last = t0;
+    uint64_t cursor = events_head();
     while (!*stop) {
         usleep(200 * 1000);
-        int ch;
-        char text[40];
-        while (events_pop(&ch, text, sizeof text)) (void)0;   /* already logged */
+        tick();
+        event_t ev;
+        while (events_next(&cursor, &ev)) (void)0;     /* already logged where they happen */
         time_t now = time(NULL);
         if (now - last >= STATUS_SECS) {
             last = now;
             for (int i = 0; i < channels_count(); ++i) {
                 channel_status_t st;
                 channels_status(i, &st);
+                if (!st.configured) continue;
                 vg_log("CAM%d %s: %s %s %ux%u %u fps, REC %s %llu KiB", i + 1, st.host,
                        st.live ? "live" : st.state, vg_codec_name(st.codec), st.width, st.height,
                        st.fps, st.recording ? "on" : "off", (unsigned long long)(st.rec_bytes >> 10));

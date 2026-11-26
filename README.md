@@ -14,6 +14,10 @@ are part of the design.
   for recording.
 - **Recording** into segments that play on their own, with a free-space
   reserve: the oldest recordings are deleted when the disk fills up.
+- **Configuration** in one JSON file (`/etc/vigil.json`) and an
+  **HTTP/WebSocket API** to read and change it while video keeps running,
+  with live status and events; login with the system account
+  ([docs/api.md](docs/api.md)).
 
 ## Platforms
 
@@ -33,12 +37,18 @@ cmake -B build && cmake --build build -j && (cd build && ctest)
 ./build/vigild -o /tmp/rec -c rtsp://user:pass@camera/stream -c netip://admin:@dvr:34567/
 ```
 
+Or put the cameras in a configuration file
+([example](docs/vigil.example.json)) and run `vigild -f vigil.json`;
+then `curl -u root:PASSWORD http://localhost:8080/api/v1/status`.
+
 For a board, see its page under [docs/platforms](docs/platforms/).
 
 ## Documentation
 
 - [Architecture](docs/architecture.md): how the code is split into core,
   protocol sources, HAL and platforms, and how a stream flows through it.
+- [Configuration and HTTP API](docs/api.md): the configuration file, the
+  endpoints, the WebSocket, authentication and password redaction.
 - [Adding a platform](docs/porting.md): what a new SoC family has to
   implement.
 - Platforms: [HiSilicon](docs/platforms/hisilicon.md),
@@ -48,6 +58,8 @@ For a board, see its page under [docs/platforms](docs/platforms/).
 
 ## License
 
-GPL-3.0-or-later. [LVGL](https://lvgl.io) (MIT) is included as a submodule.
+GPL-3.0-or-later. [LVGL](https://lvgl.io), [cJSON](https://github.com/DaveGamble/cJSON)
+and [CivetWeb](https://github.com/civetweb/civetweb) (all MIT) are included
+as submodules.
 Vendor SDKs, libraries and kernel modules are not part of this repository.
 They are used from wherever you keep them.

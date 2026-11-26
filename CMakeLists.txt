@@ -15,16 +15,29 @@ if(NOT EXISTS ${CMAKE_SOURCE_DIR}/cmake/platforms/${VIGIL_PLATFORM}.cmake)
   message(FATAL_ERROR "Unknown VIGIL_PLATFORM '${VIGIL_PLATFORM}'")
 endif()
 
+option(VIGIL_API "HTTP/WebSocket API (CivetWeb, docs/api.md)" ON)
+
 add_compile_options(-Wall -Wno-unused-function)
 find_package(Threads REQUIRED)
+
+# cJSON (third_party/cJSON, MIT): the configuration file and the API's JSON.
+if(NOT EXISTS ${CMAKE_SOURCE_DIR}/third_party/cJSON/cJSON.c)
+  message(FATAL_ERROR "third_party/cJSON is empty: git submodule update --init")
+endif()
+add_library(cjson STATIC third_party/cJSON/cJSON.c)
+target_include_directories(cjson PUBLIC third_party/cJSON)
+target_link_libraries(cjson PUBLIC m)
 
 # ---- core: hardware-agnostic, builds and tests on any host ------------------
 add_library(vigil_core STATIC
   src/core/au_norm.c
   src/core/channel.c
+  src/core/config.c
+  src/core/config_schema.c
   src/core/events.c
   src/core/md5.c
   src/core/net.c
+  src/core/schema.c
   src/core/seg_writer.c
   src/core/sps.c
   src/core/source/rtp_depay.c
@@ -34,7 +47,7 @@ add_library(vigil_core STATIC
   src/core/source/source_netip.c
   src/core/source/source_rtsp.c)
 target_include_directories(vigil_core PUBLIC src/core src/core/source src/hal)
-target_link_libraries(vigil_core PUBLIC Threads::Threads)
+target_link_libraries(vigil_core PUBLIC cjson Threads::Threads)
 
 # ---- platform: sets VIGIL_PLATFORM_SOURCES / _LIBS / _DEFS, VIGIL_HAS_UI ----
 set(VIGIL_HAS_UI OFF)
@@ -54,10 +67,20 @@ else()
   list(APPEND VIGILD_SOURCES src/app/frontend_headless.c)
 endif()
 
+# ---- API: CivetWeb + crypt(3); -DVIGIL_API=OFF drops both --------------------
+if(VIGIL_API)
+  include(cmake/api.cmake)
+else()
+  list(APPEND VIGILD_SOURCES src/api/api_none.c)
+endif()
+
 add_executable(vigild ${VIGILD_SOURCES} $<TARGET_OBJECTS:vigil_platform>)
-target_include_directories(vigild PRIVATE src/app src/ui ${VIGIL_PLATFORM_INCLUDES})
+target_include_directories(vigild PRIVATE src/app src/api src/ui ${VIGIL_PLATFORM_INCLUDES})
 target_compile_definitions(vigild PRIVATE ${VIGIL_PLATFORM_DEFS})
 target_link_libraries(vigild PRIVATE vigil_core ${VIGIL_PLATFORM_LIBS})
+if(VIGIL_API)
+  target_link_libraries(vigild PRIVATE vigil_api)
+endif()
 if(VIGIL_HAS_UI)
   target_link_libraries(vigild PRIVATE lvgl)
 endif()

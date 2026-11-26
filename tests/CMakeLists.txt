@@ -3,6 +3,14 @@ add_executable(test_core test_core.c)
 target_link_libraries(test_core PRIVATE vigil_core)
 add_test(NAME core COMMAND test_core ${CMAKE_CURRENT_SOURCE_DIR}/data)
 
+if(TARGET vigil_api)
+  add_executable(test_api test_api.c)
+  target_link_libraries(test_api PRIVATE vigil_api)
+  add_test(NAME api_auth COMMAND test_api)
+endif()
+
+add_test(NAME cli_too_long COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_cli.sh $<TARGET_FILE:vigild>)
+
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_FOUND)
   foreach(clip testsrc_640x360.h264 majestic_1080p.h265)
@@ -18,6 +26,11 @@ if(Python3_FOUND)
              COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_faults.sh $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264 ${case})
   endforeach()
+  if(TARGET vigil_api)
+    add_test(NAME api_e2e
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/api_test.py $<TARGET_FILE:vigild>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
+  endif()
   foreach(case h264:none h264:digest h264:basic h265:none h264:wrong)
     string(REPLACE ":" "_" name ${case})
     add_test(NAME rtsp_${name}
