@@ -32,6 +32,7 @@ extern char   fake_mounted[512];
 extern char   fake_umounted[256];
 extern int    fake_mount_errno;     /* nonzero: mount() fails with it */
 extern int    fake_umount_errno;
+extern int    fake_mount_errno_once; /* the next mount() only fails with it */
 /* What the last run of each program got on stdin (one buffer, the last). */
 extern char   fake_stdin[8192];
 
@@ -46,6 +47,10 @@ void  fake_answer(const char *prog, int status, const char *output);
 void  fake_have(const char *prog, int there);
 int   fake_ran(const char *substr);
 void  fake_clear_log(void);
+/* When `prog` next runs, copy the file at `path` (under the root) into
+ * fake_snap: what the program found there. */
+void  fake_snapshot(const char *prog, const char *path);
+extern char fake_snap[4096];
 /* An IPv4 address for fake interface `ifname` (ops->ifaddr). */
 void  fake_ifaddr(const char *ifname, const char *addr, const char *mask);
 

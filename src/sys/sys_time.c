@@ -374,7 +374,9 @@ int ntp_sync(char servers[][64], int n, char *msg, size_t cap)
         if (sys_have("fake-hwclock")) sys_run(o2, sizeof o2, 10, "fake-hwclock", "save", NULL);
         return 0;
     }
-    if (rc == 124) snprintf(msg, cap, "no answer from the NTP servers within 20 s");
+    /* busybox ntpd -q gives up by its own alarm (SIGALRM, 128 + 14) when
+     * no server answers: seen in QEMU with an unreachable server. */
+    if (rc == 124 || rc == 128 + 14) snprintf(msg, cap, "no answer from the NTP servers");
     else snprintf(msg, cap, "ntpd failed (%d)%s%.200s", rc, out[0] ? ": " : "", out);
     return -1;
 }

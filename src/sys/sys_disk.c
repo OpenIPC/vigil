@@ -11,6 +11,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/statvfs.h>
 
 #include "sys.h"
@@ -463,12 +464,43 @@ static int mkdir_mnt(const char *mnt, char *msg, size_t cap)
     return 0;
 }
 
+/* Is /dev/<dev> mounted at `mnt` already? */
+static int mounted_at(const char *dev, const char *mnt)
+{
+    mnt_t *m = calloc(MOUNTS_MAX, sizeof *m);
+    if (!m) return 0;
+    int n = read_mounts(m, MOUNTS_MAX), found = 0;
+    for (int i = 0; i < n && !found; ++i) found = !strcmp(m[i].dev, dev) && !strcmp(m[i].mnt, mnt);
+    free(m);
+    return found;
+}
+
+/* A new partition's uevent sends the firmware's automount.sh after it at
+ * the same time (it tries its filesystems one by one): two mounts of one
+ * device at once both fail with EBUSY. Seen in QEMU on ssr621q after a
+ * format, with nothing mounted in the end. So EBUSY is waited out, and a
+ * mount automount.sh made at the same place is as good as ours. */
+#define MOUNT_BUSY_TRIES 8
+
 static int try_mount(const char *dev, const char *mnt, const char *fs)
 {
     char ps[512], pt[512];
     sys_path(ps, sizeof ps, dev);
     sys_path(pt, sizeof pt, mnt);
-    if (sys_ops()->mount(ps, pt, fs, 0, NULL) == 0) return 0;
+    for (int i = 0;; ++i) {
+        if (sys_ops()->mount(ps, pt, fs, 0, NULL) == 0) return 0;
+        int e = errno;
+        /* automount.sh removed the mount point after its own try */
+        if (e == ENOENT && i + 1 < MOUNT_BUSY_TRIES && mkdir(pt, 0755) == 0) continue;
+        errno = e;
+        if (errno != EBUSY) break;
+        if (mounted_at(dev, mnt)) return 0;
+        if (i + 1 >= MOUNT_BUSY_TRIES) {
+            errno = EBUSY;
+            return -1;
+        }
+        sleep(1);
+    }
     if (errno != ENODEV) return -1;
     /* exfat, ext4 and ntfs are modules on the firmware's kernels; nothing
      * else loads them. msdos and vfat share the fat driver. */
@@ -539,15 +571,53 @@ static unsigned char part_type(const char *fs)
     return !strcmp(fs, "vfat") ? 0x0c : !strcmp(fs, "ext4") ? 0x83 : 0x07;
 }
 
-static int wait_for(const char *name)
+static int g_settle_ms = 3000;
+
+void sys_disk_set_settle(int ms) { g_settle_ms = ms; }
+
+static ino_t node_ino(const char *name)
 {
-    char dev[64];
+    char dev[64], p[512];
+    struct stat st;
     snprintf(dev, sizeof dev, "/dev/%s", name);
-    for (int i = 0; i < 50; ++i) {
-        if (sys_exists(dev)) return 0;
+    return stat(sys_path(p, sizeof p, dev), &st) == 0 ? st.st_ino : 0;
+}
+
+/* /dev/<part> as the kernel numbers it (/sys/block/<disk>/<part>/dev),
+ * made when it is missing. mdev handles each uevent in a process of its
+ * own, so the "remove" of the old partition can run after the "add" of
+ * the new one and delete the node it just made: seen in QEMU on ssr621q,
+ * /dev/sda1 gone while /proc/partitions listed sda1. */
+static int ensure_node(const char *disk, const char *part)
+{
+    char rel[160], buf[32], p[512];
+    if (node_ino(part)) return 0;
+    snprintf(rel, sizeof rel, "/sys/block/%s/%s/dev", disk, part);
+    unsigned maj, min;
+    if (sys_read(rel, buf, sizeof buf) <= 0 || sscanf(buf, "%u:%u", &maj, &min) != 2) return -1;
+    snprintf(rel, sizeof rel, "/dev/%s", part);
+    if (mknod(sys_path(p, sizeof p, rel), S_IFBLK | 0660, makedev(maj, min)) < 0 && errno != EEXIST) return -1;
+    chmod(p, 0660);                         /* as mdev.conf makes it, whatever our umask */
+    return 0;
+}
+
+/* After a new partition table the kernel announces the partitions again:
+ * mdev removes /dev/<part> (if it was there) and makes it anew, and
+ * automount.sh, run for each, tries to mount the new partition and then
+ * removes /mnt/<part>. Working on the node before that is over loses the
+ * race: in QEMU on ssr621q the mkfs went to a node about to be replaced
+ * and the mount point vanished under the mount. So: wait for a node that
+ * is not the old one, then let automount.sh's attempt pass. */
+static int wait_for(const char *disk, const char *name, ino_t old)
+{
+    int tries = g_settle_ms ? 50 : 1;
+    for (int i = 0; i < tries; ++i) {
+        ino_t now = node_ino(name);
+        if (now && (now != old || !g_settle_ms)) break;
         usleep(100 * 1000);
     }
-    return -1;
+    if (g_settle_ms) usleep((useconds_t)g_settle_ms * 1000);
+    return ensure_node(disk, name);
 }
 
 int sys_disk_format(const char *name, const char *fs, char *msg, size_t cap)
@@ -593,12 +663,13 @@ int sys_disk_format(const char *name, const char *fs, char *msg, size_t cap)
         }
         char dp[64], p[512];
         snprintf(dp, sizeof dp, "/dev/%s", name);
+        ino_t old_node = whole ? 0 : node_ino(target);
         if (sys_ops()->reread_parts(sys_path(p, sizeof p, dp)) < 0) {
             snprintf(msg, cap, "the kernel kept the old partition table of %s (%s); unplug it and try again",
                      name, strerror(errno));
             goto out;
         }
-        if (!whole && wait_for(target) < 0) {
+        if (!whole && wait_for(name, target, old_node) < 0) {
             snprintf(msg, cap, "%s did not appear after the new partition table", target);
             goto out;
         }

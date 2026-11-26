@@ -139,6 +139,8 @@ void test_sys_time(void)
           "sync now: %s", fake_log);
     fake_answer("ntpd", 124, "");
     CHECK(ntp_sync(srv, 2, err, sizeof err) < 0 && strstr(err, "no answer"), "sync timeout: %s", err);
+    fake_answer("ntpd", 142, "");
+    CHECK(ntp_sync(srv, 2, err, sizeof err) < 0 && strstr(err, "no answer"), "ntpd's own alarm: %s", err);
     fake_answer("ntpd", 1, "ntpd: bad address 'x'");
     CHECK(ntp_sync(srv, 1, err, sizeof err) < 0 && strstr(err, "bad address"), "sync error: %s", err);
     CHECK(ntp_daemon(1, err, sizeof err) < 0, "no init script: said so");

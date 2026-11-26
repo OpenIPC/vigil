@@ -66,6 +66,7 @@ static const sys_disk_t *get(const sys_disk_t *d, int n, const char *name)
 static void setup(void)
 {
     fake_init();
+    sys_disk_set_settle(0);
     /* a USB stick, one exFAT partition, mounted where automount.sh puts it */
     fake_file("/sys/block/sda/size", "262144\n");
     fake_file("/sys/block/sda/removable", "1\n");
@@ -278,6 +279,15 @@ static void test_mount(void)
     snprintf(line, sizeof line, "mount %s/dev/sdc %s/mnt/sdc ext4", fake_root, fake_root);
     CHECK(fake_ran(line), "as the superblock says");
 
+    /* automount.sh mounting the same device at the same moment: EBUSY,
+     * and then its mount at /mnt/sdc counts. */
+    fake_mount_errno = EBUSY;
+    fake_file("/proc/mounts", "/dev/sdc /mnt/sdc ext4 rw 0 0\n");
+    CHECK(sys_disk_mount("sdc", msg, sizeof msg) == 0, "EBUSY with automount's mount there: %s", msg);
+    fake_file("/proc/mounts", "");
+    CHECK(sys_disk_mount("sdc", msg, sizeof msg) < 0 && strstr(msg, "busy"), "EBUSY that lasts: %s", msg);
+    fake_mount_errno = 0;
+
     /* Unknown filesystem: automount.sh's list, never auto. */
     fake_dev("sdc", 3 * MIB, 0x438, "\0\0", 2);
     fake_clear_log();
@@ -350,6 +360,20 @@ static void test_nas(void)
     CHECK(strstr(fake_mounted, "password=Pa55,,word") && strstr(fake_mounted, " cifs "), "cifs mount(2)");
     CHECK(fake_ran("modprobe cifs"), "the module is loaded");
     CHECK(!strstr(msg, "Pa55"), "no password in the message");
+    /* A kernel without SMB2 (CONFIG_CIFS_SMB2): EINVAL to vers=2.1, then SMB1. */
+    fake_mount_errno_once = EINVAL;
+    CHECK(sys_nas_mount(&c, "/mnt/nas", msg, sizeof msg) == 0 && strstr(fake_mounted, "vers=1.0") &&
+          strstr(msg, "SMB1") && !strstr(msg, "Pa55"), "SMB1 fallback: %s", msg);
+    fake_mount_errno_once = EINVAL;
+    fake_mount_errno = EHOSTUNREACH;
+    CHECK(sys_nas_mount(&c, "/mnt/nas", msg, sizeof msg) < 0 && strstr(msg, "CONFIG_CIFS_SMB2") &&
+          !strstr(msg, "nvalid"), "SMB1 fallback, the real error: %s", msg);
+    fake_mount_errno = 0;
+    snprintf(c.options, sizeof c.options, "vers=3.0");
+    fake_mount_errno_once = EINVAL;
+    CHECK(sys_nas_mount(&c, "/mnt/nas", msg, sizeof msg) < 0 && !strstr(fake_mounted, "vers=1.0"),
+          "a vers= of one's own is not second-guessed: %s", msg);
+    c.options[0] = 0;
     fake_clear_log();
     CHECK(sys_nas_test(&c, msg, sizeof msg) == 0 && strstr(msg, "written"), "test: %s", msg);
     CHECK(fake_ran("umount") && !fake_exists(SYS_NAS_TEST_DIR), "unmounted and removed after the test");

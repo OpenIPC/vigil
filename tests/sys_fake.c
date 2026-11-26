@@ -18,8 +18,10 @@ char   fake_hostname[256];
 time_t fake_time;
 char   fake_mounted[512];
 char   fake_umounted[256];
-int    fake_mount_errno, fake_umount_errno;
+int    fake_mount_errno, fake_umount_errno, fake_mount_errno_once;
 char   fake_stdin[8192];
+char   fake_snap[4096];
+static char g_snap_prog[64], g_snap_path[256];
 
 #define ANSWERS 32
 static struct { char prog[64]; int status; char out[1024]; } g_ans[ANSWERS];
@@ -44,6 +46,12 @@ static int f_run(const char *const *argv, const char *input, int timeout_s, char
     snprintf(fake_stdin, sizeof fake_stdin, "%s", input ? input : "");
     const char *base = strrchr(argv[0], '/');
     base = base ? base + 1 : argv[0];
+    if (g_snap_prog[0] && !strcmp(base, g_snap_prog)) {
+        char *t = fake_read(g_snap_path);
+        snprintf(fake_snap, sizeof fake_snap, "%s", t ? t : "(none)");
+        free(t);
+        g_snap_prog[0] = 0;
+    }
     if (cap) out[0] = 0;
     for (int i = 0; i < ANSWERS; ++i)
         if (g_have[i].prog[0] && (!strcmp(g_have[i].prog, base) || !strcmp(g_have[i].prog, argv[0])) &&
@@ -95,6 +103,11 @@ static int f_mount(const char *src, const char *target, const char *fstype, unsi
     char l[600];
     snprintf(l, sizeof l, "mount %s", fake_mounted);
     logf_(l);
+    if (fake_mount_errno_once) {
+        errno = fake_mount_errno_once;
+        fake_mount_errno_once = 0;
+        return -1;
+    }
     if (fake_mount_errno) {
         errno = fake_mount_errno;
         return -1;
@@ -164,7 +177,7 @@ void fake_init(void)
     memset(g_if, 0, sizeof g_if);
     fake_log[0] = fake_hostname[0] = fake_mounted[0] = fake_umounted[0] = fake_stdin[0] = 0;
     fake_time = 0;
-    fake_mount_errno = fake_umount_errno = 0;
+    fake_mount_errno = fake_umount_errno = fake_mount_errno_once = 0;
 }
 
 void fake_done(void)
@@ -248,6 +261,13 @@ void fake_have(const char *prog, int there)
             g_have[i].there = there;
             return;
         }
+}
+
+void fake_snapshot(const char *prog, const char *path)
+{
+    snprintf(g_snap_prog, sizeof g_snap_prog, "%s", prog);
+    snprintf(g_snap_path, sizeof g_snap_path, "%s", path);
+    fake_snap[0] = 0;
 }
 
 int fake_ran(const char *substr) { return strstr(fake_log, substr) != NULL; }
