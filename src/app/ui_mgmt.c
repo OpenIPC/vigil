@@ -20,7 +20,14 @@
 
 #define ETH "eth0"
 
-#define CP(dst, src) snprintf((dst), sizeof(dst), "%s", (src))
+/* Copy, cut to fit: the model's fields are smaller than the backends'. */
+static void cp(char *d, size_t n, const char *s)
+{
+    size_t l = strnlen(s, n - 1);
+    memcpy(d, s, l);
+    d[l] = 0;
+}
+#define CP(dst, src) cp((dst), sizeof(dst), (src))
 
 static int managed(void) { return sys_managed(); }
 

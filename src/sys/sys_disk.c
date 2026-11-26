@@ -185,7 +185,7 @@ static void model_of(const char *disk, char *out, size_t cap)
     char *v = vendor, *m = model;
     while (*v == ' ') ++v;
     while (*m == ' ') ++m;
-    snprintf(out, cap, "%s%s%s", v, *v && *m ? " " : "", m);
+    snprintf(out, cap, "%.31s%s%.31s", v, *v && *m ? " " : "", m);
 }
 
 static int is_system(const char *name, const mnt_t *m, int nm, const char *root)

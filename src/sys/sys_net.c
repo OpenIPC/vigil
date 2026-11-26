@@ -74,7 +74,7 @@ static void quads(const char *s, char *a, char *b, size_t cap)
         q[n] = 0;
         struct in_addr ia;
         if (inet_pton(AF_INET, q, &ia) == 1) {
-            snprintf(found ? b : a, cap, "%s", q);
+            snprintf(found ? b : a, cap, "%.15s", q);
             ++found;
         }
         p += n - 1;
@@ -369,9 +369,9 @@ void net_status(const char *ifname, net_status_t *st)
 static int is_wireless(const char *ifname)
 {
     char p[128];
-    snprintf(p, sizeof p, "/sys/class/net/%s/wireless", ifname);
+    snprintf(p, sizeof p, "/sys/class/net/%.15s/wireless", ifname);
     if (sys_exists(p)) return 1;
-    snprintf(p, sizeof p, "/sys/class/net/%s/phy80211", ifname);
+    snprintf(p, sizeof p, "/sys/class/net/%.15s/phy80211", ifname);
     return sys_exists(p);
 }
 
@@ -495,12 +495,12 @@ static void driver_of(const char *ifname, char *out, size_t cap)
 {
     char rel[128], p[512], link[512];
     out[0] = 0;
-    snprintf(rel, sizeof rel, "/sys/class/net/%s/device/driver", ifname);
+    snprintf(rel, sizeof rel, "/sys/class/net/%.15s/device/driver", ifname);
     ssize_t n = readlink(sys_path(p, sizeof p, rel), link, sizeof link - 1);
     if (n <= 0) return;
     link[n] = 0;
     const char *b = strrchr(link, '/');
-    snprintf(out, cap, "%s", b ? b + 1 : link);
+    snprintf(out, cap, "%.31s", b ? b + 1 : link);
 }
 
 void lte_info(lte_info_t *l)

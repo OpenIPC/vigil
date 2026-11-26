@@ -193,7 +193,7 @@ static void svc_set(mgmt_svc_status_t *st, int ok, const char *msg)
 
 static int run_job(slot_t *s, char *msg, size_t cap)
 {
-    char err[512] = "";
+    char err[256] = "";
     int rc = -1;
     switch (s->kind) {
     case J_NET: {
@@ -205,7 +205,7 @@ static int run_job(slot_t *s, char *msg, size_t cap)
             /* ifup failed: put the old file back at once. */
             char e2[256];
             net_restore(s->net.ifname, old, e2, sizeof e2);
-            snprintf(msg, cap, "%s; the previous settings are back", err);
+            snprintf(msg, cap, "%.200s; the previous settings are back", err);
             free(old);
             events_push(0, "network: change failed");
             return -1;
