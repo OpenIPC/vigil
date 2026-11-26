@@ -18,7 +18,8 @@ static const ui_model_t *g_model;
 static lv_obj_t         *g_live;
 static ui_page_t        *g_stack[STACK_MAX];
 static int               g_depth;
-static lv_indev_t       *g_pointer;
+static lv_indev_t       *g_pointer, *g_keypad;
+static int               g_kbd_used;    /* a key since the last keyboard came */
 
 static ui_chan_t    g_status[UI_MAX_CHANNELS];
 static lv_subject_t g_subj_ch[UI_MAX_CHANNELS];
@@ -28,6 +29,8 @@ lv_subject_t        ui_subj_nav_pinned;
 static char         g_clock[48], g_clock_prev[48];
 
 static lv_obj_t   *g_popup;         /* the full-screen catcher; the panel is its child */
+static lv_group_t *g_popup_group;
+static int         g_help;          /* the popup is the help */
 static lv_obj_t   *g_toast;
 static lv_timer_t *g_toast_timer;
 
@@ -35,6 +38,46 @@ const ui_model_t *ui_model(void) { return g_model; }
 lv_subject_t *ui_subject_channel(int ch) { return &g_subj_ch[ch]; }
 const ui_chan_t *ui_channel(int ch) { return &g_status[ch]; }
 void ui_app_set_pointer(lv_indev_t *indev) { g_pointer = indev; }
+int ui_keyboard_in_use(void) { return g_kbd_used; }
+
+/* ---- focus ------------------------------------------------------------------------ */
+
+static lv_group_t *focus_group(void)
+{
+    if (g_popup) return g_popup_group;
+    ui_page_t *p = ui_page_top();
+    return p ? p->group : ui_live_group();
+}
+
+/* The keypad works on the topmost thing: a popup, the page, the live view. */
+static void focus_sync(void)
+{
+    if (g_keypad) lv_indev_set_group(g_keypad, focus_group());
+}
+
+void ui_app_set_keypad(lv_indev_t *indev)
+{
+    g_keypad = indev;
+    focus_sync();
+}
+
+void ui_gridnav(lv_obj_t *o, lv_gridnav_ctrl_t ctrl)
+{
+    lv_gridnav_add(o, ctrl);
+    lv_obj_add_flag(o, UI_FLAG_ARROWS);
+}
+
+void ui_gridnav_focus(lv_obj_t *cont, lv_obj_t *item)
+{
+    lv_gridnav_set_focused(cont, item, LV_ANIM_OFF);
+    if (!lv_obj_has_state(cont, LV_STATE_FOCUSED)) lv_obj_remove_state(item, LV_STATE_FOCUSED | LV_STATE_FOCUS_KEY);
+}
+
+void ui_inert(lv_obj_t *o)
+{
+    lv_obj_remove_flag(o, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(o, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+}
 
 int ui_pointer(lv_point_t *p)
 {
@@ -122,7 +165,17 @@ lv_obj_t *ui_popup_open(const lv_point_t *at, int w)
     lv_obj_add_flag(panel, LV_OBJ_FLAG_CLICKABLE);      /* clicks on it are not "outside" */
     if (at) lv_obj_set_pos(panel, at->x, at->y);
     else lv_obj_center(panel);
+    g_popup_group = lv_group_create();
+    focus_sync();
     return panel;
+}
+
+void ui_popup_focus(lv_obj_t *cont, lv_obj_t *first)
+{
+    if (!g_popup_group) return;
+    ui_gridnav(cont, LV_GRIDNAV_CTRL_ROLLOVER);
+    lv_group_add_obj(g_popup_group, cont);
+    if (first) ui_gridnav_focus(cont, first);
 }
 
 void ui_popup_place(const lv_point_t *at)
@@ -147,6 +200,10 @@ void ui_popup_close(void)
     if (!g_popup) return;
     lv_obj_delete_async(g_popup);
     g_popup = NULL;
+    g_help = 0;
+    lv_group_delete(g_popup_group);
+    g_popup_group = NULL;
+    focus_sync();
 }
 
 int ui_popup_is_open(void) { return g_popup != NULL; }
@@ -225,6 +282,7 @@ void ui_confirm(const char *text, const char *yes, void (*on_yes)(void *), void 
     lv_obj_set_width(l, LV_PCT(100));
     lv_obj_t *row = lv_obj_create(panel);
     ui_plain(row);
+    ui_ring_room(row);                  /* the focus ring */
     lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_layout(row, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
@@ -236,6 +294,73 @@ void ui_confirm(const char *text, const char *yes, void (*on_yes)(void *), void 
     ui_btn_accent(ok);
     lv_obj_set_user_data(ok, (void *)1);
     lv_obj_add_event_cb(ok, confirm_cb, LV_EVENT_CLICKED, c);
+    /* Enter right away keeps things as they are: a removal or a discard
+     * takes a deliberate move to its button. */
+    ui_popup_focus(row, no);
+    ui_popup_place(NULL);
+}
+
+/* ---- help ------------------------------------------------------------------------------- */
+
+static const char *const k_help[][2] = {
+    { NULL, "Live view" },
+    { "Arrows", "Select a camera" },
+    { "Enter", "Selected camera full screen, and back" },
+    { "1   4", "Single view, 2x2 view" },
+    { "PgUp PgDn   [ ]", "Previous, next page" },
+    { "M   F2", "Main menu" },
+    { "Menu   Shift+F10", "Context menu" },
+    { NULL, "Everywhere" },
+    { "Tab   Shift+Tab", "Next, previous item" },
+    { "Arrows", "Move; change a list or a number" },
+    { "Enter   Space", "Activate; turn a switch on or off" },
+    { "Enter in a text field", "Next field" },
+    { "Ctrl+S", "Save the page" },
+    { "Esc", "Back, close (asks before losing changes)" },
+    { "F1   ?", "This help" },
+};
+
+static void help_close_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_popup_close();
+}
+
+void ui_help_toggle(void)
+{
+    if (g_help) {
+        ui_popup_close();
+        return;
+    }
+    lv_obj_t *panel = ui_popup_open(NULL, 620);
+    g_help = 1;
+    lv_obj_set_style_pad_all(panel, VG_SPACE_XL, 0);
+    lv_obj_set_style_border_color(panel, UI_C(ACCENT), 0);
+    ui_label(panel, LV_SYMBOL_KEYBOARD "  Keyboard shortcuts", VG_FONT_LG_LV, UI_C(TEXT));
+    for (size_t i = 0; i < sizeof k_help / sizeof k_help[0]; ++i) {
+        if (!k_help[i][0]) {
+            lv_obj_t *h = ui_label(panel, k_help[i][1], VG_FONT_SM_LV, UI_C(ACCENT));
+            lv_obj_set_style_pad_top(h, VG_SPACE_SM, 0);
+            continue;
+        }
+        lv_obj_t *r = lv_obj_create(panel);
+        ui_plain(r);
+        ui_inert(r);
+        lv_obj_set_size(r, LV_PCT(100), LV_SIZE_CONTENT);
+        lv_obj_t *k = ui_label(r, k_help[i][0], VG_FONT_MD_LV, UI_C(TEXT));
+        lv_obj_set_width(k, 220);
+        lv_obj_t *v = ui_label(r, k_help[i][1], VG_FONT_MD_LV, UI_C(TEXT2));
+        lv_obj_set_pos(v, 230, 0);
+    }
+    lv_obj_t *row = lv_obj_create(panel);
+    ui_plain(row);
+    ui_ring_room(row);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_top(row, VG_SPACE_MD, 0);
+    lv_obj_t *close = ui_btn(row, NULL, "Close");
+    lv_obj_align(close, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_add_event_cb(close, help_close_cb, LV_EVENT_CLICKED, NULL);
+    ui_popup_focus(row, close);
     ui_popup_place(NULL);
 }
 
@@ -253,6 +378,7 @@ static void page_deleted_cb(lv_event_t *e)
 {
     ui_page_t *p = lv_event_get_user_data(e);
     if (p->on_close) p->on_close(p);
+    lv_group_delete(p->group);
     free(p);
 }
 
@@ -262,6 +388,7 @@ ui_page_t *ui_page_push(const char *title)
     ui_page_t *p = calloc(1, sizeof *p);
     if (!p) return NULL;
     ui_popup_close();
+    p->group = lv_group_create();
     p->scr = lv_obj_create(NULL);
     ui_plain(p->scr);
     lv_obj_add_style(p->scr, &ui_st_screen, 0);
@@ -283,10 +410,14 @@ ui_page_t *ui_page_push(const char *title)
 
     lv_obj_t *back = ui_btn(p->header, LV_SYMBOL_LEFT, "Back");
     lv_obj_add_event_cb(back, back_btn_cb, LV_EVENT_CLICKED, NULL);
+    /* First in the order: what a mouse user's page has focused (shown as
+     * nothing), and Shift+Tab from the first field. */
+    lv_group_add_obj(p->group, back);
     p->title = ui_label(p->header, title, VG_FONT_LG_LV, UI_C(TEXT));
     lv_obj_set_flex_grow(p->title, 1);
     p->actions = lv_obj_create(p->header);
     ui_plain(p->actions);
+    ui_ring_room(p->actions);            /* the focus ring */
     lv_obj_set_size(p->actions, LV_SIZE_CONTENT, LV_PCT(100));
     lv_obj_set_layout(p->actions, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(p->actions, LV_FLEX_FLOW_ROW);
@@ -311,7 +442,15 @@ ui_page_t *ui_page_push(const char *title)
 
     g_stack[g_depth++] = p;
     lv_screen_load(p->scr);
+    focus_sync();
     return p;
+}
+
+void ui_page_ready(ui_page_t *p)
+{
+    uint32_t n = lv_obj_get_child_count(p->actions);
+    for (uint32_t i = 0; i < n; ++i) lv_group_add_obj(p->group, lv_obj_get_child(p->actions, (int32_t)i));
+    if (g_kbd_used) lv_group_focus_next(p->group);      /* from Back to the first */
 }
 
 void ui_page_close(ui_page_t *p)
@@ -320,6 +459,7 @@ void ui_page_close(ui_page_t *p)
     ui_popup_close();
     --g_depth;
     lv_screen_load(g_depth ? g_stack[g_depth - 1]->scr : g_live);
+    focus_sync();
     /* Async: this usually runs inside an event of one of its widgets. */
     lv_obj_delete_async(p->scr);
 }
@@ -343,6 +483,94 @@ void ui_app_back(void)
         ui_live_context_menu(NULL);
 }
 
+/* ---- keyboard ------------------------------------------------------------------------- */
+
+static void help_async(void *u)
+{
+    (void)u;
+    ui_help_toggle();
+}
+
+static void save_async(void *u)
+{
+    (void)u;
+    ui_page_t *p = ui_page_top();
+    if (p && p->save && !g_popup) lv_obj_send_event(p->save, LV_EVENT_CLICKED, NULL);
+}
+
+/* Esc: back, as the right button, but on the live view it only closes
+ * (a menu that opens on Esc would be a surprise). */
+static void esc_async(void *u)
+{
+    (void)u;
+    if (g_popup || ui_page_top()) ui_app_back();
+    else ui_live_key(LV_KEY_ESC, 0);
+}
+
+static int is_type(lv_obj_t *o, const lv_obj_class_t *c) { return o && lv_obj_check_type(o, c); }
+
+uint32_t ui_app_key(uint32_t key, unsigned mods)
+{
+    if (!g_kbd_used) {
+        g_kbd_used = 1;
+        ui_theme_focus_visible(1);
+    }
+    lv_group_t *grp = focus_group();
+    lv_obj_t *foc = grp ? lv_group_get_focused(grp) : NULL;
+    int typing = is_type(foc, &lv_textarea_class);
+    int dd = is_type(foc, &lv_dropdown_class), dd_open = dd && lv_dropdown_is_open(foc);
+    int up = key == LV_KEY_UP || key == LV_KEY_LEFT;
+
+    if (key == UI_KEY_F(1) || (key == '?' && !typing && !(mods & (UI_MOD_CTRL | UI_MOD_ALT)))) {
+        lv_async_call(help_async, NULL);
+        return 0;
+    }
+    if (mods & (UI_MOD_CTRL | UI_MOD_ALT)) {
+        if (mods == UI_MOD_CTRL && key == 's') lv_async_call(save_async, NULL);
+        return 0;
+    }
+    if (key == UI_KEY_F(10) && (mods & UI_MOD_SHIFT)) key = UI_KEY_MENU;
+    if (key == LV_KEY_ESC) {
+        if (dd_open) return key;                /* the list closes */
+        lv_async_call(esc_async, NULL);
+        return 0;
+    }
+    if (!g_popup && !ui_page_top()) {
+        if (ui_live_key(key, mods)) return 0;
+        return key >= UI_KEY_BASE ? 0 : key;
+    }
+    if (key >= UI_KEY_BASE) return 0;
+    if (key == ' ' && !typing) return LV_KEY_ENTER;
+    if (dd && !dd_open && (key == LV_KEY_UP || key == LV_KEY_DOWN || key == LV_KEY_LEFT || key == LV_KEY_RIGHT)) {
+        /* A closed list changes in place, as a <select> does. */
+        uint32_t sel = lv_dropdown_get_selected(foc), n = lv_dropdown_get_option_count(foc);
+        if (up ? sel > 0 : sel + 1 < n) {
+            lv_dropdown_set_selected(foc, up ? sel - 1 : sel + 1);
+            lv_obj_send_event(foc, LV_EVENT_VALUE_CHANGED, NULL);
+        }
+        return 0;
+    }
+    if (key == LV_KEY_UP || key == LV_KEY_DOWN) {
+        if (!foc || dd_open || lv_obj_has_flag(foc, UI_FLAG_ARROWS)) return key;
+        if (up) lv_group_focus_prev(grp);
+        else lv_group_focus_next(grp);
+        return 0;
+    }
+    if ((key == LV_KEY_LEFT || key == LV_KEY_RIGHT) && is_type(foc, &lv_button_class)) {
+        if (up) lv_group_focus_prev(grp);
+        else lv_group_focus_next(grp);
+        return 0;
+    }
+    return key;
+}
+
+void ui_app_keyboards(int n)
+{
+    if (n) return;
+    g_kbd_used = 0;
+    ui_theme_focus_visible(0);
+}
+
 void ui_app_create(const ui_model_t *m)
 {
     g_model = m;
@@ -355,6 +583,7 @@ void ui_app_create(const ui_model_t *m)
     ui_theme_init(lv_display_get_default());
     g_live = ui_live_create();
     lv_screen_load(g_live);
+    focus_sync();
     ui_app_refresh();
     lv_timer_create(refresh_cb, REFRESH_MS, NULL);
 }

@@ -16,6 +16,7 @@
 #define VG_COLOR_TEXT                0xE8EAED
 #define VG_COLOR_TEXT2               0x9AA3AF
 #define VG_COLOR_CHIP                0x0B0D11
+#define VG_COLOR_FOCUS               0xFFFFFF
 
 #define VG_SPACE_XS                  4
 #define VG_SPACE_SM                  8
@@ -38,6 +39,8 @@
 
 #define VG_SIZE_NAVBAR               64
 #define VG_SIZE_ICON_DOT             10
+#define VG_SIZE_FOCUS_RING           3
+#define VG_SIZE_FOCUS_GAP            2
 #define VG_SIZE_PAGE_HEADER          56
 #define VG_SIZE_BUTTON               40
 #define VG_SIZE_CURSOR               19

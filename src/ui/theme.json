@@ -12,11 +12,12 @@
     "warn":   "#FF9900",
     "text":   "#E8EAED",
     "text2":  "#9AA3AF",
-    "chip":   "#0B0D11"
+    "chip":   "#0B0D11",
+    "focus":  "#FFFFFF"
   },
   "space": { "xs": 4, "sm": 8, "md": 12, "lg": 16, "xl": 24 },
   "radius": { "sm": 4, "md": 8, "lg": 12 },
   "font": { "sm": 14, "md": 16, "lg": 20, "xl": 24 },
-  "size": { "navbar": 64, "icon_dot": 10, "page_header": 56, "button": 40, "cursor": 19 },
+  "size": { "navbar": 64, "icon_dot": 10, "focus_ring": 3, "focus_gap": 2, "page_header": 56, "button": 40, "cursor": 19 },
   "duration": { "fast": 150, "normal": 250, "navbar_hide": 3000, "toast": 2500, "double_click": 400, "flash": 3000 }
 }

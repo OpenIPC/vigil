@@ -21,11 +21,27 @@ extern lv_style_t ui_st_btn_pressed;
 extern lv_style_t ui_st_btn_checked;
 extern lv_style_t ui_st_btn_disabled;
 extern lv_style_t ui_st_chip;       /* small opaque label background on video */
+/* Keyboard focus, for LV_STATE_FOCUSED: a ring around the widget
+ * (outline), or inside its edge (border) where the outside belongs to a
+ * neighbour (video tiles, list rows). Both draw nothing until
+ * ui_theme_focus_visible(1): a mouse user sees no focus. */
+extern lv_style_t ui_st_focus;
+extern lv_style_t ui_st_focus_in;
 
 /* Once, after the display exists: the tokens' styles and LVGL's default
  * theme (used by the stock widgets: switch, dropdown, keyboard...) in the
  * same colours. */
 void ui_theme_init(lv_display_t *disp);
+
+/* Show (a keyboard is in use) or hide the focus styles. */
+void ui_theme_focus_visible(int on);
+/* Add ui_st_focus to a stock widget (text area, switch, drop-down). */
+void ui_focus_style(lv_obj_t *o);
+
+/* Let the focus ring of `o`'s children show outside `o` (a tight row of
+ * buttons, a field's box): overflow visible, and room for it in what LVGL
+ * redraws when one of them changes. */
+void ui_ring_room(lv_obj_t *o);
 
 /* No padding, border, radius, background or scrolling. */
 void ui_plain(lv_obj_t *o);

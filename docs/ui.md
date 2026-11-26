@@ -2,7 +2,8 @@
 
 `vigild` draws its user interface on the board's HDMI output with
 [LVGL](https://lvgl.io) (v9.2), on the graphics layer above the video. It
-is operated with a USB mouse (or a touch screen). This page describes how
+is operated with a USB mouse (or a touch screen), a USB keyboard, or both.
+This page describes how
 the UI is built, how it gets its data, how the settings pages come from the
 configuration schema, and how to run and test it without a board.
 
@@ -72,9 +73,9 @@ four pages). On a platform whose tiles are fixed (`fixed_tiles`, the
 hi3520dv200 capture pipeline), only the 2x2 view is offered.
 
 **Main menu and pages.** Every page has a header with Back, its title,
-its actions (Save, Cancel, Add) and the clock. Back is the header button or
-the **right mouse button**, which goes back one level (closing the
-keyboard or a question first).
+its actions (Save, Cancel, Add) and the clock. Back is the header button,
+the **right mouse button** or **Esc**, which go back one level (closing the
+on-screen keyboard or a question first).
 
 ![Main menu](../tests/ui/menu.png)
 
@@ -138,7 +139,7 @@ time:
 
 | Schema type | Widget |
 |---|---|
-| string | one-line text area; the on-screen keyboard opens on it |
+| string | one-line text area; the on-screen keyboard opens on it (not once a keyboard is in use) |
 | integer | text area for digits with `-` / `+` buttons kept within min..max; the range is shown |
 | boolean | switch |
 | enum | drop-down list of the values |
@@ -186,9 +187,9 @@ gets its own tile in the main menu (give it a symbol in
 
 The look is defined once, in `src/ui/theme.json`: colours of the dark NVR
 theme (`bg`, `panel`, `panel2`, `hover`, `line`, `accent`, `ok`, `bad`,
-`warn`, `text`, `text2`, `chip`), spacing, radii, font sizes, component
-sizes and durations (navigation bar hide delay, double-click interval,
-toast). `scripts/gen-theme.py` (Python 3, standard library) generates
+`warn`, `text`, `text2`, `chip`, `focus`), spacing, radii, font sizes, component
+sizes (including the keyboard focus ring, `focus_ring` and `focus_gap`)
+and durations (navigation bar hide delay, double-click interval, toast). `scripts/gen-theme.py` (Python 3, standard library) generates
 
 - `src/ui/theme_tokens.h`: `VG_COLOR_ACCENT`, `VG_SPACE_MD`,
   `VG_FONT_LG_LV` (the LVGL font), `VG_DURATION_NAVBAR_HIDE`, ...; and
@@ -206,34 +207,103 @@ is a blend with the key colour and shows as a pink fringe.
 
 ## Input
 
-`src/app/input_evdev.c` reads every `/dev/input/event*` that is a pointer:
-a mouse (relative X/Y and a left button) or a touch screen or tablet
-(absolute X/Y). All of them move one LVGL pointer. The directory is scanned
-again every 2 s, so a mouse plugged in later works (the boards have no
-udev). The left button clicks; the **right button** calls `ui_app_back`.
+`src/app/input_evdev.c` reads every `/dev/input/event*` that is a pointer
+or a keyboard. A mouse (relative X/Y and a left button) or a touch screen
+or tablet (absolute X/Y) moves the one LVGL pointer; a keyboard (a device
+with letter keys and Enter) types into the one LVGL keypad. Several of
+each work at once. The directory is scanned again every 2 s, so a mouse or
+a keyboard plugged in later works (the boards have no udev). The left
+button clicks; the **right button** calls `ui_app_back`.
 
 LVGL's own evdev driver (`LV_USE_EVDEV`) is not used: it opens one device
-and reports only `BTN_MOUSE`/`BTN_TOUCH`, so the right button would be
-lost. Button changes are queued, so a click shorter than LVGL's input poll
-(33 ms) still counts. The reader is in `src/app` rather than `src/core`
-(it needs Linux headers, which the core must not depend on) or `src/ui`
-(LVGL only); it is plain Linux, so every platform with a display uses it.
+and reports only `BTN_MOUSE`/`BTN_TOUCH`, so the right button and the keys
+would be lost. Button changes are queued, so a click shorter than LVGL's
+input poll (33 ms) still counts. The reader is in `src/app` rather than
+`src/core` (it needs Linux headers, which the core must not depend on) or
+`src/ui` (LVGL only); it is plain Linux, so every platform with a display
+uses it.
 
 The pointer is drawn by LVGL (`ui_cursor.c`, an arrow with only opaque and
-fully transparent pixels), shown while a pointer device is present. A
-physical keyboard and remote controls (LVGL `gridnav`) are not handled yet.
+fully transparent pixels), shown while a pointer device is present.
+
+### Keyboard
+
+**Layout.** Keys are translated in the reader with a US layout: Shift,
+Caps Lock (letters only) and Num Lock (on at start: the keypad types
+digits; off, its keys are arrows, Home, End, Page Up/Down and Delete), and
+the keyboards' Caps Lock and Num Lock lights follow. There is no XKB: a
+keyboard with another layout types the US characters of its keys.
+Autorepeat is the kernel's (the repeats it reports for a key held down).
+Each key reaches LVGL as a press and a release, so a held key never blocks
+another keyboard; unplugging a keyboard drops its held Shift or Ctrl.
+
+**Focus.** Every screen and popup has an `lv_group`: the live view (the
+tile grid, then the navigation bar), each page (Back, the page's content
+in reading order, then its actions such as Cancel and Save), the context
+menu, a question, the help. Grids and lists are LVGL `gridnav`
+containers: the arrows move between the tiles of the live view and of the
+main menu, the rows of the camera list and the items of a menu. Tab and
+Shift+Tab go through everything; Enter activates. The focused item has a
+white ring (`focus` token): around a button or a field, and inside the
+edge of a video tile or a list row, drawn on the UI layer over the
+outermost pixels of the video rather than filling the hole.
+
+![Keyboard focus on a tile](../tests/ui/focus.png)
+
+**Mouse and keyboard together.** The focus is shown from the first key
+until the last keyboard is unplugged; a mouse-only user never sees it.
+The mouse's hover highlight and the keyboard's ring are separate states
+and can be on two different things; clicking a tile or a field also moves
+the keyboard's focus there, so Enter after a click means what was clicked.
+The pointer stays as it is. Once the keyboard is in use, a text field no
+longer opens the on-screen keyboard: type into it.
+
+**Shortcuts** (F1 or `?` shows them on the screen):
+
+| Where | Key | Does |
+|---|---|---|
+| live view | arrows | select a camera |
+| | Enter | the selected camera full screen; again: back to the layout before |
+| | `1`, `4` (`9` where offered) | single view of the selected camera, 2x2 (3x3) around it |
+| | PgUp / PgDn, `[` / `]` | previous / next page |
+| | `M`, F2 | main menu |
+| | Menu key, Shift+F10 | context menu of the selected camera |
+| | Tab | to the navigation bar (it comes up while it has the focus) |
+| | Esc | close a menu or popup; from the navigation bar back to the tiles |
+| everywhere | Tab / Shift+Tab | next / previous item |
+| | arrows | move between items (in a text field Left/Right move the cursor) |
+| | Enter, Space | activate a button, turn a switch on or off |
+| | Esc | back, as the right button; closes a popup first |
+| | F1, `?` | help |
+| forms | typing | goes into the focused text field |
+| | Enter in a text field | next field (after the last: Save) |
+| | Up / Down on a number | +1 / -1 |
+| | arrows on a drop-down | previous / next value; Enter opens the list |
+| | Ctrl+S | Save |
+| | Esc with unsaved changes | asks first (Cancel is focused: Enter keeps the page) |
+| camera list | Enter | edit the row |
+| | Delete | remove the row (asks first) |
+
+![Keyboard shortcuts](../tests/ui/help.png)
 
 ## Running and testing without a board
 
 `test_ui` (built in every host build, run by `ctest`) is the UI without
-hardware: LVGL renders into memory, a pipe stands in for the mouse and goes
-through the real evdev reader, settings go through the real configuration
+hardware: LVGL renders into memory, pipes stand in for the mouse and the
+keyboards and go through the real evdev reader, settings go through the real configuration
 store (a file in the build directory), and only the channels, events and
 clock are fakes. It walks through the screens with the mouse, checks the
 widget states (tile texts, the navigation bar showing and hiding, the
 context menu, full screen and back with the rectangles handed to the
 platform, a validation error with nothing saved, a change saved and in
 force, the camera password kept) and writes a screenshot of each step.
+Then it does it again with the keyboard: moving the selection over the
+tiles, full screen with Enter, `1`, `4`, the pages, the navigation bar and
+the context menu, the help, the main menu by the arrows, typing into a
+field (with a held key's repeats, Shift and Caps Lock), Enter to the next
+field, a number stepped by the arrows, Ctrl+S saved and in force, Esc
+asking before it discards, the camera list's rows, a switch, a drop-down,
+and a keyboard unplugged with Shift held.
 
 `tests/ui_compare.py` compares those with the references in `tests/ui/*.png`
 (a pixel differs when a channel is off by more than 24; at most 0.3 % may
@@ -250,5 +320,6 @@ is needed, so this runs in CI. There is no interactive desktop simulator
 yet: an LVGL SDL window (`hal_ui` for the generic platform) is the
 natural next step.
 
-On a board, `vigild` logs each pointer device it finds
-(`input: <device> (<name>): mouse`) and when one goes away.
+On a board, `vigild` logs each input device it finds
+(`input: <device> (<name>): mouse`, `... keyboard`) and when one goes
+away.

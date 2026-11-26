@@ -14,6 +14,7 @@
   --vg-color-text: #e8eaed;
   --vg-color-text2: #9aa3af;
   --vg-color-chip: #0b0d11;
+  --vg-color-focus: #ffffff;
   --vg-space-xs: 4px;
   --vg-space-sm: 8px;
   --vg-space-md: 12px;
@@ -28,6 +29,8 @@
   --vg-font-xl: 24px;
   --vg-size-navbar: 64px;
   --vg-size-icon-dot: 10px;
+  --vg-size-focus-ring: 3px;
+  --vg-size-focus-gap: 2px;
   --vg-size-page-header: 56px;
   --vg-size-button: 40px;
   --vg-size-cursor: 19px;

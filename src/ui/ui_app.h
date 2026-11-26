@@ -8,8 +8,11 @@
  *        -> settings: one page per schema section (ui_form.c), the
  *           camera list and a camera's form; system (ui_system.c)
  *
- * Back is the header's back button or the right mouse button; on the live
- * view the right button opens the context menu. State comes from the
+ * Back is the header's back button, the right mouse button or Esc; on the
+ * live view the right button opens the context menu. Every screen and
+ * popup has an lv_group for the keyboard (LVGL keypad): Tab and the arrows
+ * move the focus (lv_gridnav in grids and menus), Enter activates, and the
+ * shortcuts are in ui_app_key (docs/ui.md lists them). State comes from the
  * model (ui_model.h): channel snapshots, events and the configuration
  * generation are polled on a timer and published as lv_subjects that the
  * widgets observe. LVGL thread (the main thread) only.
@@ -18,6 +21,7 @@
 #define UI_APP_H
 
 #include "lvgl.h"
+#include "ui_keys.h"
 #include "ui_model.h"
 
 /* ---- for the app --------------------------------------------------------------- */
@@ -33,6 +37,22 @@ void ui_app_back(void);
 /* The pointer device (for the navigation bar's bottom edge and where the
  * context menu opens); NULL: none. */
 void ui_app_set_pointer(lv_indev_t *indev);
+
+/* The keypad (keyboards); NULL: none. */
+void ui_app_set_keypad(lv_indev_t *indev);
+
+/* A key from the keyboard (ui_keys.h): a shortcut is started (after the
+ * current input processing) and 0 returned, else the key LVGL's keypad
+ * gets. The first key shows the focus and stops the on-screen keyboard
+ * opening on text fields. */
+uint32_t ui_app_key(uint32_t key, unsigned mods);
+
+/* `n` keyboards are plugged in; with none, the UI is for the mouse again
+ * (no focus shown, the on-screen keyboard back). */
+void ui_app_keyboards(int n);
+
+/* A keyboard has been used (and is still plugged in). */
+int ui_keyboard_in_use(void);
 
 /* Poll the model now instead of at the next refresh tick (tests). */
 void ui_app_refresh(void);
@@ -56,6 +76,8 @@ extern lv_subject_t ui_subj_nav_pinned;
 typedef struct ui_page ui_page_t;
 struct ui_page {
     lv_obj_t *scr;
+    lv_group_t *group;              /* the keyboard's focus order: Back, the body, actions */
+    lv_obj_t *save;                 /* Ctrl+S clicks it (NULL: none) */
     lv_obj_t *header;
     lv_obj_t *title;
     lv_obj_t *actions;              /* header, right: add buttons here */
@@ -68,6 +90,10 @@ struct ui_page {
 };
 
 ui_page_t *ui_page_push(const char *title);
+/* The page is built: its actions join the focus order after the body
+ * (whose widgets the builder added to p->group), and with a keyboard in
+ * use the focus starts on the first of them. */
+void ui_page_ready(ui_page_t *p);
 /* Close the top page (it must be `p`) and show the one below. */
 void ui_page_close(ui_page_t *p);
 ui_page_t *ui_page_top(void);       /* NULL on the live view */
@@ -85,12 +111,34 @@ lv_obj_t *ui_popup_open(const lv_point_t *at, int w);
 void      ui_popup_place(const lv_point_t *at);    /* after it is filled */
 void      ui_popup_close(void);
 int       ui_popup_is_open(void);
+/* The keyboard moves among `cont`'s clickable children with the arrows
+ * (lv_gridnav), starting at `first` (NULL: the first). */
+void      ui_popup_focus(lv_obj_t *cont, lv_obj_t *first);
+/* The keyboard shortcuts (F1 or ?); open again: closed. */
+void      ui_help_toggle(void);
+
+/* Arrow keys go to this object (a gridnav container, a number field)
+ * rather than moving the focus. */
+#define UI_FLAG_ARROWS LV_OBJ_FLAG_USER_1
+/* Make `o` a gridnav container that takes the arrows, its clickable
+ * children the items. */
+void      ui_gridnav(lv_obj_t *o, lv_gridnav_ctrl_t ctrl);
+/* Make `item` the gridnav container `cont`'s current item (marked
+ * focused only while `cont` has the focus). */
+void      ui_gridnav_focus(lv_obj_t *cont, lv_obj_t *item);
+/* Not clickable, so not an item of a gridnav container (separators,
+ * plain rows). */
+void      ui_inert(lv_obj_t *o);
 
 /* The pointer's position, or 0 when there is no pointer. */
 int ui_pointer(lv_point_t *p);
 
 /* Screens. */
 lv_obj_t *ui_live_create(void);
+lv_group_t *ui_live_group(void);
+/* A key on the live view with nothing over it: 1 when it was a shortcut
+ * (started after the current input processing). */
+int       ui_live_key(uint32_t key, unsigned mods);
 void      ui_live_context_menu(const lv_point_t *at);
 void      ui_live_event(const ui_event_t *ev);
 void      ui_menu_open(void);

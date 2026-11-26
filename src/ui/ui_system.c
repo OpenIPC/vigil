@@ -70,4 +70,5 @@ void ui_system_open(void)
     }
     s->n = n;
     lv_obj_set_user_data(p->body, lv_timer_create(sys_tick_cb, 1000, s));
+    ui_page_ready(p);
 }

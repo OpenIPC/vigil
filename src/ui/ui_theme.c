@@ -5,16 +5,52 @@
 #include "ui_theme.h"
 
 lv_style_t ui_st_screen, ui_st_panel, ui_st_btn, ui_st_btn_hover, ui_st_btn_pressed,
-    ui_st_btn_checked, ui_st_btn_disabled, ui_st_chip;
+    ui_st_btn_checked, ui_st_btn_disabled, ui_st_chip, ui_st_focus, ui_st_focus_in;
 static lv_style_t st_accent, st_accent_hover;
 
-static int g_init;
+static int g_init, g_focus_visible;
+
+void ui_theme_focus_visible(int on)
+{
+    on = !!on;
+    if (g_init && on == g_focus_visible) return;
+    g_focus_visible = on;
+    lv_style_reset(&ui_st_focus);
+    lv_style_reset(&ui_st_focus_in);
+    if (on) {
+        /* Opaque: over video a blended pixel is a fringe in the key colour. */
+        lv_style_set_outline_color(&ui_st_focus, UI_C(FOCUS));
+        lv_style_set_outline_opa(&ui_st_focus, LV_OPA_COVER);
+        lv_style_set_outline_width(&ui_st_focus, VG_SIZE_FOCUS_RING);
+        lv_style_set_outline_pad(&ui_st_focus, VG_SIZE_FOCUS_GAP);
+        lv_style_set_border_color(&ui_st_focus_in, UI_C(FOCUS));
+        lv_style_set_border_opa(&ui_st_focus_in, LV_OPA_COVER);
+        lv_style_set_border_width(&ui_st_focus_in, VG_SIZE_FOCUS_RING);
+        lv_style_set_border_side(&ui_st_focus_in, LV_BORDER_SIDE_FULL);
+    } else {
+        /* LVGL's own theme marks a focused widget too: nothing, as here. */
+        lv_style_set_outline_width(&ui_st_focus, 0);
+    }
+    if (g_init) {
+        lv_obj_report_style_change(&ui_st_focus);
+        lv_obj_report_style_change(&ui_st_focus_in);
+    }
+}
+
+void ui_focus_style(lv_obj_t *o)
+{
+    lv_obj_add_style(o, &ui_st_focus, LV_STATE_FOCUSED);
+    lv_obj_add_style(o, &ui_st_focus, LV_STATE_FOCUS_KEY);
+}
 
 void ui_theme_init(lv_display_t *disp)
 {
     lv_theme_t *th = lv_theme_default_init(disp, UI_C(ACCENT), UI_C(OK), 1, VG_FONT_MD_LV);
     lv_display_set_theme(disp, th);
     if (g_init) return;
+    lv_style_init(&ui_st_focus);
+    lv_style_init(&ui_st_focus_in);
+    ui_theme_focus_visible(0);
     g_init = 1;
 
     lv_style_init(&ui_st_screen);
@@ -82,6 +118,18 @@ void ui_theme_init(lv_display_t *disp)
     lv_style_set_text_font(&ui_st_chip, VG_FONT_SM_LV);
 }
 
+static void ring_room_cb(lv_event_t *e)
+{
+    lv_event_set_ext_draw_size(e, VG_SIZE_FOCUS_RING + VG_SIZE_FOCUS_GAP);
+}
+
+void ui_ring_room(lv_obj_t *o)
+{
+    lv_obj_add_flag(o, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    lv_obj_add_event_cb(o, ring_room_cb, LV_EVENT_REFR_EXT_DRAW_SIZE, NULL);
+    lv_obj_refresh_ext_draw_size(o);
+}
+
 void ui_plain(lv_obj_t *o)
 {
     lv_obj_remove_style_all(o);
@@ -97,6 +145,7 @@ lv_obj_t *ui_btn(lv_obj_t *parent, const char *symbol, const char *text)
     lv_obj_add_style(b, &ui_st_btn_checked, LV_STATE_CHECKED);
     lv_obj_add_style(b, &ui_st_btn_pressed, LV_STATE_PRESSED);
     lv_obj_add_style(b, &ui_st_btn_disabled, LV_STATE_DISABLED);
+    lv_obj_add_style(b, &ui_st_focus, LV_STATE_FOCUSED);
     lv_obj_set_size(b, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_layout(b, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(b, LV_FLEX_FLOW_ROW);

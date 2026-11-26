@@ -5,10 +5,16 @@
  * array section (a camera); the list page shows an array section's items
  * with Add, Edit and Remove. Widgets follow the field's kind:
  *
- *   string  text area; the on-screen keyboard opens on it
- *   integer text area for digits with - and + (kept within min..max)
+ *   string  text area; the on-screen keyboard opens on it, unless a
+ *           keyboard is in use
+ *   integer text area for digits with - and + (kept within min..max);
+ *           Up and Down step it
  *   boolean switch
  *   enum    drop-down list of the values
+ *
+ * The page's focus order is Back, the fields, Cancel and Save; Enter in a
+ * text field goes to the next field (from the last one, to Save), and
+ * Ctrl+S saves (ui_page_t.save).
  *
  * with the schema's label and help, and "applies after restart" for fields
  * that are not live. Save sends the whole section to model->save, the path
@@ -166,12 +172,33 @@ static void kb_show(form_t *f, lv_obj_t *ta, int numeric)
     lv_obj_scroll_to_view_recursive(ta, LV_ANIM_OFF);
 }
 
-static void ta_focus_cb(lv_event_t *e)
+/* Clicked (or Enter): the on-screen keyboard, for a mouse user. Someone
+ * with a keyboard types into the field directly. */
+static void ta_click_cb(lv_event_t *e)
 {
     form_t *f = lv_event_get_user_data(e);
     lv_obj_t *ta = lv_event_get_target(e);
     int i = (int)(intptr_t)lv_obj_get_user_data(ta);
+    if (ui_keyboard_in_use()) return;
     kb_show(f, ta, section(f->sec)->fields[i].kind == UI_FIELD_INT);
+}
+
+/* Enter in a text field: the next field, or Save after the last. */
+static void ta_ready_cb(lv_event_t *e)
+{
+    form_t *f = lv_event_get_user_data(e);
+    lv_indev_t *in = lv_indev_active();
+    if (!in || lv_indev_get_type(in) != LV_INDEV_TYPE_KEYPAD) return;   /* the on-screen keyboard's OK */
+    int i = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    lv_obj_t *next = f->page->save;
+    for (int k = i + 1; k < f->n_fields; ++k)
+        if (f->w[k]) {
+            next = f->w[k];
+            break;
+        }
+    /* The Enter's release must not click what gets the focus now. */
+    lv_indev_wait_release(in);
+    lv_group_focus_obj(next);
 }
 
 static void kb_cb(lv_event_t *e)
@@ -179,12 +206,8 @@ static void kb_cb(lv_event_t *e)
     kb_hide(lv_event_get_user_data(e));
 }
 
-static void int_step_cb(lv_event_t *e)
+static void int_step(form_t *f, int i, int up)
 {
-    form_t *f = lv_event_get_user_data(e);
-    lv_obj_t *b = lv_event_get_target(e);
-    int code = (int)(intptr_t)lv_obj_get_user_data(b);     /* field * 2 + (1 for +) */
-    int i = code / 2, up = code & 1;
     const ui_field_t *fd = &section(f->sec)->fields[i];
     long v = strtol(lv_textarea_get_text(f->w[i]), NULL, 10) + (up ? 1 : -1);
     if (v < fd->min) v = fd->min;
@@ -192,6 +215,23 @@ static void int_step_cb(lv_event_t *e)
     char buf[16];
     snprintf(buf, sizeof buf, "%ld", v);
     lv_textarea_set_text(f->w[i], buf);
+}
+
+static void int_step_cb(lv_event_t *e)
+{
+    form_t *f = lv_event_get_user_data(e);
+    int code = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));    /* field * 2 + (1 for +) */
+    int_step(f, code / 2, code & 1);
+}
+
+/* Up and Down on a number step it, before the text area moves its cursor. */
+static void int_key_cb(lv_event_t *e)
+{
+    uint32_t k = lv_event_get_key(e);
+    if (k != LV_KEY_UP && k != LV_KEY_DOWN) return;
+    form_t *f = lv_event_get_user_data(e);
+    int_step(f, (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e)), k == LV_KEY_UP);
+    lv_event_stop_processing(e);
 }
 
 static lv_obj_t *step_btn(lv_obj_t *parent, form_t *f, int i, int up)
@@ -210,8 +250,8 @@ static lv_obj_t *text_area(lv_obj_t *parent, form_t *f, int i, const char *value
     lv_textarea_set_one_line(ta, 1);
     lv_textarea_set_text(ta, value);
     lv_obj_set_user_data(ta, (void *)(intptr_t)i);
-    lv_obj_add_event_cb(ta, ta_focus_cb, LV_EVENT_FOCUSED, f);
-    lv_obj_add_event_cb(ta, ta_focus_cb, LV_EVENT_CLICKED, f);
+    lv_obj_add_event_cb(ta, ta_click_cb, LV_EVENT_CLICKED, f);
+    lv_obj_add_event_cb(ta, ta_ready_cb, LV_EVENT_READY, f);
     lv_obj_set_style_border_color(ta, UI_C(BAD), LV_PART_MAIN | LV_STATE_USER_1);
     lv_obj_set_style_border_width(ta, 2, LV_PART_MAIN | LV_STATE_USER_1);
     return ta;
@@ -229,6 +269,7 @@ static void field_row(lv_obj_t *list, form_t *f, int i)
     lv_obj_set_style_border_color(row, UI_C(LINE), 0);
     lv_obj_set_style_border_side(row, LV_BORDER_SIDE_TOP, 0);
     lv_obj_set_style_border_width(row, i ? 1 : 0, 0);
+    ui_ring_room(row);                  /* the focus ring */
     lv_obj_set_layout(row, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_column(row, VG_SPACE_XL, 0);
@@ -249,6 +290,7 @@ static void field_row(lv_obj_t *list, form_t *f, int i)
     ui_plain(right);
     lv_obj_set_height(right, LV_SIZE_CONTENT);
     lv_obj_set_flex_grow(right, 1);
+    ui_ring_room(right);
     lv_obj_set_layout(right, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(right, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(right, VG_SPACE_XS, 0);
@@ -264,6 +306,7 @@ static void field_row(lv_obj_t *list, form_t *f, int i)
         lv_obj_t *box = lv_obj_create(right);
         ui_plain(box);
         lv_obj_set_size(box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        ui_ring_room(box);
         lv_obj_set_layout(box, LV_LAYOUT_FLEX);
         lv_obj_set_flex_flow(box, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -274,6 +317,8 @@ static void field_row(lv_obj_t *list, form_t *f, int i)
         lv_textarea_set_max_length(f->w[i], 11);
         lv_obj_set_width(f->w[i], 140);
         lv_obj_set_style_text_align(f->w[i], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_add_flag(f->w[i], UI_FLAG_ARROWS);
+        lv_obj_add_event_cb(f->w[i], int_key_cb, LV_EVENT_KEY | LV_EVENT_PREPROCESS, f);
         step_btn(box, f, i, 1);
         snprintf(range, sizeof range, "%d ... %d", fd->min, fd->max);
         ui_label(box, range, VG_FONT_SM_LV, UI_C(TEXT2));
@@ -298,6 +343,8 @@ static void field_row(lv_obj_t *list, form_t *f, int i)
         break;
     }
     }
+    ui_focus_style(f->w[i]);
+    lv_group_add_obj(f->page->group, f->w[i]);
     if (fd->help && *fd->help) {
         lv_obj_t *h = ui_label(right, fd->help, VG_FONT_SM_LV, UI_C(TEXT2));
         lv_obj_set_width(h, LV_PCT(100));
@@ -518,6 +565,7 @@ void ui_form_open(int sec, int item)
     lv_obj_t *save = ui_btn(p->actions, LV_SYMBOL_SAVE, "Save");
     ui_btn_accent(save);
     lv_obj_add_event_cb(save, save_cb, LV_EVENT_CLICKED, f);
+    p->save = save;
 
     if (s->help && *s->help) {
         lv_obj_t *h = ui_label(p->body, s->help, VG_FONT_SM_LV, UI_C(TEXT2));
@@ -544,6 +592,7 @@ void ui_form_open(int sec, int item)
     lv_obj_add_flag(f->kb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(f->kb, kb_cb, LV_EVENT_READY, f);
     lv_obj_add_event_cb(f->kb, kb_cb, LV_EVENT_CANCEL, f);
+    ui_page_ready(p);
 }
 
 /* ---- the list of an array section -------------------------------------------------------------- */
@@ -567,6 +616,7 @@ static lv_obj_t *table_row(lv_obj_t *table, int header)
     ui_plain(r);
     lv_obj_set_size(r, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_style_pad_ver(r, header ? VG_SPACE_SM : VG_SPACE_MD, 0);
+    lv_obj_set_style_pad_hor(r, VG_SPACE_SM, 0);    /* room for the focus ring */
     lv_obj_set_style_pad_column(r, VG_SPACE_LG, 0);
     lv_obj_set_style_border_color(r, UI_C(LINE), 0);
     lv_obj_set_style_border_side(r, LV_BORDER_SIDE_BOTTOM, 0);
@@ -628,14 +678,25 @@ static void remove_now(void *user)
     report(rc, &errs, 0);
 }
 
-static void remove_cb(lv_event_t *e)
+static void remove_ask(list_t *l, int item)
 {
-    list_t *l = lv_event_get_user_data(e);
-    l->remove_item = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    l->remove_item = item;
     char q[160];
     snprintf(q, sizeof q, "Remove item %d from %s? It is saved at once.", l->remove_item + 1,
              section(l->sec)->label);
     ui_confirm(q, "Remove", remove_now, l);
+}
+
+static void remove_cb(lv_event_t *e)
+{
+    remove_ask(lv_event_get_user_data(e), (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e)));
+}
+
+/* A row is the keyboard's item: Enter (a click) edits, Delete removes. */
+static void row_key_cb(lv_event_t *e)
+{
+    if (lv_event_get_key(e) == LV_KEY_DEL)
+        remove_ask(lv_event_get_user_data(e), (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e)));
 }
 
 static void list_build(list_t *l)
@@ -649,6 +710,7 @@ static void list_build(list_t *l)
     else lv_obj_remove_state(l->add, LV_STATE_DISABLED);
 
     lv_obj_t *r = table_row(l->table, 1);
+    ui_inert(r);
     cell(r, NULL, "#", UI_C(TEXT2));
     for (int f = 0; f < s->n_fields; ++f) cell(r, &s->fields[f], s->fields[f].label, UI_C(TEXT2));
     lv_obj_t *pad = lv_obj_create(r);
@@ -661,8 +723,14 @@ static void list_build(list_t *l)
         lv_obj_set_style_pad_ver(e, VG_SPACE_XL, 0);
     }
     char buf[1024], idx[16];
+    lv_obj_t *first = NULL;
     for (int k = 0; k < n; ++k) {
         r = table_row(l->table, 0);
+        lv_obj_set_user_data(r, (void *)(intptr_t)k);
+        lv_obj_add_style(r, &ui_st_focus_in, LV_STATE_FOCUSED);
+        lv_obj_add_event_cb(r, edit_cb, LV_EVENT_CLICKED, l);
+        lv_obj_add_event_cb(r, row_key_cb, LV_EVENT_KEY, l);
+        if (!first) first = r;
         snprintf(idx, sizeof idx, "%d", k + 1);
         cell(r, NULL, idx, UI_C(TEXT));
         for (int f = 0; f < s->n_fields; ++f) {
@@ -682,6 +750,7 @@ static void list_build(list_t *l)
         lv_obj_set_user_data(rm, (void *)(intptr_t)k);
         lv_obj_add_event_cb(rm, remove_cb, LV_EVENT_CLICKED, l);
     }
+    if (first) ui_gridnav_focus(l->table, first);   /* not the header */
 }
 
 /* A new configuration (saved here, by the API or by a form above). */
@@ -718,5 +787,9 @@ void ui_list_open(int sec)
     lv_obj_set_size(l->table, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_layout(l->table, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(l->table, LV_FLEX_FLOW_COLUMN);
+    /* Up and Down go through the rows, and past the ends to Back and Add. */
+    ui_gridnav(l->table, LV_GRIDNAV_CTRL_NONE);
+    lv_group_add_obj(p->group, l->table);
     lv_subject_add_observer_obj(&ui_subj_config, list_config_cb, l->table, l);
+    ui_page_ready(p);
 }

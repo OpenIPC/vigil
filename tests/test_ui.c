@@ -604,7 +604,9 @@ static void test_two_mice(lv_indev_t *ptr)
     struct input_event dn = { .type = EV_KEY, .code = BTN_LEFT, .value = 1 }, up = dn,
                        syn = { .type = EV_SYN, .code = SYN_REPORT };
     up.value = 0;
-    move_to(640, 30);                           /* the header: nothing to click */
+    ui_system_open();                           /* a page with room where nothing is to click */
+    run(50);
+    move_to(640, 650);
     ev(EV_KEY, BTN_LEFT, 1);
     ev(EV_SYN, SYN_REPORT, 0);
     run(40);
@@ -622,6 +624,306 @@ static void test_two_mice(lv_indev_t *ptr)
     close(b[1]);                                /* unplugged while pressed */
     run(80);
     CHECK(lv_indev_get_state(ptr) == LV_INDEV_STATE_RELEASED, "unplugging releases");
+    button(BTN_RIGHT);
+    CHECK(!ui_page_top(), "back on the live view");
+}
+
+/* ---- the keyboard ------------------------------------------------------------------------------- */
+
+static int g_kbd[2] = { -1, -1 };       /* pipe: test -> evdev reader, as a keyboard */
+
+static void kev(int fd, int code, int value)
+{
+    struct input_event e[2] = { { .type = EV_KEY, .code = (unsigned short)code, .value = value },
+                                { .type = EV_SYN, .code = SYN_REPORT } };
+    if (write(fd, e, sizeof e) != (ssize_t)sizeof e) abort();
+}
+
+/* A key pressed and released, with a modifier held around it (0: none). */
+static void key_with(int mod, int code)
+{
+    if (mod) kev(g_kbd[1], mod, 1);
+    kev(g_kbd[1], code, 1);
+    kev(g_kbd[1], code, 0);
+    if (mod) kev(g_kbd[1], mod, 0);
+    run(100);
+}
+
+static void key(int code) { key_with(0, code); }
+
+/* Type ASCII text the way a US keyboard does. */
+static void type(const char *text)
+{
+    static const char row1[] = "qwertyuiop", row2[] = "asdfghjkl", row3[] = "zxcvbnm";
+    for (; *text; ++text) {
+        char c = *text;
+        int shift = c >= 'A' && c <= 'Z', code = 0;
+        if (shift) c = (char)(c - 'A' + 'a');
+        const char *p;
+        if ((p = strchr(row1, c)) && c) code = KEY_Q + (int)(p - row1);
+        else if ((p = strchr(row2, c)) && c) code = KEY_A + (int)(p - row2);
+        else if ((p = strchr(row3, c)) && c) code = KEY_Z + (int)(p - row3);
+        else if (c >= '1' && c <= '9') code = KEY_1 + c - '1';
+        else if (c == '0') code = KEY_0;
+        else if (c == '/') code = KEY_SLASH;
+        else if (c == '.') code = KEY_DOT;
+        else if (c == '-') code = KEY_MINUS;
+        else if (c == ' ') code = KEY_SPACE;
+        else abort();
+        key_with(shift ? KEY_LEFTSHIFT : 0, code);
+    }
+}
+
+static lv_obj_t *focused(void)
+{
+    lv_group_t *g = lv_indev_get_group(input_evdev_keypad());
+    return g ? lv_group_get_focused(g) : NULL;
+}
+
+/* The tile showing `title` (its name chip's parent). */
+static lv_obj_t *tile(const char *title)
+{
+    lv_obj_t *l = find(title, 0);
+    return l ? lv_obj_get_parent(lv_obj_get_parent(l)) : NULL;
+}
+
+static int has_focus(lv_obj_t *o) { return o && lv_obj_has_state(o, LV_STATE_FOCUSED); }
+
+static void test_keyboard_live(void)
+{
+    if (pipe(g_kbd) < 0) abort();
+    fcntl(g_kbd[0], F_SETFL, O_NONBLOCK);
+    input_evdev_attach_keyboard(g_kbd[0], "test keyboard");
+    run(VG_DURATION_TOAST);                     /* the last toast is gone */
+    click_at(300, 200);                         /* CAM1, by the mouse: selected */
+    run(VG_DURATION_DOUBLE_CLICK + 100);
+    CHECK(!ui_keyboard_in_use(), "no key yet");
+
+    key(KEY_RIGHT);
+    CHECK(ui_keyboard_in_use(), "a key: the keyboard is in use");
+    CHECK(has_focus(tile("Yard")) && !has_focus(tile("Gate")), "Right: CAM2 selected");
+    move_to(1000, 600);                         /* the mouse over CAM4 changes nothing */
+    CHECK(has_focus(tile("Yard")), "hover does not take the selection");
+    shot("focus");
+
+    key(KEY_ENTER);
+    CHECK(g_tiles[1].w == W && g_tiles[0].w == 0, "Enter: CAM2 full screen");
+    CHECK(has_focus(tile("Yard")), "still selected full screen");
+    key(KEY_ENTER);
+    CHECK(g_tiles[0].w == 640 && g_tiles[1].w == 640, "Enter again: back to 2x2");
+    key(KEY_DOWN);
+    CHECK(has_focus(tile("CAM 4")), "Down: CAM4");
+    key(KEY_1);
+    CHECK(g_tiles[3].w == W && g_tiles[0].w == 0, "1: single view of the selected CAM4");
+    key(KEY_PAGEDOWN);
+    CHECK(g_tiles[0].w == W, "PageDown: next page (wraps to CAM1)");
+    key(KEY_RIGHTBRACE);
+    CHECK(g_tiles[1].w == W, "]: next page, CAM2");
+    key(KEY_PAGEUP);
+    key(KEY_LEFTBRACE);
+    CHECK(g_tiles[3].w == W, "PageUp, [: back two pages, CAM4");
+    key(KEY_4);
+    CHECK(g_tiles[0].w == 640 && g_tiles[3].w == 640 && has_focus(tile("CAM 4")), "4: 2x2, CAM4 still selected");
+
+    key(KEY_TAB);
+    run(300);                                   /* it slides up */
+    lv_obj_t *menu = find("Main menu", 1);
+    int x, y;
+    if (menu) center_of(menu, &x, &y);
+    CHECK(menu && y < H && has_focus(lv_obj_get_parent(menu)), "Tab: the navigation bar comes up, focused");
+    key(KEY_ESC);
+    run(VG_DURATION_NAVBAR_HIDE + 300);
+    menu = find("Main menu", 1);
+    if (menu) center_of(menu, &x, &y);
+    CHECK(has_focus(tile("CAM 4")) && (!menu || y >= H), "Esc: back to the tiles, the bar hides");
+
+    key_with(KEY_LEFTSHIFT, KEY_F10);
+    CHECK(ui_popup_is_open() && find("Full screen: CAM 4", 1), "Shift+F10: context menu for the selected tile");
+    key(KEY_DOWN);
+    key(KEY_ENTER);
+    CHECK(!ui_popup_is_open() && g_tiles[3].w == W, "Down, Enter: full screen from the menu");
+    key(KEY_4);
+
+    key(KEY_F1);
+    CHECK(ui_popup_is_open() && find("Keyboard shortcuts", 1), "F1: help");
+    shot("help");
+    key(KEY_ESC);
+    CHECK(!ui_popup_is_open(), "Esc closes the help");
+    key_with(KEY_LEFTSHIFT, KEY_SLASH);
+    CHECK(ui_popup_is_open() && find("Keyboard shortcuts", 1), "?: help");
+    key(KEY_F1);
+    CHECK(!ui_popup_is_open(), "F1 again closes it");
+    key(KEY_ESC);
+    CHECK(!ui_popup_is_open() && !ui_page_top(), "Esc on the live view opens nothing");
+}
+
+static void test_keyboard_settings(void)
+{
+    key(KEY_M);
+    CHECK(ui_page_top() && find("Recording", 0), "M: main menu");
+    CHECK(has_focus(lv_obj_get_parent(find("Cameras", 0))), "first tile focused");
+    key(KEY_RIGHT);
+    CHECK(has_focus(lv_obj_get_parent(find("Recording", 0))), "Right: Recording");
+    key(KEY_ENTER);
+    lv_obj_t *path = textarea(0), *seg = textarea(1);
+    CHECK(find("Recording directory", 0) && focused() == path, "Enter: the form, its first field focused");
+    lv_obj_t *kb = lv_obj_get_child(lv_screen_active(), -1);
+
+    /* Backspace, held: the kernel's repeats delete too. */
+    kev(g_kbd[1], KEY_BACKSPACE, 1);
+    for (int i = 0; i < 9; ++i) kev(g_kbd[1], KEY_BACKSPACE, 2);
+    kev(g_kbd[1], KEY_BACKSPACE, 0);
+    run(400);
+    CHECK(!strcmp(lv_textarea_get_text(path), ""), "Backspace and its repeats: '%s' left", lv_textarea_get_text(path));
+    type("/tmp/Kbd");
+    CHECK(!strcmp(lv_textarea_get_text(path), "/tmp/Kbd"), "typed: %s", lv_textarea_get_text(path));
+    CHECK(lv_obj_has_flag(kb, LV_OBJ_FLAG_HIDDEN), "no on-screen keyboard with a keyboard in use");
+    key(KEY_ENTER);
+    CHECK(focused() == seg, "Enter in a text field: the next field");
+    int before = atoi(lv_textarea_get_text(seg));
+    key(KEY_UP);
+    key(KEY_UP);
+    key(KEY_DOWN);
+    CHECK(atoi(lv_textarea_get_text(seg)) == before + 1, "Up, Up, Down: %d -> %s", before, lv_textarea_get_text(seg));
+    CHECK(focused() == seg, "arrows on a number change it, not the focus");
+    key(KEY_TAB);
+    lv_obj_t *after = focused();
+    key_with(KEY_LEFTSHIFT, KEY_TAB);
+    CHECK(after != seg && focused() == seg, "Tab, Shift+Tab");
+    shot("form_focus");
+
+    unsigned gen = config_generation();
+    key_with(KEY_LEFTCTRL, KEY_S);
+    vigil_config_t c;
+    config_get(&c);
+    CHECK(config_generation() == gen + 1 && !strcmp(c.record.path, "/tmp/Kbd") && c.record.segment == before + 1,
+          "Ctrl+S saved: %s, %d", c.record.path, c.record.segment);
+    CHECK(find("Saved", 1), "toast");
+    key(KEY_ESC);
+    CHECK(find("Main menu", 0) && ui_page_top() && !find("Recording directory", 0), "Esc: back to the menu");
+
+    /* Unsaved changes: Esc asks; Enter keeps the page (Cancel is focused);
+     * Right, Enter discards. */
+    key(KEY_ENTER);
+    CHECK(find("Recording directory", 0), "Enter on the menu tile again");
+    type("x");
+    key(KEY_ESC);
+    CHECK(ui_popup_is_open() && find("Discard the changes", 1), "Esc with changes asks");
+    key(KEY_ENTER);
+    CHECK(!ui_popup_is_open() && find("Recording directory", 0), "Enter: Cancel, still on the form");
+    key(KEY_ESC);
+    key(KEY_RIGHT);
+    key(KEY_ENTER);
+    CHECK(!ui_popup_is_open() && find("Main menu", 0) && !find("Recording directory", 0), "Right, Enter: discarded");
+    config_get(&c);
+    CHECK(!strcmp(c.record.path, "/tmp/Kbd"), "nothing saved");
+
+    /* The camera list: rows by the arrows, Enter edits, Space toggles. */
+    key(KEY_LEFT);
+    key(KEY_ENTER);
+    CHECK(find("Add", 1), "the camera list");
+    CHECK(c.n_cameras == 1, "one camera left by the steps before");
+    key(KEY_DOWN);
+    CHECK(focused() && lv_obj_check_type(focused(), &lv_button_class) && find("Add", 1) &&
+          lv_obj_get_parent(find("Add", 1)) == focused(), "Down past the last row: Add");
+    key(KEY_UP);
+    key(KEY_ENTER);
+    CHECK(find("Cameras: 1", 0), "Up, Enter: the camera's form");
+    lv_obj_t *sw = NULL;
+    key(KEY_TAB);
+    key(KEY_TAB);
+    sw = focused();
+    CHECK(sw && lv_obj_check_type(sw, &lv_switch_class), "Tab, Tab: the switch");
+    int on = sw && lv_obj_has_state(sw, LV_STATE_CHECKED);
+    key(KEY_SPACE);
+    CHECK(sw && lv_obj_has_state(sw, LV_STATE_CHECKED) != on, "Space toggles it");
+    key(KEY_ENTER);
+    CHECK(sw && lv_obj_has_state(sw, LV_STATE_CHECKED) == on, "Enter toggles it back");
+    key(KEY_UP);
+    CHECK(focused() == textarea(1), "Up: the field above");
+    key(KEY_ESC);
+    CHECK(find("Add", 1) && !ui_popup_is_open(), "Esc: unchanged, back in the list");
+    key(KEY_DELETE);
+    CHECK(ui_popup_is_open() && find("Remove item 1 from Cameras", 1), "Delete on a row asks");
+    key(KEY_ESC);
+    CHECK(!ui_popup_is_open(), "Esc: not removed");
+    key(KEY_ESC);
+    key(KEY_ESC);
+    CHECK(!ui_page_top(), "Esc, Esc: back on the live view");
+}
+
+/* A drop-down (no setting has one yet): the arrows change it in place,
+ * Enter opens the list. */
+static void test_keyboard_dropdown(void)
+{
+    ui_page_t *p = ui_page_push("Test");
+    lv_obj_t *dd = lv_dropdown_create(p->body);
+    lv_dropdown_set_options(dd, "one\ntwo\nthree");
+    lv_group_add_obj(p->group, dd);
+    ui_page_ready(p);
+    run(50);
+    CHECK(focused() == dd, "the drop-down is focused");
+    key(KEY_DOWN);
+    key(KEY_RIGHT);
+    CHECK(lv_dropdown_get_selected(dd) == 2, "Down, Right: third (%u)", (unsigned)lv_dropdown_get_selected(dd));
+    key(KEY_UP);
+    CHECK(lv_dropdown_get_selected(dd) == 1 && !lv_dropdown_is_open(dd), "Up: second, closed");
+    key(KEY_ENTER);
+    CHECK(lv_dropdown_is_open(dd), "Enter opens the list");
+    key(KEY_UP);
+    key(KEY_ENTER);
+    CHECK(!lv_dropdown_is_open(dd) && lv_dropdown_get_selected(dd) == 0, "Up, Enter: first, closed");
+    key(KEY_ENTER);
+    key(KEY_ESC);
+    CHECK(!lv_dropdown_is_open(dd) && ui_page_top() == p, "Esc closes the list, not the page");
+    key(KEY_ESC);
+    CHECK(!ui_page_top(), "Esc: the page");
+}
+
+/* Caps Lock, Num Lock, a second keyboard, and unplugging with Shift held. */
+static void test_keyboard_plug(void)
+{
+    ui_page_t *p = ui_page_push("Test");
+    lv_obj_t *ta = lv_textarea_create(p->body);
+    lv_textarea_set_one_line(ta, 1);
+    lv_group_add_obj(p->group, ta);
+    ui_page_ready(p);
+    run(50);
+    key(KEY_CAPSLOCK);
+    type("aB");
+    key(KEY_CAPSLOCK);
+    key(KEY_KP5);
+    key(KEY_NUMLOCK);
+    key(KEY_KP4);                               /* Num Lock off: Left */
+    key(KEY_KP1);                               /* Num Lock off: End */
+    key(KEY_NUMLOCK);
+    key(KEY_KPPLUS);
+    CHECK(!strcmp(lv_textarea_get_text(ta), "Ab5+"), "Caps Lock, keypad: '%s'", lv_textarea_get_text(ta));
+
+    int k2[2];
+    if (pipe(k2) < 0) abort();
+    fcntl(k2[0], F_SETFL, O_NONBLOCK);
+    input_evdev_attach_keyboard(k2[0], "second keyboard");
+    kev(g_kbd[1], KEY_LEFTSHIFT, 1);            /* held on the first */
+    kev(k2[1], KEY_X, 1);
+    kev(k2[1], KEY_X, 0);
+    run(100);
+    close(g_kbd[1]);                            /* the first unplugged, Shift down */
+    run(100);
+    kev(k2[1], KEY_X, 1);
+    kev(k2[1], KEY_X, 0);
+    run(100);
+    CHECK(!strcmp(lv_textarea_get_text(ta), "Ab5+Xx"), "Shift from either keyboard, gone with it: '%s'",
+          lv_textarea_get_text(ta));
+    CHECK(ui_keyboard_in_use(), "a keyboard is left");
+    kev(k2[1], KEY_ESC, 1);
+    kev(k2[1], KEY_ESC, 0);
+    run(100);
+    CHECK(!ui_page_top(), "Esc from the second keyboard");
+    close(k2[1]);
+    run(100);
+    CHECK(!ui_keyboard_in_use(), "no keyboard: the UI is for the mouse again");
+    g_kbd[1] = -1;
 }
 
 int main(int argc, char **argv)
@@ -659,8 +961,10 @@ int main(int argc, char **argv)
 
     if (pipe(g_mouse) < 0) return 1;
     fcntl(g_mouse[0], F_SETFL, O_NONBLOCK);
-    lv_indev_t *ptr = input_evdev_create(disp, ui_app_back, 0);
+    static const input_hooks_t hooks = { ui_app_back, ui_app_key, ui_app_keyboards };
+    lv_indev_t *ptr = input_evdev_create(disp, &hooks, 0);
     ui_app_set_pointer(ptr);
+    ui_app_set_keypad(input_evdev_keypad());
     input_evdev_attach(g_mouse[0], "test mouse", 0, 0, 0, 0, 0);
     run(300);
 
@@ -673,6 +977,10 @@ int main(int argc, char **argv)
     test_same_redacted_urls();
     test_stale_and_cancel();
     test_two_mice(ptr);
+    test_keyboard_live();
+    test_keyboard_settings();
+    test_keyboard_dropdown();
+    test_keyboard_plug();
 
     lv_mem_monitor_t mon;
     lv_mem_monitor(&mon);

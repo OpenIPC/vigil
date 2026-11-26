@@ -2,7 +2,7 @@
 
 vigil is one program, `vigild`, that turns a cheap recorder board into a
 DVR/NVR: it takes video from cameras, shows it on the HDMI output in a
-grid of tiles with a mouse-driven UI on top ([ui.md](ui.md)), and records
+grid of tiles with a mouse and keyboard UI on top ([ui.md](ui.md)), and records
 the streams to disk. The same source tree builds for very different hardware. This page
 explains how the code is split so that this works.
 
@@ -240,7 +240,7 @@ asked for, the navigation bar and menus over the video, and
 paints the rest of each tile as a "hole" so the video plane underneath
 shows through: a colour key on HiSilicon hifb and SigmaStar's GOP, full
 transparency on Rockchip's alpha-blended plane. The screens, the
-schema-driven settings pages, mouse input and the UI tests are described in
+schema-driven settings pages, mouse and keyboard input and the UI tests are described in
 [ui.md](ui.md).
 
 ## Build

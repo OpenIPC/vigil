@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* ui_menu.c — the main menu: a tile per settings section of the schema
- * (so a new section shows up here by itself) and System. */
+ * (so a new section shows up here by itself) and System; a gridnav grid
+ * for the keyboard. */
 #include <string.h>
 
 #include "ui_app.h"
@@ -34,6 +35,8 @@ static void tile(lv_obj_t *parent, const char *sym, const char *title, const cha
     lv_obj_add_style(t, &ui_st_btn, 0);
     lv_obj_add_style(t, &ui_st_btn_hover, LV_STATE_HOVERED);
     lv_obj_add_style(t, &ui_st_btn_pressed, LV_STATE_PRESSED);
+    lv_obj_add_style(t, &ui_st_focus, LV_STATE_FOCUSED);
+    lv_obj_remove_flag(t, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
     lv_obj_set_style_radius(t, VG_RADIUS_MD, 0);
     lv_obj_set_style_pad_all(t, VG_SPACE_LG, 0);
     lv_obj_set_style_pad_row(t, VG_SPACE_SM, 0);
@@ -71,4 +74,8 @@ void ui_menu_open(void)
         tile(grid, section_symbol(s->key), s->label, help, i);
     }
     tile(grid, LV_SYMBOL_HOME, "System", "Platform, version, uptime, memory", SYSTEM);
+    /* The arrows move between the tiles; Enter opens one. */
+    ui_gridnav(grid, LV_GRIDNAV_CTRL_ROLLOVER);
+    lv_group_add_obj(p->group, grid);
+    ui_page_ready(p);
 }

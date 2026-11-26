@@ -15,6 +15,11 @@
  * full screen, and back), moves the video through model->show_tiles. The
  * right button opens a context menu with the same actions. Events that
  * need attention become toasts (event_toast).
+ *
+ * Keyboard: the grid is an lv_gridnav container, so the arrows select a
+ * tile (a ring inside its edge, ui_st_focus_in) and Enter shows it full
+ * screen; Tab reaches the navigation bar, which comes up while it has the
+ * focus. The shortcuts (1, 4, pages, menu) are in ui_live_key.
  */
 #include <stdio.h>
 #include <string.h>
@@ -48,6 +53,8 @@ static const int k_layouts[] = { 1, 4, 9, 16 };
 
 static struct {
     lv_obj_t  *scr, *grid, *clock, *summary;
+    lv_group_t *group;                  /* the grid, then the navigation bar */
+    int        sel_ch;                  /* the tile the keyboard selected (its channel) */
     lv_obj_t  *nav, *nav_page, *nav_prev, *nav_next, *nav_pin;
     lv_obj_t  *layout_btn[N_LAYOUTS];
     int        sw, sh;
@@ -174,6 +181,16 @@ static void full_screen_async(void *ch) { toggle_full_screen((int)(intptr_t)ch);
 static void cell_click_cb(lv_event_t *e)
 {
     cell_t *c = lv_event_get_user_data(e);
+    lv_indev_t *in = lv_indev_active();
+    if (in && lv_indev_get_type(in) == LV_INDEV_TYPE_KEYPAD) {
+        /* Enter on the selected tile (gridnav passes the click on). */
+        if (c->ch >= 0) lv_async_call(full_screen_async, (void *)(intptr_t)c->ch);
+        return;
+    }
+    /* The keyboard's selection follows the mouse: Enter after a click
+     * means the tile clicked. */
+    ui_gridnav_focus(L.grid, c->obj);
+    L.sel_ch = c->ch;
     /* LVGL 9.2 has no double-click event: two clicks on the same tile
      * within the token's interval are one. */
     if (c->ch >= 0 && c->ch == L.click_ch && lv_tick_elaps(L.click_ms) <= VG_DURATION_DOUBLE_CLICK) {
@@ -190,6 +207,12 @@ static void flash_done_cb(lv_timer_t *t)
     cell_t *c = lv_timer_get_user_data(t);
     lv_obj_add_flag(c->flash, LV_OBJ_FLAG_HIDDEN);
     c->flash_timer = NULL;
+}
+
+static void cell_focused_cb(lv_event_t *e)
+{
+    cell_t *c = lv_event_get_user_data(e);
+    L.sel_ch = c->ch;
 }
 
 static void cell_deleted_cb(lv_event_t *e)
@@ -224,7 +247,11 @@ static void cell_build(cell_t *c, const ui_cell_t *g)
     lv_obj_set_style_border_color(o, UI_C(LINE), 0);
     lv_obj_set_style_border_width(o, 1, 0);
     lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE);
+    /* The focus ring inside the tile's edge, over the video's outermost
+     * pixels: outside it would cover the neighbour. */
+    lv_obj_add_style(o, &ui_st_focus_in, LV_STATE_FOCUSED);
     lv_obj_add_event_cb(o, cell_click_cb, LV_EVENT_CLICKED, c);
+    lv_obj_add_event_cb(o, cell_focused_cb, LV_EVENT_FOCUSED, c);
     lv_obj_add_event_cb(o, cell_deleted_cb, LV_EVENT_DELETE, c);
     c->obj = o;
 
@@ -273,7 +300,7 @@ static void cell_build(cell_t *c, const ui_cell_t *g)
     lv_obj_set_size(c->flash, LV_PCT(100), LV_PCT(100));
     lv_obj_set_style_border_color(c->flash, UI_C(WARN), 0);
     lv_obj_set_style_border_width(c->flash, 3, 0);
-    lv_obj_remove_flag(c->flash, LV_OBJ_FLAG_CLICKABLE);
+    ui_inert(c->flash);
     lv_obj_add_flag(c->flash, LV_OBJ_FLAG_HIDDEN);
 
     if (c->ch >= 0)
@@ -317,9 +344,17 @@ static void set_layout(int layout, int page)
     L.n_cells = ui_layout_cells(L.sw, L.sh, layout, page, n, g);
     ui_rect_t tiles[UI_MAX_CHANNELS];
     memset(tiles, 0, sizeof tiles);
+    int sel = 0;
     for (int i = 0; i < L.n_cells; ++i) {
         cell_build(&L.cells[i], &g[i]);
         if (g[i].ch >= 0) tiles[g[i].ch] = (ui_rect_t){ g[i].x, g[i].y, g[i].w, g[i].h };
+        if (g[i].ch == L.sel_ch) sel = i;
+    }
+    /* The selected camera stays selected when it is still on the screen
+     * (full screen and back), else the page's first tile is. */
+    if (L.n_cells) {
+        ui_gridnav_focus(L.grid, L.cells[sel].obj);
+        L.sel_ch = L.cells[sel].ch;
     }
     if (ui_model()->show_tiles && !ui_model()->fixed_tiles) ui_model()->show_tiles(tiles, n);
     if (L.nav) nav_update();
@@ -362,7 +397,7 @@ static void make_clock(void)
 
 /* ---- navigation bar ------------------------------------------------------------------------ */
 
-enum { ACT_MENU = 1, ACT_PREV, ACT_NEXT, ACT_PIN, ACT_FULL, ACT_LAYOUT = 100 };
+enum { ACT_MENU = 1, ACT_PREV, ACT_NEXT, ACT_PIN, ACT_FULL, ACT_CONTEXT, ACT_ESC, ACT_LAYOUT = 100 };
 
 static void nav_show(int show)
 {
@@ -431,8 +466,11 @@ static void nav_poll_cb(lv_timer_t *t)
     lv_point_t p;
     if (lv_screen_active() != L.scr) return;
     if (lv_subject_get_int(&ui_subj_nav_pinned)) return;
-    if (!ui_pointer(&p)) return;
-    if (p.y >= L.sh - NAV_EDGE) {
+    if (!ui_pointer(&p)) p.y = 0;                /* no mouse: up only while it has the focus */
+    if (lv_obj_has_state(L.nav, LV_STATE_FOCUSED)) {
+        nav_show(1);
+        L.nav_seen_ms = lv_tick_get();
+    } else if (p.y >= L.sh - NAV_EDGE) {
         nav_show(1);
         L.nav_seen_ms = lv_tick_get();
     } else if (L.nav_shown && (p.y >= L.sh - VG_SIZE_NAVBAR || ui_popup_is_open())) {
@@ -440,6 +478,13 @@ static void nav_poll_cb(lv_timer_t *t)
     } else if (L.nav_shown && lv_tick_elaps(L.nav_seen_ms) >= VG_DURATION_NAVBAR_HIDE) {
         nav_show(0);
     }
+}
+
+/* Tab to the bar: up at once (and kept up by nav_poll_cb while focused). */
+static void nav_focused_cb(lv_event_t *e)
+{
+    (void)e;
+    nav_show(1);
 }
 
 static lv_obj_t *nav_btn(const char *sym, const char *text, int act)
@@ -453,6 +498,7 @@ static void nav_sep(void)
 {
     lv_obj_t *s = lv_obj_create(L.nav);
     ui_plain(s);
+    ui_inert(s);
     lv_obj_set_size(s, 1, VG_SIZE_BUTTON - VG_SPACE_SM);
     lv_obj_set_style_bg_color(s, UI_C(LINE), 0);
     lv_obj_set_style_bg_opa(s, LV_OPA_COVER, 0);
@@ -499,6 +545,7 @@ static void make_nav(void)
 
     lv_obj_t *spring = lv_obj_create(L.nav);
     ui_plain(spring);
+    ui_inert(spring);
     lv_obj_set_height(spring, 1);
     lv_obj_set_flex_grow(spring, 1);
     L.nav_pin = nav_btn(LV_SYMBOL_DOWNLOAD, "Pin", ACT_PIN);
@@ -512,6 +559,9 @@ static void make_nav(void)
 
     lv_subject_add_observer_obj(&ui_subj_nav_pinned, pinned_cb, L.nav, NULL);
     lv_timer_create(nav_poll_cb, NAV_POLL, NULL);
+    ui_gridnav(L.nav, LV_GRIDNAV_CTRL_ROLLOVER);
+    lv_obj_add_event_cb(L.nav, nav_focused_cb, LV_EVENT_FOCUSED, NULL);
+    lv_group_add_obj(L.group, L.nav);
 }
 
 /* ---- context menu --------------------------------------------------------------------------- */
@@ -532,6 +582,7 @@ static void menu_sep(lv_obj_t *panel)
 {
     lv_obj_t *s = lv_obj_create(panel);
     ui_plain(s);
+    ui_inert(s);
     lv_obj_set_size(s, LV_PCT(100), 1);
     lv_obj_set_style_bg_color(s, UI_C(LINE), 0);
     lv_obj_set_style_bg_opa(s, LV_OPA_COVER, 0);
@@ -577,7 +628,60 @@ void ui_live_context_menu(const lv_point_t *at)
     menu_item(panel, LV_SYMBOL_DOWNLOAD,
               lv_subject_get_int(&ui_subj_nav_pinned) ? "Unpin navigation bar" : "Pin navigation bar",
               ACT_PIN, -1);
+    ui_popup_focus(panel, NULL);
     ui_popup_place(at);
+}
+
+/* ---- keyboard ----------------------------------------------------------------------------- */
+
+lv_group_t *ui_live_group(void) { return L.group; }
+
+static void key_async(void *arg)
+{
+    int act = (int)(intptr_t)arg;
+    if (lv_screen_active() != L.scr || ui_popup_is_open()) return;  /* something came over it */
+    if (act >= ACT_LAYOUT) {
+        int layout = act - ACT_LAYOUT;
+        /* Single view of the selected camera; the grid around it. */
+        set_layout(layout, ui_layout_page_of(layout, L.sel_ch < 0 ? 0 : L.sel_ch));
+    } else if (act == ACT_CONTEXT) {
+        lv_point_t at = { L.sw / 2, L.sh / 2 };
+        for (int i = 0; i < L.n_cells; ++i)
+            if (L.cells[i].ch == L.sel_ch && L.sel_ch >= 0) {
+                lv_area_t a;
+                lv_obj_get_coords(L.cells[i].obj, &a);
+                at = (lv_point_t){ (a.x1 + a.x2) / 2, (a.y1 + a.y2) / 2 };
+            }
+        ui_live_context_menu(&at);
+    } else if (act == ACT_ESC) {
+        if (lv_obj_has_state(L.nav, LV_STATE_FOCUSED)) lv_group_focus_obj(L.grid);
+    } else {
+        do_action(act, L.sel_ch);
+    }
+}
+
+int ui_live_key(uint32_t key, unsigned mods)
+{
+    (void)mods;
+    int act;
+    switch (key) {
+    case '1': act = ACT_LAYOUT + 1; break;
+    case '4': act = ACT_LAYOUT + 4; break;
+    case '9': act = ACT_LAYOUT + 9; break;
+    case UI_KEY_PGUP: case '[': act = ACT_PREV; break;
+    case UI_KEY_PGDN: case ']': act = ACT_NEXT; break;
+    case 'm': case 'M': case UI_KEY_F(2): act = ACT_MENU; break;
+    case UI_KEY_MENU: act = ACT_CONTEXT; break;
+    case LV_KEY_ESC: act = ACT_ESC; break;
+    default: return 0;
+    }
+    if (act >= ACT_LAYOUT && (ui_model()->fixed_tiles || !layout_offered(act - ACT_LAYOUT))) return 1;
+    if (act == ACT_ESC) {
+        key_async((void *)(intptr_t)act);       /* already outside the input processing */
+        return 1;
+    }
+    lv_async_call(key_async, (void *)(intptr_t)act);
+    return 1;
 }
 
 /* ---- events --------------------------------------------------------------------------------- */
@@ -645,6 +749,7 @@ lv_obj_t *ui_live_create(void)
 {
     memset(&L, 0, sizeof L);
     L.click_ch = -1;
+    L.sel_ch = 0;
     L.sw = lv_display_get_horizontal_resolution(NULL);
     L.sh = lv_display_get_vertical_resolution(NULL);
     hal_ui_hole(&L.hole, &L.hole_opa);
@@ -656,6 +761,9 @@ lv_obj_t *ui_live_create(void)
     L.grid = lv_obj_create(L.scr);
     ui_plain(L.grid);
     lv_obj_set_size(L.grid, L.sw, L.sh);
+    L.group = lv_group_create();
+    ui_gridnav(L.grid, LV_GRIDNAV_CTRL_ROLLOVER);
+    lv_group_add_obj(L.group, L.grid);
     /* With alpha holes (not a colour key), whatever lies under a tile must
      * be transparent too, or it would paint over the video. */
     if (L.hole_opa < LV_OPA_COVER) lv_obj_set_style_bg_opa(L.scr, LV_OPA_TRANSP, 0);
