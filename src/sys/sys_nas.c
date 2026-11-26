@@ -219,13 +219,29 @@ int sys_nas_mount(const config_nas_t *n, const char *target, char *msg, size_t c
     if (!strcmp(n->type, "cifs") ? !fs_registered("cifs") : have_module("nfsv3"))
         sys_run(out, sizeof out, 30, "modprobe", !strcmp(n->type, "cifs") ? "cifs" : "nfsv3", NULL);
     int rc = sys_ops()->mount(src, p, n->type, 0, data);
-    int e = errno;
+    int e = errno, smb1 = 0;
     memset(data, 0, sizeof data);
+    if (rc < 0 && e == EINVAL && !strcmp(n->type, "cifs") && !strstr(n->options, "vers=")) {
+        /* A kernel without CONFIG_CIFS_SMB2 (the ssr621q one, 4.9) takes
+         * no vers= but 1.0 and answers EINVAL to 2.1, whatever the
+         * server: seen in QEMU. Try SMB1 before saying anything. */
+        config_nas_t v1 = *n;
+        snprintf(v1.options, sizeof v1.options, "vers=1.0%s%.110s", n->options[0] ? "," : "", n->options);
+        if (sys_nas_mount_args(&v1, ip, src, sizeof src, data, sizeof data, why, sizeof why) == 0) {
+            rc = sys_ops()->mount(src, p, n->type, 0, data);
+            e = errno;
+            smb1 = 1;
+        }
+        memset(data, 0, sizeof data);
+        memset(v1.password, 0, sizeof v1.password);
+    }
     if (rc < 0) {
-        snprintf(msg, cap, "cannot mount %s: %s", src, mount_error(e));
+        snprintf(msg, cap, "cannot mount %s: %s%s", src, mount_error(e),
+                 smb1 ? " (this kernel speaks SMB1 only: SMB2/3 need CONFIG_CIFS_SMB2)" : "");
         return -1;
     }
-    snprintf(msg, cap, "%s mounted at %s", src, target);
+    snprintf(msg, cap, "%s mounted at %s%s", src, target,
+             smb1 ? " with SMB1 (this kernel has no SMB2/3: CONFIG_CIFS_SMB2)" : "");
     return 0;
 }
 

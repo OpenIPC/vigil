@@ -18,7 +18,7 @@ char   fake_hostname[256];
 time_t fake_time;
 char   fake_mounted[512];
 char   fake_umounted[256];
-int    fake_mount_errno, fake_umount_errno;
+int    fake_mount_errno, fake_umount_errno, fake_mount_errno_once;
 char   fake_stdin[8192];
 char   fake_snap[4096];
 static char g_snap_prog[64], g_snap_path[256];
@@ -103,6 +103,11 @@ static int f_mount(const char *src, const char *target, const char *fstype, unsi
     char l[600];
     snprintf(l, sizeof l, "mount %s", fake_mounted);
     logf_(l);
+    if (fake_mount_errno_once) {
+        errno = fake_mount_errno_once;
+        fake_mount_errno_once = 0;
+        return -1;
+    }
     if (fake_mount_errno) {
         errno = fake_mount_errno;
         return -1;
@@ -172,7 +177,7 @@ void fake_init(void)
     memset(g_if, 0, sizeof g_if);
     fake_log[0] = fake_hostname[0] = fake_mounted[0] = fake_umounted[0] = fake_stdin[0] = 0;
     fake_time = 0;
-    fake_mount_errno = fake_umount_errno = 0;
+    fake_mount_errno = fake_umount_errno = fake_mount_errno_once = 0;
 }
 
 void fake_done(void)

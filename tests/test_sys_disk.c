@@ -360,6 +360,20 @@ static void test_nas(void)
     CHECK(strstr(fake_mounted, "password=Pa55,,word") && strstr(fake_mounted, " cifs "), "cifs mount(2)");
     CHECK(fake_ran("modprobe cifs"), "the module is loaded");
     CHECK(!strstr(msg, "Pa55"), "no password in the message");
+    /* A kernel without SMB2 (CONFIG_CIFS_SMB2): EINVAL to vers=2.1, then SMB1. */
+    fake_mount_errno_once = EINVAL;
+    CHECK(sys_nas_mount(&c, "/mnt/nas", msg, sizeof msg) == 0 && strstr(fake_mounted, "vers=1.0") &&
+          strstr(msg, "SMB1") && !strstr(msg, "Pa55"), "SMB1 fallback: %s", msg);
+    fake_mount_errno_once = EINVAL;
+    fake_mount_errno = EHOSTUNREACH;
+    CHECK(sys_nas_mount(&c, "/mnt/nas", msg, sizeof msg) < 0 && strstr(msg, "CONFIG_CIFS_SMB2") &&
+          !strstr(msg, "nvalid"), "SMB1 fallback, the real error: %s", msg);
+    fake_mount_errno = 0;
+    snprintf(c.options, sizeof c.options, "vers=3.0");
+    fake_mount_errno_once = EINVAL;
+    CHECK(sys_nas_mount(&c, "/mnt/nas", msg, sizeof msg) < 0 && !strstr(fake_mounted, "vers=1.0"),
+          "a vers= of one's own is not second-guessed: %s", msg);
+    c.options[0] = 0;
     fake_clear_log();
     CHECK(sys_nas_test(&c, msg, sizeof msg) == 0 && strstr(msg, "written"), "test: %s", msg);
     CHECK(fake_ran("umount") && !fake_exists(SYS_NAS_TEST_DIR), "unmounted and removed after the test");
