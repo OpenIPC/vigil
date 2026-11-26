@@ -25,6 +25,11 @@ static int check_url(const char *v, char *msg, size_t cap)
     return 0;
 }
 
+static int check_sub_url(const char *v, char *msg, size_t cap)
+{
+    return *v ? check_url(v, msg, cap) : 0;
+}
+
 static int check_abs_path(const char *v, char *msg, size_t cap, int empty_ok)
 {
     if (!*v && empty_ok) return 0;
@@ -105,6 +110,10 @@ static const schema_field_t camera_fields[] = {
       .label = "Name", .help = "Shown in the status and the API; empty: the camera's host." },
     { .key = "enabled", BOOL(config_camera_t, enabled), .def_int = 1, .live = 1,
       .label = "Enabled", .help = "A disabled camera keeps its tile, empty." },
+    { .key = "sub_url", STR(config_camera_t, sub_url), .def_str = "", .secret = SCHEMA_SECRET_URL,
+      .live = 1, .check = check_sub_url, .label = "Sub-stream URL",
+      .help = "Used in multi-window views; the main URL is used full screen and for recording. "
+              "Empty: derived for NETIP, otherwise the main stream everywhere." },
 };
 
 static const schema_field_t record_fields[] = {

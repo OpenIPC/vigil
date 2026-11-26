@@ -300,6 +300,7 @@ static cJSON *status_json(void)
         cJSON_AddBoolToObject(o, "live", st.live);
         cJSON_AddStringToObject(o, "state", st.configured ? (st.live ? "live" : st.state) : "off");
         cJSON_AddBoolToObject(o, "decoding", st.decoding);
+        cJSON_AddStringToObject(o, "view", st.view);
         cJSON_AddBoolToObject(o, "recording", st.recording);
         cJSON_AddStringToObject(o, "rec_state", st.rec_state[0] ? st.rec_state : "off");
         cJSON_AddNumberToObject(o, "rec_bytes", (double)st.rec_bytes);

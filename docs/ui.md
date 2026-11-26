@@ -170,9 +170,20 @@ core. That moves each running channel's picture with the existing HAL calls
 (`hal_display_set_tile`, or `hal_display_clear_tile` for a channel not on
 the page) and remembers the tiles for channels that start later. The same
 `ui_layout_cells` gives `frontend_tiles()` the start-up 2x2 tiles, so the
-holes and the video cannot disagree. On SigmaStar the decoder's output
-stays at the size of the tile it was opened for; a channel shown full
-screen is scaled up by the display until its decoder is opened again.
+holes and the video cannot disagree.
+
+**Sub-streams in small tiles.** The tile size also picks the stream: a
+tile of a quarter of the screen or less (2x2 and smaller, the small
+windows of the 8-split) shows the camera's sub-stream, a larger one (1x1,
+full screen, the 8-split's large window) its main stream. The sub-stream is
+the camera's `sub_url`, or for a NETIP camera the same URL with
+`stream=extra`; a camera without either shows its main stream everywhere.
+The switch keeps the old picture up until the new stream's first keyframe,
+and a sub-stream no longer shown keeps its connection for 5 s, so flipping
+between full screen and a layout does not reconnect. The tile's stream line
+(`H.264 352x288 10 fps`) is the stream on screen; recording always takes
+the main stream. Where decoders are scarce (`dec_shown_only`, SigmaStar)
+channels not on the page decode nothing.
 
 ## Settings pages from the schema
 

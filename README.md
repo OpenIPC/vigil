@@ -9,7 +9,9 @@ are part of the design.
 - **Network cameras** over RTSP or Xiongmai NETIP (DVRIP), H.264 and
   H.265. They are recorded without re-encoding on every platform, and
   decoded in hardware for display where the board has a decoder and a
-  display (see the table below).
+  display (see the table below). Multi-window views show the cameras'
+  sub-streams (`sub_url`, derived for NETIP), full screen the main stream;
+  recording always takes the main stream.
 - **Local analog inputs** on DVR boards: shown, then encoded in hardware
   for recording.
 - **Recording** into segments that play on their own, with a free-space

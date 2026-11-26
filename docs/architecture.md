@@ -117,6 +117,28 @@ decoder is rebuilt. If the HAL drops an AU (`hal_dec_send` fails), the
 channel stops feeding the decoder until the next keyframe, because the
 pictures after it would refer to a picture the decoder never got.
 
+### Main stream and sub-stream
+
+A camera can have a second session: its **sub-stream** (`sub_url`, or for
+NETIP the same URL with `stream=extra`), a second thread with its own
+source and normalizer. The main session above always runs: the camera's
+status and events follow it, and it records. The tile decides which one is
+decoded (`channels_set_tiles`): a tile of a quarter of the screen or less
+shows the sub-stream, a larger one or full screen the main stream; a
+channel off screen, where the platform's decoders are scarce
+(`dec_shown_only`), neither. The channel's one decoder belongs to one
+session at a time: the wanted one takes it over at its first keyframe and
+the other keeps feeding it until then, so the picture stays up through a
+switch. The sub-session starts when its tile becomes small and ends 5 s
+after it no longer is, so layouts flipped back and forth keep the
+connection. A camera has at most two connections; full screen, the display
+and the recording share the main one. A view change never touches the main
+session, so recording goes on in the same segment.
+
+A decoder the platform cannot give (out of media memory or decoder
+channels) is retried after 10 s, or as soon as another channel closes its
+decoder.
+
 ### Recording
 
 `seg_writer.c` writes the compressed elementary stream (no re-encoding,
@@ -195,7 +217,8 @@ safe from any thread at any time. The outcome goes out as events.
 | Thread | Does |
 |---|---|
 | main | `hal_init`, the frontend loop (LVGL or headless), applying configurations, `hal_shutdown` |
-| one per channel | source → `au_norm` → decoder and recorder (`channel.c`) |
+| one per channel | main stream: source → `au_norm` → recorder, and the decoder for large tiles (`channel.c`) |
+| one per channel in a small tile | sub-stream: source → `au_norm` → decoder (`channel.c`) |
 | platform threads | e.g. capture readers (hi3520dv200), as each platform needs |
 | CivetWeb master + up to 8 workers (started on demand) | HTTP requests and WebSocket sessions (`src/api`) |
 | API pusher | gathers status, events and configuration changes for the WebSocket clients |

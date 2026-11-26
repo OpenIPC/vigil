@@ -1,10 +1,14 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* channel.h — a camera channel: source -> au_norm -> decoder + recorder.
  *
- * One thread per channel. It opens the source (any protocol, source.h),
- * normalizes its access units, decodes them into the channel's tile when
- * the platform has a decoder (hal_decoder.h, sized from the stream's SPS;
- * rebuilt when the stream changes) and records them as-is (seg_writer.h).
+ * A thread per channel opens the camera's main stream (any protocol,
+ * source.h), normalizes its access units, records them as-is
+ * (seg_writer.h) and decodes them into the channel's tile when the
+ * platform has a decoder (hal_decoder.h, sized from the stream's SPS;
+ * rebuilt when the stream changes). While the tile is small (a quarter of
+ * the screen or less) a second thread brings the camera's sub-stream and
+ * decodes that instead; the main stream is still recorded, through its
+ * own connection, whatever the view.
  * Sources the platform displays itself (local capture) are only recorded.
  * Recording does not depend on decoding. A decoder that cannot be had (the
  * platform out of memory or decoder channels) is asked for again after a
@@ -23,6 +27,9 @@
 typedef struct {
     const char *urls[CHANNEL_MAX];  /* source URLs, in tile order; NULL: an empty tile */
     const char *names[CHANNEL_MAX]; /* optional display names (NULL or "") */
+    /* Optional sub-streams, shown in small tiles (NULL or "": derived from
+     * the URL where the protocol knows how, source_sub_url; else none) */
+    const char *sub_urls[CHANNEL_MAX];
     int         n;
     const char *rec_dir;            /* NULL: do not record */
     int         seg_secs;           /* segment length */
@@ -34,6 +41,9 @@ typedef struct {
     int        configured;          /* a source is set for this tile */
     int        live;                /* video arrived within the last 3 s */
     int        decoding;            /* a decoder is running */
+    char       view[8];             /* the stream on screen (or about to be): "main",
+                                       "sub", or "" (off screen, or none to decode);
+                                       codec, size and fps are that stream's */
     int        recording;           /* a segment is open */
     int        motion;              /* the camera reports motion; always 0 for now:
                                        no source reports it yet */
@@ -72,6 +82,11 @@ void channels_stop(void);
  * leaves the screen frees its decoder and gets one again at the first
  * keyframe after it comes back; recording is not affected. */
 void channels_set_tiles(const vg_rect_t *tiles);
+
+/* The screen's size, which tile sizes are judged by: a tile of a quarter
+ * of it or less shows a camera's sub-stream, a larger one its main stream.
+ * Unset (0), the main stream everywhere. Before channels_start. */
+void channels_set_screen(unsigned w, unsigned h);
 
 /* Snapshot of channel `idx` (0-based). Any thread, at any time. */
 void channels_status(int idx, channel_status_t *st);

@@ -37,6 +37,9 @@ typedef struct {
     /* The platform shows this source itself (local capture): the channel
      * records it but does not decode it. */
     int  self_displayed;
+    /* Optional: the camera's sub-stream for a main-stream URL. Returns 0
+     * with `out` set, or -1 (none, or the URL is the sub-stream already). */
+    int  (*sub_url)(const char *url, char *out, size_t cap);
 } source_ops_t;
 
 #define SOURCE_PS_MAX  3
@@ -61,6 +64,11 @@ struct source {
 /* NULL if the scheme is unknown or the URL is malformed. */
 source_t *source_create(const char *url, int index);
 void      source_destroy(source_t *s);
+
+/* The sub-stream of a camera given by its main-stream URL, where the
+ * protocol has a fixed way to name it (NETIP: stream=extra); RTSP paths
+ * are the vendor's own, so none there. 0 with `out` set, or -1. */
+int source_sub_url(const char *url, char *out, size_t cap);
 
 /* "rtsp, netip, capture" — for usage text. */
 const char *source_schemes(void);

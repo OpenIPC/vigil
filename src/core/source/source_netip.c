@@ -414,6 +414,43 @@ static void netip_destroy(source_t *s)
     s->priv = NULL;
 }
 
+/* Append `s` (n bytes) to out[*len]; -1 if it does not fit. */
+static int put(char *out, size_t cap, size_t *len, const char *s, size_t n)
+{
+    if (*len + n >= cap) return -1;
+    memcpy(out + *len, s, n);
+    *len += n;
+    out[*len] = 0;
+    return 0;
+}
+
+/* Xiongmai's sub-stream is the same channel with stream=extra: the URL
+ * with that instead of stream=main (or no stream). */
+static int netip_sub_url(const char *url, char *out, size_t cap)
+{
+    char user[64], pass[64], host[128], v[16];
+    int port = NETIP_PORT;
+    const char *path;
+    if (url_split(url, "netip", user, sizeof user, pass, sizeof pass, host, sizeof host, &port,
+                  &path) < 0)
+        return -1;
+    if (url_query(path, "stream", v, sizeof v) && (v[0] == 'e' || v[0] == 'E' || v[0] == 's'))
+        return -1;                          /* the sub-stream already */
+    const char *q = strchr(path, '?');
+    size_t len = 0;
+    if (put(out, cap, &len, url, (size_t)((q ? q : path + strlen(path)) - url)) < 0 ||
+        (!*path && put(out, cap, &len, "/", 1) < 0) || put(out, cap, &len, "?", 1) < 0)
+        return -1;
+    for (q = q ? q + 1 : NULL; q && *q; ) {
+        size_t n = strcspn(q, "&");
+        if (n && strncmp(q, "stream=", 7) != 0 &&
+            (put(out, cap, &len, q, n) < 0 || put(out, cap, &len, "&", 1) < 0))
+            return -1;
+        q += n + (q[n] == '&');
+    }
+    return put(out, cap, &len, "stream=extra", 12);
+}
+
 const source_ops_t source_netip_ops = {
     .scheme  = "netip",
     .create  = netip_create,
@@ -421,4 +458,5 @@ const source_ops_t source_netip_ops = {
     .poll    = netip_poll,
     .close   = netip_close,
     .destroy = netip_destroy,
+    .sub_url = netip_sub_url,
 };

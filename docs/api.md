@@ -292,7 +292,7 @@ For example:
   "channels": [
     { "camera": 1, "url": "rtsp://admin:***@192.168.1.10/stream=0", "name": "Gate",
       "enabled": true, "host": "192.168.1.10", "running": true, "live": true,
-      "state": "live", "decoding": true, "recording": true, "rec_state": "recording",
+      "state": "live", "decoding": true, "view": "main", "recording": true, "rec_state": "recording",
       "rec_bytes": 73400320,
       "codec": "H.265", "width": 1920, "height": 1080, "fps": 25 }
   ]
@@ -310,8 +310,12 @@ for a keyframe or for the camera) or `failed` (the last write failed); when it
 is not, why: `waiting for disk` (the path leads onto the root filesystem:
 nothing is mounted there), `not a disk` (RAM or flash), `read-only`, `error`
 (not a directory, no permission, mountinfo unreadable; the log says which);
-`rec_bytes` counts what was written since the channel started; `fps` is
-averaged over 2 s; `codec` is `null` until the stream says.
+`rec_bytes` counts what was written since the channel started; `decoding`: a
+decoder shows the channel; `view`: the stream on screen, or about to be
+(`main`, `sub` for the camera's sub-stream in a small tile, `""` when the
+channel is not on screen or nothing decodes it); `codec`, `width`,
+`height` and `fps` (averaged over 2 s) are that stream's; `codec` is `null`
+until the stream says.
 
 ### `GET /api/v1/schema`
 
