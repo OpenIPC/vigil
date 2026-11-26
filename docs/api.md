@@ -37,7 +37,10 @@ setting takes the text as it is, so `name: 123` is the name "123". Quote
 a value that YAML would otherwise cut short or read differently: a URL
 with `?`, `#`, `&` or `: `, a password with special characters, leading or
 trailing spaces, or an empty string (`""`). `cameras:` with nothing after
-it is no cameras. JSON is also valid YAML, so a JSON document loads too.
+it is no cameras, and a camera may be given as just its URL
+(`- rtsp://…`, enabled, no name): the form of the `vigil.yaml` that
+OpenIPC firmware shipped before vigild read the file itself, which
+therefore still loads. JSON is also valid YAML, so a JSON document loads too.
 
 **Written by vigild.** When the configuration is saved (the API, the
 on-screen settings), the file is written anew: two-space indentation,

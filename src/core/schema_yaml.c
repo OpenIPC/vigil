@@ -99,6 +99,16 @@ static cJSON *scalar(const yaml_event_t *ev, where_t w)
     case AT_SECTION:                    /* "cameras:" with nothing after it */
         if (null) return w.sec->is_array ? cJSON_CreateArray() : cJSON_CreateObject();
         break;
+    case AT_ITEM:                       /* "- rtsp://...": the item's first field */
+        if (!null && w.sec->n_fields > 0) {
+            where_t fw = { AT_FIELD, w.sec, &w.sec->fields[0] };
+            cJSON *obj = cJSON_CreateObject(), *v = scalar(ev, fw);
+            if (obj && v && cJSON_AddItemToObject(obj, fw.f->key, v)) return obj;
+            cJSON_Delete(v);
+            cJSON_Delete(obj);
+            return NULL;
+        }
+        break;
     case AT_VERSION:
         if (int_word(t, &n)) return cJSON_CreateNumber(n);
         break;

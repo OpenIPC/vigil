@@ -10,7 +10,10 @@
  *                        the schema field it is the value of (booleans as
  *                        true/false, yes/no, on/off; integers in decimal),
  *                        and one that does not convert stays a string, so
- *                        schema_from_json() reports it with its path.
+ *                        schema_from_json() reports it with its path. An
+ *                        item of a list given as a scalar is that item's
+ *                        first field ("- rtsp://..." is a camera's url, the
+ *                        form of the firmware's earlier vigil.yaml).
  *   schema_yaml_emit()   a cJSON document (schema_to_json) -> YAML text,
  *                        each section and setting preceded by its label and
  *                        help text as comments, so a saved file documents

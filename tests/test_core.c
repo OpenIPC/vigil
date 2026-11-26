@@ -935,6 +935,21 @@ static void test_config_file(void)
           !strcmp(d.cameras[2].url, "capture:0") && !strcmp(d.record.path, "/mnt/sda1/rec") &&
           d.record.segment == 90 && d.record.keep == 5 && d.record.allow_rootfs == 1 &&
           !strcmp(d.api.listen, "8080") && d.api.auth == 1, "values as typed");
+    /* the firmware's earlier vigil.yaml: a camera is just its URL */
+    CHECK(load_text(path,
+                    "cameras:\n"
+                    "  - rtsp://admin:12345@192.168.1.10/stream=0\n"
+                    "  - \"netip://admin:@192.168.1.11:34567/?ch=0&stream=main\"\n"
+                    "record:\n"
+                    "  path: \"\"\n"
+                    "  segment: 60\n"
+                    "  keep: 0\n", &d, &e) == 0 && d.n_cameras == 2 && d.cameras[0].enabled &&
+          !strcmp(d.cameras[0].url, "rtsp://admin:12345@192.168.1.10/stream=0") && !d.cameras[0].name[0] &&
+          !strcmp(d.cameras[1].url, "netip://admin:@192.168.1.11:34567/?ch=0&stream=main") && d.record.keep == 0,
+          "a camera given as its URL: %s %s", e.n ? e.e[0].path : "", e.n ? e.e[0].msg : "");
+    CHECK(load_text(path, "cameras:\n  - http://x/\n  -\n", &d, &e) < 0 &&
+          has_error(&e, "cameras[0].url", "not a camera URL") && has_error(&e, "cameras[1]", "object"),
+          "a bad URL, an empty item");
     CHECK(load_text(path, "cameras:\nrecord:\n", &d, &e) == 0 && d.n_cameras == 0 && d.record.segment == 60,
           "an empty section: no cameras, defaults");
     CHECK(load_text(path, "{\"version\": 1, \"record\": {\"segment\": 120, \"allow_rootfs\": true}}", &d, &e) == 0 &&
