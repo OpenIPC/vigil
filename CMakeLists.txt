@@ -10,7 +10,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 set(VIGIL_PLATFORM generic CACHE STRING "Target platform")
-set_property(CACHE VIGIL_PLATFORM PROPERTY STRINGS generic hi3536dv100 hi3520dv200 rockchip)
+set_property(CACHE VIGIL_PLATFORM PROPERTY STRINGS generic hi3536dv100 hi3520dv200 rockchip sigmastar)
 if(NOT EXISTS ${CMAKE_SOURCE_DIR}/cmake/platforms/${VIGIL_PLATFORM}.cmake)
   message(FATAL_ERROR "Unknown VIGIL_PLATFORM '${VIGIL_PLATFORM}'")
 endif()

@@ -9,6 +9,13 @@ change the HAL header for every platform instead of adding an `#ifdef`.
 
 Read [architecture.md](architecture.md) first for the terms used here.
 
+The SigmaStar port now exists for infinity2m
+([platforms/sigmastar.md](platforms/sigmastar.md),
+`src/platform/sigmastar/`). The steps below are the general recipe; where
+they differ from it (it takes the headers and shared libraries as the
+firmware ships them, not an SDK root, and binds the decoder straight to the
+display), the finished port is the reference.
+
 ## 1. Start from the generic platform
 
 `src/platform/generic/hal_generic.c` implements every HAL function as

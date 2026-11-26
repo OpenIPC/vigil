@@ -3,8 +3,8 @@
 Open-source DVR/NVR software for cheap recorder hardware running
 [OpenIPC](https://openipc.org). It shows cameras on HDMI in a 2×2 view
 with a small status UI and records their streams to disk. One code base
-runs on HiSilicon and Rockchip boards today; SigmaStar and plain Linux /
-cloud hosts are part of the design.
+runs on HiSilicon, Rockchip and SigmaStar boards; plain Linux / cloud hosts
+are part of the design.
 
 - **Network cameras** over RTSP or Xiongmai NETIP (DVRIP), H.264 and
   H.265. They are recorded without re-encoding on every platform, and
@@ -22,6 +22,7 @@ cloud hosts are part of the design.
 | [`hi3536dv100`](docs/platforms/hisilicon.md#hi3536dv100-nvr) | HiSilicon Hi3536DV100 NVRs | decode + HDMI + record | verified on hardware |
 | [`rockchip`](docs/platforms/rockchip.md) | RK3588 (Orange Pi 5 / 5 Plus, …) | decode + HDMI + record | verified headless (writeback) |
 | [`hi3520dv200`](docs/platforms/hisilicon.md#hi3520dv200-dvr--experimental) | HiSilicon Hi3520DV200 DVRs | capture + HDMI + encode | experimental, builds |
+| [`sigmastar`](docs/platforms/sigmastar.md) | SigmaStar SSR621Q NVRs (infinity2m) | decode + HDMI/VGA + record | experimental, qemu only |
 | [`generic`](docs/platforms/generic.md) | any Linux host | record only | CI-tested |
 
 ## Quick start (any Linux host)
@@ -42,6 +43,7 @@ For a board, see its page under [docs/platforms](docs/platforms/).
   implement.
 - Platforms: [HiSilicon](docs/platforms/hisilicon.md),
   [Rockchip](docs/platforms/rockchip.md),
+  [SigmaStar](docs/platforms/sigmastar.md),
   [generic](docs/platforms/generic.md).
 
 ## License
