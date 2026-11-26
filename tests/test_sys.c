@@ -9,6 +9,7 @@
 #include "sys_fake.h"
 
 void test_sys_seams(void);
+void test_sys_disk(void);
 
 void test_sys_seams(void)
 {
@@ -52,6 +53,7 @@ void test_sys_seams(void)
 int main(void)
 {
     test_sys_seams();
+    test_sys_disk();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }
