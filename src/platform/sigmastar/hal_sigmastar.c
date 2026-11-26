@@ -103,6 +103,7 @@ static struct {
 } g_ch[MAX_CH];
 static unsigned g_w, g_h;
 static unsigned char g_vdec_busy[VDEC_IDS];
+static unsigned g_vdec_freed[VDEC_IDS], g_vdec_frees;   /* when each was last freed */
 static int g_vdec_ids = VDEC_IDS;   /* lowered to what mi_vdec takes */
 static int g_open;                  /* decoders open */
 static int g_mem_known;             /* MMA_PROC could be read */
@@ -457,6 +458,7 @@ static void dec_teardown(int ch)
     MI_VDEC_StopChn(id);
     MI_VDEC_DestroyChn(id);
     g_vdec_busy[id] = 0;
+    g_vdec_freed[id] = ++g_vdec_frees;
     g_mem_used -= g_ch[ch].mem;
     g_ch[ch].mem = 0;
     g_ch[ch].codec = VG_CODEC_NONE;
@@ -495,9 +497,6 @@ static int dec_open(int ch, vg_codec_t codec, const vg_stream_info_t *si, unsign
         return -1;
     }
     dec_teardown(ch);
-    int id = 0;
-    while (g_vdec_busy[id]) ++id;           /* there is one: counted above */
-
     MI_VDEC_ChnAttr_t ca;
     memset(&ca, 0, sizeof ca);
     ca.eCodecType = codec == VG_CODEC_H265 ? E_MI_VDEC_CODEC_TYPE_H265 : E_MI_VDEC_CODEC_TYPE_H264;
@@ -507,16 +506,28 @@ static int dec_open(int ch, vg_codec_t codec, const vg_stream_info_t *si, unsign
     ca.eVideoMode = E_MI_VDEC_VIDEO_MODE_FRAME;
     ca.eDpbBufMode = E_MI_VDEC_DPB_MODE_NORMAL;
     ca.stVdecVideoAttr.u32RefFrameNum = si->refs ? si->refs : 1;
-    if ((rc = MI_VDEC_CreateChn(id, &ca)) != MI_SUCCESS) {
-        if (rc == MI_ERR_VDEC_INVALID_CHNID && id > 0 && id < g_vdec_ids) {
-            /* the device's MaxChnNum: no number from here up works */
-            fprintf(stderr, "sigmastar: mi_vdec takes %d channels (MaxChnNum)\n", id);
-            g_vdec_ids = id;
+    int id;
+    for (;;) {
+        /* The free number freed longest ago (never used ones first, the
+         * lowest first): a decoder made again in place on the number it
+         * had just given up showed nothing for 20-40 s in emulation, the
+         * emulated VPU still busy with the old one's pictures. */
+        id = -1;
+        for (int i = 0; i < g_vdec_ids; ++i)
+            if (!g_vdec_busy[i] && (id < 0 || g_vdec_freed[i] < g_vdec_freed[id])) id = i;
+        if (id < 0) {
             refuse(ch, "mi_vdec's %d channels are all in use", g_vdec_ids);
-        } else {
-            refuse(ch, "MI_VDEC_CreateChn(%d) %ux%u 0x%x", id, si->width, si->height, rc);
+            return -1;
         }
-        return -1;
+        if ((rc = MI_VDEC_CreateChn(id, &ca)) == MI_SUCCESS) break;
+        if (rc != MI_ERR_VDEC_INVALID_CHNID || id == 0 || id >= g_vdec_ids) {
+            refuse(ch, "MI_VDEC_CreateChn(%d) %ux%u 0x%x", id, si->width, si->height, rc);
+            return -1;
+        }
+        /* The device's MaxChnNum: every lower number has worked (never
+         * used numbers are tried lowest first), none from here up will. */
+        fprintf(stderr, "sigmastar: mi_vdec takes %d channels (MaxChnNum)\n", id);
+        g_vdec_ids = id;
     }
     /* A channel number used before keeps a display mode past the enum
      * (/proc's DisplayMode 2) and its pictures never show: set it. */
