@@ -74,6 +74,15 @@ _Static_assert(MAX_CH <= MI_DISP_INPUTPORT_MAX, "one input port per channel");
 #define SEND_TRIES      5           /* ~100 ms while the decoder catches up */
 #define HDMI_SYSFS      "/sys/kernel/open_hdmi/output"
 #define REOPEN_SECS     10          /* retry a decoder lost in a reset */
+/* A decoder taking over from another goes on screen after this many
+ * pictures, or after this long: in emulation an MI_VDEC channel bound to
+ * nothing decodes nothing, so it waits for the display; the old decoder's
+ * last picture stays on the port until the new one's first. */
+#define TAKEOVER_PICS   2
+#define TAKEOVER_MS     500
+#define PORT_WAIT_MS    10000       /* the old picture at most this long */
+#define PORT_CHECK_MS   20
+#define DISP_PROC       "/proc/mi_modules/mi_disp/mi_disp0"
 
 static const hal_caps_t g_caps = {
     .name = "sigmastar", .display = 1, .decoder = 1,
@@ -94,6 +103,20 @@ static struct {
     vg_rect_t        tile;          /* w == 0: not placed */
     unsigned         src_w, src_h;  /* what the decoder outputs */
     int              out_small;     /* the tile wants more: a new decoder at a keyframe */
+    /* After a takeover the port keeps the old decoder's picture, and its
+     * size (port_w x port_h), until it has a picture of the new one's. */
+    int              port_wait;
+    unsigned         port_w, port_h;
+    struct timespec  port_checked, switched;
+    struct {                        /* a decoder taking over, not on screen yet */
+        int              on;
+        int              vdec;
+        vg_codec_t       codec;
+        vg_stream_info_t si;
+        unsigned         buf, src_w, src_h;
+        unsigned long long mem;
+        struct timespec  since;
+    } nx;
     int              too_big;       /* an AU over buf_size was reported */
     int              refused;       /* a refusal was reported (until one opens) */
     int              lost;          /* gone in a reset; reopened at a keyframe */
@@ -270,15 +293,18 @@ static int port_place(int ch)
     unsigned ww, wh, ow, oh;
     fit(ch, &g_ch[ch].si, &ww, &wh);
     out_size(ch, &g_ch[ch].si, &ow, &oh);
-    if (g_ch[ch].src_w == ow && g_ch[ch].src_h == oh) {
+    /* the picture on the port: the old decoder's, until the new one's */
+    unsigned sw = g_ch[ch].port_wait ? g_ch[ch].port_w : g_ch[ch].src_w;
+    unsigned sh = g_ch[ch].port_wait ? g_ch[ch].port_h : g_ch[ch].src_h;
+    if (sw == ow && sh == oh) {
         if (g_ch[ch].si.width >= ww) ww = umin(ww, ow);
         if (g_ch[ch].si.height >= wh) wh = umin(wh, oh);
     }
 
     MI_DISP_InputPortAttr_t pa;
     memset(&pa, 0, sizeof pa);
-    pa.u16SrcWidth = g_ch[ch].src_w;
-    pa.u16SrcHeight = g_ch[ch].src_h;
+    pa.u16SrcWidth = sw;
+    pa.u16SrcHeight = sh;
     pa.stDispWin.u16X = t.x + (int)align_down(((unsigned)t.w - ww) / 2, 2);
     pa.stDispWin.u16Y = t.y + (int)align_down(((unsigned)t.h - wh) / 2, 2);
     pa.stDispWin.u16Width = ww;
@@ -447,56 +473,13 @@ static void refuse(int ch, const char *fmt, ...)
     va_end(ap);
 }
 
-/* Locked. */
-static void dec_teardown(int ch)
-{
-    if (g_ch[ch].codec == VG_CODEC_NONE) return;
-    int id = g_ch[ch].vdec;
-    MI_SYS_ChnPort_t src = vdec_port(id), dst = disp_port(ch);
-    MI_SYS_UnBindChnPort(&src, &dst);
-    MI_DISP_DisableInputPort(DISP_LAYER, ch);
-    MI_VDEC_StopChn(id);
-    MI_VDEC_DestroyChn(id);
-    g_vdec_busy[id] = 0;
-    g_vdec_freed[id] = ++g_vdec_frees;
-    g_mem_used -= g_ch[ch].mem;
-    g_ch[ch].mem = 0;
-    g_ch[ch].codec = VG_CODEC_NONE;
-    if (--g_open == 0) mem_baseline();      /* the account starts afresh */
-}
-
-void hal_dec_close(int ch)
-{
-    if (ch < 0 || ch >= MAX_CH) return;
-    pthread_mutex_lock(&g_lock);
-    dec_teardown(ch);
-    g_ch[ch].lost = 0;
-    pthread_mutex_unlock(&g_lock);
-}
-
-/* (Re)create channel ch's decoder with a `buf`-byte bitstream buffer. A
- * decoder it has stays, if the new one would not fit. Locked. */
-static int dec_open(int ch, vg_codec_t codec, const vg_stream_info_t *si, unsigned buf)
+/* An MI_VDEC channel for `si`, outputting ow x oh (or the picture's own
+ * size if the decoder refuses that): its number, or -1 (said through
+ * refuse). Not bound to anything. Locked. */
+static int vdec_make(int ch, vg_codec_t codec, const vg_stream_info_t *si, unsigned buf,
+                     unsigned *ow, unsigned *oh)
 {
     MI_S32 rc;
-    int own = g_ch[ch].codec != VG_CODEC_NONE;
-    int ids = own;
-    for (int i = 0; i < g_vdec_ids && !ids; ++i) ids = !g_vdec_busy[i];
-    if (!ids) {
-        refuse(ch, "mi_vdec's %d channels are all in use", g_vdec_ids);
-        return -1;
-    }
-    unsigned ow, oh;
-    out_size(ch, si, &ow, &oh);
-    unsigned long long need = dec_footprint(si, buf, ow, oh);
-    unsigned long long others = g_mem_used - (own ? g_ch[ch].mem : 0);
-    if (g_mem_known && others + need > g_mem_budget) {
-        refuse(ch, "%s %ux%u needs ~%llu MiB of the media heap, %llu MiB left of %llu",
-               vg_codec_name(codec), si->width, si->height, need >> 20,
-               g_mem_budget > others ? (g_mem_budget - others) >> 20 : 0, g_mem_budget >> 20);
-        return -1;
-    }
-    dec_teardown(ch);
     MI_VDEC_ChnAttr_t ca;
     memset(&ca, 0, sizeof ca);
     ca.eCodecType = codec == VG_CODEC_H265 ? E_MI_VDEC_CODEC_TYPE_H265 : E_MI_VDEC_CODEC_TYPE_H264;
@@ -538,47 +521,245 @@ static int dec_open(int ch, vg_codec_t codec, const vg_stream_info_t *si, unsign
         MI_VDEC_DestroyChn(id);
         return -1;
     }
+    MI_VDEC_OutputPortAttr_t oa;
+    memset(&oa, 0, sizeof oa);
+    oa.u16Width = *ow;
+    oa.u16Height = *oh;
+    if (MI_VDEC_SetOutputPortAttr(id, &oa) != MI_SUCCESS) {
+        *ow = si->width;                    /* the picture as decoded */
+        *oh = si->height;
+    }
+    MI_SYS_ChnPort_t src = vdec_port(id);
+    /* Live view: a short queue, the newest picture wins. */
+    MI_SYS_SetChnOutputPortDepth(&src, 0, 4);
+    g_vdec_busy[id] = 1;
+    ++g_open;
+    return id;
+}
+
+/* Locked. */
+static void vdec_free(int id)
+{
+    MI_VDEC_StopChn(id);
+    MI_VDEC_DestroyChn(id);
+    g_vdec_busy[id] = 0;
+    g_vdec_freed[id] = ++g_vdec_frees;
+    if (--g_open == 0) mem_baseline();      /* the account starts afresh */
+}
+
+/* Drop a decoder that was taking over. Locked. */
+static void nx_drop(int ch)
+{
+    if (!g_ch[ch].nx.on) return;
+    g_ch[ch].nx.on = 0;
+    g_mem_used -= g_ch[ch].nx.mem;
+    vdec_free(g_ch[ch].nx.vdec);
+}
+
+/* The decoder goes; the port stays as it is, showing its last picture.
+ * Locked. */
+static void dec_release(int ch)
+{
+    nx_drop(ch);
+    if (g_ch[ch].codec == VG_CODEC_NONE) return;
+    int id = g_ch[ch].vdec;
+    MI_SYS_ChnPort_t src = vdec_port(id), dst = disp_port(ch);
+    MI_SYS_UnBindChnPort(&src, &dst);
+    g_mem_used -= g_ch[ch].mem;
+    g_ch[ch].mem = 0;
+    g_ch[ch].codec = VG_CODEC_NONE;
+    g_ch[ch].port_wait = 0;
+    vdec_free(id);
+}
+
+/* Locked. */
+static void dec_teardown(int ch)
+{
+    int had = g_ch[ch].codec != VG_CODEC_NONE;
+    dec_release(ch);
+    if (had) MI_DISP_DisableInputPort(DISP_LAYER, ch);
+}
+
+void hal_dec_close(int ch)
+{
+    if (ch < 0 || ch >= MAX_CH) return;
+    pthread_mutex_lock(&g_lock);
+    dec_teardown(ch);
+    g_ch[ch].lost = 0;
+    pthread_mutex_unlock(&g_lock);
+}
+
+static long ms_since(const struct timespec *t)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (now.tv_sec - t->tv_sec) * 1000L + (now.tv_nsec - t->tv_nsec) / 1000000L;
+}
+
+/* The size of the last picture input port ch received, from mi_disp's
+ * /proc file (the table with RecvBufCnt: port, count, width, height).
+ * 0, or -1 if it cannot be read. */
+static int disp_recv_size(int ch, unsigned *w, unsigned *h)
+{
+    FILE *f = fopen(DISP_PROC, "r");
+    if (!f) return -1;
+    char line[256];
+    int in = 0, rc = -1;
+    while (rc < 0 && fgets(line, sizeof line, f)) {
+        if (strstr(line, "RecvBufCnt")) { in = 1; continue; }
+        if (!in) continue;
+        int port;
+        unsigned cnt, bw, bh;
+        if (sscanf(line, "%d %u %u %u", &port, &cnt, &bw, &bh) != 4) break;
+        if (port == ch) {
+            *w = bw;
+            *h = bh;
+            rc = 0;
+        }
+    }
+    fclose(f);
+    return rc;
+}
+
+/* The decoder taking over goes on screen: the port, which kept showing the
+ * old decoder's last picture, is bound to it, and the old one goes. Locked. */
+static void nx_swap(int ch)
+{
+    MI_SYS_ChnPort_t dst = disp_port(ch);
+    MI_SYS_ChnPort_t old = vdec_port(g_ch[ch].vdec);
+    MI_SYS_UnBindChnPort(&old, &dst);
+    g_ch[ch].port_w = g_ch[ch].port_wait ? g_ch[ch].port_w : g_ch[ch].src_w;
+    g_ch[ch].port_h = g_ch[ch].port_wait ? g_ch[ch].port_h : g_ch[ch].src_h;
+    vdec_free(g_ch[ch].vdec);
+    g_mem_used -= g_ch[ch].mem;
+    g_ch[ch].vdec = g_ch[ch].nx.vdec;
+    g_ch[ch].codec = g_ch[ch].nx.codec;
+    g_ch[ch].si = g_ch[ch].nx.si;
+    g_ch[ch].buf_size = g_ch[ch].nx.buf;
+    g_ch[ch].src_w = g_ch[ch].nx.src_w;
+    g_ch[ch].src_h = g_ch[ch].nx.src_h;
+    g_ch[ch].mem = g_ch[ch].nx.mem;
+    g_ch[ch].too_big = 0;
+    g_ch[ch].nx.on = 0;
+    out_follow(ch);                         /* the tile may have changed meanwhile */
+    /* The port keeps the old picture until the new decoder's first one
+     * reaches it: with the new size set at once, the display read the old
+     * picture at the wrong size (garbled for seconds in emulation, where
+     * the first picture comes late). hal_dec_send sets it then. */
+    g_ch[ch].port_wait = g_ch[ch].port_w != g_ch[ch].src_w || g_ch[ch].port_h != g_ch[ch].src_h;
+    MI_SYS_ChnPort_t src = vdec_port(g_ch[ch].vdec);
+    MI_S32 rc = MI_SYS_BindChnPort(&src, &dst, 30, 30);
+    if (rc != MI_SUCCESS) {
+        fprintf(stderr, "sigmastar: decoder %d to the display 0x%x\n", ch, rc);
+        dec_teardown(ch);
+        return;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &g_ch[ch].port_checked);
+    fprintf(stderr, "sigmastar: decoder %d: vdec %d bound %ld ms after the switch\n", ch, g_ch[ch].vdec,
+            ms_since(&g_ch[ch].nx.since));
+}
+
+/* (Re)create channel ch's decoder with a `buf`-byte bitstream buffer.
+ * With a decoder already there, the new one is made beside it and fed
+ * while the port keeps the old one's last picture, the display enlarging
+ * it if the tile grew; it goes on screen once it has pictures (nx_swap).
+ * Without room for both, the old one goes first, and stays if the new one
+ * would not fit. Locked. */
+static int dec_open(int ch, vg_codec_t codec, const vg_stream_info_t *si, unsigned buf)
+{
+    MI_S32 rc;
+    int own = g_ch[ch].codec != VG_CODEC_NONE;
+    nx_drop(ch);
+    int ids = own;
+    for (int i = 0; i < g_vdec_ids && !ids; ++i) ids = !g_vdec_busy[i];
+    if (!ids) {
+        refuse(ch, "mi_vdec's %d channels are all in use", g_vdec_ids);
+        return -1;
+    }
+    unsigned ow, oh;
+    out_size(ch, si, &ow, &oh);
+    unsigned long long need = dec_footprint(si, buf, ow, oh);
+
+    int spare = 0;
+    for (int i = 0; i < g_vdec_ids && !spare; ++i) spare = !g_vdec_busy[i];
+    if (own && spare && (!g_mem_known || g_mem_used + need <= g_mem_budget)) {
+        int id = vdec_make(ch, codec, si, buf, &ow, &oh);
+        if (id >= 0) {
+            g_ch[ch].nx.on = 1;
+            g_ch[ch].nx.vdec = id;
+            g_ch[ch].nx.codec = codec;
+            g_ch[ch].nx.si = *si;
+            g_ch[ch].nx.buf = buf;
+            g_ch[ch].nx.src_w = ow;
+            g_ch[ch].nx.src_h = oh;
+            g_ch[ch].nx.mem = need;
+            clock_gettime(CLOCK_MONOTONIC, &g_ch[ch].nx.since);
+            g_ch[ch].switched = g_ch[ch].nx.since;
+            g_mem_used += need;
+            g_ch[ch].out_small = 0;
+            g_ch[ch].lost = 0;
+            g_ch[ch].refused = 0;
+            fprintf(stderr, "sigmastar: decoder %d (vdec %d): %s %ux%u -> %ux%u, %u KiB buffer, "
+                    "~%llu KiB of the heap, taking over from vdec %d\n", ch, id, vg_codec_name(codec),
+                    si->width, si->height, ow, oh, buf >> 10, need >> 10, g_ch[ch].vdec);
+            return 0;
+        }
+    }
+
+    unsigned long long others = g_mem_used - (own ? g_ch[ch].mem : 0);
+    if (g_mem_known && others + need > g_mem_budget) {
+        refuse(ch, "%s %ux%u needs ~%llu MiB of the media heap, %llu MiB left of %llu",
+               vg_codec_name(codec), si->width, si->height, need >> 20,
+               g_mem_budget > others ? (g_mem_budget - others) >> 20 : 0, g_mem_budget >> 20);
+        return -1;
+    }
+    /* Replacing a decoder on screen without room for both: the port keeps
+     * the old one's last picture (and its size) until the new one's. */
+    int keep = own && g_ch[ch].tile.w;
+    unsigned pw = g_ch[ch].port_wait ? g_ch[ch].port_w : g_ch[ch].src_w;
+    unsigned ph = g_ch[ch].port_wait ? g_ch[ch].port_h : g_ch[ch].src_h;
+    if (keep) dec_release(ch);
+    else dec_teardown(ch);
+    int id = vdec_make(ch, codec, si, buf, &ow, &oh);
+    if (id < 0) {
+        if (keep) MI_DISP_DisableInputPort(DISP_LAYER, ch);
+        return -1;
+    }
     /* from here dec_teardown undoes it */
     g_ch[ch].codec = codec;
     g_ch[ch].vdec = id;
-    g_vdec_busy[id] = 1;
     g_ch[ch].mem = need;
     g_mem_used += need;
-    ++g_open;
     g_ch[ch].si = *si;
     g_ch[ch].buf_size = buf;
     g_ch[ch].too_big = 0;
     g_ch[ch].lost = 0;
-
-    MI_VDEC_OutputPortAttr_t oa;
-    memset(&oa, 0, sizeof oa);
-    oa.u16Width = ow;
-    oa.u16Height = oh;
-    if (MI_VDEC_SetOutputPortAttr(id, &oa) != MI_SUCCESS) {
-        oa.u16Width = si->width;                /* the picture as decoded */
-        oa.u16Height = si->height;
-    }
-    g_ch[ch].src_w = oa.u16Width;
-    g_ch[ch].src_h = oa.u16Height;
+    g_ch[ch].src_w = ow;
+    g_ch[ch].src_h = oh;
     g_ch[ch].out_small = 0;
+    if (keep) {
+        g_ch[ch].port_w = pw;
+        g_ch[ch].port_h = ph;
+        g_ch[ch].port_wait = pw != ow || ph != oh;
+        clock_gettime(CLOCK_MONOTONIC, &g_ch[ch].switched);
+        g_ch[ch].port_checked = g_ch[ch].switched;
+    }
 
     MI_SYS_ChnPort_t src = vdec_port(id), dst = disp_port(ch);
-    /* Live view: a short queue, the newest picture wins. */
-    MI_SYS_SetChnOutputPortDepth(&src, 0, 4);
-
     if (port_place(ch) < 0) {
         dec_teardown(ch);
         return -1;
     }
-    if ((rc = MI_DISP_EnableInputPort(DISP_LAYER, ch)) != MI_SUCCESS ||
-        (rc = MI_DISP_SetInputPortSyncMode(DISP_LAYER, ch, E_MI_DISP_SYNC_MODE_FREE_RUN)) != MI_SUCCESS ||
+    if ((!keep && ((rc = MI_DISP_EnableInputPort(DISP_LAYER, ch)) != MI_SUCCESS ||
+                   (rc = MI_DISP_SetInputPortSyncMode(DISP_LAYER, ch, E_MI_DISP_SYNC_MODE_FREE_RUN)) != MI_SUCCESS)) ||
         (rc = MI_SYS_BindChnPort(&src, &dst, 30, 30)) != MI_SUCCESS) {
         refuse(ch, "to the display 0x%x", rc);
         dec_teardown(ch);
         return -1;
     }
-    /* nothing of an earlier decoder on this port until this one has a picture */
-    MI_DISP_ClearInputPortBuffer(DISP_LAYER, ch, 1);
+    /* nothing of an earlier decoder on this port until this one has a
+     * picture, unless it is a replacement */
+    if (!keep) MI_DISP_ClearInputPortBuffer(DISP_LAYER, ch, 1);
     if (!g_ch[ch].tile.w)
         MI_DISP_HideInputPort(DISP_LAYER, ch);
     g_ch[ch].refused = 0;
@@ -592,8 +773,9 @@ static int dec_open(int ch, vg_codec_t codec, const vg_stream_info_t *si, unsign
  * down the old one and failed, reopen it at keyframes later. Locked. */
 static int dec_recreate(int ch, unsigned buf)
 {
-    vg_codec_t codec = g_ch[ch].codec;
-    vg_stream_info_t si = g_ch[ch].si;
+    /* the newest decoder's stream: a decoder taking over is for it */
+    vg_codec_t codec = g_ch[ch].nx.on ? g_ch[ch].nx.codec : g_ch[ch].codec;
+    vg_stream_info_t si = g_ch[ch].nx.on ? g_ch[ch].nx.si : g_ch[ch].si;
     if (dec_open(ch, codec, &si, buf) == 0) return 0;
     if (g_ch[ch].codec == VG_CODEC_NONE) {
         fprintf(stderr, "sigmastar: decoder %d lost, retried at keyframes\n", ch);
@@ -663,15 +845,19 @@ int hal_dec_send(int ch, const vg_au_t *au)
     if (g_ch[ch].out_small && au->key) dec_reopen_larger(ch);
     if (g_ch[ch].codec == VG_CODEC_NONE) return -1;
     /* MI_VDEC takes an AU whole: one larger than its buffer never goes in.
-     * At a keyframe the decoder can start over with a larger one. */
-    if (au->len > g_ch[ch].buf_size &&
+     * At a keyframe the decoder can start over with a larger one. The
+     * stream goes to a decoder taking over, if there is one: the old one
+     * keeps its last picture on screen. */
+    unsigned buf = g_ch[ch].nx.on ? g_ch[ch].nx.buf : g_ch[ch].buf_size;
+    if (au->len > buf &&
         !(au->key && au->len <= VDEC_BUF_MAX && dec_regrow(ch, au->len) == 0)) {
         if (!g_ch[ch].too_big)
             fprintf(stderr, "sigmastar: decoder %d: %zu-byte AU over its %u-byte buffer, dropped\n",
-                    ch, au->len, g_ch[ch].buf_size);
+                    ch, au->len, buf);
         g_ch[ch].too_big = 1;
         return -1;
     }
+    int nx = g_ch[ch].nx.on, id = nx ? g_ch[ch].nx.vdec : g_ch[ch].vdec;
     MI_VDEC_VideoStream_t s;
     memset(&s, 0, sizeof s);
     s.pu8Addr = (MI_U8 *)au->data;
@@ -679,12 +865,37 @@ int hal_dec_send(int ch, const vg_au_t *au)
     s.u64PTS = au->pts_us;
     s.bEndOfFrame = 1;
     /* The bitstream buffer fills while the decoder lags: wait a little. */
-    for (int i = 0; i < SEND_TRIES; ++i) {
-        MI_S32 rc = MI_VDEC_SendStream(g_ch[ch].vdec, &s, SEND_TIMEOUT_MS);
-        if (rc == MI_SUCCESS) return 0;
-        if (rc != MI_ERR_VDEC_BUF_FULL) break;
+    MI_S32 rc = MI_ERR_VDEC_BUF_FULL;
+    for (int i = 0; i < SEND_TRIES && rc == MI_ERR_VDEC_BUF_FULL; ++i)
+        rc = MI_VDEC_SendStream(id, &s, SEND_TIMEOUT_MS);
+    /* Looked at with every picture sent while it waits: the new picture
+     * shows at the old size until then. */
+    if (g_ch[ch].port_wait && !nx && ms_since(&g_ch[ch].port_checked) >= PORT_CHECK_MS) {
+        clock_gettime(CLOCK_MONOTONIC, &g_ch[ch].port_checked);
+        unsigned w = 0, h = 0;
+        int arrived = disp_recv_size(ch, &w, &h) == 0 && w == g_ch[ch].src_w && h == g_ch[ch].src_h;
+        if (arrived || ms_since(&g_ch[ch].switched) >= PORT_WAIT_MS) {
+            pthread_mutex_lock(&g_lock);
+            if (g_ch[ch].port_wait && g_ch[ch].vdec == id) {
+                g_ch[ch].port_wait = 0;
+                port_place(ch);
+                fprintf(stderr, "sigmastar: decoder %d: its picture on screen %ld ms after the switch\n",
+                        ch, ms_since(&g_ch[ch].switched));
+            }
+            pthread_mutex_unlock(&g_lock);
+        }
     }
-    return -1;
+    if (nx) {
+        MI_VDEC_ChnStat_t st;
+        memset(&st, 0, sizeof st);
+        if ((MI_VDEC_GetChnStat(id, &st) == MI_SUCCESS && st.u32DecodeStreamFrames >= TAKEOVER_PICS) ||
+            ms_since(&g_ch[ch].nx.since) >= TAKEOVER_MS) {
+            pthread_mutex_lock(&g_lock);
+            if (g_ch[ch].nx.on && g_ch[ch].nx.vdec == id) nx_swap(ch);
+            pthread_mutex_unlock(&g_lock);
+        }
+    }
+    return rc == MI_SUCCESS ? 0 : -1;
 }
 
 void hal_dec_reset(int ch)
