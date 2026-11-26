@@ -861,7 +861,7 @@ static void disks_build(disks_t *dk)
         const ui_disk_t *d = &dk->d[i];
         lv_obj_t *r = trow(dk->table);
         char name[48], what[96], size[24], avail[24];
-        snprintf(name, sizeof name, "%s%s", d->is_part ? "    " : "", d->name);
+        snprintf(name, sizeof name, "%s%.31s", d->is_part ? "    " : "", d->name);
         if (d->is_part || !d->model[0]) snprintf(what, sizeof what, "%s", d->fs[0] ? d->fs : "-");
         else snprintf(what, sizeof what, "%s%s", d->model, d->removable ? " (USB)" : "");
         ui_set_size_text(d->size, size, sizeof size);
