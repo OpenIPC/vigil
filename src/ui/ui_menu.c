@@ -19,13 +19,16 @@
 
 #include "icons.h"
 #include "ui_app.h"
+#include "ui_i18n.h"
+#include "ui_settings.h"
 #include "ui_theme.h"
 
 #define MARGIN   52             /* (1280 - 3 cards - 2 gaps) / 2 */
 #define GAP      VG_SPACE_XL
 #define BAR_H    VG_SIZE_PAGE_HEADER
 
-enum { FN_PLAYBACK, FN_AI, FN_ALARM, FN_OPERATION, FN_BACKUP, FN_DISPLAY, FN_SYSTEM, FN_ACCOUNT, FN_SECTION = 100 };
+enum { FN_PLAYBACK, FN_AI, FN_ALARM, FN_OPERATION, FN_BACKUP, FN_DISPLAY, FN_CAMERA, FN_NETWORK, FN_STORAGE,
+       FN_SYSTEM, FN_ACCOUNT };
 
 typedef struct {
     const lv_image_dsc_t *icon;
@@ -54,12 +57,17 @@ static void open_fn(int fn, const char *later)
         ui_not_yet(later);
         return;
     }
-    if (fn >= FN_SECTION) {
-        int sec = fn - FN_SECTION;
-        if (!strcmp(ui_model()->sections[sec].key, "cameras")) ui_channels_open();
-        else if (ui_model()->sections[sec].is_array) ui_list_open(sec);
-        else ui_form_open(sec, -1);
-    } else if (fn == FN_OPERATION || fn == FN_SYSTEM) {
+    if (fn == FN_CAMERA) {
+        ui_channels_open();
+    } else if (fn == FN_NETWORK) {
+        ui_network_open(0);
+    } else if (fn == FN_STORAGE) {
+        ui_storage_open(UI_STORAGE_BASIC);
+    } else if (fn == FN_SYSTEM) {
+        ui_sysset_open(0);
+    } else if (fn == FN_ACCOUNT) {
+        ui_account_open(0);
+    } else if (fn == FN_OPERATION) {
         ui_system_open();
     } else if (fn == FN_DISPLAY) {
         ui_display_open();
@@ -157,17 +165,6 @@ static void mgmt_btn(lv_obj_t *row, const lv_image_dsc_t *img, const char *label
     ui_label(b, up, VG_FONT_MD_LV, UI_C(TEXT));
 }
 
-/* The settings sections vigild has get their names and icons; another
- * one shows up with its own label and the settings icon. */
-static void section_look(const char *key, const char *label, const lv_image_dsc_t **img, const char **name)
-{
-    *img = &ui_icon_system;
-    *name = label;
-    if (!strcmp(key, "cameras")) *img = &ui_icon_camera, *name = "Camera";
-    else if (!strcmp(key, "api")) *img = &ui_icon_network, *name = "Network";
-    else if (!strcmp(key, "record")) *img = &ui_icon_storage, *name = "Storage";
-}
-
 /* ---- the screen ------------------------------------------------------------------------------- */
 
 static void top_bar(ui_page_t *p)
@@ -237,26 +234,16 @@ void ui_menu_open(void)
     lv_obj_set_layout(row, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    const ui_model_t *m = ui_model();
-    int k = 0;
-    /* Camera, Network, Storage: the other sections belong to their pages. */
-    int order[UI_MAX_ITEMS + 4], n = 0;
-    static const char *const first[] = { "cameras", "api", "record" };
-    for (int f = 0; f < 3; ++f)
-        for (int i = 0; i < m->n_sections; ++i)
-            if (!strcmp(m->sections[i].key, first[f])) order[n++] = i;
-    for (int j = 0; j < n && k < (int)(sizeof g_mgmt / sizeof g_mgmt[0]) - 2; ++j) {
-        int i = order[j];
-        const lv_image_dsc_t *img;
-        const char *name;
-        section_look(m->sections[i].key, m->sections[i].label, &img, &name);
-        g_mgmt[k] = (mgmt_t){ FN_SECTION + i, NULL };
-        mgmt_btn(row, img, name, &g_mgmt[k++]);
+    /* The settings: each opens its screen of sub-pages (ui_settings.h). */
+    static const struct { int fn; const lv_image_dsc_t *img; ui_str_t name; } mg[] = {
+        { FN_CAMERA, &ui_icon_camera, S_CAMERA }, { FN_NETWORK, &ui_icon_network, S_NETWORK },
+        { FN_STORAGE, &ui_icon_storage, S_STORAGE }, { FN_SYSTEM, &ui_icon_system, S_SYSTEM },
+        { FN_ACCOUNT, &ui_icon_account, S_ACCOUNT },
+    };
+    for (size_t k = 0; k < sizeof mg / sizeof mg[0]; ++k) {
+        g_mgmt[k] = (mgmt_t){ mg[k].fn, NULL };
+        mgmt_btn(row, mg[k].img, TR(mg[k].name), &g_mgmt[k]);
     }
-    g_mgmt[k] = (mgmt_t){ FN_SYSTEM, NULL };
-    mgmt_btn(row, &ui_icon_system, "System", &g_mgmt[k++]);
-    g_mgmt[k] = (mgmt_t){ FN_ACCOUNT, "Accounts" };
-    mgmt_btn(row, &ui_icon_account, "Account", &g_mgmt[k++]);
     ui_gridnav(row, LV_GRIDNAV_CTRL_ROLLOVER);
     lv_group_add_obj(p->group, row);
 

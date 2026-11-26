@@ -167,6 +167,17 @@ void      ui_form_open(int sec, int item);  /* item -1: object section; n: new i
  * channel slot + 1): the empty slots before it are kept empty. */
 void      ui_form_open_slot(int sec, int slot);
 void      ui_list_open(int sec);
+/* The form of object section `sec` inside `parent` (a settings pane,
+ * ui_settings.h): its widgets join `group`, Enter after the last text
+ * field focuses `save_btn`, text fields use the on-screen keyboard `kb`.
+ * The host saves, resets and frees it; deleting `parent` deletes its
+ * widgets. */
+typedef struct ui_form ui_form_t;
+ui_form_t *ui_form_embed(lv_obj_t *parent, lv_group_t *group, lv_obj_t *save_btn, lv_obj_t *kb, int sec);
+int        ui_form_embed_dirty(ui_form_t *f);
+int        ui_form_embed_save(ui_form_t *f);       /* 0 saved; errors shown under the fields */
+void       ui_form_embed_reset(ui_form_t *f);      /* the widgets show what is stored */
+void       ui_form_embed_free(ui_form_t *f);
 void      ui_system_open(void);
 void      ui_display_open(void);
 /* Every channel: state, stream on screen, codec, size, fps, recording,
@@ -176,6 +187,11 @@ void      ui_channel_info_open(void);
 int       ui_live_layout_offered(int layout);
 /* Where the clock is ("top right"), or "off". */
 const char *ui_live_clock_corner(void);
+
+/* `tm` in the UI's date and time format (ui.date_format, ui.time_format):
+ * "2026-11-26  14:32:05", "26.11.2026  2:32 PM", ... */
+struct tm;
+void ui_format_datetime(const struct tm *tm, int seconds, char *buf, size_t cap);
 
 /* "CAM 3" or the camera's name. */
 void ui_chan_title(int ch, char *buf, size_t cap);

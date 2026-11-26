@@ -385,6 +385,213 @@ static void shot(const char *name)
     fclose(f);
 }
 
+/* ---- the management pages: the system faked, the rest real ------------------------------ */
+
+/* What the pages show and do, without a system to change: an interface,
+ * disks, a clock. Time zone parsing is the real one. */
+static ui_mgmt_t    g_mg;
+static int          g_mg_pending, g_mg_wifi, g_mg_jobs, g_mg_formatted;
+static ui_net_cfg_t g_mg_eth = { .dhcp = 0, .address = "192.168.1.20", .netmask = "255.255.255.0",
+                                 .gateway = "192.168.1.1", .dns1 = "192.168.1.1", .dns2 = "8.8.8.8" };
+static char         g_mg_host[64] = "nvr-hall";
+static char         g_mg_zone[64] = "Europe/Berlin", g_mg_tz[96] = "CET-1CEST,M3.5.0,M10.5.0/3";
+
+static int  fm_managed(void) { return 1; }
+static void fm_status(ui_net_status_t *st, int wifi)
+{
+    memset(st, 0, sizeof *st);
+    st->present = st->up = st->link = 1;
+    st->speed = wifi ? 0 : 100;
+    snprintf(st->duplex, sizeof st->duplex, "%s", wifi ? "" : "full");
+    snprintf(st->mac, sizeof st->mac, "%s", wifi ? "e8:4e:06:1a:22:31" : "00:12:31:a5:7c:02");
+    snprintf(st->address, sizeof st->address, "%s", wifi ? "192.168.1.57" : "192.168.1.20");
+    snprintf(st->netmask, sizeof st->netmask, "255.255.255.0");
+    snprintf(st->gateway, sizeof st->gateway, "192.168.1.1");
+    snprintf(st->dns1, sizeof st->dns1, "192.168.1.1");
+    st->mtu = 1500;
+}
+static void fm_eth_get(ui_net_cfg_t *c, ui_net_status_t *st) { *c = g_mg_eth; fm_status(st, 0); }
+static int  fm_eth_apply(const ui_net_cfg_t *c, char *field, size_t fcap, char *err, size_t cap)
+{
+    if (!c->dhcp && strcmp(c->netmask, "255.255.255.0") && strcmp(c->netmask, "255.255.0.0")) {
+        snprintf(field, fcap, "netmask");
+        snprintf(err, cap, "not a netmask (255.255.255.0, ...)");
+        return UI_MGMT_EINVAL;
+    }
+    g_mg_eth = *c;
+    g_mg_pending = 1;
+    return ++g_mg_jobs;
+}
+static int  fm_pending(int *secs) { if (secs) *secs = 57; return g_mg_pending; }
+static int  fm_confirm(void) { int p = g_mg_pending; g_mg_pending = 0; return p ? 0 : -1; }
+static int  fm_revert(void) { return fm_confirm(); }
+static void fm_wifi_get(ui_wifi_t *w, ui_net_status_t *st)
+{
+    memset(w, 0, sizeof *w);
+    fm_status(st, 1);
+    if (!g_mg_wifi) return;
+    snprintf(w->ifname, sizeof w->ifname, "wlan0");
+    snprintf(w->ssid, sizeof w->ssid, "HomeNet");
+    w->password_set = 1;
+}
+static int  fm_wifi_scan(ui_wifi_net_t *o, int max, char *err, size_t cap)
+{
+    (void)o; (void)max;
+    snprintf(err, cap, "this firmware has no iw to scan with");
+    return -1;
+}
+static int  fm_wifi_set(const char *ssid, const char *p, char *err, size_t cap)
+{
+    (void)ssid; (void)p; (void)err; (void)cap;
+    return ++g_mg_jobs;
+}
+static void fm_lte_get(ui_lte_t *l, ui_net_status_t *st) { memset(l, 0, sizeof *l); memset(st, 0, sizeof *st); }
+static void fm_services(ui_svc_t *d, ui_svc_t *m, ui_svc_t *a, ui_svc_t *n)
+{
+    *d = (ui_svc_t){ .last = 1795702800, .ok = 1, .result = "updated: good 203.0.113.7" };
+    *m = (ui_svc_t){ 0 };
+    *a = (ui_svc_t){ .last = 1795703400, .ok = 1, .result = "sent" };
+    *n = (ui_svc_t){ 0 };
+}
+static int  fm_job_start(void) { return ++g_mg_jobs; }
+static int  fm_nas_support(const char *type, char *why, size_t cap)
+{
+    if (!strcmp(type, "nfs")) {
+        snprintf(why, cap, "the kernel has NFS without version 3: it needs CONFIG_NFS_V3");
+        return 0;
+    }
+    return 1;
+}
+static int  fm_nas_mounted(void) { return 0; }
+static int  fm_curl(void) { return 1; }
+static int  fm_job(int id, ui_mjob_t *j)
+{
+    memset(j, 0, sizeof *j);
+    j->id = id;
+    j->state = UI_JOBST_DONE;
+    snprintf(j->msg, sizeof j->msg, "done");
+    return 0;
+}
+static int  fm_disks(ui_disk_t *o, int max)
+{
+    static const ui_disk_t d[] = {
+        { .name = "sda", .size = 1000204886016ull, .model = "WDC WD10PURZ" },
+        { .name = "sda1", .parent = "sda", .is_part = 1, .size = 1000203837440ull, .fs = "exfat",
+          .mnt = "/mnt/sda1", .total = 1000170000000ull, .avail = 612400000000ull, .state = "recording" },
+        { .name = "sdb", .size = 31914983424ull, .model = "SanDisk Ultra", .removable = 1 },
+        { .name = "sdb1", .parent = "sdb", .is_part = 1, .size = 31913934848ull, .fs = "vfat",
+          .state = "not mounted" },
+    };
+    int n = (int)(sizeof d / sizeof d[0]);
+    if (n > max) n = max;
+    memcpy(o, d, (size_t)n * sizeof *o);
+    if (g_mg_formatted && n > 3) {
+        snprintf(o[3].fs, sizeof o[3].fs, "exfat");
+        snprintf(o[3].mnt, sizeof o[3].mnt, "/mnt/sdb1");
+        snprintf(o[3].state, sizeof o[3].state, "mounted");
+        o[3].total = 31900000000ull;
+        o[3].avail = 31850000000ull;
+    }
+    return n;
+}
+static int  fm_formats(char out[][8], int max)
+{
+    (void)max;
+    snprintf(out[0], 8, "exfat");
+    snprintf(out[1], 8, "vfat");
+    return 2;
+}
+static int  fm_disk_format(const char *name, const char *fs, const char *confirm, char *err, size_t cap)
+{
+    (void)fs;
+    if (strcmp(name, confirm)) {
+        snprintf(err, cap, "type the disk's name (%s) to confirm", name);
+        return UI_MGMT_EINVAL;
+    }
+    g_mg_formatted = 1;
+    return ++g_mg_jobs;
+}
+static int  fm_disk_act(const char *name, char *err, size_t cap) { (void)name; (void)err; (void)cap; return ++g_mg_jobs; }
+static void fm_time_get(ui_time_t *t)
+{
+    memset(t, 0, sizeof *t);
+    snprintf(t->zone, sizeof t->zone, "%s", g_mg_zone);
+    snprintf(t->tz, sizeof t->tz, "%s", g_mg_tz);
+    t->rtc = 1;
+    snprintf(t->servers[0], 64, "0.pool.ntp.org");
+    snprintf(t->servers[1], 64, "1.pool.ntp.org");
+    t->n_servers = 2;
+    t->ntp = 1;
+    t->ntp_interval = 60;
+    t->ntp_last_try = t->ntp_last_ok = 1795703100;
+    snprintf(t->ntp_result, sizeof t->ntp_result, "the clock was set from 0.pool.ntp.org");
+}
+static int  fm_time_set(const char *zone, const char *tz, int set_clock, long long t, char *err, size_t cap)
+{
+    (void)set_clock; (void)t; (void)err; (void)cap;
+    if (zone && *zone) snprintf(g_mg_zone, sizeof g_mg_zone, "%s", zone);
+    if (tz && *tz) {
+        snprintf(g_mg_tz, sizeof g_mg_tz, "%s", tz);
+        snprintf(g_mg_zone, sizeof g_mg_zone, "custom");
+    }
+    return 0;
+}
+static int  fm_ntp_set(int en, const char *srv, int iv, char *err, size_t cap)
+{
+    (void)en; (void)srv; (void)iv; (void)err; (void)cap;
+    return 0;
+}
+static void fm_host_get(char *b, size_t cap) { snprintf(b, cap, "%s", g_mg_host); }
+static int  fm_host_set(const char *n, char *err, size_t cap)
+{
+    if (!*n || strchr(n, ' ')) {
+        snprintf(err, cap, "1 to 63 letters, digits and '-'");
+        return UI_MGMT_EINVAL;
+    }
+    snprintf(g_mg_host, sizeof g_mg_host, "%s", n);
+    return 0;
+}
+
+static void fake_mgmt(ui_model_t *m)
+{
+    g_mg = *m->mgmt;                    /* real: time zone parsing */
+    g_mg.managed = fm_managed;
+    g_mg.eth_get = fm_eth_get;
+    g_mg.eth_apply = fm_eth_apply;
+    g_mg.net_pending = fm_pending;
+    g_mg.net_confirm = fm_confirm;
+    g_mg.net_revert = fm_revert;
+    g_mg.wifi_get = fm_wifi_get;
+    g_mg.wifi_scan = fm_wifi_scan;
+    g_mg.wifi_set = fm_wifi_set;
+    g_mg.lte_get = fm_lte_get;
+    g_mg.services = fm_services;
+    g_mg.ddns_update = fm_job_start;
+    g_mg.smtp_test = fm_job_start;
+    g_mg.nas_test = fm_job_start;
+    g_mg.nas_support = fm_nas_support;
+    g_mg.nas_mounted = fm_nas_mounted;
+    g_mg.curl = fm_curl;
+    g_mg.job = fm_job;
+    g_mg.disks = fm_disks;
+    g_mg.disk_formats = fm_formats;
+    g_mg.disk_format = fm_disk_format;
+    g_mg.disk_mount = fm_disk_act;
+    g_mg.disk_unmount = fm_disk_act;
+    g_mg.time_get = fm_time_get;
+    g_mg.time_set = fm_time_set;
+    g_mg.ntp_set = fm_ntp_set;
+    g_mg.ntp_sync = fm_job_start;
+    g_mg.hostname_get = fm_host_get;
+    g_mg.hostname_set = fm_host_set;
+    /* Accounts: the real ones would read api.users (/etc); none here
+     * until the Account pages' fakes. */
+    g_mg.users_gen = NULL;
+    g_mg.users = NULL;
+    g_mg.groups = NULL;
+    m->mgmt = &g_mg;
+}
+
 /* ---- finding widgets ------------------------------------------------------------------------- */
 
 static int visible(lv_obj_t *o)
@@ -510,6 +717,15 @@ static lv_obj_t *tile(const char *title)
 /* ---- the steps ---------------------------------------------------------------------------- */
 
 #define SAVE LV_SYMBOL_SAVE "  Save"
+
+/* A section's schema form, as the menu used to open it (the management
+ * screens show their own pages now). */
+static void open_form(const char *key)
+{
+    for (int i = 0; i < g_model.n_sections; ++i)
+        if (!strcmp(g_model.sections[i].key, key)) ui_form_open(i, -1);
+    run(100);
+}
 
 static void test_layout_math(void)
 {
@@ -709,7 +925,7 @@ static void test_context_and_full_screen(void)
     button(BTN_RIGHT);
     button(BTN_RIGHT);
     click_text("Record");
-    CHECK(ui_page_top() && find("Recording directory", 0), "Record: the recording settings");
+    CHECK(ui_page_top() && find("Storage", 1) && find("Disk Manager", 0), "Record: the storage screen");
     button(BTN_RIGHT);
     button(BTN_RIGHT);
     click_text("Display");
@@ -734,6 +950,9 @@ static void test_menu_and_settings(void)
     move_to(rx, ry);
     CHECK(lv_obj_has_state(rec, LV_STATE_HOVERED), "the tile under the pointer is hovered");
     click_text("STORAGE");
+    CHECK(find("Disk Manager", 0) && find("Network Storage", 0), "STORAGE: the storage screen");
+    button(BTN_RIGHT);
+    open_form("record");
     CHECK(find("Recording directory", 0) && find("Segment length (s)", 0), "recording form from the schema");
     CHECK(find("Recording: 1 camera.", 1), "the recording's state");
     lv_obj_t *path = textarea(0), *seg = textarea(1);
@@ -766,6 +985,9 @@ static void test_menu_and_settings(void)
     CHECK(find("Main menu", 0), "back from the form");
 
     click_text("NETWORK");
+    CHECK(find("Ethernet", 0) && find("Alarm center", 0) && find("P2P", 0), "NETWORK: the network screen");
+    button(BTN_RIGHT);
+    open_form("api");
     CHECK(find("applies after restart", 1), "non-live setting marked");
     click_text("Listen on");                    /* the label: no keyboard */
     lv_obj_t *listen = textarea(0);
@@ -922,7 +1144,7 @@ static void test_channels_discovery(void)
 static void test_system(void)
 {
     run(VG_DURATION_TOAST);
-    click_text("SYSTEM");
+    click_text("OPERATION");
     CHECK(find("vigild 0.1.0", 0) && find("0 d 01:02:03", 0), "system page");
     shot("system");
     button(BTN_RIGHT);
@@ -969,7 +1191,7 @@ static void test_same_redacted_urls(void)
 
 static void test_stale_and_cancel(void)
 {
-    click_text("STORAGE");
+    open_form("record");
     lv_obj_t *seg = textarea(1);
     lv_textarea_set_text(seg, "300");
     schema_errors_t se = { 0 };
@@ -1023,6 +1245,119 @@ static void test_two_mice(lv_indev_t *ptr)
     CHECK(lv_indev_get_state(ptr) == LV_INDEV_STATE_RELEASED, "unplugging releases");
     button(BTN_RIGHT);
     CHECK(!ui_page_top(), "back on the live view");
+}
+
+/* ---- the management screens -------------------------------------------------------------- */
+
+static void quiet(void);
+
+/* The left pane's item `label`. */
+static void nav_to(const char *label)
+{
+    click_text(label);
+    run(200);
+}
+
+static void test_network_pages(void)
+{
+    run(VG_DURATION_TOAST);
+    move_to(W / 2, H - 1);
+    run(300);
+    click_text("Main menu");
+    click_text("NETWORK");
+    CHECK(find("Network", 1) && find("Ethernet", 0) && find("up, 100 Mb/s full", 0) &&
+          find("00:12:31:a5:7c:02", 0), "Ethernet: status");
+    lv_obj_t *mask = textarea(1);
+    CHECK(mask && !strcmp(lv_textarea_get_text(mask), "255.255.255.0"), "Ethernet: the stored netmask");
+    lv_textarea_set_text(mask, "255.0.255.0");
+    click_text(SAVE);
+    run(100);
+    CHECK(find("not a netmask", 1) && lv_obj_has_state(mask, LV_STATE_USER_1) && !g_mg_pending,
+          "a bad netmask: refused, marked");
+    shot("network_error");
+    lv_textarea_set_text(mask, "255.255.0.0");
+    click_text(SAVE);
+    run(800);
+    CHECK(g_mg_pending && ui_popup_is_open() && find("Keep these network settings?", 1) &&
+          find("Undone in 57 s", 1), "applied: the countdown question");
+    shot("network_keep");
+    click_text(LV_SYMBOL_OK "  Keep");
+    run(100);
+    CHECK(!g_mg_pending && !ui_popup_is_open() && find("kept", 1), "Keep: confirmed");
+    CHECK(!strcmp(g_mg_eth.netmask, "255.255.0.0"), "the change went to the model");
+
+    nav_to("Wi-Fi");
+    CHECK(find("No Wi-Fi adapter", 0) && !find(SAVE, 0), "Wi-Fi: no adapter, nothing to save");
+    nav_to("DDNS");
+    CHECK(find("Update now", 1) && find("good 203.0.113.7", 1), "DDNS: the form and the last update");
+    lv_obj_t *host = textarea(0);
+    if (host) lv_textarea_set_text(host, "nvr.example.org");
+    nav_to("SMTP");
+    CHECK(ui_popup_is_open() && find("Discard the changes", 1), "leaving with changes asks");
+    click_text("Cancel");
+    CHECK(!ui_popup_is_open() && find("Update now", 1), "Cancel: still on DDNS");
+    click_text(SAVE);
+    run(100);
+    vigil_config_t c;
+    config_get(&c);
+    CHECK(!strcmp(c.ddns.host, "nvr.example.org"), "DDNS saved through the store: '%s'", c.ddns.host);
+    nav_to("SMTP");
+    CHECK(find("Send test mail", 1) && !ui_popup_is_open(), "SMTP: saved, so no question");
+    click_text("Send test mail");
+    run(800);
+    CHECK(find("done", 1), "test mail: the job's result");
+    nav_to("P2P");
+    CHECK(find("P2P is not available", 0), "P2P: said so");
+    button(BTN_RIGHT);
+    CHECK(find("Main menu", 0), "back in the menu");
+    button(BTN_RIGHT);
+}
+
+/* Every sub-page of a management screen, as a screenshot each. */
+static void shots_settings(const char *tile, const char *prefix, const char *const *items, int n)
+{
+    click_text(tile);
+    for (int i = 0; i < n; ++i) {
+        nav_to(items[i]);
+        char name[64], slug[32];
+        size_t k = 0;
+        for (const char *p = items[i]; *p && k + 1 < sizeof slug; ++p)
+            slug[k++] = (*p >= 'A' && *p <= 'Z') ? (char)(*p + 32) : (*p == ' ' ? '-' : *p);
+        slug[k] = 0;
+        snprintf(name, sizeof name, "%s-%s", prefix, slug);
+        shot(name);
+    }
+    button(BTN_RIGHT);
+}
+
+static void shots_network(void)
+{
+    static const char *const items[] = { "Ethernet", "Wi-Fi", "LTE", "DDNS", "UPnP", "SMTP", "Alarm center", "P2P" };
+    shots_settings("NETWORK", "network", items, 8);
+    g_mg_wifi = 1;
+    click_text("NETWORK");
+    nav_to("Wi-Fi");
+    shot("network-wifi-adapter");
+    click_text("Scan");
+    shot("network-wifi-scan");
+    nav_to("Ethernet");
+    lv_obj_t *mask = textarea(1);
+    if (mask) lv_textarea_set_text(mask, "255.0.255.0");
+    click_text(SAVE);
+    shot("network-ethernet-error");
+    if (mask) lv_textarea_set_text(mask, "255.255.255.0");
+    click_text(SAVE);
+    run(800);
+    shot("network-ethernet-keep");
+    click_text(LV_SYMBOL_OK "  Keep");
+    quiet();
+    lv_obj_t *dns = textarea(3);
+    if (dns) lv_textarea_set_text(dns, "1.1.1.1");
+    nav_to("LTE");
+    shot("settings-discard");
+    click_text("Discard");
+    button(BTN_RIGHT);
+    g_mg_wifi = 0;
 }
 
 /* ---- the keyboard ------------------------------------------------------------------------------- */
@@ -1195,6 +1530,10 @@ static void test_keyboard_settings(void)
     key(KEY_RIGHT);
     CHECK(has_focus(lv_obj_get_parent(find("STORAGE", 0))), "Right, Right: STORAGE");
     key(KEY_ENTER);
+    CHECK(find("Disk Manager", 0), "Enter: the storage screen");
+    key(KEY_ESC);
+    CHECK(find("Main menu", 0), "Esc: back");
+    open_form("record");
     lv_obj_t *path = textarea(0), *seg = textarea(1);
     CHECK(find("Recording directory", 0) && focused() == path, "Enter: the form, its first field focused");
     lv_obj_t *kb = lv_obj_get_child(lv_screen_active(), -1);
@@ -1234,8 +1573,8 @@ static void test_keyboard_settings(void)
 
     /* Unsaved changes: Esc asks; Enter keeps the page (Cancel is focused);
      * Right, Enter discards. */
-    key(KEY_ENTER);
-    CHECK(find("Recording directory", 0), "Enter on the menu tile again");
+    open_form("record");
+    CHECK(find("Recording directory", 0), "the form again");
     type("x");
     key(KEY_ESC);
     CHECK(ui_popup_is_open() && find("Discard the changes", 1), "Esc with changes asks");
@@ -1415,7 +1754,7 @@ static void test_empty_slot(void)
     move_to(W / 2, H - 1);
     run(300);
     click_text("Main menu");
-    click_text("SYSTEM");
+    click_text("OPERATION");
     click_text("Channel info");
     CHECK(find("Channel info", 0) && find("1920x1080", 0) && find("motion, human", 0) &&
           find("Connecting", 0), "Channel info: state, size, events");
@@ -1568,6 +1907,7 @@ static int setup(int channels, const char *json, char *path, size_t cap)
     g_model.now = fake_now;
     g_model.system_info = fake_info;
     fake_discovery(&g_model);
+    fake_mgmt(&g_model);
     ui_app_create(&g_model);
     if (pipe(g_mouse) < 0 || pipe(g_kbd) < 0) return -1;
     fcntl(g_mouse[0], F_SETFL, O_NONBLOCK);
@@ -1776,7 +2116,7 @@ static int shots_4(void)
     shot("confirm-discard");
     click_text("Discard");
     button(BTN_RIGHT);
-    click_text("STORAGE");
+    open_form("record");
     shot("record");
     lv_obj_t *p = textarea(0);
     if (p) lv_textarea_set_text(p, "rec");
@@ -1791,7 +2131,10 @@ static int shots_4(void)
     click_text("DISPLAY");
     shot("display");
     button(BTN_RIGHT);
-    click_text("SYSTEM");
+    quiet();
+    shots_network();
+    quiet();
+    click_text("OPERATION");
     shot("system");
     click_text("Channel info");
     shot("channel-info");
@@ -1896,7 +2239,7 @@ static int shots_16(void)
     move_to(W / 2, H - 1);
     run(300);
     click_text("Main menu");
-    click_text("SYSTEM");
+    click_text("OPERATION");
     click_text("Channel info");
     shot("channel-info-16");
     input_evdev_delete();
@@ -1974,6 +2317,7 @@ int main(int argc, char **argv)
     g_model.now = fake_now;
     g_model.system_info = fake_info;
     fake_discovery(&g_model);
+    fake_mgmt(&g_model);
     ui_app_create(&g_model);
 
     if (pipe(g_mouse) < 0) return 1;
@@ -2000,6 +2344,7 @@ int main(int argc, char **argv)
     test_keyboard_dropdown();
     test_keyboard_plug();
     test_empty_slot();
+    test_network_pages();
 
     lv_mem_monitor_t mon;
     lv_mem_monitor(&mon);

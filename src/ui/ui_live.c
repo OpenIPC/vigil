@@ -27,6 +27,7 @@
 #include "hal_ui.h"
 #include "icons.h"
 #include "ui_app.h"
+#include "ui_settings.h"
 #include "ui_layout.h"
 #include "ui_theme.h"
 
@@ -485,7 +486,7 @@ static void do_action(int act, int ch)
         ui_channels_open();
         break;
     case ACT_RECORD:
-        if (section_of("record") >= 0) ui_form_open(section_of("record"), -1);
+        ui_storage_open(UI_STORAGE_BASIC);
         break;
     case ACT_DISPLAY:
         ui_display_open();

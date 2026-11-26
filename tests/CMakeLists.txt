@@ -24,10 +24,14 @@ if(TARGET vigil_ui)
   # The on-screen UI on an in-memory display, with the real evdev reader,
   # the bridge and the configuration store, and fake channels.
   add_executable(test_ui test_ui.c ${CMAKE_SOURCE_DIR}/src/app/ui_bridge.c
-                 ${CMAKE_SOURCE_DIR}/src/app/input_evdev.c)
+                 ${CMAKE_SOURCE_DIR}/src/app/ui_mgmt.c ${CMAKE_SOURCE_DIR}/src/app/input_evdev.c)
   target_include_directories(test_ui PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
   target_compile_definitions(test_ui PRIVATE VIGIL_VERSION="${PROJECT_VERSION}")
-  target_link_libraries(test_ui PRIVATE vigil_ui vigil_core)
+  target_link_libraries(test_ui PRIVATE vigil_ui vigil_sys vigil_core)
+  if(TARGET vigil_api)
+    target_link_libraries(test_ui PRIVATE vigil_api)
+    target_compile_definitions(test_ui PRIVATE VIGIL_HAVE_USERS)
+  endif()
   # Every screen as PNGs into build/screenshots, for looking at (not a test):
   # cmake --build build --target screenshots
   add_custom_target(screenshots

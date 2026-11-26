@@ -531,5 +531,6 @@ int ui_bridge_init(ui_model_t *m)
     m->disc_assign = disc_assign_ui;
     m->disc_autoadd = disc_autoadd_ui;
     g_ev_cursor = 0;                    /* every event still kept, the start-up ones too */
+    m->mgmt = ui_mgmt_model();
     return 0;
 }
