@@ -112,8 +112,19 @@ void      ui_popup_place(const lv_point_t *at);    /* after it is filled */
 void      ui_popup_close(void);
 int       ui_popup_is_open(void);
 /* The keyboard moves among `cont`'s clickable children with the arrows
- * (lv_gridnav), starting at `first` (NULL: the first). */
-void      ui_popup_focus(lv_obj_t *cont, lv_obj_t *first);
+ * (lv_gridnav with `ctrl`), starting at `first` (NULL: the first). */
+void      ui_popup_focus(lv_obj_t *cont, lv_obj_t *first, lv_gridnav_ctrl_t ctrl);
+/* A submenu: a second panel beside `item` (an item of the popup's panel),
+ * filled by the caller; ui_popup_sub_place then places it and gives it
+ * the keyboard, on `first` (NULL: its first item). Up and Down move in
+ * it; back (Esc, Left, the right button) closes it before the popup. */
+lv_obj_t *ui_popup_sub(lv_obj_t *item, int w);
+void      ui_popup_sub_place(lv_obj_t *first);
+void      ui_popup_sub_close(void);
+int       ui_popup_sub_is_open(void);
+/* "<what> is not available yet": what a menu item or a card of a feature
+ * vigil does not have yet (playback, PTZ, ...) opens. */
+void      ui_not_yet(const char *what);
 /* The keyboard shortcuts (F1 or ?); open again: closed. */
 void      ui_help_toggle(void);
 
@@ -145,6 +156,11 @@ void      ui_menu_open(void);
 void      ui_form_open(int sec, int item);  /* item -1: object section; n: new item */
 void      ui_list_open(int sec);
 void      ui_system_open(void);
+void      ui_display_open(void);
+/* The live view's layouts (windows per page) the platform can show. */
+int       ui_live_layout_offered(int layout);
+/* Where the clock is ("top right"), or "off". */
+const char *ui_live_clock_corner(void);
 
 /* "CAM 3" or the camera's name. */
 void ui_chan_title(int ch, char *buf, size_t cap);

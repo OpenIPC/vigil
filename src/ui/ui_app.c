@@ -30,6 +30,7 @@ static char         g_clock[48], g_clock_prev[48];
 
 static lv_obj_t   *g_popup;         /* the full-screen catcher; the panel is its child */
 static lv_group_t *g_popup_group;
+static lv_obj_t   *g_popup_panel, *g_sub, *g_sub_item;
 static int         g_help;          /* the popup is the help */
 static lv_obj_t   *g_toast;
 static lv_timer_t *g_toast_timer;
@@ -165,15 +166,16 @@ lv_obj_t *ui_popup_open(const lv_point_t *at, int w)
     lv_obj_add_flag(panel, LV_OBJ_FLAG_CLICKABLE);      /* clicks on it are not "outside" */
     if (at) lv_obj_set_pos(panel, at->x, at->y);
     else lv_obj_center(panel);
+    g_popup_panel = panel;
     g_popup_group = lv_group_create();
     focus_sync();
     return panel;
 }
 
-void ui_popup_focus(lv_obj_t *cont, lv_obj_t *first)
+void ui_popup_focus(lv_obj_t *cont, lv_obj_t *first, lv_gridnav_ctrl_t ctrl)
 {
     if (!g_popup_group) return;
-    ui_gridnav(cont, LV_GRIDNAV_CTRL_ROLLOVER);
+    ui_gridnav(cont, ctrl);
     lv_group_add_obj(g_popup_group, cont);
     if (first) ui_gridnav_focus(cont, first);
 }
@@ -195,11 +197,78 @@ void ui_popup_place(const lv_point_t *at)
     lv_obj_set_pos(panel, x < 0 ? 0 : x, y < 0 ? 0 : y);
 }
 
+lv_obj_t *ui_popup_sub(lv_obj_t *item, int w)
+{
+    if (!g_popup) return NULL;
+    ui_popup_sub_close();
+    g_sub_item = item;
+    g_sub = lv_obj_create(g_popup);
+    ui_plain(g_sub);
+    lv_obj_add_style(g_sub, &ui_st_panel, 0);
+    lv_obj_set_style_pad_all(g_sub, VG_SPACE_SM, 0);
+    lv_obj_set_style_pad_row(g_sub, VG_SPACE_XS, 0);
+    lv_obj_set_style_border_color(g_sub, UI_C(ACCENT), 0);
+    lv_obj_set_width(g_sub, w);
+    lv_obj_set_height(g_sub, LV_SIZE_CONTENT);
+    lv_obj_set_layout(g_sub, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(g_sub, LV_FLEX_FLOW_COLUMN);
+    lv_obj_add_flag(g_sub, LV_OBJ_FLAG_CLICKABLE);      /* clicks on it are not "outside" */
+    return g_sub;
+}
+
+/* Left in a submenu: back to the menu (after the key's processing: the
+ * submenu goes away). */
+static void sub_close_async(void *u)
+{
+    (void)u;
+    ui_popup_sub_close();
+}
+
+static void sub_key_cb(lv_event_t *e)
+{
+    if (lv_event_get_key(e) == LV_KEY_LEFT) lv_async_call(sub_close_async, NULL);
+}
+
+/* Beside the item, to the right of the menu, or to its left when there is
+ * no room; kept on the screen. */
+void ui_popup_sub_place(lv_obj_t *first)
+{
+    if (!g_sub) return;
+    lv_obj_update_layout(g_sub);
+    lv_area_t item, menu;
+    lv_obj_get_coords(g_sub_item, &item);
+    lv_obj_get_coords(g_popup_panel, &menu);
+    int sw = lv_display_get_horizontal_resolution(NULL), sh = lv_display_get_vertical_resolution(NULL);
+    int w = lv_obj_get_width(g_sub), h = lv_obj_get_height(g_sub);
+    int x = menu.x2 + VG_SPACE_XS, y = item.y1 - VG_SPACE_SM;
+    if (x + w > sw) x = menu.x1 - VG_SPACE_XS - w;
+    if (y + h > sh) y = sh - h;
+    lv_obj_set_pos(g_sub, x < 0 ? 0 : x, y < 0 ? 0 : y);
+    ui_gridnav(g_sub, LV_GRIDNAV_CTRL_ROLLOVER | LV_GRIDNAV_CTRL_VERTICAL_MOVE_ONLY);
+    lv_obj_add_event_cb(g_sub, sub_key_cb, LV_EVENT_KEY, NULL);
+    lv_group_add_obj(g_popup_group, g_sub);
+    lv_group_focus_obj(g_sub);
+    if (first) ui_gridnav_focus(g_sub, first);
+}
+
+void ui_popup_sub_close(void)
+{
+    if (!g_sub) return;
+    lv_group_remove_obj(g_sub);
+    /* Async: this usually runs inside an event of one of its items. */
+    lv_obj_delete_async(g_sub);
+    g_sub = NULL;
+    if (g_popup_group && lv_obj_get_group(g_popup_panel) == g_popup_group) lv_group_focus_obj(g_popup_panel);
+}
+
+int ui_popup_sub_is_open(void) { return g_sub != NULL; }
+
 void ui_popup_close(void)
 {
     if (!g_popup) return;
     lv_obj_delete_async(g_popup);
     g_popup = NULL;
+    g_popup_panel = g_sub = g_sub_item = NULL;
     g_help = 0;
     lv_group_delete(g_popup_group);
     g_popup_group = NULL;
@@ -296,7 +365,35 @@ void ui_confirm(const char *text, const char *yes, void (*on_yes)(void *), void 
     lv_obj_add_event_cb(ok, confirm_cb, LV_EVENT_CLICKED, c);
     /* Enter right away keeps things as they are: a removal or a discard
      * takes a deliberate move to its button. */
-    ui_popup_focus(row, no);
+    ui_popup_focus(row, no, LV_GRIDNAV_CTRL_ROLLOVER);
+    ui_popup_place(NULL);
+}
+
+static void close_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_popup_close();
+}
+
+void ui_not_yet(const char *what)
+{
+    lv_obj_t *panel = ui_popup_open(NULL, 520);
+    lv_obj_set_style_pad_all(panel, VG_SPACE_XL, 0);
+    lv_obj_set_style_pad_row(panel, VG_SPACE_XL, 0);
+    lv_obj_set_style_border_color(panel, UI_C(ACCENT), 0);
+    lv_obj_t *l = ui_label(panel, "", VG_FONT_LG_LV, UI_C(TEXT));
+    lv_label_set_text_fmt(l, LV_SYMBOL_WARNING "  %s is not available yet.", what);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(l, LV_PCT(100));
+    ui_label(panel, "It is planned; this version of vigil does not have it.", VG_FONT_SM_LV, UI_C(TEXT2));
+    lv_obj_t *row = lv_obj_create(panel);
+    ui_plain(row);
+    ui_ring_room(row);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_t *ok = ui_btn(row, NULL, "Close");
+    lv_obj_align(ok, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_add_event_cb(ok, close_cb, LV_EVENT_CLICKED, NULL);
+    ui_popup_focus(row, ok, LV_GRIDNAV_CTRL_ROLLOVER);
     ui_popup_place(NULL);
 }
 
@@ -306,10 +403,10 @@ static const char *const k_help[][2] = {
     { NULL, "Live view" },
     { "Arrows", "Select a camera" },
     { "Enter", "Selected camera full screen, and back" },
-    { "1   4", "Single view, 2x2 view" },
+    { "1  4  8  9  0", "Split: 1, 4, 8, 9, 16 windows" },
     { "PgUp PgDn   [ ]", "Previous, next page" },
     { "M   F2", "Main menu" },
-    { "Menu   Shift+F10", "Context menu" },
+    { "Menu   Shift+F10", "Context menu (Right: Split)" },
     { NULL, "Everywhere" },
     { "Tab   Shift+Tab", "Next, previous item" },
     { "Arrows", "Move; change a list or a number" },
@@ -319,12 +416,6 @@ static const char *const k_help[][2] = {
     { "Esc", "Back, close (asks before losing changes)" },
     { "F1   ?", "This help" },
 };
-
-static void help_close_cb(lv_event_t *e)
-{
-    (void)e;
-    ui_popup_close();
-}
 
 void ui_help_toggle(void)
 {
@@ -359,8 +450,8 @@ void ui_help_toggle(void)
     lv_obj_set_style_pad_top(row, VG_SPACE_MD, 0);
     lv_obj_t *close = ui_btn(row, NULL, "Close");
     lv_obj_align(close, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_add_event_cb(close, help_close_cb, LV_EVENT_CLICKED, NULL);
-    ui_popup_focus(row, close);
+    lv_obj_add_event_cb(close, close_cb, LV_EVENT_CLICKED, NULL);
+    ui_popup_focus(row, close, LV_GRIDNAV_CTRL_ROLLOVER);
     ui_popup_place(NULL);
 }
 
@@ -466,6 +557,10 @@ void ui_page_close(ui_page_t *p)
 
 void ui_app_back(void)
 {
+    if (g_sub) {
+        ui_popup_sub_close();
+        return;
+    }
     if (g_popup) {
         ui_popup_close();
         return;

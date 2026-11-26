@@ -20,7 +20,7 @@
 #include <stdint.h>
 #include <time.h>
 
-#define UI_MAX_CHANNELS 16
+#define UI_MAX_CHANNELS 64          /* the largest layout; platforms have fewer */
 #define UI_ERRORS_MAX   16
 #define UI_MAX_ITEMS    16          /* items of an array section */
 

@@ -13,14 +13,16 @@ configuration schema, and how to run and test it without a board.
 
 ```
 live view                  tiles over the whole screen, clock in a corner
- |  navigation bar         bottom edge; Main menu, 1x1 / 2x2, < page >, Pin, totals, clock
- |  context menu           right button: Main menu, full screen, layouts, pages, pin
+ |  navigation bar         bottom edge; Main menu, layouts, < page >, Pin, totals, clock
+ |  context menu           right button: Main menu, Channels, Playback, Record, PTZ,
+ |                         Display, Split > (layouts); full screen, pages, pin
  +-> Main menu             one tile per settings section + System
       +-> Cameras          the camera list: Add, Edit, Remove
       |    +-> a camera    form: URL, name, enabled
       +-> Recording        form
       +-> HTTP API         form
       +-> System           platform, version, uptime, memory, storage (read-only)
+      +-> Display          output, clock corner, layouts (read-only for now)
 ```
 
 **Live view.** The tiles take the whole screen (2x2 on a 1280x720 output:
@@ -58,19 +60,37 @@ view, `config applied` and the like would only be noise.
 The **navigation bar** slides up over the video when the pointer reaches
 the bottom edge of the screen and hides 3 s after the pointer leaves it,
 unless pinned. Besides the actions it shows the LIVE and REC totals and the
-clock. The
-**context menu** (right button) offers the same actions, plus "Full
-screen" for the tile under the pointer. **Double-clicking** a tile shows
-that channel full screen; double-clicking again returns to the layout
-before.
+clock. **Double-clicking** a tile shows that channel full screen;
+double-clicking again returns to the layout before.
 
-![Context menu](../tests/ui/context.png)
+The **context menu** (right button, or the Menu key) is, in this order:
+**Main menu**; **Channels** (the camera list); **Playback**; **Record**
+(the recording settings); **PTZ**; **Display** (output, clock corner and
+layouts, read-only until the UI has settings of its own); **Split**, a
+submenu of the layouts. Then, for the tile under the pointer, "Full
+screen" (or "Back to the grid"), the pages when there are several, and
+pinning the navigation bar. Playback and PTZ are not in vigil yet: they
+are in the menu, muted, and say "not available yet" when chosen; they are
+placeholders for what comes next.
 
-Layouts are 1x1 and 2x2 on today's platforms; 3x3 and 4x4 are offered once
-a platform reports more than 4 or 9 channels (`hal_caps()->max_channels`).
-Paging walks through the channels a page at a time (1x1 with four cameras:
-four pages). On a platform whose tiles are fixed (`fixed_tiles`, the
+![Context menu with Split](../tests/ui/split_menu16.png)
+
+**Split** offers 1, 4, 8, 9, 16, 32 and 64 windows, those up to the
+number of channels the platform can show (`hal_caps()->max_channels`;
+today every platform reports 4, so 1 and 4); the current one is checked.
+The geometry is `ui_layout_cells`: N x N grids for 1, 4, 9, 16 and 64;
+**8** is the classic one large window (3 x 3 cells of a 4 x 4 grid) with
+three small ones down the right and four along the bottom; **32** is an
+8 x 4 grid of equal windows, which on a 16:9 screen is the usual way to
+show 32. Window edges are on 16-pixel columns and even rows. Paging walks
+through the channels a page at a time (1 window with four cameras: four
+pages). On a platform whose tiles are fixed (`fixed_tiles`, the
 hi3520dv200 capture pipeline), only the 2x2 view is offered.
+
+![8 windows](../tests/ui/split8.png)
+
+The 16- and 64-channel pictures here come from the headless test, which
+fakes those capabilities.
 
 **Main menu and pages.** Every page has a header with Back, its title,
 its actions (Save, Cancel, Add) and the clock. Back is the header button,
@@ -264,10 +284,10 @@ longer opens the on-screen keyboard: type into it.
 |---|---|---|
 | live view | arrows | select a camera |
 | | Enter | the selected camera full screen; again: back to the layout before |
-| | `1`, `4` (`9` where offered) | single view of the selected camera, 2x2 (3x3) around it |
+| | `1`, `4`, `8`, `9`, `0` | 1, 4, 8, 9 or 16 windows, with the selected camera in view (up to what the platform shows) |
 | | PgUp / PgDn, `[` / `]` | previous / next page |
 | | `M`, F2 | main menu |
-| | Menu key, Shift+F10 | context menu of the selected camera |
+| | Menu key, Shift+F10 | context menu of the selected camera; Right (or Enter) on Split opens it, Left or Esc closes it |
 | | Tab | to the navigation bar (it comes up while it has the focus) |
 | | Esc | close a menu or popup; from the navigation bar back to the tiles |
 | everywhere | Tab / Shift+Tab | next / previous item |

@@ -15,6 +15,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #include <linux/input.h>
 
 #include "lvgl.h"
@@ -62,6 +63,7 @@ void hal_ui_hole(lv_color_t *c, lv_opa_t *o)
 /* ---- the model: the real bridge, fake channels -------------------------------------- */
 
 static ui_model_t g_model;
+static int        g_channels = 4;       /* the platform's, as the model says */
 static ui_rect_t  g_tiles[UI_MAX_CHANNELS];
 static int        g_tile_calls;
 
@@ -79,6 +81,11 @@ static void fake_status(int idx, ui_chan_t *st)
         *st = (ui_chan_t){ .configured = 1, .state = "connect: Connection refused" };
         break;
     default:
+        /* Past the first four (the runs with more channels): live, some
+         * recording. */
+        if (idx >= 3 && g_channels > 4)
+            *st = (ui_chan_t){ .configured = 1, .live = 1, .recording = idx % 3 == 0, .codec = "H.264",
+                               .width = 640, .height = 360, .fps = 15 };
         break;
     }
 }
@@ -317,6 +324,18 @@ static void test_layout_math(void)
     CHECK(c[1].x == 416 && c[2].x == 848 && c[2].w == W - 848, "3x3 columns on 16-pixel edges (%d, %d)",
           c[1].x, c[2].x);
     CHECK(!ui_layout_valid(2) && ui_layout_cells(W, H, 2, 0, 4, c) == 0, "2 is not a layout");
+    static const int layouts[] = { 1, 4, 8, 9, 16, 32, 64 };
+    for (size_t k = 0; k < sizeof layouts / sizeof layouts[0]; ++k) {
+        int n = ui_layout_cells(W, H, layouts[k], 0, 64, c);
+        long a = 0;
+        int inside = 1;
+        for (int i = 0; i < n; ++i) {
+            a += (long)c[i].w * c[i].h;
+            inside &= c[i].x >= 0 && c[i].y >= 0 && c[i].x + c[i].w <= W && c[i].y + c[i].h <= H &&
+                      c[i].x % 16 == 0 && c[i].y % 2 == 0;
+        }
+        CHECK(n == layouts[k] && a == (long)W * H && inside, "%d windows cover the screen, aligned", layouts[k]);
+    }
 }
 
 static void test_live(void)
@@ -363,6 +382,18 @@ static void test_context_and_full_screen(void)
     run(50);
     CHECK(ui_popup_is_open() && find("Full screen: Gate", 1) && find("Pin navigation bar", 1),
           "context menu with the tile's channel");
+    {
+        static const char *const order[] = { "Main menu", "Channels", "Playback", "Record", "PTZ", "Display", "Split" };
+        int prev = -1, ok = 1;
+        for (size_t i = 0; i < sizeof order / sizeof order[0]; ++i) {
+            lv_obj_t *l = find(order[i], 1);
+            int x, y;
+            if (l) center_of(l, &x, &y);
+            ok &= l && y > prev;
+            prev = l ? y : prev;
+        }
+        CHECK(ok, "context menu: Main menu, Channels, Playback, Record, PTZ, Display, Split");
+    }
     shot("context");
     button(BTN_RIGHT);                          /* right again: closed */
     run(50);
@@ -395,7 +426,10 @@ static void test_context_and_full_screen(void)
     /* Paging in single view through the context menu. */
     move_to(300, 200);
     button(BTN_RIGHT);
-    click_text("Single view");
+    click_text("Split");
+    CHECK(ui_popup_sub_is_open() && find("1 window", 1) && find("4 windows", 1) && !find("8 windows", 1),
+          "Split: only the layouts a 4-channel platform can show");
+    click_text("1 window");
     CHECK(g_tiles[0].w == W && g_tiles[1].w == 0, "single view shows CAM1");
     push_event(4, "offline");                   /* CAM4 is not on the screen */
     ui_app_refresh();
@@ -411,8 +445,30 @@ static void test_context_and_full_screen(void)
     click_text("Next page");
     CHECK(g_tiles[1].w == W && g_tiles[0].w == 0, "next page shows CAM2");
     button(BTN_RIGHT);
-    click_text("2x2 view");
+    click_text("Split");
+    click_text("4 windows");
     CHECK(g_tiles[0].w == 640 && g_tiles[3].w == 640, "back to 2x2");
+
+    /* The other items. */
+    button(BTN_RIGHT);
+    click_text("Playback");
+    CHECK(find("Playback is not available yet", 1), "Playback: not there yet, said so");
+    button(BTN_RIGHT);
+    CHECK(!ui_popup_is_open(), "closed");
+    button(BTN_RIGHT);
+    click_text("Channels");
+    CHECK(ui_page_top() && find("Add", 1), "Channels: the camera list");
+    button(BTN_RIGHT);
+    button(BTN_RIGHT);
+    click_text("Record");
+    CHECK(ui_page_top() && find("Recording directory", 0), "Record: the recording settings");
+    button(BTN_RIGHT);
+    button(BTN_RIGHT);
+    click_text("Display");
+    CHECK(ui_page_top() && find("top right", 0) && find("1, 4", 0), "Display: clock corner, layouts");
+    shot("display");
+    button(BTN_RIGHT);
+    CHECK(!ui_page_top(), "back on the live view");
 }
 
 static void test_menu_and_settings(void)
@@ -739,9 +795,31 @@ static void test_keyboard_live(void)
 
     key_with(KEY_LEFTSHIFT, KEY_F10);
     CHECK(ui_popup_is_open() && find("Full screen: CAM 4", 1), "Shift+F10: context menu for the selected tile");
-    key(KEY_DOWN);
+    key(KEY_UP);
+    key(KEY_UP);
     key(KEY_ENTER);
-    CHECK(!ui_popup_is_open() && g_tiles[3].w == W, "Down, Enter: full screen from the menu");
+    CHECK(!ui_popup_is_open() && g_tiles[3].w == W, "Up, Up, Enter: full screen from the menu");
+    key(KEY_4);
+
+    /* Split: Right opens it, Esc or Left closes it, then the menu. */
+    key(KEY_COMPOSE);
+    for (int i = 0; i < 6; ++i) key(KEY_DOWN);  /* down to Split */
+    key(KEY_RIGHT);
+    CHECK(ui_popup_sub_is_open() && has_focus(lv_obj_get_parent(find("4 windows", 1))),
+          "Menu key, Down x6, Right: Split open on the current layout");
+    shot("split");
+    key(KEY_ESC);
+    CHECK(!ui_popup_sub_is_open() && ui_popup_is_open(), "Esc closes the submenu only");
+    key(KEY_RIGHT);
+    key(KEY_LEFT);
+    CHECK(!ui_popup_sub_is_open() && ui_popup_is_open(), "Left closes it too");
+    key(KEY_ENTER);
+    key(KEY_UP);
+    key(KEY_ENTER);
+    CHECK(!ui_popup_is_open() && g_tiles[3].w == W && g_tiles[0].w == 0, "Enter, Up, Enter: 1 window, CAM4");
+    key(KEY_8);
+    key(KEY_0);
+    CHECK(g_tiles[3].w == W, "8 and 0 do nothing on a 4-channel platform");
     key(KEY_4);
 
     key(KEY_F1);
@@ -926,12 +1004,116 @@ static void test_keyboard_plug(void)
     g_kbd[1] = -1;
 }
 
+static int rect_is(int ch, int x, int y, int w, int h)
+{
+    const ui_rect_t *r = &g_tiles[ch];
+    if (r->x == x && r->y == y && r->w == w && r->h == h) return 1;
+    fprintf(stderr, "CAM%d at %d,%d %dx%d, not %d,%d %dx%d\n", ch + 1, r->x, r->y, r->w, r->h, x, y, w, h);
+    return 0;
+}
+
+/* A platform with 16 channels: Split offers 1, 4, 8, 9, 16. */
+static void test_split16(void)
+{
+    move_to(300, 200);
+    button(BTN_RIGHT);
+    click_text("Split");
+    CHECK(find("8 windows", 1) && find("9 windows", 1) && find("16 windows", 1) && !find("32 windows", 1),
+          "16 channels: Split up to 16");
+    shot("split_menu16");
+    click_text("8 windows");
+    CHECK(rect_is(0, 0, 0, 960, 540) && rect_is(1, 960, 0, 320, 180) && rect_is(3, 960, 360, 320, 180) &&
+          rect_is(4, 0, 540, 320, 180) && rect_is(7, 960, 540, 320, 180) && g_tiles[8].w == 0,
+          "8: one 3x3 window, three down the right, four along the bottom");
+    shot("split8");
+    key(KEY_9);
+    CHECK(rect_is(0, 0, 0, 416, 240) && rect_is(8, 848, 480, 432, 240), "9: 3x3 on 16-pixel columns");
+    key(KEY_0);
+    CHECK(rect_is(0, 0, 0, 320, 180) && rect_is(15, 960, 540, 320, 180), "0: 16");
+    shot("split16");
+    key(KEY_8);
+    CHECK(rect_is(0, 0, 0, 960, 540), "8: the 8-split again");
+    key(KEY_PAGEDOWN);
+    CHECK(rect_is(8, 0, 0, 960, 540) && g_tiles[0].w == 0, "PageDown: CAM9 in the large window");
+}
+
+/* 64 channels: 32 (8x4) and 64 (8x8) too. */
+static void test_split64(void)
+{
+    move_to(300, 200);
+    button(BTN_RIGHT);
+    click_text("Split");
+    CHECK(find("32 windows", 1) && find("64 windows", 1), "64 channels: every layout");
+    shot("split_menu64");
+    click_text("32 windows");
+    CHECK(rect_is(0, 0, 0, 160, 180) && rect_is(31, 1120, 540, 160, 180), "32: 8x4");
+    shot("split32");
+    button(BTN_RIGHT);
+    click_text("Split");
+    click_text("64 windows");
+    CHECK(rect_is(0, 0, 0, 160, 90) && rect_is(63, 1120, 630, 160, 90), "64: 8x8");
+    shot("split64");
+}
+
+/* The UI on a platform with `channels` channels (a fresh process). */
+static int run_split(int channels)
+{
+    g_channels = channels;
+    char path[512];
+    snprintf(path, sizeof path, "%s/vigil-%d.json", g_out, channels);
+    unlink(path);
+    FILE *f = fopen(path, "w");
+    fputs("{\"version\":1,\"cameras\":[{\"url\":\"rtsp://192.168.1.10/s\",\"name\":\"Gate\"}]}", f);
+    fclose(f);
+    CHECK(config_init(path) == 0, "config");
+    lv_init();
+    lv_tick_set_cb(fake_ms);
+    lv_display_t *disp = lv_display_create(W, H);
+    lv_display_set_color_format(disp, LV_COLOR_FORMAT_XRGB8888);
+    lv_display_set_buffers(disp, g_fb, NULL, sizeof g_fb, LV_DISPLAY_RENDER_MODE_DIRECT);
+    lv_display_set_flush_cb(disp, flush_cb);
+    if (ui_bridge_init(&g_model) < 0) return 1;
+    g_model.channels = channels;
+    g_model.chan_status = fake_status;
+    g_model.show_tiles = fake_tiles;
+    g_model.now = fake_now;
+    ui_app_create(&g_model);
+    if (pipe(g_mouse) < 0 || pipe(g_kbd) < 0) return 1;
+    fcntl(g_mouse[0], F_SETFL, O_NONBLOCK);
+    fcntl(g_kbd[0], F_SETFL, O_NONBLOCK);
+    static const input_hooks_t hooks = { ui_app_back, ui_app_key, ui_app_keyboards };
+    ui_app_set_pointer(input_evdev_create(disp, &hooks, 0));
+    ui_app_set_keypad(input_evdev_keypad());
+    input_evdev_attach(g_mouse[0], "test mouse", 0, 0, 0, 0, 0);
+    input_evdev_attach_keyboard(g_kbd[0], "test keyboard");
+    run(300);
+    if (channels == 16) test_split16();
+    else test_split64();
+    input_evdev_delete();
+    unlink(path);
+    printf("%d channels: %d checks, %d failed\n", channels, g_checks, g_fail);
+    fflush(NULL);
+    return g_fail ? 1 : 0;
+}
+
 int main(int argc, char **argv)
 {
     g_out = argc > 1 ? argv[1] : ".";
     setenv("TZ", "UTC", 1);
     tzset();
     test_layout_math();
+
+    /* More channels than the test platform has: each in a process of its
+     * own, since LVGL and the UI are set up once per process. */
+    static const int k_more[] = { 16, 64 };
+    for (size_t i = 0; i < sizeof k_more / sizeof k_more[0]; ++i) {
+        fflush(NULL);
+        pid_t pid = fork();
+        if (pid == 0) _exit(run_split(k_more[i]));
+        int st = 0;
+        CHECK(pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0,
+              "the %d-channel run", k_more[i]);
+    }
 
     char path[512];
     snprintf(path, sizeof path, "%s/vigil.json", g_out);

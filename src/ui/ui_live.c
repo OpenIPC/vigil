@@ -46,10 +46,10 @@ typedef struct {
     lv_obj_t   *info, *info_l;  /* bottom-left chip: stream */
     lv_obj_t   *flash;
     lv_timer_t *flash_timer;
+    int         tiny;           /* too narrow for the stream line */
 } cell_t;
 
-static const int k_layouts[] = { 1, 4, 9, 16 };
-#define N_LAYOUTS (int)(sizeof k_layouts / sizeof k_layouts[0])
+#define N_LAYOUTS 7                    /* ui_n_layouts */
 
 static struct {
     lv_obj_t  *scr, *grid, *clock, *summary;
@@ -76,14 +76,25 @@ static int n_channels(void)
     return n > UI_MAX_CHANNELS ? UI_MAX_CHANNELS : n < 1 ? 1 : n;
 }
 
-/* A layout is offered when the next smaller one cannot show every channel
- * on one page. */
+/* A layout is offered when the platform can show that many channels:
+ * more windows than channels would only add empty ones. */
 static int layout_offered(int layout)
 {
     if (ui_model()->fixed_tiles) return layout == 4;
-    for (int i = 0; i < N_LAYOUTS; ++i)
-        if (k_layouts[i] == layout) return i == 0 || n_channels() > k_layouts[i - 1];
-    return 0;
+    return ui_layout_valid(layout) && layout <= n_channels();
+}
+
+int ui_live_layout_offered(int layout) { return layout_offered(layout); }
+
+const char *ui_live_clock_corner(void)
+{
+    switch (CLOCK_CORNER) {
+    case LV_ALIGN_TOP_LEFT:     return "top left";
+    case LV_ALIGN_TOP_RIGHT:    return "top right";
+    case LV_ALIGN_BOTTOM_LEFT:  return "bottom left";
+    case LV_ALIGN_BOTTOM_RIGHT: return "bottom right";
+    default:                    return "off";
+    }
 }
 
 /* ---- one tile ----------------------------------------------------------------------- */
@@ -120,7 +131,8 @@ static void cell_update(cell_t *c)
 
     if (st->configured && st->live) {
         lv_obj_add_flag(c->mid, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_remove_flag(c->info, LV_OBJ_FLAG_HIDDEN);
+        if (c->tiny) lv_obj_add_flag(c->info, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_remove_flag(c->info, LV_OBJ_FLAG_HIDDEN);
         if (st->width)
             snprintf(buf, sizeof buf, "%s  %ux%u  %u fps", st->codec, st->width, st->height, st->fps);
         else
@@ -146,7 +158,7 @@ static void cell_update(cell_t *c)
     lv_label_set_text(c->mid_l1, l1);
     lv_obj_set_style_text_color(c->mid_l1, col, 0);
     lv_label_set_text(c->mid_l2, l2);
-    if (*l2) lv_obj_remove_flag(c->mid_l2, LV_OBJ_FLAG_HIDDEN);
+    if (*l2 && !c->tiny) lv_obj_remove_flag(c->mid_l2, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(c->mid_l2, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -222,13 +234,17 @@ static void cell_deleted_cb(lv_event_t *e)
     c->flash_timer = NULL;
 }
 
-/* Room the clock takes from a chip in the tile's corner `corner`. */
-static int clock_offset(const ui_cell_t *g, lv_align_t corner)
+/* Room the clock takes from a chip about `w` wide at the tile's left
+ * edge, at its top (top != 0) or bottom: the chip moves past the clock
+ * when the two would overlap. */
+static int clock_offset(const ui_cell_t *g, int top, int w)
 {
-    if (!L.clock || corner != CLOCK_CORNER) return 0;
-    int left = corner == LV_ALIGN_TOP_LEFT || corner == LV_ALIGN_BOTTOM_LEFT;
-    int top = corner == LV_ALIGN_TOP_LEFT || corner == LV_ALIGN_TOP_RIGHT;
-    if ((left ? g->x != 0 : g->x + g->w != L.sw) || (top ? g->y != 0 : g->y + g->h != L.sh)) return 0;
+    if (!L.clock) return 0;
+    lv_area_t c;
+    lv_obj_get_coords(L.clock, &c);
+    int x0 = g->x + VG_SPACE_SM, x1 = x0 + w;
+    if (x1 < c.x1 || x0 > c.x2) return 0;
+    if (top ? !(g->y == 0 && c.y1 < L.sh / 2) : !(g->y + g->h == L.sh && c.y1 > L.sh / 2)) return 0;
     return lv_obj_get_height(L.clock) + VG_SPACE_SM;
 }
 
@@ -256,8 +272,9 @@ static void cell_build(cell_t *c, const ui_cell_t *g)
     c->obj = o;
 
     int small = g->w < 400;
+    c->tiny = g->w < 240;
     lv_obj_t *t = chip(o);
-    lv_obj_align(t, LV_ALIGN_TOP_LEFT, VG_SPACE_SM, VG_SPACE_SM + clock_offset(g, LV_ALIGN_TOP_LEFT));
+    lv_obj_align(t, LV_ALIGN_TOP_LEFT, VG_SPACE_SM, VG_SPACE_SM + clock_offset(g, 1, 140));
     c->title = ui_label(t, "", small ? VG_FONT_SM_LV : VG_FONT_MD_LV, UI_C(TEXT));
     /* REC: a red dot and the word, as on a camcorder. */
     c->rec = lv_obj_create(t);
@@ -281,10 +298,10 @@ static void cell_build(cell_t *c, const ui_cell_t *g)
     c->mid = chip(o);
     lv_obj_set_flex_flow(c->mid, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(c->mid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_all(c->mid, VG_SPACE_MD, 0);
+    lv_obj_set_style_pad_all(c->mid, c->tiny ? VG_SPACE_XS : VG_SPACE_MD, 0);
     lv_obj_set_style_pad_row(c->mid, VG_SPACE_XS, 0);
     lv_obj_center(c->mid);
-    c->mid_l1 = ui_label(c->mid, "", small ? VG_FONT_MD_LV : VG_FONT_LG_LV, UI_C(TEXT2));
+    c->mid_l1 = ui_label(c->mid, "", c->tiny ? VG_FONT_SM_LV : small ? VG_FONT_MD_LV : VG_FONT_LG_LV, UI_C(TEXT2));
     c->mid_l2 = ui_label(c->mid, "", VG_FONT_SM_LV, UI_C(TEXT2));
     lv_obj_set_style_max_width(c->mid_l2, g->w - 4 * VG_SPACE_LG, 0);
     lv_obj_set_style_text_align(c->mid_l2, LV_TEXT_ALIGN_CENTER, 0);
@@ -292,7 +309,7 @@ static void cell_build(cell_t *c, const ui_cell_t *g)
 
     c->info = chip(o);
     lv_obj_align(c->info, LV_ALIGN_BOTTOM_LEFT, VG_SPACE_SM,
-                 -VG_SPACE_SM - clock_offset(g, LV_ALIGN_BOTTOM_LEFT));
+                 -VG_SPACE_SM - clock_offset(g, 0, 200));
     c->info_l = ui_label(c->info, "", VG_FONT_SM_LV, UI_C(TEXT2));
 
     c->flash = lv_obj_create(o);
@@ -316,7 +333,7 @@ static void nav_update(void)
     int pages = ui_layout_pages(L.layout, n_channels());
     for (int i = 0; i < N_LAYOUTS; ++i) {
         if (!L.layout_btn[i]) continue;
-        if (k_layouts[i] == L.layout) lv_obj_add_state(L.layout_btn[i], LV_STATE_CHECKED);
+        if (ui_layouts[i] == L.layout) lv_obj_add_state(L.layout_btn[i], LV_STATE_CHECKED);
         else lv_obj_remove_state(L.layout_btn[i], LV_STATE_CHECKED);
     }
     lv_label_set_text_fmt(L.nav_page, "%d / %d", L.page + 1, pages);
@@ -397,7 +414,16 @@ static void make_clock(void)
 
 /* ---- navigation bar ------------------------------------------------------------------------ */
 
-enum { ACT_MENU = 1, ACT_PREV, ACT_NEXT, ACT_PIN, ACT_FULL, ACT_CONTEXT, ACT_ESC, ACT_LAYOUT = 100 };
+enum { ACT_MENU = 1, ACT_PREV, ACT_NEXT, ACT_PIN, ACT_FULL, ACT_CONTEXT, ACT_ESC, ACT_CHANNELS, ACT_RECORD,
+       ACT_DISPLAY, ACT_LAYOUT = 100 };
+
+/* The settings section with `key`, or -1. */
+static int section_of(const char *key)
+{
+    for (int i = 0; i < ui_model()->n_sections; ++i)
+        if (!strcmp(ui_model()->sections[i].key, key)) return i;
+    return -1;
+}
 
 static void nav_show(int show)
 {
@@ -419,6 +445,15 @@ static void do_action(int act, int ch)
     switch (act) {
     case ACT_MENU:
         ui_menu_open();
+        break;
+    case ACT_CHANNELS:
+        if (section_of("cameras") >= 0) ui_list_open(section_of("cameras"));
+        break;
+    case ACT_RECORD:
+        if (section_of("record") >= 0) ui_form_open(section_of("record"), -1);
+        break;
+    case ACT_DISPLAY:
+        ui_display_open();
         break;
     case ACT_PREV:
     case ACT_NEXT:
@@ -524,11 +559,10 @@ static void make_nav(void)
     lv_obj_t *menu = nav_btn(LV_SYMBOL_LIST, "Main menu", ACT_MENU);
     ui_btn_accent(menu);
     nav_sep();
-    static const char *const names[] = { "1x1", "2x2", "3x3", "4x4" };
     int any = 0;
-    for (int i = 0; i < N_LAYOUTS; ++i) {
-        if (!layout_offered(k_layouts[i]) || ui_model()->fixed_tiles) continue;
-        L.layout_btn[i] = nav_btn(NULL, names[i], ACT_LAYOUT + k_layouts[i]);
+    for (int i = 0; i < ui_n_layouts && i < N_LAYOUTS; ++i) {
+        if (!layout_offered(ui_layouts[i]) || ui_model()->fixed_tiles) continue;
+        L.layout_btn[i] = nav_btn(NULL, ui_layout_name(ui_layouts[i]), ACT_LAYOUT + ui_layouts[i]);
         any = 1;
     }
     if (any) nav_sep();
@@ -574,7 +608,7 @@ static lv_obj_t *menu_item(lv_obj_t *panel, const char *sym, const char *text, i
     lv_obj_set_style_border_width(b, 0, 0);
     lv_obj_set_style_bg_color(b, UI_C(PANEL), 0);
     lv_obj_set_user_data(b, (void *)(intptr_t)(ch + 1));
-    lv_obj_add_event_cb(b, action_cb, LV_EVENT_CLICKED, (void *)(intptr_t)act);
+    if (act) lv_obj_add_event_cb(b, action_cb, LV_EVENT_CLICKED, (void *)(intptr_t)act);
     return b;
 }
 
@@ -599,27 +633,88 @@ static int channel_at(const lv_point_t *at)
     return -1;
 }
 
+/* Not there yet (playback, PTZ): in the menu, muted, so it already has
+ * the product's shape; choosing one says so (ui_not_yet), as the main
+ * menu's cards of such features do. */
+static void later_cb(lv_event_t *e)
+{
+    ui_not_yet(lv_event_get_user_data(e));
+}
+
+static void menu_item_later(lv_obj_t *panel, const char *sym, const char *text)
+{
+    lv_obj_t *b = menu_item(panel, sym, text, 0, -1);
+    lv_obj_set_style_text_color(b, UI_C(TEXT2), 0);
+    lv_obj_add_event_cb(b, later_cb, LV_EVENT_CLICKED, (void *)text);
+}
+
+static void split_pick_cb(lv_event_t *e)
+{
+    int layout = (int)(intptr_t)lv_event_get_user_data(e);
+    ui_popup_close();
+    /* keep the selected camera in view */
+    set_layout(layout, ui_layout_page_of(layout, L.sel_ch < 0 ? 0 : L.sel_ch));
+}
+
+static void split_open(lv_obj_t *item)
+{
+    if (ui_popup_sub_is_open()) {
+        ui_popup_sub_close();
+        return;
+    }
+    lv_obj_t *sub = ui_popup_sub(item, 220), *cur = NULL;
+    for (int i = 0; i < ui_n_layouts; ++i) {
+        int n = ui_layouts[i];
+        if (!layout_offered(n)) continue;
+        char text[40];
+        snprintf(text, sizeof text, "%d window%s  (%s)", n, n == 1 ? "" : "s", ui_layout_name(n));
+        lv_obj_t *b = menu_item(sub, n == L.layout ? LV_SYMBOL_OK : NULL, text, 0, -1);
+        lv_obj_add_event_cb(b, split_pick_cb, LV_EVENT_CLICKED, (void *)(intptr_t)n);
+        if (n == L.layout) {
+            lv_obj_set_style_text_color(b, UI_C(ACCENT), 0);
+            cur = b;
+        } else {
+            lv_obj_set_style_pad_left(b, VG_SPACE_MD + 22, 0);     /* aligned with the checked one */
+        }
+    }
+    ui_popup_sub_place(cur);
+}
+
+static void split_click_cb(lv_event_t *e) { split_open(lv_event_get_target(e)); }
+
+static void split_key_cb(lv_event_t *e)
+{
+    if (lv_event_get_key(e) == LV_KEY_RIGHT && !ui_popup_sub_is_open()) split_open(lv_event_get_target(e));
+}
+
+/* Main menu, Channels, Playback, Record, PTZ, Display, Split; then what
+ * concerns the tile under the pointer, the pages, and the bar. */
 void ui_live_context_menu(const lv_point_t *at)
 {
     lv_obj_t *panel = ui_popup_open(at, 260);
     menu_item(panel, LV_SYMBOL_LIST, "Main menu", ACT_MENU, -1);
+    if (section_of("cameras") >= 0) menu_item(panel, LV_SYMBOL_VIDEO, "Channels", ACT_CHANNELS, -1);
+    menu_item_later(panel, LV_SYMBOL_PLAY, "Playback");
+    if (section_of("record") >= 0) menu_item(panel, LV_SYMBOL_SAVE, "Record", ACT_RECORD, -1);
+    menu_item_later(panel, LV_SYMBOL_GPS, "PTZ");
+    menu_item(panel, LV_SYMBOL_SETTINGS, "Display", ACT_DISPLAY, -1);
     if (!ui_model()->fixed_tiles) {
+        lv_obj_t *split = menu_item(panel, LV_SYMBOL_BARS, "Split", 0, -1);
+        lv_obj_set_flex_grow(ui_btn_label(split), 1);
+        ui_label(split, LV_SYMBOL_RIGHT, VG_FONT_SM_LV, UI_C(TEXT2));
+        lv_obj_add_event_cb(split, split_click_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_event_cb(split, split_key_cb, LV_EVENT_KEY, NULL);
+
         int ch = channel_at(at);
-        char buf[64], t[40];
+        int pages = ui_layout_pages(L.layout, n_channels()) > 1;
+        if (ch >= 0 || pages) menu_sep(panel);
         if (ch >= 0) {
+            char buf[64], t[40];
             ui_chan_title(ch, t, sizeof t);
             snprintf(buf, sizeof buf, L.layout == 1 ? "Back to the grid" : "Full screen: %s", t);
             menu_item(panel, LV_SYMBOL_IMAGE, buf, ACT_FULL, ch);
         }
-        menu_sep(panel);
-        static const char *const names[] = { "Single view", "2x2 view", "3x3 view", "4x4 view" };
-        for (int i = 0; i < N_LAYOUTS; ++i) {
-            if (!layout_offered(k_layouts[i])) continue;
-            lv_obj_t *b = menu_item(panel, NULL, names[i], ACT_LAYOUT + k_layouts[i], -1);
-            if (k_layouts[i] == L.layout) lv_obj_set_style_text_color(b, UI_C(ACCENT), 0);
-        }
-        if (ui_layout_pages(L.layout, n_channels()) > 1) {
-            menu_sep(panel);
+        if (pages) {
             menu_item(panel, LV_SYMBOL_LEFT, "Previous page", ACT_PREV, -1);
             menu_item(panel, LV_SYMBOL_RIGHT, "Next page", ACT_NEXT, -1);
         }
@@ -628,7 +723,8 @@ void ui_live_context_menu(const lv_point_t *at)
     menu_item(panel, LV_SYMBOL_DOWNLOAD,
               lv_subject_get_int(&ui_subj_nav_pinned) ? "Unpin navigation bar" : "Pin navigation bar",
               ACT_PIN, -1);
-    ui_popup_focus(panel, NULL);
+    /* Left and Right go to the item (Right opens Split). */
+    ui_popup_focus(panel, NULL, LV_GRIDNAV_CTRL_ROLLOVER | LV_GRIDNAV_CTRL_VERTICAL_MOVE_ONLY);
     ui_popup_place(at);
 }
 
@@ -667,7 +763,9 @@ int ui_live_key(uint32_t key, unsigned mods)
     switch (key) {
     case '1': act = ACT_LAYOUT + 1; break;
     case '4': act = ACT_LAYOUT + 4; break;
+    case '8': act = ACT_LAYOUT + 8; break;
     case '9': act = ACT_LAYOUT + 9; break;
+    case '0': act = ACT_LAYOUT + 16; break;
     case UI_KEY_PGUP: case '[': act = ACT_PREV; break;
     case UI_KEY_PGDN: case ']': act = ACT_NEXT; break;
     case 'm': case 'M': case UI_KEY_F(2): act = ACT_MENU; break;
