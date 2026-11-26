@@ -2,6 +2,9 @@
 add_executable(test_core test_core.c)
 target_link_libraries(test_core PRIVATE vigil_core)
 add_test(NAME core COMMAND test_core ${CMAKE_CURRENT_SOURCE_DIR}/data)
+add_executable(test_discovery test_discovery.c)
+target_link_libraries(test_discovery PRIVATE vigil_core)
+add_test(NAME discovery COMMAND test_discovery ${CMAKE_CURRENT_SOURCE_DIR}/data)
 
 if(TARGET vigil_api)
   add_executable(test_api test_api.c)

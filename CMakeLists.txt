@@ -62,11 +62,15 @@ add_library(vigil_core STATIC
   src/core/channel.c
   src/core/config.c
   src/core/config_schema.c
+  src/core/disc_ops.c
+  src/core/disc_proto.c
+  src/core/discovery.c
   src/core/events.c
   src/core/md5.c
   src/core/net.c
   src/core/schema.c
   src/core/schema_yaml.c
+  src/core/sha1.c
   src/core/rec_place.c
   src/core/seg_writer.c
   src/core/sps.c
