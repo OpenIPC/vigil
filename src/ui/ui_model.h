@@ -287,6 +287,7 @@ typedef struct {
     void        (*time_get)(ui_time_t *t);
     int         (*zones)(void);                     /* how many named zones */
     const char *(*zone_name)(int i);
+    const char *(*zone_tz)(int i);          /* its POSIX TZ string */
     int         (*tz_parse)(const char *posix, ui_tz_rule_t *r);
     int         (*tz_build)(const ui_tz_rule_t *r, char *out, size_t cap, char *err, size_t ecap);
     int         (*time_set)(const char *zone, const char *tz, int set_clock, long long t, char *err, size_t cap);

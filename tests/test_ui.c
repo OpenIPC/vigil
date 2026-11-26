@@ -552,6 +552,117 @@ static int  fm_host_set(const char *n, char *err, size_t cap)
     return 0;
 }
 
+/* Accounts, in memory: the rules users.c enforces that the pages show. */
+static ui_user_t  g_fu[8];
+static int        g_nfu;
+static ui_group_t g_fg[8] = { { "admin", 0xff, 1, 0, 0 }, { "user", 0x3, 1, 1, 0 } };
+static int        g_nfg = 2;
+static unsigned   g_fgen = 1;
+static const char *const k_fperms[] = { "live", "playback", "ptz", "cameras", "storage", "network", "system",
+                                        "users" };
+
+static unsigned fa_gen(void) { return g_fgen; }
+static int fa_users(ui_user_t *o, int max)
+{
+    int n = g_nfu < max ? g_nfu : max;
+    memcpy(o, g_fu, (size_t)n * sizeof *o);
+    return n;
+}
+static int fa_groups(ui_group_t *o, int max)
+{
+    for (int i = 0; i < g_nfg; ++i) {
+        g_fg[i].members = 0;
+        for (int k = 0; k < g_nfu; ++k) g_fg[i].members += !strcmp(g_fu[k].group, g_fg[i].name);
+    }
+    int n = g_nfg < max ? g_nfg : max;
+    memcpy(o, g_fg, (size_t)n * sizeof *o);
+    return n;
+}
+static int fa_find_user(const char *n)
+{
+    for (int i = 0; i < g_nfu; ++i)
+        if (!strcmp(g_fu[i].name, n)) return i;
+    return -1;
+}
+static int fa_find_group(const char *n)
+{
+    for (int i = 0; i < g_nfg; ++i)
+        if (!strcmp(g_fg[i].name, n)) return i;
+    return -1;
+}
+#define FA_ERR(f, ...) do { snprintf(field, fcap, "%s", f); snprintf(err, cap, __VA_ARGS__); return UI_MGMT_EINVAL; } while (0)
+static int fa_user_add(const char *name, const char *group, const char *pass, int en, char *field, size_t fcap,
+                       char *err, size_t cap)
+{
+    if (!*name || !strcmp(name, "root")) FA_ERR("name", "not a user name");
+    if (fa_find_user(name) >= 0) FA_ERR("name", "the name is taken");
+    if (fa_find_group(group) < 0) FA_ERR("group", "no such group");
+    if (strlen(pass) < 4) FA_ERR("password", "at least 4 characters");
+    if (g_nfu == 8) FA_ERR("", "too many users");
+    ui_user_t *u = &g_fu[g_nfu++];
+    memset(u, 0, sizeof *u);
+    snprintf(u->name, sizeof u->name, "%s", name);
+    snprintf(u->group, sizeof u->group, "%s", group);
+    u->enabled = en;
+    u->password_set = 1;
+    ++g_fgen;
+    return 0;
+}
+static int fa_user_update(const char *name, const char *group, int en, const char *pass, char *field, size_t fcap,
+                          char *err, size_t cap)
+{
+    int i = fa_find_user(name);
+    if (i < 0) FA_ERR("name", "no such user");
+    if (group && fa_find_group(group) < 0) FA_ERR("group", "no such group");
+    if (pass && strlen(pass) < 4) FA_ERR("password", "at least 4 characters");
+    if (group) snprintf(g_fu[i].group, sizeof g_fu[i].group, "%s", group);
+    if (en >= 0) g_fu[i].enabled = en;
+    ++g_fgen;
+    return 0;
+}
+static int fa_user_delete(const char *name, char *err, size_t cap)
+{
+    int i = fa_find_user(name);
+    if (i < 0) {
+        snprintf(err, cap, "no such user");
+        return UI_MGMT_EINVAL;
+    }
+    memmove(&g_fu[i], &g_fu[i + 1], (size_t)(g_nfu - i - 1) * sizeof g_fu[0]);
+    --g_nfu;
+    ++g_fgen;
+    return 0;
+}
+static int fa_group_set(const char *name, unsigned perms, int create, char *field, size_t fcap, char *err, size_t cap)
+{
+    int i = fa_find_group(name);
+    if (create) {
+        if (!*name || strchr(name, ' ')) FA_ERR("name", "not a group name");
+        if (i >= 0) FA_ERR("name", "the name is taken");
+        if (g_nfg == 8) FA_ERR("", "too many groups");
+        i = g_nfg++;
+        memset(&g_fg[i], 0, sizeof g_fg[i]);
+        snprintf(g_fg[i].name, sizeof g_fg[i].name, "%s", name);
+        g_fg[i].editable = 1;
+    }
+    if (i < 0) FA_ERR("name", "no such group");
+    if (!g_fg[i].editable) FA_ERR("permissions", "a built-in group cannot be changed so");
+    g_fg[i].perms = perms;
+    ++g_fgen;
+    return 0;
+}
+static int fa_group_delete(const char *name, char *err, size_t cap)
+{
+    int i = fa_find_group(name);
+    if (i < 0 || g_fg[i].builtin) {
+        snprintf(err, cap, i < 0 ? "no such group" : "a built-in group");
+        return UI_MGMT_EINVAL;
+    }
+    memmove(&g_fg[i], &g_fg[i + 1], (size_t)(g_nfg - i - 1) * sizeof g_fg[0]);
+    --g_nfg;
+    ++g_fgen;
+    return 0;
+}
+
 static void fake_mgmt(ui_model_t *m)
 {
     g_mg = *m->mgmt;                    /* real: time zone parsing */
@@ -584,11 +695,17 @@ static void fake_mgmt(ui_model_t *m)
     g_mg.ntp_sync = fm_job_start;
     g_mg.hostname_get = fm_host_get;
     g_mg.hostname_set = fm_host_set;
-    /* Accounts: the real ones would read api.users (/etc); none here
-     * until the Account pages' fakes. */
-    g_mg.users_gen = NULL;
-    g_mg.users = NULL;
-    g_mg.groups = NULL;
+    /* Accounts: the real ones would read api.users (/etc). */
+    g_mg.users_gen = fa_gen;
+    g_mg.users = fa_users;
+    g_mg.groups = fa_groups;
+    g_mg.perm_names = k_fperms;
+    g_mg.n_perms = 8;
+    g_mg.user_add = fa_user_add;
+    g_mg.user_update = fa_user_update;
+    g_mg.user_delete = fa_user_delete;
+    g_mg.group_set = fa_group_set;
+    g_mg.group_delete = fa_group_delete;
     m->mgmt = &g_mg;
 }
 
@@ -1553,6 +1670,213 @@ static void shots_storage(void)
     button(BTN_RIGHT);
 }
 
+/* The `nth` object of `cls` on the screen (hidden ones counted). */
+static lv_obj_t *nth_of_in(lv_obj_t *o, const lv_obj_class_t *cls, int nth, int *seen)
+{
+    if (lv_obj_check_type(o, cls) && (*seen)++ == nth) return o;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(o); ++i) {
+        lv_obj_t *r = nth_of_in(lv_obj_get_child(o, (int32_t)i), cls, nth, seen);
+        if (r) return r;
+    }
+    return NULL;
+}
+
+static lv_obj_t *nth_of(const lv_obj_class_t *cls, int nth)
+{
+    int seen = 0;
+    return nth_of_in(lv_screen_active(), cls, nth, &seen);
+}
+
+static void dd_pick(lv_obj_t *dd, int sel)
+{
+    if (!dd) return;
+    lv_dropdown_set_selected(dd, (uint32_t)sel);
+    lv_obj_send_event(dd, LV_EVENT_VALUE_CHANGED, NULL);
+    run(50);
+}
+
+static void click_obj(lv_obj_t *o)
+{
+    int x, y;
+    lv_obj_scroll_to_view_recursive(o, LV_ANIM_OFF);
+    run(50);
+    center_of(o, &x, &y);
+    click_at(x, y);
+}
+
+static int zone_index(const char *name)
+{
+    for (int i = 0; i < g_mg.zones(); ++i)
+        if (!strcmp(g_mg.zone_name(i), name)) return i;
+    return -1;
+}
+
+static void test_system_pages(void)
+{
+    run(VG_DURATION_TOAST);
+    move_to(W / 2, H - 1);
+    run(300);
+    click_text("Main menu");
+    click_text("SYSTEM");
+    CHECK(find("System", 1) && find("General", 0) && find("Device name", 0) && find("Time zone", 0), "System: General");
+    CHECK(find("UTC+01:00; daylight saving time UTC+02:00 from the last Sunday of March 02:00 to the last Sunday "
+               "of October 03:00", 1), "the zone described");
+    lv_obj_t *host = textarea(0);
+    CHECK(host && !strcmp(lv_textarea_get_text(host), "nvr-hall"), "the host name");
+    lv_textarea_set_text(host, "nvr-gate");
+    dd_pick(nth_of(&lv_dropdown_class, 1), 1);         /* DD.MM.YYYY */
+    click_text(SAVE);
+    run(300);
+    vigil_config_t c;
+    config_get(&c);
+    CHECK(!strcmp(g_mg_host, "nvr-gate"), "host name saved: %s", g_mg_host);
+    CHECK(!strcmp(c.ui.date_format, "DD.MM.YYYY"), "date format saved: %s", c.ui.date_format);
+    CHECK(find("26.11.2026", 1), "the clock in the new format");
+    shot("system_general");
+
+    lv_textarea_set_text(host, "bad name");
+    click_text(SAVE);
+    run(100);
+    CHECK(find("1 to 63 letters", 1) && lv_obj_has_state(host, LV_STATE_USER_1) && !strcmp(g_mg_host, "nvr-gate"),
+          "a bad host name: refused under the field");
+    lv_textarea_set_text(host, "nvr-gate");
+
+    dd_pick(nth_of(&lv_dropdown_class, 3), zone_index("Asia/Tokyo"));
+    CHECK(find("UTC+09:00, no daylight saving time", 1), "Tokyo described");
+    click_text(SAVE);
+    run(100);
+    CHECK(!strcmp(g_mg_zone, "Asia/Tokyo"), "zone saved: %s", g_mg_zone);
+
+    /* Custom: UTC+1 with DST, the last Sunday of March 02:00 to the last
+     * Sunday of October 03:00. */
+    dd_pick(nth_of(&lv_dropdown_class, 3), g_mg.zones());
+    dd_pick(nth_of(&lv_dropdown_class, 4), 15);         /* UTC+01:00 */
+    lv_obj_t *dst = nth_of(&lv_switch_class, 0);
+    if (dst) {
+        lv_obj_add_state(dst, LV_STATE_CHECKED);
+        lv_obj_send_event(dst, LV_EVENT_VALUE_CHANGED, NULL);
+    }
+    dd_pick(nth_of(&lv_dropdown_class, 6), 4);          /* last */
+    dd_pick(nth_of(&lv_dropdown_class, 7), 0);          /* Sunday */
+    dd_pick(nth_of(&lv_dropdown_class, 8), 2);          /* March */
+    dd_pick(nth_of(&lv_dropdown_class, 9), 4);
+    dd_pick(nth_of(&lv_dropdown_class, 10), 0);
+    dd_pick(nth_of(&lv_dropdown_class, 11), 9);         /* October */
+    lv_textarea_set_text(textarea(3), "02:00");
+    lv_textarea_set_text(textarea(4), "03:00");
+    lv_obj_send_event(textarea(4), LV_EVENT_VALUE_CHANGED, NULL);
+    run(50);
+    CHECK(find("POSIX: <+01>-1<+02>,M3.5.0,M10.5.0/3", 1), "the custom zone's preview");
+    shot("system_custom_tz");
+    click_text(SAVE);
+    run(100);
+    CHECK(!strcmp(g_mg_tz, "<+01>-1<+02>,M3.5.0,M10.5.0/3") && !strcmp(g_mg_zone, "custom"), "custom saved: %s",
+          g_mg_tz);
+
+    int jobs = g_mg_jobs;
+    lv_obj_t *sync = find(LV_SYMBOL_REFRESH "  Sync now", 0);
+    if (sync) click_obj(sync);
+    run(800);
+    CHECK(g_mg_jobs > jobs && find("Clock synchronised", 1), "Sync now: a job");
+    button(BTN_RIGHT);
+    CHECK(find("Main menu", 0), "back in the menu");
+}
+
+static void test_account_pages(void)
+{
+    run(VG_DURATION_TOAST);
+    click_text("ACCOUNT");
+    CHECK(find("Account", 1) && find("No users yet", 1) && !find(SAVE, 0), "Users: none, no Save");
+    click_text(LV_SYMBOL_PLUS "  Add user");
+    lv_textarea_set_text(textarea(0), "anna");
+    lv_textarea_set_text(textarea(1), "anna1");
+    lv_textarea_set_text(textarea(2), "anna1");
+    shot("account_user_editor");
+    click_obj(find(LV_SYMBOL_OK "  Add user", 0));
+    run(100);
+    CHECK(g_nfu == 1 && !strcmp(g_fu[0].name, "anna") && !strcmp(g_fu[0].group, "user") && find("anna", 0),
+          "anna added and listed");
+    shot("account_users");
+    click_text(LV_SYMBOL_PLUS "  Add user");
+    lv_textarea_set_text(textarea(0), "anna");
+    lv_textarea_set_text(textarea(1), "other1");
+    lv_textarea_set_text(textarea(2), "other1");
+    click_obj(find(LV_SYMBOL_OK "  Add user", 0));
+    run(100);
+    CHECK(g_nfu == 1 && find("the name is taken", 1), "a taken name: refused under the field");
+    lv_textarea_set_text(textarea(1), "x1");
+    click_obj(find(LV_SYMBOL_CLOSE "  Cancel", 0));
+    run(100);
+    click_obj(find(LV_SYMBOL_EDIT "  Edit", 0));
+    lv_obj_t *en = nth_of(&lv_switch_class, 0);
+    if (en) lv_obj_remove_state(en, LV_STATE_CHECKED);
+    click_obj(find(LV_SYMBOL_OK "  Save user", 0));
+    run(100);
+    CHECK(g_nfu == 1 && !g_fu[0].enabled && find("no", 0), "anna disabled");
+    click_obj(find(LV_SYMBOL_TRASH "  Remove", 0));
+    CHECK(ui_popup_is_open() && find("Remove the user anna?", 1), "Remove asks");
+    click_text("Remove");
+    run(100);
+    CHECK(g_nfu == 0 && find("No users yet", 1), "anna removed");
+
+    click_text("Groups");
+    run(200);
+    lv_obj_t *admin = find("admin", 0);
+    lv_obj_t *arow = admin ? lv_obj_get_parent(admin) : NULL;
+    CHECK(arow && lv_obj_has_state(lv_obj_get_child(arow, 2), LV_STATE_DISABLED), "admin: read only");
+    lv_textarea_set_text(textarea(0), "viewer");
+    click_obj(find(LV_SYMBOL_PLUS "  Add", 0));
+    run(100);
+    lv_obj_t *v = find("viewer", 0);
+    CHECK(v && g_nfg == 3, "viewer added");
+    if (v) click_obj(lv_obj_get_child(lv_obj_get_parent(v), 2));     /* Live */
+    shot("account_groups");
+    click_text(SAVE);
+    run(100);
+    CHECK(g_nfg == 3 && g_fg[2].perms == 1, "viewer: live only (%x)", g_nfg == 3 ? g_fg[2].perms : 0);
+    button(BTN_RIGHT);
+    button(BTN_RIGHT);
+    CHECK(!ui_page_top(), "back on the live view");
+}
+
+static void shots_system(void)
+{
+    static const char *const items[] = { "General", "HTTP API" };
+    shots_settings("SYSTEM", "system", items, 2);
+    click_text("SYSTEM");
+    dd_pick(nth_of(&lv_dropdown_class, 3), g_mg.zones());
+    lv_obj_t *dst = nth_of(&lv_switch_class, 0);
+    if (dst) {
+        lv_obj_add_state(dst, LV_STATE_CHECKED);
+        lv_obj_send_event(dst, LV_EVENT_VALUE_CHANGED, NULL);
+    }
+    run(50);
+    lv_obj_t *pv = find("POSIX:", 1);
+    if (pv) lv_obj_scroll_to_view_recursive(pv, LV_ANIM_OFF);
+    shot("system-general-custom-tz");
+    lv_obj_t *ls = find("Last synchronised", 1);
+    if (ls) lv_obj_scroll_to_view_recursive(ls, LV_ANIM_OFF);
+    shot("system-general-ntp");
+    click_text("Cancel");
+    button(BTN_RIGHT);
+}
+
+static void shots_account(void)
+{
+    g_nfu = 0;
+    fa_user_add("anna", "user", "anna1", 1, (char[16]){ 0 }, 16, (char[64]){ 0 }, 64);
+    fa_user_add("guard", "user", "guard1", 0, (char[16]){ 0 }, 16, (char[64]){ 0 }, 64);
+    fa_group_set("viewer", 1, 1, (char[16]){ 0 }, 16, (char[64]){ 0 }, 64);
+    static const char *const items[] = { "Users", "Groups" };
+    shots_settings("ACCOUNT", "account", items, 2);
+    click_text("ACCOUNT");
+    click_text(LV_SYMBOL_PLUS "  Add user");
+    shot("account-users-add");
+    click_obj(find(LV_SYMBOL_EDIT "  Edit", 0));
+    shot("account-users-edit");
+    button(BTN_RIGHT);
+}
+
 /* ---- the keyboard ------------------------------------------------------------------------------- */
 
 static int g_kbd[2] = { -1, -1 };       /* pipe: test -> evdev reader, as a keyboard */
@@ -2329,6 +2653,10 @@ static int shots_4(void)
     quiet();
     shots_storage();
     quiet();
+    shots_system();
+    quiet();
+    shots_account();
+    quiet();
     click_text("OPERATION");
     shot("system");
     click_text("Channel info");
@@ -2541,6 +2869,8 @@ int main(int argc, char **argv)
     test_empty_slot();
     test_network_pages();
     test_storage_pages();
+    test_system_pages();
+    test_account_pages();
 
     lv_mem_monitor_t mon;
     lv_mem_monitor(&mon);
