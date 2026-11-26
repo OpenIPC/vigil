@@ -46,6 +46,10 @@ void  fake_answer(const char *prog, int status, const char *output);
 void  fake_have(const char *prog, int there);
 int   fake_ran(const char *substr);
 void  fake_clear_log(void);
+/* When `prog` next runs, copy the file at `path` (under the root) into
+ * fake_snap: what the program found there. */
+void  fake_snapshot(const char *prog, const char *path);
+extern char fake_snap[4096];
 /* An IPv4 address for fake interface `ifname` (ops->ifaddr). */
 void  fake_ifaddr(const char *ifname, const char *addr, const char *mask);
 

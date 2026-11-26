@@ -91,15 +91,19 @@ void test_sys_net(void)
     /* Apply: written atomically, the old text returned, ifdown/ifup run. */
     fake_file("/etc/network/interfaces.d/eth0", FW_ETH0);
     fake_clear_log();
+    fake_snapshot("ifdown", "/etc/network/interfaces.d/eth0");
     char *old = NULL;
     CHECK(net_apply(&s, &old, err, sizeof err) == 0, "apply: %s", err);
     CHECK(old && !strcmp(old, FW_ETH0), "the old file is returned");
     CHECK(fake_ran("ifdown -f eth0\nifup eth0\n"), "restarted: %s", fake_log);
+    CHECK(strstr(fake_snap, "inet dhcp"), "ifdown saw the old (DHCP) stanza, so it stops udhcpc: %s", fake_snap);
     char *now = fake_read("/etc/network/interfaces.d/eth0");
     CHECK(now && strstr(now, "inet static"), "written");
     free(now);
     fake_clear_log();
+    fake_snapshot("ifdown", "/etc/network/interfaces.d/eth0");
     CHECK(net_restore("eth0", old, err, sizeof err) == 0, "restore: %s", err);
+    CHECK(strstr(fake_snap, "inet static"), "restore: ifdown saw the stanza in force: %s", fake_snap);
     now = fake_read("/etc/network/interfaces.d/eth0");
     CHECK(now && !strcmp(now, FW_ETH0) && fake_ran("ifup eth0"), "restored and restarted");
     free(now);

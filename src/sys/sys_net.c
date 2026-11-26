@@ -236,12 +236,21 @@ char *net_stanza(const net_cfg_t *c, const char *old)
     return out;
 }
 
-static int restart(const char *ifname, char *err, size_t cap)
+/* Taken down with the stanza it was brought up with: busybox ifdown
+ * reads the file as it is now, so after a DHCP -> static change it would
+ * "take down" a static address and leave the DHCP client running, which
+ * then renews its lease over the new address. -f: also when ifupdown's
+ * state file does not list it (S40network brought eth0 up by other means
+ * in some modes). */
+static void if_down(const char *ifname)
 {
     char out[512];
-    /* -f: also when ifupdown's state file does not list it (S40network
-     * brought eth0 up by other means in some modes). */
     sys_run(out, sizeof out, IFDOWN_SECS, "ifdown", "-f", ifname, NULL);
+}
+
+static int if_up(const char *ifname, char *err, size_t cap)
+{
+    char out[512];
     int rc = sys_run(out, sizeof out, IFUP_SECS, "ifup", ifname, NULL);
     if (rc != 0) {
         sys_trim(out);
@@ -249,6 +258,12 @@ static int restart(const char *ifname, char *err, size_t cap)
         return -1;
     }
     return 0;
+}
+
+static int restart(const char *ifname, char *err, size_t cap)
+{
+    if_down(ifname);
+    return if_up(ifname, err, cap);
 }
 
 int net_apply(const net_cfg_t *cfg, char **old_text, char *err, size_t cap)
@@ -268,15 +283,22 @@ int net_apply(const net_cfg_t *cfg, char **old_text, char *err, size_t cap)
         old = NULL;
     }
     char *text = net_stanza(cfg, old);
-    if (!text || sys_write(path, text, strlen(text), 0644, err, cap) < 0) {
-        if (!text) snprintf(err, cap, "out of memory");
+    if (!text) {
+        snprintf(err, cap, "out of memory");
+        free(old);
+        return -1;
+    }
+    if_down(cfg->ifname);
+    if (sys_write(path, text, strlen(text), 0644, err, cap) < 0) {
+        char e2[64];
+        if_up(cfg->ifname, e2, sizeof e2);      /* the old file is still there */
         free(text);
         free(old);
         return -1;
     }
     free(text);
     *old_text = old;
-    return restart(cfg->ifname, err, cap);
+    return if_up(cfg->ifname, err, cap);
 }
 
 int net_restore(const char *ifname, const char *old_text, char *err, size_t cap)
@@ -287,13 +309,20 @@ int net_restore(const char *ifname, const char *old_text, char *err, size_t cap)
         return -1;
     }
     stanza_path(ifname, path, sizeof path);
+    if_down(ifname);
     if (old_text) {
-        if (sys_write(path, old_text, strlen(old_text), 0644, err, cap) < 0) return -1;
+        if (sys_write(path, old_text, strlen(old_text), 0644, err, cap) < 0) {
+            char e2[64];
+            if_up(ifname, e2, sizeof e2);
+            return -1;
+        }
     } else if (unlink(sys_path(p, sizeof p, path)) < 0 && errno != ENOENT) {
         snprintf(err, cap, "cannot remove %s: %s", path, strerror(errno));
+        char e2[64];
+        if_up(ifname, e2, sizeof e2);
         return -1;
     }
-    return restart(ifname, err, cap);
+    return if_up(ifname, err, cap);
 }
 
 /* ---- status --------------------------------------------------------------------- */
