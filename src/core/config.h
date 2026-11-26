@@ -66,10 +66,17 @@ typedef struct {
 } config_api_t;
 
 typedef struct {
+    char interfaces[128];           /* "eth0,eth1"; "" = every IPv4 interface */
+    char targets[256];              /* unicast addresses also searched */
+    char prefer[32];                /* "netip,onvif,dhip" */
+} config_discovery_t;
+
+typedef struct {
     int             n_cameras;
     config_camera_t cameras[CHANNEL_MAX];
     config_record_t record;
     config_api_t    api;
+    config_discovery_t discovery;
 } vigil_config_t;
 
 extern const schema_t config_schema;

@@ -8,6 +8,7 @@
  * so the on-screen UI and the HTTP API validate, save and apply a change
  * the same way, and the schema (config_schema.c) drives both. */
 #define _DEFAULT_SOURCE
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,7 @@
 #include "cJSON.h"
 #include "channel.h"
 #include "config.h"
+#include "discovery.h"
 #include "events.h"
 #include "hal.h"
 #include "ui_bridge.h"
@@ -391,6 +393,118 @@ static int system_info(ui_info_t *info, int max)
     return n;
 }
 
+/* ---- camera discovery --------------------------------------------------------------- */
+
+_Static_assert(UI_DISC_NETIP == DISC_NETIP && UI_DISC_ONVIF == DISC_ONVIF && UI_DISC_DHIP == DISC_DHIP,
+               "UI_DISC_* are DISC_*");
+_Static_assert(UI_DISC_MAX >= DISC_JOB_MAX && UI_DISC_MAX >= DISC_MAX, "the UI holds every result");
+_Static_assert((int)UI_JOB_SCAN == (int)DISC_JOB_SCAN && (int)UI_JOB_AUTOADD == (int)DISC_JOB_AUTOADD,
+               "ui_job_kind_t follows disc_job_kind_t");
+
+static void job_err(char *err, size_t cap)
+{
+    if (errno == EBUSY) snprintf(err, cap, "Another search or change is running");
+    else if (errno == EAGAIN && disc_auth_wait() > 0)
+        snprintf(err, cap, "Too many refused passwords: try again in %d s", disc_auth_wait());
+    else if (errno == EINVAL) snprintf(err, cap, "Check the values");
+    else snprintf(err, cap, "Cannot start");
+}
+
+static int disc_scan_ui(unsigned protos, char *err, size_t cap)
+{
+    disc_scan_opts_t o;
+    memset(&o, 0, sizeof o);
+    o.protos = protos;
+    o.seconds = 4;
+    int id = disc_scan(&o);
+    if (id < 0) job_err(err, cap);
+    return id;
+}
+
+static int disc_devices_ui(ui_disc_dev_t *out, int max)
+{
+    disc_device_t *d = malloc(DISC_MAX * sizeof *d);
+    if (!d) return 0;
+    int n = disc_devices(d, DISC_MAX);
+    if (n > max) n = max;
+    for (int i = 0; i < n; ++i) {
+        ui_disc_dev_t *u = &out[i];
+        memset(u, 0, sizeof *u);
+        snprintf(u->key, sizeof u->key, "%s", d[i].mac[0] ? d[i].mac : d[i].ip);
+        snprintf(u->ip, sizeof u->ip, "%s", d[i].ip);
+        snprintf(u->mac, sizeof u->mac, "%s", d[i].mac);
+        snprintf(u->mask, sizeof u->mask, "%s", d[i].mask);
+        snprintf(u->gateway, sizeof u->gateway, "%s", d[i].gateway);
+        snprintf(u->vendor, sizeof u->vendor, "%s", d[i].vendor);
+        snprintf(u->model, sizeof u->model, "%s", d[i].model);
+        snprintf(u->name, sizeof u->name, "%s", d[i].name);
+        u->protos = d[i].protos;
+        u->port = d[i].protos & DISC_NETIP ? d[i].netip_port : d[i].http_port;
+        u->channel = disc_device_channel(&d[i]);
+    }
+    free(d);
+    return n;
+}
+
+static void disc_job_ui(ui_disc_job_t *out)
+{
+    disc_job_t *j = malloc(sizeof *j);
+    memset(out, 0, sizeof *out);
+    if (!j) return;
+    disc_job_get(j);
+    out->id = j->id;
+    out->kind = (ui_job_kind_t)j->kind;
+    out->running = j->running;
+    out->dry_run = j->dry_run;
+    out->progress = j->progress;
+    snprintf(out->msg, sizeof out->msg, "%s", j->msg);
+    out->n = j->n;
+    for (int i = 0; i < j->n; ++i) {
+        const disc_result_t *r = &j->r[i];
+        ui_disc_res_t *u = &out->r[i];
+        snprintf(u->key, sizeof u->key, "%s", r->key);
+        snprintf(u->ip, sizeof u->ip, "%s", r->ip);
+        snprintf(u->new_ip, sizeof u->new_ip, "%s", r->new_ip);
+        u->proto = r->proto;
+        u->channel = r->channel;
+        u->done = r->done;
+        u->ok = r->done && r->rc == DISC_OK;
+        u->reprobed = r->reprobed;
+        snprintf(u->msg, sizeof u->msg, "%s", r->msg);
+    }
+    free(j);
+}
+
+static int disc_ip_ui(const ui_disc_ip_t *items, int n, const char *start, const char *mask, const char *gw,
+                      const char *user, const char *pass, int dry_run, char *err, size_t cap)
+{
+    disc_ip_item_t *it = calloc((size_t)(n > 0 ? n : 1), sizeof *it);
+    if (!it) return -1;
+    for (int i = 0; i < n; ++i) {
+        snprintf(it[i].key, sizeof it[i].key, "%s", items[i].key);
+        snprintf(it[i].ip, sizeof it[i].ip, "%s", items[i].ip);
+    }
+    int id = disc_ip_job(it, n, start, mask, gw, user, pass, dry_run);
+    if (id < 0) job_err(err, cap);
+    free(it);
+    return id;
+}
+
+static int disc_assign_ui(const char *key, int channel, const char *user, const char *pass, int replace,
+                          char *err, size_t cap)
+{
+    int id = disc_assign_job(key, channel, 0, user, pass, "", replace);
+    if (id < 0) job_err(err, cap);
+    return id;
+}
+
+static int disc_autoadd_ui(const char *user, const char *pass, char *err, size_t cap)
+{
+    int id = disc_autoadd_job(user, pass);
+    if (id < 0) job_err(err, cap);
+    return id;
+}
+
 int ui_bridge_init(ui_model_t *m)
 {
     if (!g_sections && sections_build() < 0) return -1;
@@ -411,6 +525,12 @@ int ui_bridge_init(ui_model_t *m)
     m->get_value = get_value;
     m->save = save;
     m->system_info = system_info;
+    m->disc_scan = disc_scan_ui;
+    m->disc_devices = disc_devices_ui;
+    m->disc_job = disc_job_ui;
+    m->disc_ip = disc_ip_ui;
+    m->disc_assign = disc_assign_ui;
+    m->disc_autoadd = disc_autoadd_ui;
     g_ev_cursor = 0;                    /* every event still kept, the start-up ones too */
     return 0;
 }

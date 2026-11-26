@@ -123,6 +123,44 @@ typedef struct {
     char value[96];
 } ui_info_t;
 
+/* ---- camera discovery ------------------------------------------------------------- */
+
+enum { UI_DISC_NETIP = 1u, UI_DISC_ONVIF = 2u, UI_DISC_DHIP = 4u };
+#define UI_DISC_MAX 64
+
+typedef struct {
+    char     key[24];               /* what the jobs take: the MAC, else the address */
+    char     ip[16], mac[18], mask[16], gateway[16];
+    char     vendor[32], model[64], name[64];
+    unsigned protos;                /* UI_DISC_* that answered */
+    int      port;                  /* of the first protocol it would be added with */
+    int      channel;               /* 1-based channel whose camera is this address; 0 none */
+} ui_disc_dev_t;
+
+typedef enum { UI_JOB_NONE, UI_JOB_SCAN, UI_JOB_IP, UI_JOB_ASSIGN, UI_JOB_AUTOADD } ui_job_kind_t;
+
+typedef struct {
+    char     key[24], ip[16], new_ip[16];
+    unsigned proto;                 /* UI_DISC_* used */
+    int      channel;
+    int      done, ok, reprobed;
+    char     msg[96];
+} ui_disc_res_t;
+
+typedef struct {
+    unsigned      id;               /* 0: none yet */
+    ui_job_kind_t kind;
+    int           running, dry_run, progress;
+    char          msg[96];
+    int           n;
+    ui_disc_res_t r[UI_DISC_MAX];
+} ui_disc_job_t;
+
+typedef struct {
+    char key[24];
+    char ip[16];                    /* "": the next free one from the start address */
+} ui_disc_ip_t;
+
 typedef struct ui_model {
     /* platform */
     const char *role;           /* "NVR" / "DVR" */
@@ -156,6 +194,19 @@ typedef struct ui_model {
 
     /* system page */
     int (*system_info)(ui_info_t *info, int max);
+
+    /* Camera discovery (NULL when vigild has none). Each starting call
+     * returns the job's id, or -1 with `err` (another job runs, too many
+     * refused passwords: wait, bad values); disc_job shows the current or
+     * last one. Credentials go to that job only. */
+    int  (*disc_scan)(unsigned protos, char *err, size_t cap);
+    int  (*disc_devices)(ui_disc_dev_t *out, int max);      /* by address */
+    void (*disc_job)(ui_disc_job_t *job);
+    int  (*disc_ip)(const ui_disc_ip_t *items, int n, const char *start, const char *mask, const char *gw,
+                    const char *user, const char *pass, int dry_run, char *err, size_t cap);
+    int  (*disc_assign)(const char *key, int channel, const char *user, const char *pass, int replace,
+                        char *err, size_t cap);
+    int  (*disc_autoadd)(const char *user, const char *pass, char *err, size_t cap);
 } ui_model_t;
 
 #endif /* UI_MODEL_H */

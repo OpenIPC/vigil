@@ -482,7 +482,7 @@ static void do_action(int act, int ch)
         ui_menu_open();
         break;
     case ACT_CHANNELS:
-        if (section_of("cameras") >= 0) ui_list_open(section_of("cameras"));
+        ui_channels_open();
         break;
     case ACT_RECORD:
         if (section_of("record") >= 0) ui_form_open(section_of("record"), -1);

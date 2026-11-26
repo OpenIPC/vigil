@@ -81,6 +81,9 @@ defaults, commented.
 | `api.auth` | boolean | `true` | Require the system account's password. See [Authentication](#authentication). |
 | `api.user` | string | `"root"` | The account whose password the API asks for. |
 | `api.shadow` | absolute path | `"/etc/shadow"` | The shadow file holding that account's password hash. |
+| `discovery.interfaces` | string | `""` | Interfaces to search for cameras on, comma separated; empty: every IPv4 interface ([Discovery](#discovery)). |
+| `discovery.targets` | IPv4 addresses, comma separated | `""` | Also searched by unicast: cameras on a routed subnet. |
+| `discovery.prefer` | `netip`, `onvif`, `dhip`, comma separated | `"netip,onvif,dhip"` | The protocol a camera that answers several is added with. |
 
 `GET /api/v1/schema` returns this table as data (below), so it is never out
 of date for a client.
@@ -237,10 +240,17 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `GET /api/v1/status` | Platform, uptime, configuration generation, one entry per camera. |
 | `GET /api/v1/config` | The configuration in force, passwords redacted. |
 | `PUT /api/v1/config` | Replace the whole configuration. Sections and keys it omits get their defaults. |
-| `GET /api/v1/config/<section>` | One section: `cameras`, `record` or `api`. |
+| `GET /api/v1/config/<section>` | One section: `cameras`, `record`, `api` or `discovery`. |
 | `PUT /api/v1/config/<section>` | Replace one section; the others stay. |
 | `GET /api/v1/schema` | Every setting: type, default, limits, label, help. |
 | `GET /api/v1/ws` | WebSocket: pushed status, events and configuration changes. |
+| `POST /api/v1/discovery/scan` | Search the LAN for cameras ([Discovery](#discovery)). |
+| `GET /api/v1/discovery` | The devices found, and the current or last discovery job. |
+| `DELETE /api/v1/discovery` | Forget the devices found. |
+| `GET /api/v1/discovery/job` | The current or last discovery job. |
+| `POST /api/v1/discovery/ip` | Change devices' addresses, or (`dry_run`) show the plan. |
+| `POST /api/v1/channels/<n>/assign` | Add a device found to channel n. |
+| `POST /api/v1/discovery/autoadd` | Add every new device to the empty channels. |
 
 A `PUT` is validated as a whole (every error is reported, at most 16 listed,
 `more_errors` counts the rest); unknown keys are errors here, to catch
@@ -375,6 +385,120 @@ the `PUT`).
 websocat -H "Authorization: Basic $(printf root:PASSWORD | base64)" ws://192.168.1.20:8080/api/v1/ws
 ```
 
+## Discovery
+
+vigild finds cameras on its network, changes their addresses and adds them
+to channels, over three protocols:
+
+| | NETIP (Xiongmai, OpenIPC majestic) | ONVIF | DHIP (Dahua and its OEMs) |
+|---|---|---|---|
+| Found by | search (msgid 1530) to UDP 34569, by broadcast; the answer comes by broadcast to 34569 | WS-Discovery Probe for `NetworkVideoTransmitter` to 239.255.255.250:3702; the answer comes back to the asker | `DHDiscover.search` to 239.255.255.251:37810 and by broadcast; the answer comes back to the asker |
+| Address changed by | the broadcast set (msgid 1532, the MAC and the sofia hash of the password; no connection, so a device on another subnet can be moved into this one); if it does not answer, a login on TCP 34567 and `ConfigSet` of `NetWork.NetCommon` | `SetNetworkDefaultGateway` and `SetNetworkInterfaces` (static address), `SystemReboot` when the device asks for it; WS-Security digest, HTTP Digest on a 401 | RPC2 over HTTP: `global.login` (Default encryption), `configManager.setConfig` of `Network` |
+| Camera URL | `netip://user:pass@ip:34567/?ch=0&stream=main`; the sub-stream is derived | `GetProfiles`, `GetStreamUri` of the first two profiles (main, sub) | `rtsp://user:pass@ip:554/cam/realmonitor?channel=1&subtype=0`, `sub_url` `subtype=1` |
+
+ONVIF and DHIP changes need a TCP connection to the device, so the device
+has to be reachable (on this subnet, or routed); NETIP's broadcast set does
+not. A device that answers more than one protocol is one entry (merged by
+MAC, else by address). When it can be added more than one way, the URL
+comes from NETIP first (both streams without guessing a path), then ONVIF
+(the device names its own streams), then DHIP (Dahua's fixed RTSP path);
+`discovery.prefer` changes the order.
+
+Everything that touches the network is a **job** on discovery's own
+thread, one at a time (another request gets `409`): `scan` returns at once
+(`202`) with the running job; `ip`, `assign` and `autoadd` wait up to 8 s
+and answer `200` with the outcome, or `202` with the job still running.
+`GET /api/v1/discovery/job` (or the `job` of `GET /api/v1/discovery`)
+follows it:
+
+```json
+{ "id": 7, "kind": "ip", "running": false, "dry_run": false, "progress": 100,
+  "message": "1 changed, 0 failed",
+  "results": [ { "device": "00:12:31:4f:2a:10", "ip": "192.168.1.10", "new_ip": "192.168.0.31",
+                 "reprobed": true, "protocol": "netip", "done": true, "ok": true, "message": "changed" } ] }
+```
+
+A failed result has `"ok": false`, `error` (`auth`: the device refused the
+credentials; `unsupported`; `timeout`; `unreachable`; `protocol`: an answer
+that could not be used; `invalid`) and a `message` saying what happened.
+
+**Credentials** (`user`, default `admin`; `password`, default empty) come
+in the request, are used for that job and wiped; they are kept only in the
+camera URL of a device added to a channel. Answers and the log never show
+them (URLs are redacted as everywhere else). Each refusal by a device is
+counted: after 10 in a minute, requests with credentials get `429` with
+`Retry-After` until the oldest is a minute old, and at most 30 such
+requests a minute are taken in any case, so the API cannot be used to guess
+a camera's password at speed or to lock its account.
+
+### `POST /api/v1/discovery/scan`
+
+```json
+{ "protocols": ["netip", "onvif", "dhip"], "seconds": 3,
+  "interfaces": ["eth0"], "targets": ["10.1.2.3"], "broadcast": true,
+  "ports": { "netip": 34569, "onvif": 3702, "dhip": 37810 } }
+```
+
+All optional: `protocols` (or `"all"`, the default), `seconds` 1..15
+(default 3; the searches go out three times, a second apart),
+`interfaces` (default `discovery.interfaces`, or every IPv4 interface that
+is up, not loopback), `targets`: addresses also asked by unicast (cameras
+on a routed subnet; `discovery.targets` are asked too),
+`broadcast: false` asks only those, and `ports` the UDP ports asked (devices
+behind port forwarding, test responders). Devices are kept 10 minutes after
+they last answered, 64 at most.
+
+### `GET /api/v1/discovery`
+
+```json
+{ "devices": [
+    { "device": "00:12:31:4f:2a:10", "ip": "192.168.1.10", "mac": "00:12:31:4f:2a:10",
+      "mask": "255.255.255.0", "gateway": "192.168.1.1", "dhcp": null,
+      "protocols": ["netip", "onvif"], "vendor": "Xiongmai", "model": "IPC", "name": "LocalHost",
+      "serial": "abcdef0123456789", "version": "V4.02.R11...", "channels": 1,
+      "ports": { "netip": 34567, "http": 80 }, "onvif": "http://192.168.1.10:8899/onvif/device_service",
+      "interface": "eth0", "age": 4, "channel": null,
+      "urls": { "netip": "netip://192.168.1.10:34567/?ch=0&stream=main" } } ],
+  "job": { ... } }
+```
+
+`device` is the key the other requests take (the MAC, else the address).
+`channel` is the channel whose camera URL points at this address, or
+`null`. `urls` are what adding it would use, without credentials (ONVIF's
+come from the device when it is added). `age`: seconds since it last
+answered.
+
+### `POST /api/v1/discovery/ip`
+
+One device, `{"device": "00:12:31:4f:2a:10", "ip": "192.168.0.31", "mask":
+"255.255.255.0", "gateway": "192.168.0.1", "user": "admin", "password":
+"..."}`, or many: `"devices": ["mac1", {"device": "mac2", "ip": "..."}]`
+with `"start": "192.168.0.31"` for those without an address: they get the
+next free ones from `start` within its subnet, skipping the addresses of
+known devices and cameras, this board's own, and any that answer ARP or
+ping. `"dry_run": true` only plans (no credentials needed, nothing is sent
+to the devices). Each device is changed over the first protocol it answered
+in the order above; a refused password is not tried on another protocol.
+After a change the device is looked for at its new address for up to 10 s
+(`reprobed`).
+
+### `POST /api/v1/channels/<n>/assign`
+
+`{"device": "...", "user": "admin", "password": "...", "protocol": "onvif",
+"name": "Gate", "replace": false}` puts the device on channel n (the
+channels before it, if empty, stay empty). `protocol` (default: the order
+above) and `name` (default: the device's) are optional. A channel with a
+camera is refused unless `replace`; a device already on a channel is
+refused.
+
+### `POST /api/v1/discovery/autoadd`
+
+`{"user": "admin", "password": "..."}`: every device found that is not on
+a channel goes to the next empty channel, in address order, with these
+credentials (one URL per device: for an NVR or DVR found this way, its
+first channel). The configuration is saved once, at the end; the results
+say which device went where.
+
 ## Inside
 
 - `src/core/schema.{h,c}`: the generic engine (defaults, JSON in and out,
@@ -394,6 +518,12 @@ websocat -H "Authorization: Basic $(printf root:PASSWORD | base64)" ws://192.168
   oldest of its 32 queued events and configuration messages, and only its
   latest status is kept.
   `src/api/auth.c`: Basic credentials, the shadow file, `crypt(3)`.
+  `src/api/api_disc.c`: the discovery endpoints, over
+  `src/core/discovery.{h,c}` (the device table and the jobs),
+  `src/core/disc_proto.{h,c}` (the searches and their answers, as pure
+  parsers of untrusted input) and `src/core/disc_ops.{h,c}` (ONVIF, Dahua
+  RPC2 and NETIP calls on one device). `tests/fake_discovery.py` plays
+  devices of each kind for `tests/discovery_test.py`.
 - JSON is parsed by cJSON ([third_party/cJSON](../third_party/cJSON), MIT),
   bodies capped at 64 KiB; YAML by [libyaml](https://github.com/yaml/libyaml)
   (MIT, the system's).
