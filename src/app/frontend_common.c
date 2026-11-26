@@ -1,17 +1,17 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* frontend_common.c — the quad-view geometry shared by the UI and the
- * decoders' tiles. */
+/* frontend_common.c — the tiles the channels start in: the live view's
+ * first layout (2x2, page 1), from the geometry the UI uses (ui_layout.c),
+ * so the video and the UI's holes agree. */
+#include <string.h>
+
 #include "frontend.h"
+#include "ui_layout.h"
 
 void frontend_tiles(vg_rect_t *tiles, int n)
 {
-    int half_w = SCREEN_W / 2;
-    int half_h = (SCREEN_H - HEADER_H - STRIP_H) / 2;
-    for (int i = 0; i < n; ++i) {
-        int q = i % 4;                          /* quad view: tiles 5+ repeat */
-        tiles[i].x = (q % 2) * half_w;
-        tiles[i].y = HEADER_H + (q / 2) * half_h;
-        tiles[i].w = half_w & ~1;
-        tiles[i].h = half_h & ~1;
-    }
+    ui_cell_t cells[4];
+    int k = ui_layout_cells(SCREEN_W, SCREEN_H, 4, 0, n, cells);
+    memset(tiles, 0, sizeof *tiles * (size_t)n);    /* past the first page: not shown */
+    for (int i = 0; i < k; ++i)
+        if (cells[i].ch >= 0) tiles[cells[i].ch] = (vg_rect_t){ cells[i].x, cells[i].y, cells[i].w, cells[i].h };
 }

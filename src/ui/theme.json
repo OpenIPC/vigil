@@ -18,5 +18,5 @@
   "radius": { "sm": 4, "md": 8, "lg": 12 },
   "font": { "sm": 14, "md": 16, "lg": 20, "xl": 24 },
   "size": { "header": 40, "strip": 80, "navbar": 64, "page_header": 56, "button": 40, "cursor": 19 },
-  "duration": { "fast": 150, "normal": 250, "navbar_hide": 3000, "toast": 2500, "double_click": 400 }
+  "duration": { "fast": 150, "normal": 250, "navbar_hide": 3000, "toast": 2500, "double_click": 400, "flash": 3000 }
 }

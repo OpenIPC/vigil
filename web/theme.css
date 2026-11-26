@@ -37,4 +37,5 @@
   --vg-duration-navbar-hide: 3000ms;
   --vg-duration-toast: 2500ms;
   --vg-duration-double-click: 400ms;
+  --vg-duration-flash: 3000ms;
 }

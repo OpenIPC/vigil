@@ -48,5 +48,6 @@
 #define VG_DURATION_NAVBAR_HIDE      3000
 #define VG_DURATION_TOAST            2500
 #define VG_DURATION_DOUBLE_CLICK     400
+#define VG_DURATION_FLASH            3000
 
 #endif /* THEME_TOKENS_H */

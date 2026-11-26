@@ -11,10 +11,10 @@
 
 #define SCREEN_W   1280
 #define SCREEN_H   720
-#define HEADER_H   40
-#define STRIP_H    80
 
-/* Tile rectangles of the quad view, for the decoders' output. */
+/* Where the channels start: the live view's 2x2 grid (ui_layout.h);
+ * channels past the first four get no tile (w == 0) until the UI shows
+ * them. */
 void frontend_tiles(vg_rect_t *tiles, int n);
 
 /* Run until *stop or run_secs elapse (0 = no limit), calling tick() from
