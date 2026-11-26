@@ -110,7 +110,9 @@ void ui_theme_init(lv_display_t *disp)
     lv_style_init(&ui_st_chip);
     lv_style_set_bg_color(&ui_st_chip, UI_C(CHIP));
     lv_style_set_bg_opa(&ui_st_chip, LV_OPA_COVER);
-    lv_style_set_radius(&ui_st_chip, VG_RADIUS_SM);
+    /* Square: a rounded corner's soft edge over a tile would blend with
+     * the key colour. */
+    lv_style_set_radius(&ui_st_chip, 0);
     lv_style_set_pad_hor(&ui_st_chip, VG_SPACE_SM);
     lv_style_set_pad_ver(&ui_st_chip, VG_SPACE_XS);
     lv_style_set_pad_column(&ui_st_chip, VG_SPACE_SM);
@@ -180,6 +182,62 @@ lv_obj_t *ui_icon(lv_obj_t *parent, const lv_image_dsc_t *img, uint32_t rgb)
     lv_obj_remove_flag(i, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(i, LV_OBJ_FLAG_CLICK_FOCUSABLE);
     return i;
+}
+
+/* Discs with hard edges, made once per size. */
+#define DISCS_MAX 4
+static struct {
+    int            d;
+    uint8_t       *px;
+    lv_image_dsc_t img;
+} g_discs[DISCS_MAX];
+
+static const lv_image_dsc_t *disc_image(int d)
+{
+    int i;
+    for (i = 0; i < DISCS_MAX && g_discs[i].d; ++i)
+        if (g_discs[i].d == d) return &g_discs[i].img;
+    if (i == DISCS_MAX || !(g_discs[i].px = lv_malloc((size_t)d * (size_t)d))) return NULL;
+    /* Opaque where the pixel's centre is inside the circle, else nothing. */
+    long r2 = (long)d * d;
+    for (int y = 0; y < d; ++y)
+        for (int x = 0; x < d; ++x) {
+            long dx = 2 * x + 1 - d, dy = 2 * y + 1 - d;
+            g_discs[i].px[y * d + x] = dx * dx + dy * dy <= r2 ? 0xFF : 0;
+        }
+    g_discs[i].d = d;
+    lv_image_dsc_t *img = &g_discs[i].img;
+    img->header.magic = LV_IMAGE_HEADER_MAGIC;
+    img->header.cf = LV_COLOR_FORMAT_A8;
+    img->header.w = (uint32_t)d;
+    img->header.h = (uint32_t)d;
+    img->header.stride = (uint32_t)d;
+    img->data = g_discs[i].px;
+    img->data_size = (uint32_t)(d * d);
+    return img;
+}
+
+static void disc_hover_cb(lv_event_t *e)
+{
+    lv_obj_t *disc = lv_event_get_user_data(e);
+    int over = lv_event_get_code(e) == LV_EVENT_HOVER_OVER;
+    lv_obj_set_style_image_recolor(disc, over ? UI_C(ACCENT) : UI_C(CHIP), 0);
+}
+
+lv_obj_t *ui_disc_button(lv_obj_t *parent, int d)
+{
+    lv_obj_t *b = lv_button_create(parent);
+    lv_obj_remove_style_all(b);
+    lv_obj_set_size(b, d, d);
+    lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+    const lv_image_dsc_t *img = disc_image(d);
+    if (img) {
+        lv_obj_t *disc = ui_icon(b, img, VG_COLOR_CHIP);
+        lv_obj_center(disc);
+        lv_obj_add_event_cb(b, disc_hover_cb, LV_EVENT_HOVER_OVER, disc);
+        lv_obj_add_event_cb(b, disc_hover_cb, LV_EVENT_HOVER_LEAVE, disc);
+    }
+    return b;
 }
 
 lv_obj_t *ui_label(lv_obj_t *parent, const char *text, const lv_font_t *font, lv_color_t color)

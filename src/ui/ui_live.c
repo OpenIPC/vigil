@@ -346,20 +346,12 @@ static void cell_build(cell_t *c, const ui_cell_t *g)
     lv_obj_set_style_text_align(c->mid_l2, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(c->mid_l2, LV_LABEL_LONG_WRAP);
 
-    /* An empty slot: a large "+" that adds a camera on this channel. */
-    c->add = lv_button_create(o);
-    lv_obj_remove_style_all(c->add);
-    lv_obj_set_size(c->add, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_set_style_radius(c->add, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(c->add, UI_C(CHIP), 0);
-    lv_obj_set_style_bg_opa(c->add, LV_OPA_COVER, 0);
-    lv_obj_set_style_pad_all(c->add, c->tiny ? 0 : VG_SPACE_SM, 0);
-    lv_obj_set_style_border_color(c->add, UI_C(ACCENT), LV_STATE_HOVERED);
-    lv_obj_set_style_border_width(c->add, 2, LV_STATE_HOVERED);
+    /* An empty slot: a large "+" that adds a camera on this channel. Two
+     * sizes rendered: LVGL does not scale A8 images. */
+    c->add = ui_disc_button(o, small ? 52 : 88);
     lv_obj_center(c->add);
     lv_obj_add_event_cb(c->add, add_click_cb, LV_EVENT_CLICKED, c);
-    /* Two sizes rendered: LVGL does not scale A8 images. */
-    ui_icon(c->add, small ? &ui_icon_add_sm : &ui_icon_add, VG_COLOR_TEXT2);
+    lv_obj_center(ui_icon(c->add, small ? &ui_icon_add_sm : &ui_icon_add, VG_COLOR_TEXT2));
     lv_obj_add_flag(c->add, LV_OBJ_FLAG_HIDDEN);
 
     c->flash = lv_obj_create(o);
@@ -595,17 +587,7 @@ static void arrow_cb(lv_event_t *e)
 static void make_arrows(void)
 {
     for (int i = 0; i < 2; ++i) {
-        lv_obj_t *b = lv_button_create(L.scr);
-        lv_obj_remove_style_all(b);
-        lv_obj_set_size(b, VG_SIZE_PAGE_ARROW, VG_SIZE_PAGE_ARROW);
-        lv_obj_set_style_radius(b, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_bg_color(b, UI_C(CHIP), 0);
-        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_color(b, UI_C(LINE), 0);
-        lv_obj_set_style_border_width(b, 1, 0);
-        lv_obj_set_style_bg_color(b, UI_C(ACCENT), LV_STATE_HOVERED);
-        lv_obj_set_style_border_color(b, UI_C(ACCENT), LV_STATE_HOVERED);
-        lv_obj_add_style(b, &ui_st_btn_pressed, LV_STATE_PRESSED);
+        lv_obj_t *b = ui_disc_button(L.scr, VG_SIZE_PAGE_ARROW);
         lv_obj_align(b, i ? LV_ALIGN_RIGHT_MID : LV_ALIGN_LEFT_MID, i ? -VG_SPACE_LG : VG_SPACE_LG, 0);
         lv_obj_t *l = ui_label(b, i ? LV_SYMBOL_RIGHT : LV_SYMBOL_LEFT, VG_FONT_LG_LV, UI_C(TEXT));
         lv_obj_center(l);

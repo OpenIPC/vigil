@@ -333,7 +333,11 @@ an icon: put its SVG in `src/ui/icons/`, add a line to the script's
 
 Everything drawn over a video tile is opaque and has no shadow: on a
 colour-keyed layer (HiSilicon hifb, SigmaStar GOP) a half-transparent pixel
-is a blend with the key colour and shows as a pink fringe.
+is a blend with the key colour and shows as a pink fringe. For the same reason the chips over the video are square (a
+rounded corner's soft edge is such a blend), and the round page arrows and
+the "+" of an empty channel stand on a disc with hard edges (`ui_disc`:
+every pixel opaque or not drawn, like the mouse pointer). Text keeps its
+smoothing; its edges lie on the chip's own opaque background.
 
 ## Input
 

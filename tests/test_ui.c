@@ -328,11 +328,13 @@ static lv_obj_t *page_arrow(int next)
     lv_obj_t *scr = lv_screen_active();
     for (uint32_t i = 0; i < lv_obj_get_child_count(scr); ++i) {
         lv_obj_t *b = lv_obj_get_child(scr, (int32_t)i);
-        if (!lv_obj_check_type(b, &lv_button_class) || !lv_obj_get_child_count(b)) continue;
-        lv_obj_t *l = lv_obj_get_child(b, 0);
-        if (lv_obj_check_type(l, &lv_label_class) &&
-            !strcmp(lv_label_get_text(l), next ? LV_SYMBOL_RIGHT : LV_SYMBOL_LEFT))
-            return b;
+        if (!lv_obj_check_type(b, &lv_button_class)) continue;
+        for (uint32_t k = 0; k < lv_obj_get_child_count(b); ++k) {
+            lv_obj_t *l = lv_obj_get_child(b, (int32_t)k);
+            if (lv_obj_check_type(l, &lv_label_class) &&
+                !strcmp(lv_label_get_text(l), next ? LV_SYMBOL_RIGHT : LV_SYMBOL_LEFT))
+                return b;
+        }
     }
     return NULL;
 }

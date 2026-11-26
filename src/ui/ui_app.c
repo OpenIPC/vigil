@@ -41,6 +41,13 @@ const ui_chan_t *ui_channel(int ch) { return &g_status[ch]; }
 void ui_app_set_pointer(lv_indev_t *indev) { g_pointer = indev; }
 int ui_keyboard_in_use(void) { return g_kbd_used; }
 
+/* Over the live view, a panel's rounded corners would blend with the
+ * tiles' key colour (a fringe on the video): square there. */
+static void over_video(lv_obj_t *o)
+{
+    if (!ui_page_top()) lv_obj_set_style_radius(o, 0, 0);
+}
+
 /* ---- focus ------------------------------------------------------------------------ */
 
 static lv_group_t *focus_group(void)
@@ -199,6 +206,7 @@ lv_obj_t *ui_popup_open(const lv_point_t *at, int w)
     if (at) lv_obj_set_pos(panel, at->x, at->y);
     else lv_obj_center(panel);
     g_popup_panel = panel;
+    over_video(panel);
     g_popup_group = lv_group_create();
     focus_sync();
     return panel;
@@ -245,6 +253,7 @@ lv_obj_t *ui_popup_sub(lv_obj_t *item, int w)
     lv_obj_set_layout(g_sub, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(g_sub, LV_FLEX_FLOW_COLUMN);
     lv_obj_add_flag(g_sub, LV_OBJ_FLAG_CLICKABLE);      /* clicks on it are not "outside" */
+    over_video(g_sub);
     return g_sub;
 }
 
@@ -364,6 +373,7 @@ static void toast_show(ui_toast_t kind, const char *key, const char *text)
     lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_max_width(l, 850, 0);
     lv_obj_align(g_toast, LV_ALIGN_TOP_MID, 0, VG_SIZE_PAGE_HEADER + VG_SPACE_LG);
+    over_video(g_toast);
     g_toast_timer = lv_timer_create(toast_done_cb, VG_DURATION_TOAST, NULL);
     lv_timer_set_repeat_count(g_toast_timer, 1);
 }
