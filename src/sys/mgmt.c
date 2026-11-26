@@ -1,0 +1,850 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* mgmt.c — jobs, timers and the glue of the management pages (mgmt.h). */
+#define _DEFAULT_SOURCE
+#include <errno.h>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "cJSON.h"
+#include "channel.h"
+#include "config.h"
+#include "events.h"
+#include "log.h"
+#include "mgmt.h"
+#include "sys.h"
+#include "sys_curl.h"
+#include "sys_disk.h"
+#include "sys_nas.h"
+
+#define JOBS          16
+#define NAS_RETRY     60            /* seconds between attempts to mount the share */
+#define MAIL_GAP      600           /* at most one trouble mail this often */
+#define MAIL_LINES    40
+
+typedef enum {
+    J_NET, J_WIFI, J_NTP_SYNC, J_NTP_CHECK, J_NTP_DAEMON, J_DDNS, J_SMTP_TEST, J_MAIL, J_ALARM,
+    J_FORMAT, J_MOUNT, J_UNMOUNT, J_NAS_TEST, J_NAS_MOUNT,
+} jkind_t;
+
+/* Two queues, so a format that takes minutes does not hold up an NTP
+ * check or an alarm. */
+enum { Q_SLOW, Q_IO, Q_N };
+
+typedef struct {
+    mgmt_job_t pub;
+    jkind_t    kind;
+    int        queue;
+    int        internal;            /* timers' own: not announced */
+    net_cfg_t  net;
+    int        confirm, flag;
+    char       a[64], b[96];
+    char      *payload;             /* mail text, alarm JSON (malloc'd) */
+} slot_t;
+
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_wake = PTHREAD_COND_INITIALIZER;
+static slot_t          g_jobs[JOBS];
+static int             g_next_id = 1;
+static int             g_stop, g_up;
+static pthread_t       g_workers[Q_N], g_timer;
+
+/* The network change waiting for its confirmation. */
+static struct {
+    int    active;
+    char   ifname[16];
+    char  *old_text;                /* the stanza before the first unconfirmed change */
+    int    had_old;
+    time_t deadline;
+} g_pend;
+
+static int               g_confirm_secs = MGMT_CONFIRM_SECS;
+static mgmt_ntp_status_t g_ntp;
+static mgmt_services_t   g_svc;
+
+static time_t mono(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec;
+}
+
+const char *mgmt_job_state_name(mgmt_job_state_t s)
+{
+    switch (s) {
+    case JOB_QUEUED:  return "queued";
+    case JOB_RUNNING: return "running";
+    case JOB_DONE:    return "done";
+    default:          return "failed";
+    }
+}
+
+/* ---- the queues ------------------------------------------------------------------- */
+
+static const char *kind_name(jkind_t k)
+{
+    static const char *const n[] = { "network", "wifi", "ntp-sync", "ntp-check", "ntp-daemon", "ddns",
+                                     "smtp-test", "mail", "alarm", "format", "mount", "unmount",
+                                     "nas-test", "nas-mount" };
+    return n[k];
+}
+
+/* A slot for a new job (caller holds g_lock): a free one, else the
+ * oldest finished. NULL when all are queued or running. */
+static slot_t *new_slot(void)
+{
+    slot_t *best = NULL;
+    for (int i = 0; i < JOBS; ++i) {
+        slot_t *s = &g_jobs[i];
+        if (!s->pub.id) return s;
+        if (s->pub.state >= JOB_DONE && (!best || s->pub.finished < best->pub.finished)) best = s;
+    }
+    return best;
+}
+
+/* Queue `proto`; returns the id, or -1 when the queue is full. Takes
+ * proto->payload. */
+static int submit(slot_t *proto)
+{
+    pthread_mutex_lock(&g_lock);
+    slot_t *s = g_up ? new_slot() : NULL;
+    if (!s) {
+        pthread_mutex_unlock(&g_lock);
+        free(proto->payload);
+        return -1;
+    }
+    free(s->payload);
+    *s = *proto;
+    s->pub.id = g_next_id++;
+    snprintf(s->pub.kind, sizeof s->pub.kind, "%s", kind_name(s->kind));
+    s->pub.state = JOB_QUEUED;
+    s->pub.msg[0] = 0;
+    s->pub.started = s->pub.finished = 0;
+    s->queue = s->kind == J_NTP_SYNC || s->kind == J_NTP_CHECK || s->kind == J_DDNS || s->kind == J_SMTP_TEST ||
+               s->kind == J_MAIL || s->kind == J_ALARM ? Q_IO : Q_SLOW;
+    int id = s->pub.id;
+    pthread_cond_broadcast(&g_wake);
+    pthread_mutex_unlock(&g_lock);
+    return id;
+}
+
+int mgmt_job(int id, mgmt_job_t *out)
+{
+    int rc = -1;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < JOBS; ++i)
+        if (g_jobs[i].pub.id == id && id > 0) {
+            *out = g_jobs[i].pub;
+            rc = 0;
+        }
+    pthread_mutex_unlock(&g_lock);
+    return rc;
+}
+
+static void cfg_get(vigil_config_t **c)
+{
+    *c = malloc(sizeof **c);
+    if (*c) config_get(*c);
+}
+
+/* ---- running a job ------------------------------------------------------------------ */
+
+/* Recording is held off the mount that holds record.path, if it is one
+ * of `name`'s. Returns 1 when a hold was taken (release it after). */
+static int hold_for(const char *name)
+{
+    char mnts[8][128];
+    int n = sys_disk_mounts(name, mnts, 8), held = 0;
+    vigil_config_t *c;
+    cfg_get(&c);
+    for (int i = 0; c && i < n && !held; ++i) {
+        size_t l = strlen(mnts[i]);
+        if (c->record.path[0] && !strncmp(c->record.path, mnts[i], l) &&
+            (c->record.path[l] == '/' || !c->record.path[l])) {
+            int open = channels_rec_hold(mnts[i], 5000);
+            vg_log("mgmt: recording held off %s for %s%s", mnts[i], name, open ? " (segments still open)" : "");
+            held = 1;
+        }
+    }
+    free(c);
+    return held;
+}
+
+static void ntp_servers(char servers[][64], int *n)
+{
+    sys_clock_t c;
+    clock_read(&c);
+    *n = c.n_servers;
+    memcpy(servers, c.servers, sizeof c.servers);
+}
+
+static void svc_set(mgmt_svc_status_t *st, int ok, const char *msg)
+{
+    pthread_mutex_lock(&g_lock);
+    st->last = time(NULL);
+    st->ok = ok;
+    snprintf(st->result, sizeof st->result, "%s", msg);
+    pthread_mutex_unlock(&g_lock);
+}
+
+static int run_job(slot_t *s, char *msg, size_t cap)
+{
+    char err[256] = "";
+    int rc = -1;
+    switch (s->kind) {
+    case J_NET: {
+        /* The answer to the request that asked for this goes out first. */
+        if (g_confirm_secs >= 10) sleep(1);
+        char *old = NULL;
+        rc = net_apply(&s->net, &old, err, sizeof err);
+        if (rc < 0 && old) {
+            /* ifup failed: put the old file back at once. */
+            char e2[256];
+            net_restore(s->net.ifname, old, e2, sizeof e2);
+            snprintf(msg, cap, "%.200s; the previous settings are back", err);
+            free(old);
+            events_push(0, "network: change failed");
+            return -1;
+        }
+        if (rc < 0) {
+            snprintf(msg, cap, "%s", err);
+            free(old);
+            return -1;
+        }
+        pthread_mutex_lock(&g_lock);
+        if (s->confirm) {
+            /* A second change before the first was confirmed keeps the
+             * first's old file: rolling back goes to what was confirmed. */
+            if (!g_pend.active || strcmp(g_pend.ifname, s->net.ifname)) {
+                free(g_pend.old_text);
+                g_pend.old_text = old;
+                g_pend.had_old = old != NULL;
+                old = NULL;
+            }
+            g_pend.active = 1;
+            snprintf(g_pend.ifname, sizeof g_pend.ifname, "%s", s->net.ifname);
+            g_pend.deadline = mono() + g_confirm_secs;
+        }
+        pthread_mutex_unlock(&g_lock);
+        free(old);
+        snprintf(msg, cap, s->confirm ? "applied; confirm within %d s or it is undone" : "applied",
+                 g_confirm_secs);
+        events_push(0, s->confirm ? "network: confirm in %d s" : "network changed", g_confirm_secs);
+        return 0;
+    }
+    case J_WIFI:
+        rc = wifi_set(s->a, s->b, s->payload ? s->payload : "", err, sizeof err);
+        if (s->payload) memset(s->payload, 0, strlen(s->payload));
+        snprintf(msg, cap, "%s", rc ? err : "joining the network");
+        return rc;
+    case J_NTP_SYNC:
+    case J_NTP_CHECK: {
+        char servers[4][64];
+        int n;
+        ntp_servers(servers, &n);
+        rc = ntp_sync(servers, n, err, sizeof err);
+        pthread_mutex_lock(&g_lock);
+        g_ntp.last_try = time(NULL);
+        if (rc == 0) g_ntp.last_ok = g_ntp.last_try;
+        snprintf(g_ntp.result, sizeof g_ntp.result, "%.159s", err);
+        pthread_mutex_unlock(&g_lock);
+        snprintf(msg, cap, "%s", err);
+        if (rc < 0 && s->kind == J_NTP_CHECK) vg_log("mgmt: NTP: %s", err);
+        return rc;
+    }
+    case J_NTP_DAEMON:
+        rc = ntp_daemon(s->flag, err, sizeof err);
+        snprintf(msg, cap, "%s", rc ? err : s->flag ? "ntpd restarted" : "ntpd stopped");
+        return rc;
+    case J_DDNS: {
+        vigil_config_t *c;
+        cfg_get(&c);
+        rc = c ? ddns_update(&c->ddns, err, sizeof err) : -1;
+        free(c);
+        svc_set(&g_svc.ddns, rc == 0, err);
+        snprintf(msg, cap, "%s", err);
+        if (rc < 0 && !s->internal) vg_log("mgmt: DDNS: %s", err);
+        return rc;
+    }
+    case J_SMTP_TEST:
+    case J_MAIL: {
+        vigil_config_t *c;
+        cfg_get(&c);
+        char host[64], subj[128];
+        host_get(host, sizeof host);
+        if (s->kind == J_SMTP_TEST) snprintf(subj, sizeof subj, "vigil on %s: test mail", host);
+        else snprintf(subj, sizeof subj, "vigil on %.63s: %.50s", host, s->b);
+        const char *body = s->payload ? s->payload : "This is a test mail from vigil. Mail settings work.\n";
+        rc = c ? mail_send(&c->smtp, subj, body, err, sizeof err) : -1;
+        free(c);
+        svc_set(&g_svc.smtp, rc == 0, err);
+        snprintf(msg, cap, "%s", err);
+        if (rc < 0) vg_log("mgmt: mail: %s", err);
+        return rc;
+    }
+    case J_ALARM:
+        rc = http_post_json(s->a, s->payload ? s->payload : "{}", err, sizeof err);
+        svc_set(&g_svc.alarm, rc == 0, err);
+        snprintf(msg, cap, "%s", err);
+        return rc;
+    case J_FORMAT: {
+        int held = hold_for(s->a);
+        rc = sys_disk_format(s->a, s->b, err, sizeof err);
+        if (held) channels_rec_release();
+        snprintf(msg, cap, "%s", err);
+        vg_log("mgmt: format %s as %s: %s", s->a, s->b, err);
+        events_push(0, rc ? "disk %s: format failed" : "disk %s formatted", s->a);
+        return rc;
+    }
+    case J_MOUNT:
+        rc = sys_disk_mount(s->a, err, sizeof err);
+        snprintf(msg, cap, "%s", err);
+        vg_log("mgmt: mount %s: %s", s->a, err);
+        return rc;
+    case J_UNMOUNT: {
+        int held = hold_for(s->a);
+        rc = sys_disk_unmount(s->a, err, sizeof err);
+        /* Unmounted, the hold has nothing left to protect: recording
+         * waits for the disk by itself (rec_place). Still busy: it goes
+         * on recording there. */
+        if (held) channels_rec_release();
+        snprintf(msg, cap, "%s", err);
+        vg_log("mgmt: unmount %s: %s", s->a, err);
+        return rc;
+    }
+    case J_NAS_TEST: {
+        vigil_config_t *c;
+        cfg_get(&c);
+        rc = c ? sys_nas_test(&c->nas, err, sizeof err) : -1;
+        free(c);
+        snprintf(msg, cap, "%s", err);
+        return rc;
+    }
+    case J_NAS_MOUNT: {
+        vigil_config_t *c;
+        cfg_get(&c);
+        if (!c) return -1;
+        if (s->flag && sys_nas_mounted(MGMT_NAS_MOUNT)) {
+            /* new settings: off the old share first */
+            int open = channels_rec_hold(MGMT_NAS_MOUNT, 5000);
+            (void)open;
+            rc = sys_nas_umount(MGMT_NAS_MOUNT, err, sizeof err);
+            channels_rec_release();
+            if (rc < 0) {
+                snprintf(msg, cap, "%s", err);
+                svc_set(&g_svc.nas, 0, err);
+                free(c);
+                return -1;
+            }
+        }
+        if (!strcmp(c->nas.type, "none")) {
+            free(c);
+            svc_set(&g_svc.nas, 1, "not used");
+            snprintf(msg, cap, "not used");
+            return 0;
+        }
+        rc = sys_nas_mount(&c->nas, MGMT_NAS_MOUNT, err, sizeof err);
+        free(c);
+        int was_ok = g_svc.nas.ok;
+        svc_set(&g_svc.nas, rc == 0, err);
+        if (rc == 0) events_push(0, "NAS mounted");
+        else if (was_ok || !g_svc.nas.last) vg_log("mgmt: network storage: %s", err);
+        snprintf(msg, cap, "%s", err);
+        return rc;
+    }
+    }
+    snprintf(msg, cap, "unknown job");
+    return -1;
+}
+
+static void *worker(void *arg)
+{
+    int q = (int)(intptr_t)arg;
+    pthread_mutex_lock(&g_lock);
+    while (!g_stop) {
+        slot_t *s = NULL;
+        for (int i = 0; i < JOBS; ++i) {
+            slot_t *j = &g_jobs[i];
+            if (j->pub.id && j->queue == q && j->pub.state == JOB_QUEUED && (!s || j->pub.id < s->pub.id)) s = j;
+        }
+        if (!s) {
+            pthread_cond_wait(&g_wake, &g_lock);
+            continue;
+        }
+        s->pub.state = JOB_RUNNING;
+        s->pub.started = time(NULL);
+        slot_t copy = *s;
+        int id = s->pub.id;
+        pthread_mutex_unlock(&g_lock);
+        char msg[256] = "";
+        int rc = run_job(&copy, msg, sizeof msg);
+        pthread_mutex_lock(&g_lock);
+        /* The slot is still this job's: only finished slots are reused. */
+        if (s->pub.id == id) {
+            s->pub.state = rc == 0 ? JOB_DONE : JOB_FAILED;
+            s->pub.finished = time(NULL);
+            snprintf(s->pub.msg, sizeof s->pub.msg, "%s", msg);
+            if (s->payload) {
+                memset(s->payload, 0, strlen(s->payload));
+                free(s->payload);
+                s->payload = NULL;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    return NULL;
+}
+
+/* ---- the timers ----------------------------------------------------------------------- */
+
+/* Events worth a mail: trouble a person must act on. */
+static int mail_worthy(const char *text)
+{
+    static const char *const pre[] = { "REC failed", "REC disk full", "REC waiting for disk", "REC not a disk",
+                                       "REC read-only", "REC error", "offline", "down", "no decoder", NULL };
+    for (int i = 0; pre[i]; ++i)
+        if (!strncmp(text, pre[i], strlen(pre[i]))) return 1;
+    return 0;
+}
+
+static void alarm_post(const vigil_config_t *c, cJSON *doc)
+{
+    char host[64];
+    host_get(host, sizeof host);
+    cJSON_AddStringToObject(doc, "device", host);
+    slot_t j = { .kind = J_ALARM, .internal = 1 };
+    snprintf(j.a, sizeof j.a, "http://%.30s:%d", c->alarm.host, c->alarm.port);
+    size_t l = strlen(j.a);
+    snprintf(j.a + l, sizeof j.a - l, "%s", c->alarm.path);
+    j.payload = cJSON_PrintUnformatted(doc);
+    cJSON_Delete(doc);
+    if (j.payload) submit(&j);
+}
+
+static void *timer(void *arg)
+{
+    (void)arg;
+    vigil_config_t *c = malloc(sizeof *c);
+    if (!c) return NULL;
+    config_nas_t nas_applied;
+    memset(&nas_applied, 0, sizeof nas_applied);
+    int ntp_applied = -1, nas_known = 0;
+    time_t now0 = mono(), ntp_at = now0 + 30, ddns_at = now0 + 20, nas_at = now0 + 2, beat_at = now0;
+    time_t mail_at = 0;
+    uint64_t cursor = events_head();
+    char mail[MAIL_LINES * 64] = "";
+    int mail_n = 0;
+
+    pthread_mutex_lock(&g_lock);
+    while (!g_stop) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += 1;
+        pthread_cond_timedwait(&g_wake, &g_lock, &ts);
+        if (g_stop) break;
+        time_t now = mono();
+        /* A network change nobody confirmed: undone here, not queued
+         * behind a format. */
+        int revert = g_pend.active && now >= g_pend.deadline;
+        char ifname[16];
+        char *old = NULL;
+        int had_old = 0;
+        if (revert) {
+            snprintf(ifname, sizeof ifname, "%s", g_pend.ifname);
+            old = g_pend.old_text;
+            had_old = g_pend.had_old;
+            g_pend.old_text = NULL;
+            g_pend.active = 0;
+        }
+        pthread_mutex_unlock(&g_lock);
+
+        if (revert) {
+            char err[256];
+            int rc = net_restore(ifname, had_old ? old : NULL, err, sizeof err);
+            vg_log("mgmt: %s: no confirmation in time; previous settings restored%s%s", ifname,
+                   rc ? ": " : "", rc ? err : "");
+            events_push(0, "network: rolled back");
+            free(old);
+        }
+
+        config_get(c);
+        if (sys_managed()) {
+            if (c->time.ntp != ntp_applied) {
+                /* At start only stop a daemon the settings turn off; the
+                 * firmware starts it, and restarting it for nothing would
+                 * drop its synchronisation. */
+                if (ntp_applied >= 0 || !c->time.ntp) {
+                    slot_t j = { .kind = J_NTP_DAEMON, .internal = 1, .flag = c->time.ntp };
+                    submit(&j);
+                }
+                ntp_applied = c->time.ntp;
+            }
+            if (c->time.ntp && now >= ntp_at) {
+                slot_t j = { .kind = J_NTP_CHECK, .internal = 1 };
+                submit(&j);
+                ntp_at = now + (time_t)c->time.ntp_interval * 60;
+            }
+            if (c->ddns.enabled && now >= ddns_at) {
+                slot_t j = { .kind = J_DDNS, .internal = 1 };
+                submit(&j);
+                ddns_at = now + (time_t)c->ddns.interval * 60;
+            }
+            int nas_changed = nas_known && memcmp(&nas_applied, &c->nas, sizeof nas_applied) != 0;
+            if (nas_changed || (strcmp(c->nas.type, "none") && now >= nas_at && !sys_nas_mounted(MGMT_NAS_MOUNT))) {
+                slot_t j = { .kind = J_NAS_MOUNT, .internal = 1, .flag = nas_changed };
+                submit(&j);
+                nas_at = now + NAS_RETRY;
+            }
+            nas_applied = c->nas;
+            nas_known = 1;
+        }
+
+        /* Events: to the alarm center as they come, and the troubling
+         * ones by mail, gathered. */
+        event_t ev;
+        while (events_next(&cursor, &ev)) {
+            if (c->alarm.enabled && c->alarm.host[0]) {
+                cJSON *d = cJSON_CreateObject();
+                cJSON_AddStringToObject(d, "type", "event");
+                cJSON_AddNumberToObject(d, "time", (double)ev.time);
+                cJSON_AddNumberToObject(d, "camera", ev.ch);
+                cJSON_AddStringToObject(d, "text", ev.text);
+                alarm_post(c, d);
+                beat_at = now + c->alarm.interval;
+            }
+            if (c->smtp.enabled && mail_worthy(ev.text) && mail_n < MAIL_LINES) {
+                char line[96], when[32];
+                struct tm tm;
+                localtime_r(&ev.time, &tm);
+                strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", &tm);
+                if (ev.ch) snprintf(line, sizeof line, "%s  CAM%d %s\n", when, ev.ch, ev.text);
+                else snprintf(line, sizeof line, "%s  %s\n", when, ev.text);
+                size_t l = strlen(mail);
+                snprintf(mail + l, sizeof mail - l, "%s", line);
+                ++mail_n;
+            }
+        }
+        if (c->alarm.enabled && c->alarm.host[0] && c->alarm.interval && now >= beat_at) {
+            cJSON *d = cJSON_CreateObject();
+            cJSON_AddStringToObject(d, "type", "heartbeat");
+            cJSON_AddNumberToObject(d, "time", (double)time(NULL));
+            alarm_post(c, d);
+            beat_at = now + c->alarm.interval;
+        }
+        if (mail_n && c->smtp.enabled && (!mail_at || now - mail_at >= MAIL_GAP)) {
+            slot_t j = { .kind = J_MAIL, .internal = 1 };
+            snprintf(j.b, sizeof j.b, "%d event%s", mail_n, mail_n > 1 ? "s" : "");
+            size_t need = strlen(mail) + 128;
+            j.payload = malloc(need);
+            if (j.payload) snprintf(j.payload, need, "Events that need attention:\n\n%s", mail);
+            submit(&j);
+            mail[0] = 0;
+            mail_n = 0;
+            mail_at = now;
+        }
+        pthread_mutex_lock(&g_lock);
+    }
+    pthread_mutex_unlock(&g_lock);
+    free(c);
+    return NULL;
+}
+
+/* ---- life ------------------------------------------------------------------------------- */
+
+int mgmt_start(void)
+{
+    pthread_mutex_lock(&g_lock);
+    if (g_up) {
+        pthread_mutex_unlock(&g_lock);
+        return 0;
+    }
+    g_stop = 0;
+    g_up = 1;
+    pthread_mutex_unlock(&g_lock);
+    for (int q = 0; q < Q_N; ++q)
+        if (pthread_create(&g_workers[q], NULL, worker, (void *)(intptr_t)q) != 0) return -1;
+    if (pthread_create(&g_timer, NULL, timer, NULL) != 0) return -1;
+    vg_log("mgmt: %s", sys_managed() ? "managing this system (OpenIPC)"
+                                     : "not an OpenIPC system: network, time and disks are left alone");
+    return 0;
+}
+
+void mgmt_stop(void)
+{
+    pthread_mutex_lock(&g_lock);
+    if (!g_up) {
+        pthread_mutex_unlock(&g_lock);
+        return;
+    }
+    g_stop = 1;
+    pthread_cond_broadcast(&g_wake);
+    pthread_mutex_unlock(&g_lock);
+    /* A job under way (a format) is waited for: stopping halfway through
+     * would leave the disk without a filesystem. */
+    for (int q = 0; q < Q_N; ++q) pthread_join(g_workers[q], NULL);
+    pthread_join(g_timer, NULL);
+    pthread_mutex_lock(&g_lock);
+    g_up = 0;
+    for (int i = 0; i < JOBS; ++i) {
+        free(g_jobs[i].payload);
+        g_jobs[i].payload = NULL;
+    }
+    free(g_pend.old_text);
+    memset(&g_pend, 0, sizeof g_pend);
+    pthread_mutex_unlock(&g_lock);
+}
+
+/* ---- network ----------------------------------------------------------------------- */
+
+int mgmt_net_apply(const net_cfg_t *cfg, int confirm, char *field, size_t fcap, char *err, size_t cap)
+{
+    field[0] = err[0] = 0;
+    if (!sys_managed()) return MGMT_EUNMANAGED;
+    if (net_validate(cfg, field, fcap, err, cap) < 0) return MGMT_EINVAL;
+    slot_t j = { .kind = J_NET, .net = *cfg, .confirm = confirm };
+    snprintf(j.pub.target, sizeof j.pub.target, "%s", cfg->ifname);
+    int id = submit(&j);
+    if (id < 0) {
+        snprintf(err, cap, "too many changes under way");
+        return MGMT_EBUSY;
+    }
+    return id;
+}
+
+void mgmt_set_confirm_secs(int secs) { g_confirm_secs = secs; }
+
+int mgmt_net_pending(char *ifname, size_t cap, int *secs_left)
+{
+    pthread_mutex_lock(&g_lock);
+    int a = g_pend.active;
+    if (a) {
+        if (ifname) snprintf(ifname, cap, "%s", g_pend.ifname);
+        if (secs_left) {
+            long left = (long)(g_pend.deadline - mono());
+            *secs_left = left < 0 ? 0 : (int)left;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    return a;
+}
+
+int mgmt_net_confirm(void)
+{
+    pthread_mutex_lock(&g_lock);
+    int a = g_pend.active;
+    if (a) {
+        free(g_pend.old_text);
+        memset(&g_pend, 0, sizeof g_pend);
+    }
+    pthread_mutex_unlock(&g_lock);
+    if (a) {
+        vg_log("mgmt: network settings confirmed");
+        events_push(0, "network: confirmed");
+    }
+    return a ? 0 : -1;
+}
+
+int mgmt_net_revert(void)
+{
+    /* The timer does it at once. */
+    pthread_mutex_lock(&g_lock);
+    int a = g_pend.active;
+    if (a) g_pend.deadline = 0;
+    pthread_cond_broadcast(&g_wake);
+    pthread_mutex_unlock(&g_lock);
+    return a ? 0 : -1;
+}
+
+int mgmt_wifi_set(const char *ifname, const char *ssid, const char *password, char *err, size_t cap)
+{
+    if (!sys_managed()) return MGMT_EUNMANAGED;
+    slot_t j = { .kind = J_WIFI };
+    snprintf(j.a, sizeof j.a, "%s", ifname);
+    snprintf(j.b, sizeof j.b, "%s", ssid);
+    snprintf(j.pub.target, sizeof j.pub.target, "%s", ifname);
+    j.payload = strdup(password);
+    int id = submit(&j);
+    if (id < 0) snprintf(err, cap, "too many changes under way");
+    return id < 0 ? MGMT_EBUSY : id;
+}
+
+/* ---- time and name ----------------------------------------------------------------- */
+
+void mgmt_ntp_status(mgmt_ntp_status_t *st)
+{
+    pthread_mutex_lock(&g_lock);
+    *st = g_ntp;
+    pthread_mutex_unlock(&g_lock);
+}
+
+int mgmt_time_set(const char *zone, const char *tz, int set_clock, time_t t, char *err, size_t cap)
+{
+    err[0] = 0;
+    if (!sys_managed()) return MGMT_EUNMANAGED;
+    if ((zone && *zone) || (tz && *tz)) {
+        if (clock_set_zone(zone, tz, err, cap) < 0) return MGMT_EINVAL;
+        vg_log("mgmt: time zone %s", zone && *zone ? zone : tz);
+    }
+    if (set_clock) {
+        if (clock_set(t, err, cap) < 0) return MGMT_EINVAL;
+        vg_log("mgmt: clock set");
+        events_push(0, "clock set");
+    }
+    return MGMT_OK;
+}
+
+int mgmt_ntp_set(int enabled, char servers[][64], int n, int interval_min, char *err, size_t cap)
+{
+    err[0] = 0;
+    if (!sys_managed()) return MGMT_EUNMANAGED;
+    sys_clock_t now;
+    clock_read(&now);
+    int changed = n != now.n_servers;
+    for (int i = 0; i < n && !changed; ++i) changed = strcmp(servers[i], now.servers[i]) != 0;
+    if (n && changed && ntp_set_servers(servers, n, err, cap) < 0) return MGMT_EINVAL;
+    cJSON *d = cJSON_CreateObject();
+    cJSON_AddBoolToObject(d, "ntp", enabled);
+    cJSON_AddNumberToObject(d, "ntp_interval", interval_min);
+    char *body = cJSON_PrintUnformatted(d);
+    cJSON_Delete(d);
+    schema_errors_t e = { 0 };
+    config_rc_t rc = body ? config_put_json("time", body, strlen(body), &e) : CONFIG_EIO;
+    free(body);
+    if (rc != CONFIG_OK && rc != CONFIG_EUNSYNCED) {
+        snprintf(err, cap, "%s%s%s", e.n ? e.e[0].path : "", e.n && e.e[0].path[0] ? ": " : "",
+                 e.n ? e.e[0].msg : "cannot save");
+        return rc == CONFIG_EINVAL ? MGMT_EINVAL : MGMT_EFAIL;
+    }
+    /* New servers reach a running ntpd only through a restart; on/off
+     * is the timer's (it follows time.ntp). */
+    if (changed && enabled) {
+        slot_t j = { .kind = J_NTP_DAEMON, .flag = 1 };
+        submit(&j);
+    }
+    return MGMT_OK;
+}
+
+int mgmt_ntp_sync(void)
+{
+    if (!sys_managed()) return MGMT_EUNMANAGED;
+    slot_t j = { .kind = J_NTP_SYNC };
+    return submit(&j);
+}
+
+int mgmt_hostname_set(const char *name, char *err, size_t cap)
+{
+    if (!sys_managed()) return MGMT_EUNMANAGED;
+    if (host_set(name, err, cap) < 0) return MGMT_EINVAL;
+    vg_log("mgmt: host name %s", name);
+    return MGMT_OK;
+}
+
+/* ---- services ---------------------------------------------------------------------- */
+
+void mgmt_services(mgmt_services_t *s)
+{
+    pthread_mutex_lock(&g_lock);
+    *s = g_svc;
+    pthread_mutex_unlock(&g_lock);
+}
+
+int mgmt_ddns_update(void)
+{
+    slot_t j = { .kind = J_DDNS };
+    return submit(&j);
+}
+
+int mgmt_smtp_test(void)
+{
+    slot_t j = { .kind = J_SMTP_TEST };
+    return submit(&j);
+}
+
+/* ---- disks ------------------------------------------------------------------------- */
+
+int mgmt_disks(sys_disk_t *out, int max)
+{
+    vigil_config_t *c;
+    cfg_get(&c);
+    int n = sys_disk_list(out, max, c && c->record.path[0] ? c->record.path : NULL);
+    free(c);
+    return n;
+}
+
+static int disk_job(jkind_t kind, const char *name, const char *fs, char *err, size_t cap)
+{
+    slot_t j = { .kind = kind };
+    snprintf(j.a, sizeof j.a, "%s", name);
+    snprintf(j.b, sizeof j.b, "%s", fs ? fs : "");
+    snprintf(j.pub.target, sizeof j.pub.target, "%s", name);
+    /* One disk job at a time for a disk. */
+    pthread_mutex_lock(&g_lock);
+    int busy = 0;
+    for (int i = 0; i < JOBS; ++i)
+        busy |= g_jobs[i].pub.id && g_jobs[i].pub.state < JOB_DONE && !strcmp(g_jobs[i].pub.target, name) &&
+                (g_jobs[i].kind == J_FORMAT || g_jobs[i].kind == J_MOUNT || g_jobs[i].kind == J_UNMOUNT);
+    pthread_mutex_unlock(&g_lock);
+    if (busy) {
+        snprintf(err, cap, "%s is busy with another change", name);
+        return MGMT_EBUSY;
+    }
+    int id = submit(&j);
+    if (id < 0) {
+        snprintf(err, cap, "too many changes under way");
+        return MGMT_EBUSY;
+    }
+    return id;
+}
+
+int mgmt_disk_format(const char *name, const char *fs, const char *confirm, char *err, size_t cap)
+{
+    err[0] = 0;
+    if (!sys_managed()) return MGMT_EUNMANAGED;
+    if (!confirm || strcmp(confirm, name) != 0) {
+        snprintf(err, cap, "type the disk's name (%.31s) to confirm", name);
+        return MGMT_EINVAL;
+    }
+    char fss[4][8];
+    int n = sys_disk_formats(fss, 4), ok = 0;
+    for (int i = 0; i < n; ++i) ok |= !strcmp(fss[i], fs);
+    if (!ok) {
+        snprintf(err, cap, "this firmware cannot make %.16s", fs);
+        return MGMT_EINVAL;
+    }
+    if (sys_disk_can_format(name, err, cap) < 0) return MGMT_EINVAL;
+    return disk_job(J_FORMAT, name, fs, err, cap);
+}
+
+int mgmt_disk_mount(const char *name, char *err, size_t cap)
+{
+    err[0] = 0;
+    if (!sys_managed()) return MGMT_EUNMANAGED;
+    return disk_job(J_MOUNT, name, NULL, err, cap);
+}
+
+int mgmt_disk_unmount(const char *name, char *err, size_t cap)
+{
+    err[0] = 0;
+    if (!sys_managed()) return MGMT_EUNMANAGED;
+    sys_disk_t *d = calloc(SYS_DISK_MAX, sizeof *d);
+    int n = d ? sys_disk_list(d, SYS_DISK_MAX, NULL) : 0, sys = 0, found = 0;
+    for (int i = 0; i < n; ++i)
+        if (!strcmp(d[i].name, name)) found = 1, sys = d[i].system;
+    free(d);
+    if (!found || sys) {
+        snprintf(err, cap, found ? "%.31s holds the system" : "no disk %.31s", name);
+        return MGMT_EINVAL;
+    }
+    return disk_job(J_UNMOUNT, name, NULL, err, cap);
+}
+
+int mgmt_nas_test(void)
+{
+    if (!sys_managed()) return MGMT_EUNMANAGED;
+    slot_t j = { .kind = J_NAS_TEST };
+    return submit(&j);
+}

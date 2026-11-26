@@ -19,6 +19,11 @@ int auth_base64_decode(const char *in, size_t len, unsigned char *out, size_t ca
 int auth_check_shadow(const char *shadow, const char *user, const char *password,
                       char *why, size_t cap);
 
+/* crypt(3) of `password` with `setting` (a hash, or "$6$salt"), copied
+ * into `out` under the lock crypt's static buffer needs. 0, or -1 when
+ * the C library cannot (no such method: NULL or "*..."). */
+int auth_crypt(const char *password, const char *setting, char *out, size_t cap);
+
 /* Equal strings, in a time that depends only on their lengths. */
 int auth_equal(const char *a, const char *b);
 

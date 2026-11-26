@@ -42,7 +42,9 @@ typedef struct {
     int        n_items, n_fields;
     char     **vals;                /* n_items x n_fields, as stored (redacted) */
     unsigned   gen;                 /* the generation `vals` came from */
-    ui_page_t *page;
+    ui_page_t *page;                /* NULL: embedded in a settings pane */
+    lv_group_t *group;              /* the widgets' focus order */
+    lv_obj_t  *save_btn;            /* Enter after the last field goes there */
     lv_obj_t  *w[FIELDS_MAX];       /* the value widget */
     lv_obj_t  *err[FIELDS_MAX];
     lv_obj_t  *general;             /* errors without a field */
@@ -187,7 +189,7 @@ static void ta_ready_cb(lv_event_t *e)
     lv_indev_t *in = lv_indev_active();
     if (!in || lv_indev_get_type(in) != LV_INDEV_TYPE_KEYPAD) return;   /* the on-screen keyboard's OK */
     int i = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
-    lv_obj_t *next = f->page->save;
+    lv_obj_t *next = f->save_btn;
     for (int k = i + 1; k < f->n_fields; ++k)
         if (f->w[k]) {
             next = f->w[k];
@@ -341,7 +343,7 @@ static void field_row(lv_obj_t *list, form_t *f, int i)
     }
     }
     ui_focus_style(f->w[i]);
-    lv_group_add_obj(f->page->group, f->w[i]);
+    lv_group_add_obj(f->group, f->w[i]);
     if (fd->help && *fd->help) {
         lv_obj_t *h = ui_label(right, fd->help, VG_FONT_SM_LV, UI_C(TEXT2));
         lv_obj_set_width(h, LV_PCT(100));
@@ -394,6 +396,7 @@ static void errors_show(form_t *f, const ui_errors_t *errs)
 static void form_title(form_t *f)
 {
     const ui_section_t *s = section(f->sec);
+    if (!f->page) return;
     if (!s->is_array) lv_label_set_text(f->page->title, s->label);
     else if (f->is_new && s->slots) lv_label_set_text_fmt(f->page->title, "%s %d: new", s->label, f->item + 1);
     else if (f->is_new) lv_label_set_text_fmt(f->page->title, "%s: new", s->label);
@@ -423,9 +426,9 @@ static void widgets_from_vals(form_t *f)
     }
 }
 
-static void save_cb(lv_event_t *e)
+/* Save the form; the result as a toast, errors under their fields. */
+static ui_save_rc_t form_save(form_t *f)
 {
-    form_t *f = lv_event_get_user_data(e);
     const ui_section_t *s = section(f->sec);
     kb_hide(f);
     errors_clear(f);
@@ -433,7 +436,7 @@ static void save_cb(lv_event_t *e)
     /* The section as stored, with this form's fields in their row. */
     int total = f->n_items * f->n_fields;
     char **v = calloc((size_t)total + 1, sizeof *v);
-    if (!v) return;
+    if (!v) return UI_SAVE_FAILED;
     int restart = 0, ok = 1;
     for (int k = 0; k < total && ok; ++k) {
         int r = k / f->n_fields, i = k % f->n_fields;
@@ -464,20 +467,20 @@ static void save_cb(lv_event_t *e)
     report(rc, &errs, restart);
     if (rc == UI_SAVE_INVALID) {
         errors_show(f, &errs);
-        return;
+        return rc;
     }
-    if (rc == UI_SAVE_STALE && s->is_array) {
+    if (rc == UI_SAVE_STALE && s->is_array && f->page) {
         /* The list may have been reordered: which camera this form edits
          * is no longer known. Back to the list, which shows it now. */
         ui_page_close(f->page);
-        return;
+        return rc;
     }
-    if (rc != UI_SAVE_OK && rc != UI_SAVE_UNSYNCED && rc != UI_SAVE_STALE) return;
+    if (rc != UI_SAVE_OK && rc != UI_SAVE_UNSYNCED && rc != UI_SAVE_STALE) return rc;
     /* What is stored now (secrets redacted again) is the new baseline. */
     int n;
     unsigned gen;
     char **nv = vals_load(f->sec, f->item + 1, &n, &gen);
-    if (!nv) return;
+    if (!nv) return rc;
     vals_free(f->vals, f->n_items * f->n_fields);
     f->vals = nv;
     f->n_items = n;
@@ -488,6 +491,12 @@ static void save_cb(lv_event_t *e)
         form_title(f);
     }
     widgets_from_vals(f);
+    return rc;
+}
+
+static void save_cb(lv_event_t *e)
+{
+    form_save(lv_event_get_user_data(e));
 }
 
 static void discard_cb(void *user)
@@ -591,6 +600,7 @@ static void form_open(int sec, int item, int at_slot)
         return;
     }
     f->page = p;
+    f->group = p->group;
     p->user = f;
     p->on_back = form_back;
     p->on_close = form_close;
@@ -602,6 +612,7 @@ static void form_open(int sec, int item, int at_slot)
     ui_btn_accent(save);
     lv_obj_add_event_cb(save, save_cb, LV_EVENT_CLICKED, f);
     p->save = save;
+    f->save_btn = save;
 
     if (s->help && *s->help) {
         lv_obj_t *h = ui_label(p->body, s->help, VG_FONT_SM_LV, UI_C(TEXT2));
@@ -631,6 +642,81 @@ static void form_open(int sec, int item, int at_slot)
 
 void ui_form_open(int sec, int item) { form_open(sec, item, 0); }
 void ui_form_open_slot(int sec, int slot) { form_open(sec, slot, 1); }
+
+/* ---- a form inside a settings pane ------------------------------------------------------------ */
+
+ui_form_t *ui_form_embed(lv_obj_t *parent, lv_group_t *group, lv_obj_t *save_btn, lv_obj_t *kb, int sec)
+{
+    const ui_section_t *s = section(sec);
+    if (s->is_array || s->n_fields > FIELDS_MAX) return NULL;
+    form_t *f = calloc(1, sizeof *f);
+    if (!f) return NULL;
+    f->sec = sec;
+    f->item = -1;
+    f->n_fields = s->n_fields;
+    f->n_stored = 1;
+    f->group = group;
+    f->save_btn = save_btn;
+    f->kb = kb;
+    f->vals = vals_load(sec, 0, &f->n_items, &f->gen);
+    if (!f->vals) {
+        free(f);
+        return NULL;
+    }
+    f->general = ui_label(parent, "", VG_FONT_MD_LV, UI_C(BAD));
+    lv_obj_set_width(f->general, LV_PCT(100));
+    lv_label_set_long_mode(f->general, LV_LABEL_LONG_WRAP);
+    lv_obj_add_flag(f->general, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t *list = lv_obj_create(parent);
+    ui_plain(list);
+    lv_obj_add_style(list, &ui_st_panel, 0);
+    lv_obj_set_style_pad_ver(list, VG_SPACE_SM, 0);
+    lv_obj_set_style_pad_hor(list, VG_SPACE_LG, 0);
+    lv_obj_set_size(list, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_layout(list, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    ui_ring_room(list);
+    for (int i = 0; i < f->n_fields; ++i) field_row(list, f, i);
+    return (ui_form_t *)f;
+}
+
+int ui_form_embed_dirty(ui_form_t *h)
+{
+    form_t *f = (form_t *)h;
+    if (!f) return 0;
+    /* Settings changed elsewhere meanwhile (the API): not this form's
+     * changes, and nothing to lose. */
+    return form_dirty(f);
+}
+
+int ui_form_embed_save(ui_form_t *h)
+{
+    ui_save_rc_t rc = form_save((form_t *)h);
+    return rc == UI_SAVE_OK || rc == UI_SAVE_UNSYNCED ? 0 : -1;
+}
+
+void ui_form_embed_reset(ui_form_t *h)
+{
+    form_t *f = (form_t *)h;
+    errors_clear(f);
+    int n;
+    unsigned gen;
+    char **nv = vals_load(f->sec, 0, &n, &gen);
+    if (!nv) return;
+    vals_free(f->vals, f->n_items * f->n_fields);
+    f->vals = nv;
+    f->n_items = n;
+    f->gen = gen;
+    widgets_from_vals(f);
+}
+
+void ui_form_embed_free(ui_form_t *h)
+{
+    form_t *f = (form_t *)h;
+    if (!f) return;
+    vals_free(f->vals, f->n_items * f->n_fields);
+    free(f);
+}
 
 /* ---- the list of an array section -------------------------------------------------------------- */
 

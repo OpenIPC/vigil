@@ -9,6 +9,7 @@
 #include <time.h>
 
 #include "ui_app.h"
+#include "ui_i18n.h"
 #include "ui_theme.h"
 
 #define REFRESH_MS  250
@@ -136,13 +137,55 @@ void ui_chan_title(int ch, char *buf, size_t cap)
 
 /* ---- snapshots ------------------------------------------------------------------ */
 
+/* ui.date_format, ui.time_format and ui.language, read again when the
+ * configuration's generation moves. */
+static char     g_datefmt[16] = "YYYY-MM-DD", g_timefmt[8] = "24h";
+static unsigned g_fmt_gen;
+
+static void formats_sync(void)
+{
+    unsigned gen = g_model->config_generation ? g_model->config_generation() : 0;
+    if (gen == g_fmt_gen && gen) return;
+    g_fmt_gen = gen;
+    for (int i = 0; i < g_model->n_sections; ++i) {
+        const ui_section_t *sec = &g_model->sections[i];
+        if (strcmp(sec->key, "ui") != 0) continue;
+        for (int f = 0; f < sec->n_fields; ++f) {
+            char v[32];
+            g_model->get_value(i, -1, f, v, sizeof v);
+            if (!strcmp(sec->fields[f].key, "date_format")) snprintf(g_datefmt, sizeof g_datefmt, "%.15s", v);
+            else if (!strcmp(sec->fields[f].key, "time_format")) snprintf(g_timefmt, sizeof g_timefmt, "%.7s", v);
+            else if (!strcmp(sec->fields[f].key, "language")) ui_i18n_set(v);
+        }
+    }
+}
+
+void ui_format_datetime(const struct tm *tm, int seconds, char *buf, size_t cap)
+{
+    char d[48], t[48];
+    int y = (tm->tm_year + 1900) % 10000, m = (tm->tm_mon + 1) % 100, dd = tm->tm_mday % 100;
+    if (!strcmp(g_datefmt, "DD.MM.YYYY")) snprintf(d, sizeof d, "%02d.%02d.%04d", dd, m, y);
+    else if (!strcmp(g_datefmt, "MM/DD/YYYY")) snprintf(d, sizeof d, "%02d/%02d/%04d", m, dd, y);
+    else snprintf(d, sizeof d, "%04d-%02d-%02d", y, m, dd);
+    if (!strcmp(g_timefmt, "12h")) {
+        int h = tm->tm_hour % 12 ? tm->tm_hour % 12 : 12;
+        if (seconds) snprintf(t, sizeof t, "%d:%02d:%02d %s", h, tm->tm_min, tm->tm_sec, tm->tm_hour < 12 ? "AM" : "PM");
+        else snprintf(t, sizeof t, "%d:%02d %s", h, tm->tm_min, tm->tm_hour < 12 ? "AM" : "PM");
+    } else if (seconds) {
+        snprintf(t, sizeof t, "%02d:%02d:%02d", tm->tm_hour, tm->tm_min, tm->tm_sec);
+    } else {
+        snprintf(t, sizeof t, "%02d:%02d", tm->tm_hour, tm->tm_min);
+    }
+    snprintf(buf, cap, "%s  %s", d, t);
+}
+
 static void clock_text(char *buf, size_t cap)
 {
     time_t now = g_model->now ? g_model->now() : time(NULL);
     struct tm tm;
     localtime_r(&now, &tm);
-    snprintf(buf, cap, "%04d-%02d-%02d  %02d:%02d:%02d", tm.tm_year + 1900, tm.tm_mon + 1,
-             tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    formats_sync();
+    ui_format_datetime(&tm, 1, buf, cap);
 }
 
 void ui_app_refresh(void)

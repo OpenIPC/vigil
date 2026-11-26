@@ -72,6 +72,7 @@ add_library(vigil_core STATIC
   src/core/schema_yaml.c
   src/core/sha1.c
   src/core/rec_place.c
+  src/core/rec_sched.c
   src/core/seg_writer.c
   src/core/sps.c
   src/core/source/rtp_depay.c
@@ -82,6 +83,22 @@ add_library(vigil_core STATIC
   src/core/source/source_rtsp.c)
 target_include_directories(vigil_core PUBLIC src/core src/core/source src/hal)
 target_link_libraries(vigil_core PUBLIC cjson vigil_yaml Threads::Threads)
+
+# ---- sys: looking after the system vigild runs on (src/sys, Linux) ------------
+# Network, time, host name, disks, network storage, mail: OS work the
+# management pages do, kept out of the POSIX-only core. Every file and
+# command goes through src/sys/sys.h, so the tests run it on a fake root.
+add_library(vigil_sys STATIC
+  src/sys/mgmt.c
+  src/sys/sys.c
+  src/sys/sys_net.c
+  src/sys/sys_curl.c
+  src/sys/sys_disk.c
+  src/sys/sys_nas.c
+  src/sys/sys_time.c)
+target_include_directories(vigil_sys PUBLIC src/sys)
+target_link_libraries(vigil_sys PUBLIC vigil_core)
+target_compile_definitions(vigil_sys PRIVATE VIGIL_VERSION="${PROJECT_VERSION}")
 
 # ---- platform: sets VIGIL_PLATFORM_SOURCES / _LIBS / _DEFS, VIGIL_HAS_UI ----
 set(VIGIL_HAS_UI OFF)
@@ -95,7 +112,8 @@ target_compile_definitions(vigil_platform PRIVATE ${VIGIL_PLATFORM_DEFS})
 set(VIGILD_SOURCES src/app/main.c src/app/frontend_common.c)
 # The UI (src/ui: LVGL and hal_ui.h only) as a library: vigild links it on
 # platforms with a display, the host build for its screenshot tests.
-set(VIGIL_UI_SOURCES src/ui/ui_app.c src/ui/ui_channels.c src/ui/icons.c src/ui/ui_cursor.c src/ui/ui_form.c
+set(VIGIL_UI_SOURCES src/ui/ui_app.c src/ui/ui_channels.c src/ui/icons.c src/ui/ui_cursor.c src/ui/ui_form.c src/ui/ui_i18n.c src/ui/ui_settings.c src/ui/ui_set_network.c src/ui/ui_set_storage.c
+    src/ui/ui_set_system.c src/ui/ui_set_account.c
     src/ui/ui_layout.c src/ui/ui_live.c src/ui/ui_menu.c src/ui/ui_osk.c src/ui/ui_system.c src/ui/ui_theme.c)
 if(VIGIL_HAS_UI OR (BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING))
   include(cmake/lvgl.cmake)
@@ -104,7 +122,8 @@ if(VIGIL_HAS_UI OR (BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING))
   target_link_libraries(vigil_ui PUBLIC lvgl)
 endif()
 if(VIGIL_HAS_UI)
-  list(APPEND VIGILD_SOURCES src/app/frontend_ui.c src/app/ui_bridge.c src/app/input_evdev.c)
+  list(APPEND VIGILD_SOURCES src/app/frontend_ui.c src/app/ui_bridge.c src/app/ui_mgmt.c
+       src/app/input_evdev.c)
   target_link_libraries(vigil_platform PRIVATE lvgl)
 else()
   list(APPEND VIGILD_SOURCES src/app/frontend_headless.c src/ui/ui_layout.c)
@@ -120,9 +139,10 @@ endif()
 add_executable(vigild ${VIGILD_SOURCES} $<TARGET_OBJECTS:vigil_platform>)
 target_include_directories(vigild PRIVATE src/app src/api src/ui ${VIGIL_PLATFORM_INCLUDES})
 target_compile_definitions(vigild PRIVATE ${VIGIL_PLATFORM_DEFS} VIGIL_VERSION="${PROJECT_VERSION}")
-target_link_libraries(vigild PRIVATE vigil_core ${VIGIL_PLATFORM_LIBS})
+target_link_libraries(vigild PRIVATE vigil_sys vigil_core ${VIGIL_PLATFORM_LIBS})
 if(VIGIL_API)
   target_link_libraries(vigild PRIVATE vigil_api)
+  target_compile_definitions(vigild PRIVATE VIGIL_HAVE_USERS)
 endif()
 if(VIGIL_HAS_UI)
   target_link_libraries(vigild PRIVATE vigil_ui)

@@ -39,6 +39,7 @@
 #include <stddef.h>
 
 #include "channel.h"
+#include "rec_sched.h"
 #include "schema.h"
 
 #define CONFIG_VERSION      1
@@ -56,13 +57,84 @@ typedef struct {
     int  segment;                   /* seconds */
     int  keep;                      /* segments per camera, 0 = all */
     int  allow_rootfs;              /* the root filesystem counts as a disk (rec_place.h) */
+    char on_full[12];               /* "overwrite" | "stop" (seg_writer.h) */
 } config_record_t;
+
+/* A camera's week: one letter per half hour, 48 a day (rec_sched.h). */
+#define CONFIG_DAY_SLOTS 48
+typedef struct {
+    int  camera;                    /* 1-based */
+    char day[7][CONFIG_DAY_SLOTS + 1];  /* mon .. sun */
+} config_sched_t;
+
+typedef struct {
+    int camera;                     /* 1-based */
+    int max_gb;                     /* 0: no limit */
+    int max_days;                   /* 0: no limit */
+} config_quota_t;
+
+typedef struct {
+    char type[8];                   /* "none" | "cifs" | "nfs" */
+    char server[64];
+    char share[128];
+    char user[64];
+    char password[64];
+    char options[128];
+} config_nas_t;
+
+typedef struct {
+    int  enabled;
+    char provider[12];              /* "dyndns" | "noip" | "custom" */
+    char host[128];
+    char user[64];
+    char password[64];
+    char url[256];                  /* custom: {host} {ip} {user} {password} */
+    int  interval;                  /* minutes */
+} config_ddns_t;
+
+typedef struct {
+    int enabled;
+    int http_port;                  /* external ports to map; 0: none */
+    int rtsp_port;
+} config_upnp_t;
+
+typedef struct {
+    int  enabled;
+    char server[128];
+    int  port;
+    char security[12];              /* "none" | "starttls" | "tls" */
+    char user[64];
+    char password[64];
+    char from[128];
+    char to[256];                   /* addresses, separated by commas */
+} config_smtp_t;
+
+typedef struct {
+    int  enabled;
+    char protocol[8];               /* "http" (JSON POST) */
+    char host[128];
+    int  port;
+    char path[128];
+    int  interval;                  /* heartbeat, seconds; 0: none */
+} config_alarm_t;
+
+typedef struct {
+    int ntp;                        /* sync the clock from the servers in /etc/ntp.conf */
+    int ntp_interval;               /* minutes between vigild's own checks */
+} config_time_t;
+
+typedef struct {
+    char language[8];
+    char date_format[12];           /* "YYYY-MM-DD" | "DD.MM.YYYY" | "MM/DD/YYYY" */
+    char time_format[4];            /* "24h" | "12h" */
+} config_ui_t;
 
 typedef struct {
     char listen[64];                /* "addr:port", "port"; "" = no API */
     int  auth;
     char user[32];
     char shadow[192];
+    char users[192];                /* vigil's own accounts (src/api/users.h) */
 } config_api_t;
 
 typedef struct {
@@ -75,9 +147,23 @@ typedef struct {
     int             n_cameras;
     config_camera_t cameras[CHANNEL_MAX];
     config_record_t record;
+    int             n_schedules;
+    config_sched_t  schedule[CHANNEL_MAX];
+    int             n_quotas;
+    config_quota_t  quota[CHANNEL_MAX];
+    config_nas_t    nas;
+    config_ddns_t   ddns;
+    config_upnp_t   upnp;
+    config_smtp_t   smtp;
+    config_alarm_t  alarm;
+    config_time_t   time;
+    config_ui_t     ui;
     config_api_t    api;
     config_discovery_t discovery;
 } vigil_config_t;
+
+/* "mon".."sun" */
+extern const char *const config_day_keys[7];
 
 extern const schema_t config_schema;
 
@@ -91,6 +177,10 @@ void config_defaults(vigil_config_t *c);
 void config_trim(vigil_config_t *c);
 
 void config_to_channels(const vigil_config_t *c, channels_config_t *cc);
+
+/* The cameras' weeks (record schedule) for rec_sched_set; returns the
+ * number of entries (CHANNEL_MAX). A camera listed twice: the last wins. */
+int config_to_schedule(const vigil_config_t *c, rec_week_t weeks[CHANNEL_MAX]);
 
 /* ---- files ---------------------------------------------------------------------- */
 

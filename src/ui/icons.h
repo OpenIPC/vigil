@@ -27,5 +27,21 @@ extern const lv_image_dsc_t ui_icon_add;    /* 72 px, plus.svg */
 extern const lv_image_dsc_t ui_icon_add_sm;    /* 36 px, plus.svg */
 extern const lv_image_dsc_t ui_icon_search;    /* 24 px, search.svg */
 extern const lv_image_dsc_t ui_icon_channels;    /* 24 px, device-cctv.svg */
+extern const lv_image_dsc_t ui_icon_nav_ethernet;    /* 22 px, network.svg */
+extern const lv_image_dsc_t ui_icon_nav_wifi;    /* 22 px, wifi.svg */
+extern const lv_image_dsc_t ui_icon_nav_lte;    /* 22 px, antenna-bars-5.svg */
+extern const lv_image_dsc_t ui_icon_nav_ddns;    /* 22 px, world-www.svg */
+extern const lv_image_dsc_t ui_icon_nav_upnp;    /* 22 px, router.svg */
+extern const lv_image_dsc_t ui_icon_nav_smtp;    /* 22 px, mail.svg */
+extern const lv_image_dsc_t ui_icon_nav_alarm;    /* 22 px, bell-ringing.svg */
+extern const lv_image_dsc_t ui_icon_nav_p2p;    /* 22 px, cloud-off.svg */
+extern const lv_image_dsc_t ui_icon_nav_basic;    /* 22 px, device-floppy.svg */
+extern const lv_image_dsc_t ui_icon_nav_schedule;    /* 22 px, calendar-time.svg */
+extern const lv_image_dsc_t ui_icon_nav_disks;    /* 22 px, server-2.svg */
+extern const lv_image_dsc_t ui_icon_nav_quota;    /* 22 px, chart-pie.svg */
+extern const lv_image_dsc_t ui_icon_nav_nas;    /* 22 px, folder-share.svg */
+extern const lv_image_dsc_t ui_icon_nav_general;    /* 22 px, settings.svg */
+extern const lv_image_dsc_t ui_icon_nav_users;    /* 22 px, users.svg */
+extern const lv_image_dsc_t ui_icon_nav_groups;    /* 22 px, users-group.svg */
 
 #endif /* ICONS_H */

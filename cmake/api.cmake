@@ -28,8 +28,10 @@ if(NOT VIGIL_CRYPT_IN_LIBC)
 endif()
 
 add_library(vigil_api STATIC ${CMAKE_SOURCE_DIR}/src/api/api.c ${CMAKE_SOURCE_DIR}/src/api/api_disc.c
-            ${CMAKE_SOURCE_DIR}/src/api/auth.c)
+            ${CMAKE_SOURCE_DIR}/src/api/api_mgmt.c ${CMAKE_SOURCE_DIR}/src/api/api_perm.c
+            ${CMAKE_SOURCE_DIR}/src/api/api_users.c ${CMAKE_SOURCE_DIR}/src/api/auth.c
+            ${CMAKE_SOURCE_DIR}/src/api/users.c)
 target_include_directories(vigil_api PUBLIC ${CMAKE_SOURCE_DIR}/src/api)
 target_compile_definitions(vigil_api PRIVATE VIGIL_VERSION="${PROJECT_VERSION}"
                            $<$<BOOL:${VIGIL_HAVE_CRYPT_H}>:VIGIL_HAVE_CRYPT_H>)
-target_link_libraries(vigil_api PUBLIC vigil_core civetweb ${_crypt_lib})
+target_link_libraries(vigil_api PUBLIC vigil_sys vigil_core civetweb ${_crypt_lib})

@@ -77,10 +77,26 @@ defaults, commented.
 | `record.segment` | integer 10..3600 | 60 | Segment length in seconds. |
 | `record.keep` | integer 0..64 | 3 | Segments kept per camera; 0 keeps all (the free-space reserve still applies). 64 is what the segment writer can track. |
 | `record.allow_rootfs` | boolean | `false` | Count the root filesystem as a disk. For a host whose root filesystem is one; never on a board, where it is the flash. |
+| `record.on_full` | `overwrite` or `stop` | `overwrite` | A full disk: the oldest recordings make room, or recording stops (`REC disk full`) until there is room. |
+| `schedule[]` | array, up to 16 | `[]` | A week per camera ([management.md](management.md#recording-policies)); a camera without one records all the time. |
+| `schedule[].camera` | integer 1..16, required | | The camera's channel. |
+| `schedule[].mon` … `sun` | 48 letters of `C`, `M`, `-` | all `C` | One per half hour from 00:00 local time: continuous, motion only, off. |
+| `quota[]` | array, up to 16 | `[]` | Per camera limits. |
+| `quota[].camera` | integer 1..16, required | | The camera's channel. |
+| `quota[].max_gb`, `max_days` | integer | 0 | The most gigabytes / days of its recordings; 0: no limit. |
+| `nas.type` | `none`, `cifs`, `nfs` | `none` | Network storage mounted at `/mnt/nas`. |
+| `nas.server`, `share`, `user`, `password`, `options` | strings | `""` | The share; the password is shown as `***`. |
+| `ddns.enabled`, `provider`, `host`, `user`, `password`, `url`, `interval` | | off, `dyndns`, 10 min | Dynamic DNS: `dyndns`, `noip` or `custom` (`url` with `{host}`, `{user}`, `{password}`). |
+| `upnp.enabled`, `http_port`, `rtsp_port` | | off | Kept; no UPnP client yet. |
+| `smtp.enabled`, `server`, `port`, `security`, `user`, `password`, `from`, `to` | | off, 587, `starttls` | Mail: trouble events, and a test mail. `to` is a comma-separated list. |
+| `alarm.enabled`, `protocol`, `host`, `port`, `path`, `interval` | | off, `http`, 80, `/`, 60 s | Every event POSTed as JSON, and a heartbeat. |
+| `time.ntp`, `time.ntp_interval` | boolean, minutes 10..1440 | `true`, 60 | NTP on (the firmware's ntpd, with the servers of `/etc/ntp.conf`), and how often vigild checks itself. |
+| `ui.language`, `date_format`, `time_format` | enums | `en`, `YYYY-MM-DD`, `24h` | The on-screen UI. |
 | `api.listen` | `"port"` or `"a.b.c.d:port"` | `"0.0.0.0:8080"` | Where the API listens (IPv4). Empty: no API. Read at start only. |
-| `api.auth` | boolean | `true` | Require the system account's password. See [Authentication](#authentication). |
-| `api.user` | string | `"root"` | The account whose password the API asks for. |
+| `api.auth` | boolean | `true` | Require a login. See [Authentication](#authentication). |
+| `api.user` | string | `"root"` | The system account: it logs in with every permission (and as `admin` while no user of that name exists). |
 | `api.shadow` | absolute path | `"/etc/shadow"` | The shadow file holding that account's password hash. |
+| `api.users` | absolute path | `"/etc/vigil.users.yaml"` | vigil's own users and groups ([Accounts and permissions](#accounts-and-permissions)). |
 | `discovery.interfaces` | string | `""` | Interfaces to search for cameras on, comma separated; empty: every IPv4 interface ([Discovery](#discovery)). |
 | `discovery.targets` | IPv4 addresses, comma separated | `""` | Also searched by unicast: cameras on a routed subnet. |
 | `discovery.prefer` | `netip`, `onvif`, `dhip`, comma separated | `"netip,onvif,dhip"` | The protocol a camera that answers several is added with. |
@@ -162,11 +178,14 @@ strip, in the log and on the WebSocket. `status.config` shows the saved
 
 ## Authentication
 
-HTTP Basic, checked against the system account: the hash of `api.user`
-in `api.shadow` is verified with `crypt(3)` (whatever methods the C library
-supports: `$1$`, `$5$`, `$6$`, …), and compared in constant time. Without
-credentials, or with wrong ones, the answer is `401` with
-`WWW-Authenticate: Basic realm="vigil"`.
+HTTP Basic, checked against vigil's own users ([Accounts and
+permissions](#accounts-and-permissions)) or the system account: the hash
+of `api.user` in `api.shadow` is verified with `crypt(3)` (whatever
+methods the C library supports: `$1$`, `$5$`, `$6$`, …), and compared in
+constant time. Without credentials, or with wrong ones, the answer is
+`401` with `WWW-Authenticate: Basic realm="vigil"`; a user who logged in
+but lacks the permission an endpoint needs gets `403`
+`{"error": "permission denied", "needs": "storage"}`.
 
 - A failed login is answered after one second. From the fifth failure in a
   row **from one client address**, every login from that address (even a
@@ -185,13 +204,14 @@ credentials, or with wrong ones, the answer is `401` with
   `root`) or a locked one (`!`, `*`) cannot log in: set a password with
   `passwd`. The reason is logged once.
 - A good login is remembered for five minutes (as a keyed digest, not the
-  password), so a polling client does not run `crypt()` every time; a change
-  to the shadow file ends it.
+  password, four logins at a time), so a polling client does not run
+  `crypt()` every time; a change to the shadow file or the users file ends
+  it, so a disabled user or a new password counts at once.
 - Basic authentication sends the password in clear on every request. The
   API has no TLS: use it on a trusted network, or put a TLS proxy or an SSH
   tunnel in front.
-- `"auth": false` turns all of this off: **anyone who can reach the port can
-  change the configuration** (and point a camera URL anywhere). `vigild`
+- `"auth": false` turns all of this off, permissions included: **anyone who
+  can reach the port can change the configuration** (and point a camera URL anywhere). `vigild`
   logs `listening … WITHOUT authentication`. Only for a closed network or
   with `listen` on `127.0.0.1`.
 
@@ -200,6 +220,83 @@ refuses an `Origin` that is not the host it was asked for: a page elsewhere
 cannot read the NVR through the user's login. Plain HTTP calls from another
 origin are stopped by the browser itself (`PUT` needs a CORS preflight, which
 gets a `401`).
+
+## Accounts and permissions
+
+Besides the system account, vigil has users of its own, each in a group
+that says what its users may do. They are kept in `api.users`
+(`/etc/vigil.users.yaml`, mode 0600), commented YAML written by `vigild`
+like `vigil.yaml`; passwords are stored as `crypt(3)` hashes (SHA-512,
+`$6$`, with a random salt; SHA-256 or MD5 where the C library has no
+SHA-512) and never leave `vigild`: the API shows `"password_set": true`.
+
+Permissions: `live` (live view, status, events), `playback`, `ptz`,
+`cameras` (the camera list, discovery), `storage` (recording, schedule,
+quota, disks, network storage), `network` (network, DDNS, UPnP, mail,
+alarm center), `system` (time, host name, the UI's settings, the whole
+configuration), `users` (accounts, and the `api` section, which decides
+who gets in at all). Two groups always exist: **admin**, every
+permission, which cannot be changed or deleted, and **user**, live view
+and playback to start with, which can be changed but not deleted. At most
+16 groups and 32 users; user and group names are 1 to 31 of `a-z 0-9 _ . -`.
+
+**Logging in.** A user of the file, enabled, with its password, gets its
+group's permissions. The system account (`api.user`, `root`) always logs
+in, with every permission, whatever the file says, so a broken or lost
+users file never locks the owner out; `admin` is that account too, with
+its password, until a user named `admin` is created. A user named `root`
+cannot be created.
+
+**Migration.** Nothing changes for an existing installation: with no users
+file, only `root` (and `admin`, as its other name) can log in, with every
+permission, as before. Users added through the API or the on-screen
+settings create the file. If it cannot be loaded (invalid YAML, a bad
+name), its users cannot log in (logged), `root` still can, and nothing is
+saved over it until it is fixed or removed.
+
+| Endpoint | Needs |
+|---|---|
+| `GET /status`, `/ws` | `live` |
+| `GET /schema`, `/me`, `/jobs/…` | a login |
+| `GET /config` | `system` |
+| `PUT /config` | every permission |
+| `/config/cameras`, `discovery` | `cameras` |
+| `/config/record`, `schedule`, `quota`, `nas` | `storage` |
+| `/config/ddns`, `upnp`, `smtp`, `alarm` | `network` |
+| `/config/time`, `ui` | `system` |
+| `/config/api` | `users` |
+| `/network/…` | `network` |
+| `/system/…` | `system` |
+| `/disks…`, `/storage/…` | `storage` |
+| `/discovery…`, `/channels/…` | `cameras` |
+| `/users…`, `/groups…` | `users` |
+| anything else | `system` |
+
+The table is one function, `api_perm_needed` (`src/api/api_perm.c`),
+read before any request is dispatched: an endpoint not listed there needs
+`system`, never nothing.
+
+| Method and path | |
+|---|---|
+| `GET /api/v1/me` | `{"user": "anna", "permissions": ["live", "playback"]}` (`user` is `""` with `api.auth` off). |
+| `GET /api/v1/users` | `[{"name", "group", "enabled", "password_set"}]` |
+| `POST /api/v1/users` | `{"name", "password", "group": "user", "enabled": true}` → `201` and the user. The password: 4 to 128 characters. |
+| `GET`, `PUT`, `DELETE /api/v1/users/<name>` | `PUT` takes any of `group`, `enabled`, `password` (a user is not renamed). |
+| `GET /api/v1/groups` | `[{"name", "builtin", "editable", "members", "permissions": {"live": true, …}}]` |
+| `POST /api/v1/groups` | `{"name", "permissions": {"live": true}}` (missing permissions are off) → `201`. |
+| `GET`, `PUT`, `DELETE /api/v1/groups/<name>` | `PUT {"permissions": {…}}` changes the ones it names. |
+
+Invalid values are `400` with the usual `errors` list (`user.password`:
+"at least 4 characters", `group.permissions.fly`: "unknown permission");
+an unknown name `404`; a name taken, a group that still has users, or a
+change to a built-in group that is not allowed `409`. Every change is
+logged, without passwords.
+
+```sh
+curl -u root:PASSWORD -X POST $NVR/api/v1/groups -d '{"name": "viewer", "permissions": {"live": true}}'
+curl -u root:PASSWORD -X POST $NVR/api/v1/users -d '{"name": "anna", "group": "viewer", "password": "s3cret"}'
+curl -u anna:s3cret $NVR/api/v1/me
+```
 
 ## Passwords in camera URLs
 
@@ -240,7 +337,7 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `GET /api/v1/status` | Platform, uptime, configuration generation, one entry per camera. |
 | `GET /api/v1/config` | The configuration in force, passwords redacted. |
 | `PUT /api/v1/config` | Replace the whole configuration. Sections and keys it omits get their defaults. |
-| `GET /api/v1/config/<section>` | One section: `cameras`, `record`, `api` or `discovery`. |
+| `GET /api/v1/config/<section>` | One section (`cameras`, `record`, `schedule`, `quota`, `nas`, `ddns`, `upnp`, `smtp`, `alarm`, `time`, `ui`, `api`, `discovery`). |
 | `PUT /api/v1/config/<section>` | Replace one section; the others stay. |
 | `GET /api/v1/schema` | Every setting: type, default, limits, label, help. |
 | `GET /api/v1/ws` | WebSocket: pushed status, events and configuration changes. |
@@ -385,6 +482,45 @@ the `PUT`).
 websocat -H "Authorization: Basic $(printf root:PASSWORD | base64)" ws://192.168.1.20:8080/api/v1/ws
 ```
 
+## Management
+
+The management pages ([management.md](management.md)) over HTTP. They change
+the system, not only `vigil.yaml`, and only on OpenIPC firmware: elsewhere
+every change answers `409` ("vigild does not manage this system") and the
+`GET`s show what there is. Changes that take a while answer `202` with a job:
+
+```json
+{ "job": 7 }
+```
+
+and `GET /api/v1/jobs/7` says how it goes:
+`{"id": 7, "kind": "format", "target": "sda", "state": "running", "message": "", "started": 1795700819, "finished": null}`
+(`state`: `queued`, `running`, `done`, `failed`; the last 16 jobs are kept).
+
+| Method and path | |
+|---|---|
+| `GET /api/v1/network/ethernet` | `{"managed", "config": {"dhcp", "address", "netmask", "gateway", "dns1", "dns2", "mtu"}, "status": {"interface", "present", "up", "link", "speed", "duplex", "mac", "mtu", "address", "netmask", "gateway", "dns": [...]}, "pending": {"interface", "seconds"} \| null}` |
+| `PUT /api/v1/network/ethernet` | Any of the `config` keys (the others stay) → `202` `{"job", "confirm_within": 60}`. Undone after 60 s unless confirmed; `"confirm": false` skips that. `400` with the field on a bad address, netmask, gateway, DNS or MTU. |
+| `POST /api/v1/network/ethernet/confirm` | Keep the change; `409` when none waits. |
+| `POST /api/v1/network/ethernet/revert` | Undo it now. |
+| `GET /api/v1/network/wifi` | `{"present": false}`, or the interface, `ssid`, `password_set`, `can_scan` and its `status`. |
+| `PUT /api/v1/network/wifi` | `{"ssid", "password"}` → `202`; `409` without an adapter. |
+| `GET /api/v1/network/wifi/scan` | `{"networks": [{"ssid", "signal", "secured"}]}`; `501` without `iw`. |
+| `GET /api/v1/network/lte` | `{"present", "interface", "driver", "profile", "status"}` |
+| `GET /api/v1/network/services` | The last DDNS update, mail and alarm post (`{"enabled", "last", "ok", "result"}`), `upnp` (`"active": false`), `p2p` (`"available": false`), and whether `curl` is there. |
+| `POST /api/v1/network/ddns/update`, `/network/smtp/test` | `202`: an update now, a test mail with the settings in force. |
+| `GET /api/v1/system/time` | `{"time", "local", "zone", "tz", "rule": {"std_offset", "dst", "dst_offset", "start": {"month", "week", "wday", "minute"}, "end": {…}}, "rtc", "ntp": {"enabled", "interval", "servers", "last_try", "last_ok", "result"}}`; offsets in minutes east of UTC. |
+| `PUT /api/v1/system/time` | Any of `"zone"` (a name from `/system/zones`), `"tz"` (a POSIX string) or `"rule"` (as above: built into a POSIX string), `"time"` (Unix time: set the clock), `"ntp": {"enabled", "servers", "interval"}`. |
+| `POST /api/v1/system/time/sync` | `202`: synchronise with the NTP servers now. |
+| `GET /api/v1/system/zones` | `[{"name": "Europe/Berlin", "tz": "CET-1CEST,M3.5.0,M10.5.0/3"}, …]` |
+| `GET`/`PUT /api/v1/system/hostname` | `{"hostname"}`; also in `GET /api/v1/status`. |
+| `GET /api/v1/disks` | `{"managed", "disks": [{"name", "parent", "partition", "size", "model", "removable", "read_only", "fs", "mount", "total", "free", "system", "state"}], "formats": ["exfat", "vfat"]}` |
+| `POST /api/v1/disks/<name>/format` | `{"fs": "exfat", "confirm": "<name>"}` → `202`. A system device, or a wrong `confirm`, is `400`. |
+| `POST /api/v1/disks/<name>/mount`, `/unmount` | `202`. |
+| `GET /api/v1/storage/nas` | `{"support": {"cifs": {"ok", "why"}, "nfs": {…}}, "mount": "/mnt/nas", "mounted", "status"}` |
+| `POST /api/v1/storage/nas/test` | `202`: mount the share in force at a test directory, write and read a file, unmount. |
+| `GET /api/v1/jobs/<id>` | A job, as above. |
+
 ## Discovery
 
 vigild finds cameras on its network, changes their addresses and adds them
@@ -517,6 +653,10 @@ say which device went where.
   is dropped), never the other clients or shutdown. A slow client loses the
   oldest of its 32 queued events and configuration messages, and only its
   latest status is kept.
+  `src/api/auth.c`: Basic credentials, the shadow file, `crypt(3)`;
+  `src/api/users.c`: the accounts file and logging in; `src/api/api_perm.c`:
+  which permission each endpoint needs; `src/api/api_users.c`: the
+  accounts' endpoints.
   `src/api/auth.c`: Basic credentials, the shadow file, `crypt(3)`.
   `src/api/api_disc.c`: the discovery endpoints, over
   `src/core/discovery.{h,c}` (the device table and the jobs),

@@ -23,10 +23,14 @@ live view                  tiles over the whole screen, clock in a corner
       |    |               Change IP, Mass change, Auto add) and every channel
       |    |               (Edit, Clear, Add / Replace with a device found)
       |    +-> a camera    form: URL, name, enabled
-      +-> STORAGE          the recording's state, and its form
-      +-> NETWORK          the HTTP API's form
-      +-> SYSTEM           platform, version, uptime, memory, storage (read-only)
-      |   (OPERATION) +-> Channel info: every channel's state, stream, codec,
+      +-> NETWORK          settings screen: Ethernet, Wi-Fi, LTE, DDNS, UPnP,
+      |                    SMTP, Alarm center, P2P
+      +-> STORAGE          settings screen: Basic, Schedule, Disk Manager,
+      |                    Disk Quota, Network Storage
+      +-> SYSTEM           settings screen: General, HTTP API
+      +-> ACCOUNT          settings screen: Users, Groups
+      +-> OPERATION        platform, version, uptime, memory, storage (read-only)
+      |               +-> Channel info: every channel's state, stream, codec,
       |                   size, fps, recording, events
       +-> DISPLAY          output, clock corner, layouts (read-only for now)
 ```
@@ -133,18 +137,16 @@ The 16- and 64-channel pictures here come from the headless test, which
 fakes those capabilities.
 
 **Main menu.** A bar at the top (vigil and the role, "Main menu", the
-clock, **LIVE** back to the live view, and the account icon, muted: there
-are no accounts yet, so there is no log-out either), six function cards
+clock, **LIVE** back to the live view, and the account icon, muted: the
+on-screen UI does not log in yet, so there is no log-out either), six function cards
 (3 x 2, a large icon, an upper-case title and what it is for), and the
 **MANAGEMENT** row of the settings. The cards: PLAYBACK, AI, ALARM,
 OPERATION (the System page), BACKUP and DISPLAY (the Display page).
 PLAYBACK, AI, ALARM and BACKUP are not in vigil yet: their cards are
 there and say "not available yet", the same as Playback and PTZ in the
 context menu. Six cards fill one page at 1280x720, so there are no page
-dots. The management row: CAMERA (the Channels page), NETWORK (the HTTP
-API), STORAGE (the recording: what it is doing now, from each channel's
-recording state, and its settings), any other section of the schema with
-its own label, SYSTEM, and ACCOUNT (not there yet). The arrows move over
+dots. The management row: CAMERA (the Channels page), NETWORK, STORAGE,
+SYSTEM and ACCOUNT, each a settings screen (below). The arrows move over
 the cards and along the row, Tab goes from the cards to the row to LIVE,
 Esc and the right button go back to the live view. The background is a
 dark navy vertical gradient (`menu_top`, `menu_bottom`), the cards a
@@ -156,6 +158,91 @@ little lighter (`card`, `card_hover`).
 actions (Save, Cancel, Add) and the clock. Back is the header button, the
 **right mouse button** or **Esc**, which go back one level (closing the
 on-screen keyboard or a question first).
+
+### Settings screens
+
+NETWORK, STORAGE, SYSTEM and ACCOUNT open the classic NVR settings
+layout (`ui_settings.c`): a list of sub-pages on the left, each an icon and
+a label, the one shown in the accent colour; the sub-page on the right; and
+in the header, "Network › Ethernet", Cancel and Save for that sub-page
+(none on a sub-page with nothing to save: a status, an action list, "No
+Wi-Fi adapter"). Leaving a sub-page or the screen with unsaved changes
+asks first, as every page does. With a keyboard: Tab goes Back, the list
+(Up and Down move in it, Enter opens one), the sub-page's widgets, Cancel,
+Save; Ctrl+S saves.
+
+![Network, Ethernet](../tests/ui/network_keep.png)
+
+A sub-page is either a schema form placed in the pane (`ui_form_embed`:
+DDNS, UPnP, SMTP, Alarm center, Network Storage, HTTP API are sections of
+`vigil.yaml` and need no code of their own beyond the action they offer)
+or widgets of its own built from `ui_settings.h`'s blocks (a titled panel,
+label/widget rows, read-only rows, text, numbers, switches, drop-downs).
+What changes the system goes through the model's management calls
+(`ui_mgmt_t` in `ui_model.h`, filled by `src/app/ui_mgmt.c` from
+`src/sys`); a slow one is a job the sub-page follows on a timer
+(`ui_set_follow_job`), so the screen never waits.
+
+**Network.** *Ethernet*: the link (speed, duplex), MAC and the addresses
+in use, refreshed every 2 s; DHCP, address, netmask, gateway, two DNS
+servers, MTU. A bad value is marked and named in a toast; an applied change
+asks "Keep these network settings?" with the seconds left before it is
+undone (Keep, Undo) — on whatever screen is open by then, since the
+recorder may have been cut off by the change. *Wi-Fi*: with an adapter, its
+state, the network to join (scanning needs `iw`; the button says so when
+the firmware lacks it) and the password; without one, "No Wi-Fi adapter"
+and nothing to fill in. *LTE*: the modem's interface and the firmware's
+modem profile, or "No modem found". *DDNS*, *SMTP*: the form, the last
+update or mail and its result, and "Update now" / "Send test mail" (which
+use the saved settings: with unsaved changes they ask to save first).
+*UPnP*: the form, marked not active. *Alarm center*: the form and the last
+post. *P2P*: vigil has none, said so.
+
+**Storage** (also the context menu's Record). *Basic*: when the disk is
+full (Overwrite: the oldest recordings make room; Stop: recording stops
+until there is room), the segment length in minutes (the file keeps
+`record.segment` in seconds; a value that is not whole minutes is shown
+rounded with what is stored, and kept unless changed), the recording
+directory with a button for each mounted disk's `/mnt/<dev>/rec` and the
+network storage's, recording onto the root filesystem, and each camera's
+recording state. *Schedule*: a camera, a brush (Continuous, Motion only,
+Off) and the week as one drawn grid of 7 days by 48 half hours; click or
+drag to paint, or with the keyboard move a cursor with the arrows and paint
+with Space or Enter; copy a day to every day, a week to every camera,
+Always, Never. Edits to several cameras are kept until Save; a week that is
+all Continuous writes no entry. Motion only is explained: no camera source
+reports motion yet. *Disk Manager*: disks and their partitions (model or
+filesystem, size, free, mount point, state), refreshed every 2 s so a disk
+plugged in shows up; Format, Mount and Unmount per row (never on a device
+that holds the system); Format opens a panel in the page with the
+filesystem, a field to type the device's name and a Format button that
+works only when the name matches; it runs as a job. *Disk Quota*: per
+camera, the most gigabytes and days. *Network Storage*: whether SMB and NFS
+can be mounted here and why not, the share's state, its form, Test, and
+"Record here" (`record.path` = `/mnt/nas/rec`).
+
+![Storage, Schedule](../tests/ui/storage_schedule.png)
+
+**System.** *General*: the device name (the host name; shown in the main
+menu's bar and the API's status), the language (the languages there are),
+the date and time formats (the clock follows at once), the time now and
+"Set the clock", the time zone (a named one, described in words — offset,
+and when daylight saving time starts and ends — or Custom: an offset,
+daylight saving time with how far the clocks go forward and the week,
+weekday, month and time it starts and ends, previewed as its POSIX string),
+and NTP (on or off, servers, how often vigild checks, Sync now and the last
+sync). Save writes only the parts that changed. *HTTP API*: the API's form.
+
+![System, General](../tests/ui/system_general.png)
+
+**Account.** *Users*: name, group, enabled, password set; Add and Edit open
+an editor in the pane (an empty password on Edit keeps it), Remove asks
+first; the list follows changes made through the API. Changes apply at
+once. *Groups*: a row per group with a toggle per permission (Live,
+Playback, PTZ, Cameras, Storage, Network, System, Users), saved with Save;
+`admin` is read-only, `user` cannot be removed. The on-screen UI does not
+ask for a login yet: the accounts are enforced on the HTTP API, where the
+system account (root) always logs in as an administrator.
 
 ## Architecture
 
@@ -328,11 +415,21 @@ has been used, it does not open at all.
 3. Use the value where it applies (`channels_apply`, or wherever it is
    read).
 
-Nothing else: the HTTP API, `GET /api/v1/schema`, the configuration file
-and the on-screen settings page all follow from the row. A new section
-gets its own button in the main menu's management row (give it a name
-and an icon in `ui_menu.c:section_look`, or it gets its label and the
-settings icon).
+Nothing else: the HTTP API, `GET /api/v1/schema` and the configuration
+file follow from the row. On the screen, a new section is shown where it
+belongs: as a sub-page of a settings screen (an item in its table in
+`ui_set_<screen>.c` whose open() calls `ui_set_form`), or by a page of its
+own.
+
+### Words
+
+The settings screens' words are a string table (`ui_i18n.h`): each a row
+`X(S_ID, "English")`, used as `TR(S_ID)`. A translation is a table of the
+same ids in `ui_i18n_<code>.c` and a line in `ui_i18n.c`'s list; the
+Language selector (System › General, `ui.language`) offers exactly the
+languages listed, English only for now. The older pages and the schema's
+labels are still English in place; moving one is adding its row and using
+`TR()`.
 
 ## Design tokens
 
@@ -498,6 +595,10 @@ cameras (named, recording, one with motion, one connecting, one failing;
 `context-menu.png`, `context-split.png`, `context-split-16.png`,
 `menu-p1.png`, `menu-focus.png`, `not-available.png`, `cameras.png`,
 `camera-form.png`, `camera-form-keyboard.png`, `confirm-discard.png`,
+the settings screens (`network-*.png`, `storage-*.png`, `system-*.png`,
+`account-*.png`, `settings-discard.png`: every sub-page, the Ethernet
+question and error, the format panel, a painted schedule, a custom time
+zone, the user editor),
 `record.png`, `record-focus.png`, `validation-error.png`, `network.png`,
 `display.png`, `system.png`, `help-f1.png`, and since then the page
 arrows (`live-page-arrow-next.png`, `-prev`), every tile state and the

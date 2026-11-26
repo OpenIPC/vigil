@@ -183,6 +183,7 @@ def main():
     with open(shadow, "w") as f:
         f.write("root:%s:19000:0:99999:7:::\n" % HASH)
     cfg_path = os.path.join(tmp, "vigil.yaml")
+    users_path = os.path.join(tmp, "vigil.users.yaml")
     rec = os.path.join(tmp, "rec")
     # Written as a person would (a JSON string is a double-quoted YAML one).
     with open(cfg_path, "w") as f:
@@ -197,7 +198,8 @@ def main():
                 "  listen: 127.0.0.1:%d\n"
                 "  auth: on\n"
                 "  user: root\n"
-                "  shadow: %s\n" % (json.dumps(rec), api_port, json.dumps(shadow)))
+                "  shadow: %s\n"
+                "  users: %s\n" % (json.dumps(rec), api_port, json.dumps(shadow), json.dumps(users_path)))
 
     def file_config():
         """The file as vigild reads it, through vigild -w into JSON."""
@@ -227,8 +229,11 @@ def main():
         t0 = time.time()
         st, _, _ = Api(api_port, password="wrong").call("GET", "/api/v1/status")
         check(st == 401 and time.time() - t0 >= 0.9, "wrong password: 401, answered late (%s)" % st)
-        st, _, _ = Api(api_port, user="admin").call("GET", "/api/v1/status")
+        st, _, _ = Api(api_port, user="nobody").call("GET", "/api/v1/status")
         check(st == 401, "other account: 401 (%s)" % st)
+        st, _, me = Api(api_port, user="admin").json("GET", "/api/v1/me")
+        check(st == 200 and me["user"] == "admin" and len(me["permissions"]) == 8,
+              "admin is root's other name while no user admin exists (%s)" % st)
 
         # ---- the three documents
         st, hdr, status = api.json("GET", "/api/v1/status")
@@ -242,7 +247,8 @@ def main():
         st, _, schema = api.json("GET", "/api/v1/schema")
         secs = {s["key"]: s for s in schema["sections"]} if st == 200 else {}
         seg = [f for f in secs.get("record", {}).get("fields", []) if f["key"] == "segment"]
-        check(set(secs) == {"cameras", "record", "api", "discovery"} and seg and seg[0]["min"] == 10 and
+        check(set(secs) == {"cameras", "record", "schedule", "quota", "nas", "ddns", "upnp", "smtp",
+                              "alarm", "time", "ui", "api", "discovery"} and seg and seg[0]["min"] == 10 and
               seg[0]["max"] == 3600 and seg[0]["live"], "schema: sections and limits")
         st, _, _ = api.json("GET", "/api/v1/nothing")
         check(st == 404, "unknown endpoint: 404")
@@ -250,6 +256,44 @@ def main():
         check(st == 405 and "PUT" in hdr.get("Allow", ""), "DELETE config: 405 with Allow")
         st, _, _ = api.json("PUT", "/api/v1/config/nope", {})
         check(st == 404, "unknown section: 404")
+
+        # ---- management: on a host vigild does not manage, it shows and refuses
+        st, _, eth = api.json("GET", "/api/v1/network/ethernet")
+        check(st == 200 and eth["managed"] is False and "config" in eth and "status" in eth and
+              eth["pending"] is None, "ethernet: shown, not managed (%s)" % st)
+        st, _, err = api.json("PUT", "/api/v1/network/ethernet", {"dhcp": False, "address": "10.0.0.2",
+                                                                  "netmask": "255.255.255.0"})
+        check(st == 409 and "does not manage" in err["error"], "ethernet: PUT refused here (%s)" % st)
+        st, _, _ = api.json("POST", "/api/v1/network/ethernet/confirm")
+        check(st == 409, "confirm without a change: 409 (%s)" % st)
+        st, _, z = api.json("GET", "/api/v1/system/zones")
+        check(st == 200 and {"name": "Europe/Berlin", "tz": "CET-1CEST,M3.5.0,M10.5.0/3"} in z, "zones")
+        st, _, t = api.json("GET", "/api/v1/system/time")
+        check(st == 200 and "ntp" in t and t["ntp"]["enabled"] is True and isinstance(t["time"], (int, float)),
+              "time (%s)" % st)
+        st, _, _ = api.json("PUT", "/api/v1/system/time", {"zone": "Europe/Berlin"})
+        check(st == 409, "time zone: refused here (%s)" % st)
+        st, _, h = api.json("GET", "/api/v1/system/hostname")
+        st2, _, status2 = api.json("GET", "/api/v1/status")
+        check(st == 200 and h["hostname"] and status2["hostname"] == h["hostname"], "hostname, also in status")
+        st, _, d = api.json("GET", "/api/v1/disks")
+        check(st == 200 and isinstance(d["disks"], list) and isinstance(d["formats"], list), "disks (%s)" % st)
+        st, _, _ = api.json("POST", "/api/v1/disks/sda/format", {"fs": "vfat", "confirm": "sda"})
+        check(st == 409, "format: refused here (%s)" % st)
+        st, _, sv = api.json("GET", "/api/v1/network/services")
+        check(st == 200 and sv["upnp"]["active"] is False and sv["p2p"]["available"] is False,
+              "services: UPnP not active, no P2P")
+        st, _, n = api.json("GET", "/api/v1/storage/nas")
+        check(st == 200 and n["mount"] == "/mnt/nas" and "cifs" in n["support"], "network storage (%s)" % st)
+        st, _, _ = api.json("GET", "/api/v1/jobs/999")
+        check(st == 404, "unknown job: 404")
+        st, _, _ = api.json("GET", "/api/v1/network/wifi/scan")
+        check(st == 409, "Wi-Fi scan without an adapter: 409 (%s)" % st)
+        st, _, j = api.json("POST", "/api/v1/network/smtp/test")
+        check(st == 202 and j["job"] > 0, "test mail: a job (%s)" % st)
+        st, _, job = api.json("GET", "/api/v1/jobs/%d" % j["job"])
+        check(st == 200 and job["kind"] == "smtp-test" and job["state"] in ("queued", "running", "failed", "done"),
+              "the job (%s)" % job)
 
         # ---- WebSocket
         bad = WebSocket(api_port, "Basic " + base64.b64encode(b"root:nope").decode())
@@ -419,6 +463,91 @@ def main():
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=20)
         check(busy.returncode == 0 and "running without the API" in busy.stdout,
               "port taken: logged, vigild runs on without the API (rc %s)" % busy.returncode)
+
+        # ---- accounts and permissions
+        st, _, me = api.json("GET", "/api/v1/me")
+        check(st == 200 and me["user"] == "root" and "users" in me["permissions"], "me: root, every permission")
+        st, _, groups = api.json("GET", "/api/v1/groups")
+        check(st == 200 and [g["name"] for g in groups] == ["admin", "user"] and not groups[0]["editable"],
+              "groups: the two built in")
+        st, _, g = api.json("POST", "/api/v1/groups", {"name": "viewer", "permissions": {"live": True}})
+        check(st == 201 and g["permissions"]["live"] and not g["permissions"]["storage"], "viewer group (%s)" % st)
+        st, _, _ = api.json("POST", "/api/v1/groups", {"name": "keeper", "permissions": {"storage": True}})
+        check(st == 201, "storage-only group (%s)" % st)
+        st, _, err = api.json("POST", "/api/v1/groups", {"name": "x", "permissions": {"fly": True}})
+        check(st == 400 and err["errors"][0]["path"] == "group.permissions.fly", "unknown permission: 400")
+        st, _, _ = api.json("PUT", "/api/v1/groups/admin", {"permissions": {"users": False}})
+        check(st == 409, "admin cannot be changed (%s)" % st)
+        st, _, _ = api.json("DELETE", "/api/v1/groups/user")
+        check(st == 409, "the user group cannot be deleted (%s)" % st)
+        st, _, u = api.json("POST", "/api/v1/users", {"name": "vera", "group": "viewer", "password": "verapw"})
+        check(st == 201 and u == {"name": "vera", "group": "viewer", "enabled": True, "password_set": True},
+              "user vera (%s %s)" % (st, u))
+        st, _, _ = api.json("POST", "/api/v1/users", {"name": "kim", "group": "keeper", "password": "kimpw1"})
+        check(st == 201, "user kim (%s)" % st)
+        st, _, err = api.json("POST", "/api/v1/users", {"name": "root", "password": "rootpw"})
+        check(st == 400 and err["errors"][0]["path"] == "user.name", "root is reserved")
+        st, _, err = api.json("POST", "/api/v1/users", {"name": "zed", "password": "x"})
+        check(st == 400 and err["errors"][0]["path"] == "user.password", "short password: 400")
+        st, _, _ = api.json("POST", "/api/v1/users", {"name": "vera", "password": "verapw"})
+        check(st == 409, "a name twice: 409 (%s)" % st)
+        st, _, _ = api.json("DELETE", "/api/v1/groups/viewer")
+        check(st == 409, "a group with users stays (%s)" % st)
+        st, _, raw = api.call("GET", "/api/v1/users")
+        check(st == 200 and b"$6$" not in raw and b"verapw" not in raw and b"password_set" in raw,
+              "the user list has no hashes")
+        text = open(users_path).read()
+        check(oct(os.stat(users_path).st_mode & 0o777) == "0o600" and "name: vera" in text and "verapw" not in text,
+              "the users file: 0600, hashes only")
+
+        vera = Api(api_port, user="vera", password="verapw")
+        st, _, _ = vera.call("GET", "/api/v1/status")
+        check(st == 200, "viewer: status 200 (%s)" % st)
+        st, _, err = vera.json("GET", "/api/v1/config")
+        check(st == 403 and err["needs"] == "system", "viewer: config 403 (%s)" % st)
+        st, _, err = vera.json("PUT", "/api/v1/config/record", {"path": rec, "allow_rootfs": True})
+        check(st == 403 and err["needs"] == "storage", "viewer: PUT record 403 (%s)" % st)
+        st, _, _ = vera.json("GET", "/api/v1/users")
+        check(st == 403, "viewer: users 403 (%s)" % st)
+        st, _, me = vera.json("GET", "/api/v1/me")
+        check(st == 200 and me == {"user": "vera", "permissions": ["live"]}, "viewer: me (%s)" % me)
+        vws = WebSocket(api_port, vera.auth)
+        check(wait_for(lambda: vws.find(lambda m: m["type"] == "status"), 5), "viewer: WebSocket status")
+        vws.close()
+        kim = Api(api_port, user="kim", password="kimpw1")
+        st, _, _ = kim.json("PUT", "/api/v1/config/record", {"path": rec, "segment": 90, "allow_rootfs": True})
+        check(st == 200, "storage user: PUT record 200 (%s)" % st)
+        st, _, _ = kim.json("PUT", "/api/v1/config/api", {"listen": "127.0.0.1:%d" % api_port})
+        check(st == 403, "storage user: PUT api 403 (%s)" % st)
+        st, _, _ = kim.json("PUT", "/api/v1/config", {})
+        check(st == 403, "storage user: PUT whole config 403 (%s)" % st)
+        st, _, _ = kim.json("GET", "/api/v1/disks")
+        check(st == 200, "storage user: disks 200 (%s)" % st)
+        st, _, _ = kim.json("GET", "/api/v1/network/ethernet")
+        check(st == 403, "storage user: network 403 (%s)" % st)
+        st, _, _ = vera.json("GET", "/api/v1/system/time")
+        check(st == 403, "viewer: system time 403 (%s)" % st)
+        try:
+            kws = WebSocket(api_port, kim.auth)
+            got = wait_for(lambda: kws.find(lambda m: True), 2)
+            kws.close()
+        except (OSError, EOFError, ValueError):
+            got = None
+        check(not got, "no live permission: no WebSocket")
+        st, _, _ = Api(api_port, user="vera", password="wrong").call("GET", "/api/v1/status")
+        check(st == 401, "user, wrong password: 401 (%s)" % st)
+        st, _, u = api.json("PUT", "/api/v1/users/vera", {"enabled": False})
+        check(st == 200 and u["enabled"] is False, "vera disabled")
+        st, _, _ = vera.call("GET", "/api/v1/status")
+        check(st == 401, "a disabled user: 401 (%s)" % st)
+        st, _, _ = api.json("PUT", "/api/v1/users/vera", {"enabled": True, "password": "verapw2"})
+        st2, _, _ = Api(api_port, user="vera", password="verapw2").call("GET", "/api/v1/status")
+        check(st == 200 and st2 == 200, "enabled again, new password (%s %s)" % (st, st2))
+        st, _, _ = api.call("GET", "/api/v1/status")
+        check(st == 200, "root still gets in")
+        st, _, _ = api.json("DELETE", "/api/v1/users/kim")
+        st2, _, _ = kim.call("GET", "/api/v1/config/record")
+        check(st == 200 and st2 == 401, "kim deleted: 401 (%s %s)" % (st, st2))
 
         # ---- guessing: after 5 failures in a row an address is locked out,
         # and only that address: the owner elsewhere still gets in

@@ -161,6 +161,158 @@ typedef struct {
     char ip[16];                    /* "": the next free one from the start address */
 } ui_disc_ip_t;
 
+
+/* ---- management pages (NULL members: not there in this build) ------------------- */
+
+/* Network, time, disks, accounts: what src/sys and the accounts file do,
+ * as plain data. Calls that start something slow return a job id (> 0)
+ * to poll with job(); a value <= 0 is an error with `err` (UI_MGMT_*). */
+enum { UI_MGMT_EINVAL = -1, UI_MGMT_EUNMANAGED = -2, UI_MGMT_EBUSY = -3, UI_MGMT_EFAIL = -4 };
+enum { UI_JOBST_QUEUED, UI_JOBST_RUNNING, UI_JOBST_DONE, UI_JOBST_FAILED };
+
+typedef struct {
+    int  dhcp;
+    char address[16], netmask[16], gateway[16], dns1[16], dns2[16];
+    int  mtu;
+} ui_net_cfg_t;
+
+typedef struct {
+    int  present, up, link, speed;
+    char duplex[8], mac[18];
+    int  mtu;
+    char address[16], netmask[16], gateway[16], dns1[46], dns2[46];
+} ui_net_status_t;
+
+typedef struct {
+    char ifname[16];                /* "": no Wi-Fi adapter */
+    char ssid[64];
+    int  password_set, can_scan;
+} ui_wifi_t;
+
+typedef struct {
+    char ssid[64];
+    int  signal, secured;
+} ui_wifi_net_t;
+
+typedef struct {
+    char ifname[16], driver[32], profile[48];
+} ui_lte_t;
+
+typedef struct {
+    int  id, state;                 /* UI_JOBST_* */
+    char kind[24];
+    char msg[256];
+} ui_mjob_t;
+
+typedef struct {
+    long long last;                 /* 0: never */
+    int       ok;
+    char      result[160];
+} ui_svc_t;
+
+typedef struct {
+    char name[32], parent[32];
+    int  is_part;
+    unsigned long long size;
+    char model[64];
+    int  removable, ro;
+    char fs[16], mnt[128];
+    unsigned long long total, avail;
+    int  system;
+    char state[24];
+} ui_disk_t;
+
+/* A time zone as fields (minutes east of UTC; rules: month 1..12, week
+ * 1..5 (5 = last), weekday 0..6 (0 = Sunday), minutes after midnight). */
+typedef struct {
+    int std_offset, dst, dst_offset;
+    int start_month, start_week, start_wday, start_min;
+    int end_month, end_week, end_wday, end_min;
+} ui_tz_rule_t;
+
+typedef struct {
+    char      zone[64], tz[96];
+    int       rtc;
+    char      servers[4][64];
+    int       n_servers;
+    int       ntp, ntp_interval;
+    long long ntp_last_try, ntp_last_ok;
+    char      ntp_result[160];
+} ui_time_t;
+
+typedef struct {
+    char name[32], group[32];
+    int  enabled, password_set;
+} ui_user_t;
+
+typedef struct {
+    char     name[32];
+    unsigned perms;
+    int      builtin, editable, members;
+} ui_group_t;
+
+typedef struct {
+    int (*managed)(void);           /* vigild may change this system */
+
+    /* Ethernet; eth_apply: the change waits for net_confirm (or is undone) */
+    void (*eth_get)(ui_net_cfg_t *cfg, ui_net_status_t *st);
+    int  (*eth_apply)(const ui_net_cfg_t *cfg, char *field, size_t fcap, char *err, size_t cap);
+    int  (*net_pending)(int *secs_left);    /* 1 while a change waits */
+    int  (*net_confirm)(void);
+    int  (*net_revert)(void);
+    void (*wifi_get)(ui_wifi_t *w, ui_net_status_t *st);
+    int  (*wifi_scan)(ui_wifi_net_t *out, int max, char *err, size_t cap);
+    int  (*wifi_set)(const char *ssid, const char *password, char *err, size_t cap);
+    void (*lte_get)(ui_lte_t *l, ui_net_status_t *st);
+
+    /* services: the last DDNS update, mail, alarm post, network storage mount */
+    void (*services)(ui_svc_t *ddns, ui_svc_t *smtp, ui_svc_t *alarm, ui_svc_t *nas);
+    int  (*ddns_update)(void);
+    int  (*smtp_test)(void);
+    int  (*nas_test)(void);
+    int  (*nas_support)(const char *type, char *why, size_t cap);  /* 1, or 0 with why */
+    int  (*nas_mounted)(void);
+    int  (*curl)(void);             /* mail and DDNS can work */
+
+    int  (*job)(int id, ui_mjob_t *j);              /* 0, or -1 when forgotten */
+
+    /* disks */
+    int  (*disks)(ui_disk_t *out, int max);
+    int  (*disk_formats)(char out[][8], int max);
+    int  (*disk_format)(const char *name, const char *fs, const char *confirm, char *err, size_t cap);
+    int  (*disk_mount)(const char *name, char *err, size_t cap);
+    int  (*disk_unmount)(const char *name, char *err, size_t cap);
+
+    /* time and name */
+    void        (*time_get)(ui_time_t *t);
+    int         (*zones)(void);                     /* how many named zones */
+    const char *(*zone_name)(int i);
+    const char *(*zone_tz)(int i);          /* its POSIX TZ string */
+    int         (*tz_parse)(const char *posix, ui_tz_rule_t *r);
+    int         (*tz_build)(const ui_tz_rule_t *r, char *out, size_t cap, char *err, size_t ecap);
+    int         (*time_set)(const char *zone, const char *tz, int set_clock, long long t, char *err, size_t cap);
+    int         (*ntp_set)(int enabled, const char *servers, int interval, char *err, size_t cap);
+    int         (*ntp_sync)(void);
+    void        (*hostname_get)(char *buf, size_t cap);
+    int         (*hostname_set)(const char *name, char *err, size_t cap);
+
+    /* accounts (users.h); errors name the field ("name", "password", ...) */
+    unsigned           (*users_gen)(void);
+    int                (*users)(ui_user_t *out, int max);
+    int                (*groups)(ui_group_t *out, int max);
+    const char *const *perm_names;  /* n_perms of them: bit i */
+    int                n_perms;
+    int (*user_add)(const char *name, const char *group, const char *pass, int enabled, char *field,
+                    size_t fcap, char *err, size_t cap);
+    /* group NULL, enabled < 0, pass NULL: unchanged */
+    int (*user_update)(const char *name, const char *group, int enabled, const char *pass, char *field,
+                       size_t fcap, char *err, size_t cap);
+    int (*user_delete)(const char *name, char *err, size_t cap);
+    int (*group_set)(const char *name, unsigned perms, int create, char *field, size_t fcap, char *err,
+                     size_t cap);
+    int (*group_delete)(const char *name, char *err, size_t cap);
+} ui_mgmt_t;
+
 typedef struct ui_model {
     /* platform */
     const char *role;           /* "NVR" / "DVR" */
@@ -207,6 +359,9 @@ typedef struct ui_model {
     int  (*disc_assign)(const char *key, int channel, const char *user, const char *pass, int replace,
                         char *err, size_t cap);
     int  (*disc_autoadd)(const char *user, const char *pass, char *err, size_t cap);
+
+    /* The management pages (NULL: none in this build). */
+    const ui_mgmt_t *mgmt;
 } ui_model_t;
 
 #endif /* UI_MODEL_H */

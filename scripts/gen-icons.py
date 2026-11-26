@@ -54,6 +54,23 @@ ICONS = [
     # The Channels page: its two panes.
     ("search", "search.svg", 24, 2),
     ("channels", "device-cctv.svg", 24, 2),
+    # the settings screens' left panes
+    ("nav_ethernet", "network.svg", 22, 2),
+    ("nav_wifi", "wifi.svg", 22, 2),
+    ("nav_lte", "antenna-bars-5.svg", 22, 2),
+    ("nav_ddns", "world-www.svg", 22, 2),
+    ("nav_upnp", "router.svg", 22, 2),
+    ("nav_smtp", "mail.svg", 22, 2),
+    ("nav_alarm", "bell-ringing.svg", 22, 2),
+    ("nav_p2p", "cloud-off.svg", 22, 2),
+    ("nav_basic", "device-floppy.svg", 22, 2),
+    ("nav_schedule", "calendar-time.svg", 22, 2),
+    ("nav_disks", "server-2.svg", 22, 2),
+    ("nav_quota", "chart-pie.svg", 22, 2),
+    ("nav_nas", "folder-share.svg", 22, 2),
+    ("nav_general", "settings.svg", 22, 2),
+    ("nav_users", "users.svg", 22, 2),
+    ("nav_groups", "users-group.svg", 22, 2),
 ]
 
 

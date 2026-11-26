@@ -67,14 +67,22 @@ comments; options override the file.
   (`scripts/gen-theme.py` generates `theme_tokens.h` and `web/theme.css`).
 - `src/app/` — `main.c`, the UI or headless loop, the UI's model
   (`ui_bridge.c`) and mouse and keyboard input (`input_evdev.c`).
-- `src/api/` — the HTTP/WebSocket API (`docs/api.md`) and its password check.
+- `src/api/` — the HTTP/WebSocket API (`docs/api.md`), its password check,
+  vigil's users and groups (`users.c`) and the permission table.
+- `src/sys/` — looking after the system vigild runs on (`docs/management.md`):
+  interfaces, time zone and NTP, host name, disks, network storage, mail and
+  DDNS through curl, and `mgmt.c`, the jobs and timers both front ends use.
+  Linux, outside the POSIX-only core; every file and command goes through
+  `sys.h` (a root prefix and replaceable actions), so `test_sys` runs it all
+  on a fake system.
 - `cmake/platforms/<name>.cmake` — sources, includes, libraries per platform.
 - `scripts/` — board bring-up (HiSilicon module staging, Rockchip library build).
 - `tests/` — `test_core.c` unit tests, `test_api.c` (password check), a NETIP
   camera emulator, a GStreamer RTSP server, the scripts that run `vigild`
   against them, `api_test.py` (the API end to end), and `test_ui.c` with
   `ui_compare.py` (the UI headless, screenshots against `tests/ui/*.png`).
-- `docs/` — architecture, the UI, porting guide, one page per platform.
+- `docs/` — architecture, the UI, the management pages, porting guide, one
+  page per platform.
 
 ## Build
 

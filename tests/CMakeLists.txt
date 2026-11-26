@@ -6,6 +6,14 @@ add_executable(test_discovery test_discovery.c)
 target_link_libraries(test_discovery PRIVATE vigil_core)
 add_test(NAME discovery COMMAND test_discovery ${CMAKE_CURRENT_SOURCE_DIR}/data)
 
+# src/sys on a fake root: fake /etc, /sys, /proc and /dev files, and a
+# recorder in place of ifup, mkfs, mount, date, ntpd, hostname, curl.
+add_executable(test_sys test_sys.c sys_fake.c test_sys_net.c test_sys_time.c test_sys_curl.c
+               test_sys_disk.c test_sys_mgmt.c)
+target_include_directories(test_sys PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_sys PRIVATE vigil_sys)
+add_test(NAME sys COMMAND test_sys)
+
 if(TARGET vigil_api)
   add_executable(test_api test_api.c)
   target_link_libraries(test_api PRIVATE vigil_api)
@@ -16,10 +24,14 @@ if(TARGET vigil_ui)
   # The on-screen UI on an in-memory display, with the real evdev reader,
   # the bridge and the configuration store, and fake channels.
   add_executable(test_ui test_ui.c ${CMAKE_SOURCE_DIR}/src/app/ui_bridge.c
-                 ${CMAKE_SOURCE_DIR}/src/app/input_evdev.c)
+                 ${CMAKE_SOURCE_DIR}/src/app/ui_mgmt.c ${CMAKE_SOURCE_DIR}/src/app/input_evdev.c)
   target_include_directories(test_ui PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
   target_compile_definitions(test_ui PRIVATE VIGIL_VERSION="${PROJECT_VERSION}")
-  target_link_libraries(test_ui PRIVATE vigil_ui vigil_core)
+  target_link_libraries(test_ui PRIVATE vigil_ui vigil_sys vigil_core)
+  if(TARGET vigil_api)
+    target_link_libraries(test_ui PRIVATE vigil_api)
+    target_compile_definitions(test_ui PRIVATE VIGIL_HAVE_USERS)
+  endif()
   # Every screen as PNGs into build/screenshots, for looking at (not a test):
   # cmake --build build --target screenshots
   add_custom_target(screenshots

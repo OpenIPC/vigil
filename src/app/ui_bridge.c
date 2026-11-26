@@ -124,8 +124,7 @@ static void get_value(int sec, int item, int field, char *buf, size_t cap)
     const schema_field_t *f = &s->fields[field];
     const char *p = field_at(sec, item, f);
     if (f->type == SCHEMA_STRING || f->type == SCHEMA_ENUM) {
-        if (f->secret == SCHEMA_SECRET_URL) schema_redact_url(p, buf, cap);
-        else snprintf(buf, cap, "%s", p);
+        schema_redact_field(f, p - f->off, buf, cap);
     } else {
         int v = *(const int *)(const void *)p;
         snprintf(buf, cap, "%d", f->type == SCHEMA_BOOL ? !!v : v);
@@ -532,5 +531,6 @@ int ui_bridge_init(ui_model_t *m)
     m->disc_assign = disc_assign_ui;
     m->disc_autoadd = disc_autoadd_ui;
     g_ev_cursor = 0;                    /* every event still kept, the start-up ones too */
+    m->mgmt = ui_mgmt_model();
     return 0;
 }

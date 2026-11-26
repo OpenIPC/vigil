@@ -388,6 +388,36 @@ void schema_redact_url(const char *url, char *out, size_t cap)
     snprintf(out, cap, "%.*s***%s", (int)(colon + 1 - url), url, at);
 }
 
+void schema_redact_field(const schema_field_t *f, const void *base, char *out, size_t cap)
+{
+    const char *v = cstr_at(base, f);
+    if (f->secret == SCHEMA_SECRET_URL) schema_redact_url(v, out, cap);
+    else if (f->secret == SCHEMA_SECRET) snprintf(out, cap, "%s", *v ? SCHEMA_REDACTED : "");
+    else snprintf(out, cap, "%s", v);
+}
+
+static void object_keep_secrets(const schema_section_t *sec, void *base, const void *old)
+{
+    for (int i = 0; i < sec->n_fields; ++i) {
+        const schema_field_t *f = &sec->fields[i];
+        if (f->secret != SCHEMA_SECRET || strcmp(str_at(base, f), SCHEMA_REDACTED) != 0) continue;
+        snprintf(str_at(base, f), f->size, "%s", cstr_at(old, f));
+    }
+}
+
+void schema_keep_secrets(const schema_section_t *sec, void *root, const void *old)
+{
+    if (!sec->is_array) {
+        object_keep_secrets(sec, (char *)root + sec->off, (const char *)old + sec->off);
+        return;
+    }
+    int n = *(const int *)(const void *)((const char *)root + sec->count_off);
+    int on = *(const int *)(const void *)((const char *)old + sec->count_off);
+    for (int k = 0; k < n && k < on && k < sec->max_items; ++k)
+        object_keep_secrets(sec, (char *)root + sec->off + sec->item_size * (size_t)k,
+                            (const char *)old + sec->off + sec->item_size * (size_t)k);
+}
+
 static cJSON *object_to_json(const schema_section_t *sec, const void *base, int redact)
 {
     cJSON *o = cJSON_CreateObject();
@@ -398,8 +428,8 @@ static cJSON *object_to_json(const schema_section_t *sec, const void *base, int 
         if (f->type == SCHEMA_STRING || f->type == SCHEMA_ENUM) {
             const char *s = cstr_at(base, f);
             char red[1024];
-            if (redact && f->secret == SCHEMA_SECRET_URL) {
-                schema_redact_url(s, red, sizeof red);
+            if (redact && f->secret != SCHEMA_PLAIN) {
+                schema_redact_field(f, base, red, sizeof red);
                 s = red;
             }
             v = cJSON_CreateString(s);
@@ -481,6 +511,7 @@ static cJSON *field_describe(const schema_section_t *sec, const schema_field_t *
         cJSON_AddStringToObject(o, "default", f->def_str ? f->def_str : "");
         cJSON_AddNumberToObject(o, "max_length", (double)(f->size - 1));
         if (f->secret == SCHEMA_SECRET_URL) cJSON_AddStringToObject(o, "secret", "url-password");
+        if (f->secret == SCHEMA_SECRET) cJSON_AddStringToObject(o, "secret", "password");
         break;
     case SCHEMA_ENUM: {
         cJSON_AddStringToObject(o, "default", f->def_str ? f->def_str : "");
