@@ -8,9 +8,10 @@
  * mi_hdmi: the HDMI transmitter is opensigmastar's open_hdmitx.ko, switched
  * on through open_hdmi.ko's sysfs file once the display runs.
  *
- * The decoder's own scaler only shrinks, so it outputs the picture at the
- * tile size (or the picture's, if smaller) and the display scales it into
- * the tile. The display does not keep the aspect ratio: the tile is filled.
+ * The decoder's own scaler only shrinks, so it outputs the picture at most
+ * at the tile's size and the display scales it into a window fitted inside
+ * the tile, keeping the picture's aspect ratio; the rest of the tile shows
+ * the layer's black background.
  *
  * mi_disp needs the panel timings, PQ tables and memory map from /config,
  * and mi_vdec its firmware from /config/vdec_fw (paths built into the
@@ -19,6 +20,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "mi_common_datatype.h"
 #include "mi_sys.h"
@@ -33,11 +35,17 @@
 #define MAX_CH          4           /* quad view */
 #define DISP_DEV        0
 #define DISP_LAYER      0
-/* The bitstream buffer: a 5 MP keyframe fits. */
-#define VDEC_BUF_SIZE   (1024 * 1024)
+/*
+ * The bitstream buffer holds one access unit, which MI_VDEC takes whole: a
+ * keyframe is at most about one byte per pixel in practice, so size it by
+ * the picture, between 1 MiB and the 4 MiB the RTSP and NETIP sources pass.
+ */
+#define VDEC_BUF_MIN    (1024 * 1024)
+#define VDEC_BUF_MAX    (4 * 1024 * 1024)
 #define SEND_TIMEOUT_MS 20
 #define SEND_TRIES      5           /* ~100 ms while the decoder catches up */
 #define HDMI_SYSFS      "/sys/kernel/open_hdmi/output"
+#define REOPEN_SECS     10          /* retry a decoder lost in a reset */
 
 static const hal_caps_t g_caps = {
     .name = "sigmastar", .display = 1, .decoder = 1,
@@ -47,9 +55,15 @@ static const hal_caps_t g_caps = {
 };
 
 static struct {
-    vg_codec_t codec;               /* VG_CODEC_NONE: no decoder */
-    vg_rect_t  tile;                /* w == 0: not placed */
-    unsigned   src_w, src_h;        /* what the decoder outputs */
+    vg_codec_t       codec;         /* VG_CODEC_NONE: no decoder */
+    vg_stream_info_t si;            /* the stream it was opened for */
+    unsigned         buf_size;      /* its bitstream buffer */
+    vg_rect_t        tile;          /* w == 0: not placed */
+    unsigned         src_w, src_h;  /* what the decoder outputs */
+    int              too_big;       /* an AU over buf_size was reported */
+    int              lost;          /* gone in a reset; reopened at a keyframe */
+    vg_codec_t       lost_codec;
+    time_t           lost_at;
 } g_ch[MAX_CH];
 static unsigned g_w, g_h;
 /* MI object create/destroy and port changes, across channel threads */
@@ -59,6 +73,7 @@ const hal_caps_t *hal_caps(void) { return &g_caps; }
 
 static unsigned align_down(unsigned v, unsigned a) { return v / a * a; }
 static unsigned umin(unsigned a, unsigned b) { return a < b ? a : b; }
+static unsigned umax(unsigned a, unsigned b) { return a > b ? a : b; }
 
 /* The transmitter at the timing the display scans out. Without open_hdmi
  * only VGA has a picture, so this warns but does not fail. */
@@ -153,17 +168,38 @@ void hal_shutdown(void)
 
 /* ---- display ------------------------------------------------------------- */
 
-/* Channel ch's input port at its tile, fed src_w x src_h. Locked. */
+/* The tile a channel is shown in, or, while it is not placed, a quarter of
+ * the screen to size the decoder for. */
+static vg_rect_t tile_or_default(int ch)
+{
+    if (g_ch[ch].tile.w) return g_ch[ch].tile;
+    return (vg_rect_t){ 0, 0, (int)g_w / 2, (int)g_h / 2 };
+}
+
+/* Channel ch's input port: the decoder's output, in a window fitted inside
+ * the tile at the picture's aspect ratio and centred. Locked. */
 static int port_place(int ch)
 {
+    vg_rect_t t = tile_or_default(ch);
+    unsigned pw = g_ch[ch].si.width, ph = g_ch[ch].si.height;
+    unsigned ww = (unsigned)t.w, wh = (unsigned)t.h;
+    if (pw && ph) {
+        if ((unsigned long long)pw * t.h > (unsigned long long)ph * t.w)
+            wh = (unsigned)((unsigned long long)t.w * ph / pw);   /* bars above and below */
+        else
+            ww = (unsigned)((unsigned long long)t.h * pw / ph);   /* bars at the sides */
+    }
+    ww = umax(align_down(ww, 2), 2);
+    wh = umax(align_down(wh, 2), 2);
+
     MI_DISP_InputPortAttr_t pa;
     memset(&pa, 0, sizeof pa);
     pa.u16SrcWidth = g_ch[ch].src_w;
     pa.u16SrcHeight = g_ch[ch].src_h;
-    pa.stDispWin.u16X = g_ch[ch].tile.x;
-    pa.stDispWin.u16Y = g_ch[ch].tile.y;
-    pa.stDispWin.u16Width = g_ch[ch].tile.w;
-    pa.stDispWin.u16Height = g_ch[ch].tile.h;
+    pa.stDispWin.u16X = t.x + (int)align_down(((unsigned)t.w - ww) / 2, 2);
+    pa.stDispWin.u16Y = t.y + (int)align_down(((unsigned)t.h - wh) / 2, 2);
+    pa.stDispWin.u16Width = ww;
+    pa.stDispWin.u16Height = wh;
     MI_S32 rc = MI_DISP_SetInputPortAttr(DISP_LAYER, ch, &pa);
     if (rc != MI_SUCCESS) {
         fprintf(stderr, "sigmastar: MI_DISP_SetInputPortAttr(%d) 0x%x\n", ch, rc);
@@ -176,6 +212,7 @@ int hal_display_set_tile(int ch, const vg_rect_t *r)
 {
     if (ch < 0 || ch >= MAX_CH || r->w <= 0 || r->h <= 0) return -1;
     pthread_mutex_lock(&g_lock);
+    vg_rect_t old = g_ch[ch].tile;
     /* the display's windows: x on 16 pixels, sizes even */
     g_ch[ch].tile.x = r->x & ~15;
     g_ch[ch].tile.y = r->y & ~1;
@@ -184,7 +221,10 @@ int hal_display_set_tile(int ch, const vg_rect_t *r)
     int rc = 0;
     if (g_ch[ch].codec != VG_CODEC_NONE) {      /* a decoder feeds the port */
         rc = port_place(ch);
-        MI_DISP_ShowInputPort(DISP_LAYER, ch);
+        if (rc == 0)
+            MI_DISP_ShowInputPort(DISP_LAYER, ch);
+        else
+            g_ch[ch].tile = old;                /* the port keeps the old window */
     }
     pthread_mutex_unlock(&g_lock);
     return rc;
@@ -211,13 +251,15 @@ static MI_SYS_ChnPort_t vdec_port(int ch)
     return p;
 }
 
+/* MI_SYS addresses layer 0's input port n as DISP channel n, port 0: the
+ * SDK's NVR samples bind that way, and so do all four tiles here. */
 static MI_SYS_ChnPort_t disp_port(int ch)
 {
     MI_SYS_ChnPort_t p;
     memset(&p, 0, sizeof p);
     p.eModId = E_MI_MODULE_ID_DISP;
     p.u32DevId = DISP_DEV;
-    p.u32ChnId = ch;                            /* layer 0's input port ch */
+    p.u32ChnId = ch;
     return p;
 }
 
@@ -238,21 +280,21 @@ void hal_dec_close(int ch)
     if (ch < 0 || ch >= MAX_CH) return;
     pthread_mutex_lock(&g_lock);
     dec_teardown(ch);
+    g_ch[ch].lost = 0;
     pthread_mutex_unlock(&g_lock);
 }
 
-int hal_dec_open(int ch, vg_codec_t codec, const vg_stream_info_t *si)
+/* Locked. */
+static int dec_open(int ch, vg_codec_t codec, const vg_stream_info_t *si)
 {
-    if (ch < 0 || ch >= MAX_CH || codec == VG_CODEC_NONE) return -1;
-    if (si->width > g_caps.dec_max_w || si->height > g_caps.dec_max_h) return -1;
     MI_S32 rc;
-    pthread_mutex_lock(&g_lock);
     dec_teardown(ch);
 
+    unsigned buf = umin(umax(si->width * si->height, VDEC_BUF_MIN), VDEC_BUF_MAX);
     MI_VDEC_ChnAttr_t ca;
     memset(&ca, 0, sizeof ca);
     ca.eCodecType = codec == VG_CODEC_H265 ? E_MI_VDEC_CODEC_TYPE_H265 : E_MI_VDEC_CODEC_TYPE_H264;
-    ca.u32BufSize = VDEC_BUF_SIZE;
+    ca.u32BufSize = buf;
     ca.u32PicWidth = si->width;
     ca.u32PicHeight = si->height;
     ca.eVideoMode = E_MI_VDEC_VIDEO_MODE_FRAME;
@@ -260,23 +302,26 @@ int hal_dec_open(int ch, vg_codec_t codec, const vg_stream_info_t *si)
     ca.stVdecVideoAttr.u32RefFrameNum = si->refs ? si->refs : 1;
     if ((rc = MI_VDEC_CreateChn(ch, &ca)) != MI_SUCCESS) {
         fprintf(stderr, "sigmastar: MI_VDEC_CreateChn(%d) %ux%u 0x%x\n", ch, si->width, si->height, rc);
-        goto fail;
+        return -1;
     }
     if ((rc = MI_VDEC_StartChn(ch)) != MI_SUCCESS) {
         fprintf(stderr, "sigmastar: MI_VDEC_StartChn(%d) 0x%x\n", ch, rc);
         MI_VDEC_DestroyChn(ch);
-        goto fail;
+        return -1;
     }
     g_ch[ch].codec = codec;                     /* from here dec_teardown undoes it */
+    g_ch[ch].si = *si;
+    g_ch[ch].buf_size = buf;
+    g_ch[ch].too_big = 0;
+    g_ch[ch].lost = 0;
 
     /* Decode straight to the tile's size: the decoder only shrinks, the
-     * display scales up whatever is left. Not placed yet: a quarter. */
-    unsigned tw = g_ch[ch].tile.w ? (unsigned)g_ch[ch].tile.w : g_w / 2;
-    unsigned th = g_ch[ch].tile.h ? (unsigned)g_ch[ch].tile.h : g_h / 2;
+     * display scales up whatever is left. */
+    vg_rect_t t = tile_or_default(ch);
     MI_VDEC_OutputPortAttr_t oa;
     memset(&oa, 0, sizeof oa);
-    oa.u16Width = align_down(umin(tw, si->width), 16);
-    oa.u16Height = align_down(umin(th, si->height), 2);
+    oa.u16Width = align_down(umin((unsigned)t.w, si->width), 16);
+    oa.u16Height = align_down(umin((unsigned)t.h, si->height), 2);
     if (MI_VDEC_SetOutputPortAttr(ch, &oa) != MI_SUCCESS) {
         oa.u16Width = si->width;                /* the picture as decoded */
         oa.u16Height = si->height;
@@ -288,35 +333,65 @@ int hal_dec_open(int ch, vg_codec_t codec, const vg_stream_info_t *si)
     /* Live view: a short queue, the newest picture wins. */
     MI_SYS_SetChnOutputPortDepth(&src, 0, 4);
 
-    if (!g_ch[ch].tile.w) {
-        g_ch[ch].tile.w = (int)tw;
-        g_ch[ch].tile.h = (int)th;
-        port_place(ch);
-        g_ch[ch].tile.w = 0;
-    } else {
-        port_place(ch);
+    if (port_place(ch) < 0) {
+        dec_teardown(ch);
+        return -1;
     }
     if ((rc = MI_DISP_EnableInputPort(DISP_LAYER, ch)) != MI_SUCCESS ||
         (rc = MI_DISP_SetInputPortSyncMode(DISP_LAYER, ch, E_MI_DISP_SYNC_MODE_FREE_RUN)) != MI_SUCCESS ||
         (rc = MI_SYS_BindChnPort(&src, &dst, 30, 30)) != MI_SUCCESS) {
         fprintf(stderr, "sigmastar: channel %d to the display 0x%x\n", ch, rc);
-        goto fail;
+        dec_teardown(ch);
+        return -1;
     }
     if (!g_ch[ch].tile.w)
         MI_DISP_HideInputPort(DISP_LAYER, ch);
-    pthread_mutex_unlock(&g_lock);
-    fprintf(stderr, "sigmastar: decoder %d: %s %ux%u -> %ux%u\n", ch, vg_codec_name(codec),
-            si->width, si->height, g_ch[ch].src_w, g_ch[ch].src_h);
+    fprintf(stderr, "sigmastar: decoder %d: %s %ux%u -> %ux%u, %u KiB buffer\n", ch,
+            vg_codec_name(codec), si->width, si->height, g_ch[ch].src_w, g_ch[ch].src_h,
+            buf >> 10);
     return 0;
-fail:
-    dec_teardown(ch);
+}
+
+int hal_dec_open(int ch, vg_codec_t codec, const vg_stream_info_t *si)
+{
+    if (ch < 0 || ch >= MAX_CH || codec == VG_CODEC_NONE) return -1;
+    if (si->width > g_caps.dec_max_w || si->height > g_caps.dec_max_h) return -1;
+    pthread_mutex_lock(&g_lock);
+    int rc = dec_open(ch, codec, si);
     pthread_mutex_unlock(&g_lock);
-    return -1;
+    return rc;
+}
+
+/* A decoder that a reset could not bring back: the core still counts it as
+ * open, so make it again here, at a keyframe, now and then. */
+static void dec_reopen_lost(int ch)
+{
+    pthread_mutex_lock(&g_lock);
+    if (g_ch[ch].lost && g_ch[ch].codec == VG_CODEC_NONE &&
+        time(NULL) - g_ch[ch].lost_at >= REOPEN_SECS) {
+        vg_stream_info_t si = g_ch[ch].si;
+        if (dec_open(ch, g_ch[ch].lost_codec, &si) == 0)
+            fprintf(stderr, "sigmastar: decoder %d back\n", ch);
+        else
+            g_ch[ch].lost_at = time(NULL);
+    }
+    pthread_mutex_unlock(&g_lock);
 }
 
 int hal_dec_send(int ch, const vg_au_t *au)
 {
-    if (ch < 0 || ch >= MAX_CH || g_ch[ch].codec == VG_CODEC_NONE) return -1;
+    if (ch < 0 || ch >= MAX_CH) return -1;
+    if (g_ch[ch].lost && au->key) dec_reopen_lost(ch);
+    if (g_ch[ch].codec == VG_CODEC_NONE) return -1;
+    /* MI_VDEC takes an AU whole: one larger than its buffer can never go in,
+     * so do not retry it */
+    if (au->len > g_ch[ch].buf_size) {
+        if (!g_ch[ch].too_big)
+            fprintf(stderr, "sigmastar: decoder %d: %zu-byte AU over its %u-byte buffer, dropped\n",
+                    ch, au->len, g_ch[ch].buf_size);
+        g_ch[ch].too_big = 1;
+        return -1;
+    }
     MI_VDEC_VideoStream_t s;
     memset(&s, 0, sizeof s);
     s.pu8Addr = (MI_U8 *)au->data;
@@ -337,11 +412,25 @@ void hal_dec_reset(int ch)
     if (ch < 0 || ch >= MAX_CH) return;
     pthread_mutex_lock(&g_lock);
     if (g_ch[ch].codec != VG_CODEC_NONE) {
-        MI_VDEC_StopChn(ch);
-        MI_VDEC_ResetChn(ch);
-        MI_VDEC_StartChn(ch);
-        /* the old picture must not stay up */
-        MI_DISP_ClearInputPortBuffer(DISP_LAYER, ch, 1);
+        MI_S32 rc;
+        if ((rc = MI_VDEC_StopChn(ch)) != MI_SUCCESS ||
+            (rc = MI_VDEC_ResetChn(ch)) != MI_SUCCESS ||
+            (rc = MI_VDEC_StartChn(ch)) != MI_SUCCESS) {
+            /* A decoder that did not come back would stay stuck: make a new
+             * one for the same stream instead. */
+            vg_codec_t codec = g_ch[ch].codec;
+            vg_stream_info_t si = g_ch[ch].si;
+            fprintf(stderr, "sigmastar: decoder %d reset 0x%x, recreating it\n", ch, rc);
+            if (dec_open(ch, codec, &si) < 0) {
+                fprintf(stderr, "sigmastar: decoder %d lost, retried at keyframes\n", ch);
+                g_ch[ch].lost = 1;
+                g_ch[ch].lost_codec = codec;
+                g_ch[ch].lost_at = time(NULL);
+            }
+        } else {
+            /* the old picture must not stay up */
+            MI_DISP_ClearInputPortBuffer(DISP_LAYER, ch, 1);
+        }
     }
     pthread_mutex_unlock(&g_lock);
 }

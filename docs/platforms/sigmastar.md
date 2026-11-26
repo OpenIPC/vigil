@@ -8,14 +8,14 @@
 | SDK | the i2m NVR SDK's MI libraries (2020-03), shared |
 | C library | glibc |
 | UI format | ARGB8888, colour key |
-| Status | **experimental**: runs in qemu-bench's `ssr621q` machine, not verified on hardware |
+| Status | **experimental**: run only in emulation ([qemu-bench](https://github.com/OpenIPC/qemu-bench)'s `ssr621q` machine), not on hardware |
 
 Per channel *i*, the decoder `MI_VDEC` channel *i* is bound to input port
 *i* of `MI_DISP` video layer 0, which the display scans out on HDMI and VGA
 at the same timing. The decoder's scaler only shrinks, so it outputs the
 picture at the tile's size (or the picture's own, if smaller) and the
-display scales that into the tile. The display fills the tile: it does not
-keep the aspect ratio.
+display scales that into a window fitted inside the tile at the picture's
+aspect ratio, centred, with black bars in the rest of the tile.
 
 The UI is drawn on the GOP framebuffer `/dev/fb0` above the video layer.
 fbdev.ko sets its size and format from `/config/fbdev.ini` (1280x720,
@@ -63,7 +63,8 @@ The display runs at 1280x720 (720p60), the size of vigil's layout.
 
 ## Verified
 
-In qemu-bench's `ssr621q` machine, whose decoder and display are emulated:
-see the pull request that added the platform. Nothing has run on an SSR621Q
-board yet. The HDMI and VGA signals, hot-plug and decoder limits are
-unverified.
+Only in emulation: [qemu-bench](https://github.com/OpenIPC/qemu-bench)'s
+`ssr621q` machine, whose decoder and display are emulated (OpenIPC firmware
+image, four cameras over RTSP and NETIP, H.264 and H.265; see the pull
+request that added the platform). Nothing has run on an SSR621Q board yet.
+The HDMI and VGA signals, hot-plug and decoder limits are unverified.

@@ -56,12 +56,21 @@ lv_display_t *hal_ui_create(unsigned w, unsigned h)
     if (!disp) return NULL;
     lv_linux_fbdev_set_file(disp, FB_DEV);
 
+    /* Without the key the UI's tiles would cover the video, and a hidden
+     * layer shows no UI: either way there is no usable display. */
     MI_FB_ColorKey_t ck = { .bKeyEnable = 1, .u8Red = COLORKEY_R,
                             .u8Green = COLORKEY_G, .u8Blue = COLORKEY_B };
-    if (ioctl(g_fd, FBIOSET_COLORKEY, &ck) < 0)
+    if (ioctl(g_fd, FBIOSET_COLORKEY, &ck) < 0) {
         fprintf(stderr, "FBIOSET_COLORKEY: %s\n", strerror(errno));
+        lv_display_delete(disp);
+        return NULL;
+    }
     MI_BOOL show = 1;
-    ioctl(g_fd, FBIOSET_SHOW, &show);
+    if (ioctl(g_fd, FBIOSET_SHOW, &show) < 0) {
+        fprintf(stderr, "FBIOSET_SHOW: %s\n", strerror(errno));
+        lv_display_delete(disp);
+        return NULL;
+    }
     return disp;
 }
 
