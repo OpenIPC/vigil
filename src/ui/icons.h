@@ -50,5 +50,6 @@ extern const lv_image_dsc_t ui_icon_nav_clock;    /* 22 px, clock.svg */
 extern const lv_image_dsc_t ui_icon_nav_names;    /* 22 px, device-cctv.svg */
 extern const lv_image_dsc_t ui_icon_nav_icons;    /* 22 px, activity.svg */
 extern const lv_image_dsc_t ui_icon_nav_aspect;    /* 22 px, aspect-ratio.svg */
+extern const lv_image_dsc_t ui_icon_nav_tiles;    /* 22 px, layout-grid.svg */
 
 #endif /* ICONS_H */

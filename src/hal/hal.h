@@ -26,6 +26,10 @@ typedef struct {
                                  * decodes only the channels with a tile on
                                  * screen, and frees a channel's decoder when
                                  * its tile goes (recording carries on) */
+    unsigned max_in_kbps;       /* the chip's rated incoming bandwidth for
+                                 * network cameras (every stream, main and
+                                 * sub), kbit/s, as its datasheet or product
+                                 * brief gives it; 0: not known */
 } hal_caps_t;
 
 /* Bring up the media system and the display: a w x h screen (the UI's

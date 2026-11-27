@@ -11,6 +11,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <math.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -20,6 +21,7 @@
 
 #include "aspect.h"
 #include "au_norm.h"
+#include "gop_cache.h"
 #include "channel.h"
 #include "cJSON.h"
 #include "config.h"
@@ -282,6 +284,75 @@ static void test_aspect_scaled(void)
     }
 }
 
+static void test_aspect_fill(void)
+{
+    /* The picture over the whole tile: the rectangle it takes. */
+    static const struct { vg_rect_t tile; unsigned aw, ah; vg_rect_t want; } V[] = {
+        { { 0, 0, 1280, 720 }, 4, 3, { 0, -120, 1280, 960 } },       /* 4:3 in 16:9: over top and bottom */
+        { { 0, 0, 1280, 720 }, 32, 9, { -640, 0, 2560, 720 } },      /* wider: over the sides */
+        { { 640, 360, 640, 360 }, 16, 9, { 640, 360, 640, 360 } },   /* the same shape: the tile */
+        { { 640, 360, 640, 360 }, 4, 3, { 640, 300, 640, 480 } },
+        { { 0, 0, 1280, 720 }, 0, 0, { 0, 0, 1280, 720 } },
+    };
+    for (size_t i = 0; i < sizeof V / sizeof V[0]; ++i) {
+        vg_rect_t r = aspect_cover(&V[i].tile, (vg_ratio_t){ V[i].aw, V[i].ah });
+        CHECK(rect_eq(r, V[i].want), "cover %u:%u over %dx%d: %d,%d %dx%d", V[i].aw, V[i].ah, V[i].tile.w,
+              V[i].tile.h, r.x, r.y, r.w, r.h);
+    }
+
+    /* The part of the picture that shows, in its pixels. */
+    static const struct { unsigned sw, sh, aw, ah, tw, th, align; vg_rect_t want; } K[] = {
+        { 1920, 1440, 4, 3, 1920, 1080, 2, { 0, 180, 1920, 1080 } },  /* 4:3 full screen at 1080p */
+        { 704, 576, 4, 3, 640, 360, 2, { 0, 72, 704, 432 } },         /* anamorphic 4:3 D1 in a 16:9 tile */
+        { 704, 576, 16, 9, 480, 360, 2, { 88, 0, 528, 576 } },        /* ... 16:9 D1 in a 4:3 tile */
+        { 704, 576, 16, 9, 640, 360, 2, { 0, 0, 704, 576 } },         /* the tile's shape: all of it */
+        { 2592, 1944, 0, 0, 1280, 720, 2, { 0, 242, 2592, 1458 } },   /* 0:0: the size's own shape */
+        { 960, 720, 4, 3, 1280, 720, 8, { 0, 88, 960, 544 } },        /* to multiples of 8 */
+        { 1920, 1080, 16, 9, 0, 0, 2, { 0, 0, 1920, 1080 } },         /* no tile: all of it */
+    };
+    for (size_t i = 0; i < sizeof K / sizeof K[0]; ++i) {
+        vg_rect_t r = aspect_crop(K[i].sw, K[i].sh, (vg_ratio_t){ K[i].aw, K[i].ah }, K[i].tw, K[i].th, K[i].align);
+        CHECK(rect_eq(r, K[i].want), "crop %ux%u %u:%u for %ux%u: %d,%d %dx%d", K[i].sw, K[i].sh, K[i].aw, K[i].ah,
+              K[i].tw, K[i].th, r.x, r.y, r.w, r.h);
+    }
+
+    /* Every camera size and shape, every layout, every output: inside the
+     * picture, even, centred, all of it one way, and shown at the camera's
+     * shape it is the tile's shape, to within the rounding to 2 px. */
+    static const unsigned sizes[][2] = { { 2592, 1944 }, { 2560, 1440 }, { 1920, 1080 }, { 800, 448 }, { 704, 576 } };
+    static const vg_ratio_t shapes[] = { { 0, 0 }, { 4, 3 }, { 16, 9 }, { 32, 9 }, { 1, 1 } };
+    static const unsigned outs[][2] = { { 1280, 720 }, { 1920, 1080 }, { 1280, 1024 }, { 1440, 900 } };
+    int bad = 0, cases = 0;
+    for (size_t o = 0; o < 4; ++o)
+        for (int n = 1; n <= 4; ++n)
+            for (int i = 0; i < n * n; ++i) {
+                vg_rect_t ui = cell(n, i, 1280, 720), t = aspect_map(&ui, 1280, 720, outs[o][0], outs[o][1], 2);
+                for (size_t z = 0; z < 5; ++z)
+                    for (size_t k = 0; k < 5; ++k) {
+                        unsigned sw = sizes[z][0], sh = sizes[z][1];
+                        vg_ratio_t a = shapes[k].w ? shapes[k] : (vg_ratio_t){ sw, sh };
+                        vg_rect_t r = aspect_crop(sw, sh, shapes[k], (unsigned)t.w, (unsigned)t.h, 2);
+                        ++cases;
+                        int in = r.x >= 0 && r.y >= 0 && r.x + r.w <= (int)sw && r.y + r.h <= (int)sh && r.w > 0 &&
+                                 r.h > 0 && !(r.x & 1) && !(r.y & 1) && !(r.w & 1) && !(r.h & 1);
+                        int lm = r.x, rm = (int)sw - r.x - r.w, tm = r.y, bm = (int)sh - r.y - r.h;
+                        int centred = abs(lm - rm) <= 2 && abs(tm - bm) <= 2;
+                        int full = r.w == (int)sw || r.h == (int)sh;
+                        /* shown at a: (r.w / sw * a.w) : (r.h / sh * a.h) against t.w : t.h */
+                        double shown = (double)r.w * a.w * sh / ((double)r.h * a.h * sw), want = (double)t.w / t.h;
+                        int cut = r.w < (int)sw ? r.w : r.h;
+                        int shape = fabs(shown / want - 1) <= 2.0 / cut;
+                        if (!(in && centred && full && shape)) {
+                            if (bad < 10)
+                                fprintf(stderr, "  %ux%u %u:%u %dx%d #%d out %ux%u: %d,%d %dx%d for %dx%d\n", sw,
+                                        sh, a.w, a.h, n, n, i, outs[o][0], outs[o][1], r.x, r.y, r.w, r.h, t.w, t.h);
+                            ++bad;
+                        }
+                    }
+            }
+    CHECK(bad == 0, "%d of %d crops wrong", bad, cases);
+}
+
 /* ---- au_norm --------------------------------------------------------------- */
 
 typedef struct { int n, keys; size_t len; int sps_count; uint8_t last[1 << 20]; } sink_t;
@@ -396,6 +467,80 @@ static void test_au_norm(void)
 
     au_norm_free(&a);
     free(b);
+}
+
+/* ---- GOP cache ------------------------------------------------------------- */
+
+static vg_au_t gop_test_au(uint8_t *buf, size_t len, int n, int key)
+{
+    memset(buf, n & 0xff, len);
+    return (vg_au_t){ .codec = VG_CODEC_H264, .data = buf, .len = len, .pts_us = 1000u * (unsigned)n, .key = key };
+}
+
+static void test_gop_cache(void)
+{
+    static uint8_t buf[200000];
+    gop_cache_t g;
+    gop_cache_init(&g, 1u << 20);
+    CHECK(gop_cache_used() == 0, "nothing held at first");
+
+    /* Nothing before a keyframe; then the keyframe and every AU after it,
+     * in order, as they came. */
+    vg_au_t au = gop_test_au(buf, 100, 1, 0);
+    CHECK(gop_cache_add(&g, &au, 1) == GOP_IDLE && !gop_cache_ready(&g), "no keyframe yet: nothing kept");
+    for (int i = 0; i < 30; ++i) {
+        au = gop_test_au(buf, 1000 + (size_t)i * 100, i, i == 0);
+        CHECK(gop_cache_add(&g, &au, 1) == GOP_KEPT, "AU %d kept", i);
+    }
+    CHECK(gop_cache_ready(&g) && g.n == 30, "a GOP of 30 (%u)", g.n);
+    int order = 1;
+    for (unsigned i = 0; i < g.n; ++i) {
+        vg_au_t o;
+        gop_cache_get(&g, i, &o);
+        order &= o.len == 1000 + i * 100 && o.data[0] == i && o.data[o.len - 1] == i &&
+                 o.pts_us == 1000u * i && o.key == (i == 0) && o.codec == VG_CODEC_H264;
+    }
+    CHECK(order, "replayed in order, keyframe first, data and times intact");
+    size_t held = gop_cache_used();
+    CHECK(held >= g.len && held <= 1u << 20, "held %zu for %zu bytes", held, g.len);
+
+    /* The next keyframe starts over in the same memory. */
+    au = gop_test_au(buf, 500, 40, 1);
+    CHECK(gop_cache_add(&g, &au, 1) == GOP_KEPT && g.n == 1 && gop_cache_used() == held,
+          "a keyframe starts over, no new memory (%u, %zu)", g.n, gop_cache_used());
+
+    /* Over the cap: dropped, its memory given back, nothing kept until
+     * the next keyframe. */
+    int rc = GOP_KEPT, i;
+    for (i = 0; i < 20 && rc == GOP_KEPT; ++i) {
+        au = gop_test_au(buf, sizeof buf, i, 0);
+        rc = gop_cache_add(&g, &au, 1);
+    }
+    CHECK(rc == GOP_OVER_CAP && i == 6 && !gop_cache_ready(&g) && gop_cache_used() == 0,
+          "over 1 MiB: dropped after %d AUs, %zu held", i, gop_cache_used());
+    au = gop_test_au(buf, 100, 1, 0);
+    CHECK(gop_cache_add(&g, &au, 1) == GOP_IDLE && !gop_cache_ready(&g), "then nothing until a keyframe");
+    au = gop_test_au(buf, 100, 2, 1);
+    CHECK(gop_cache_add(&g, &au, 1) == GOP_KEPT && gop_cache_ready(&g), "a keyframe: kept again");
+
+    /* A new SPS without a keyframe: not a GOP a decoder could start. */
+    au = gop_test_au(buf, 100, 3, 0);
+    CHECK(gop_cache_add(&g, &au, 2) == GOP_OVER_CAP && !gop_cache_ready(&g), "stream changed mid-GOP: dropped");
+
+    /* The budget, shared: a second cache cannot take what the first holds. */
+    gop_cache_t h;
+    gop_cache_init(&h, 1u << 20);
+    gop_cache_set_budget(300000);
+    au = gop_test_au(buf, 150000, 1, 1);
+    CHECK(gop_cache_add(&g, &au, 1) == GOP_KEPT, "first cache within the budget");
+    au = gop_test_au(buf, 150000, 2, 1);
+    CHECK(gop_cache_add(&h, &au, 1) == GOP_OVER_BUDGET && !gop_cache_ready(&h) &&
+              gop_cache_used() <= 300000, "second over the budget: dropped (%zu used)", gop_cache_used());
+    gop_cache_free(&g);
+    CHECK(gop_cache_add(&h, &au, 1) == GOP_KEPT, "the first freed: the second fits");
+    gop_cache_free(&h);
+    gop_cache_set_budget(GOP_CACHE_BUDGET);
+    CHECK(gop_cache_used() == 0, "all given back (%zu)", gop_cache_used());
 }
 
 /* ---- RTP depacketizer -------------------------------------------------------- */
@@ -1583,6 +1728,11 @@ static pthread_mutex_t g_dec_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_dec_slots;                     /* decoders the fake platform has */
 static int g_dec_open[CHANNEL_MAX];         /* channel holds one */
 static int g_dec_opens[CHANNEL_MAX], g_dec_fails[CHANNEL_MAX], g_dec_sent[CHANNEL_MAX];
+/* How decoders start: the first AU after each open not a keyframe (never
+ * right), and opens while the camera was well into a GOP (from a GOP
+ * cache: at a keyframe the camera's count is 0). */
+static int g_dec_first[CHANNEL_MAX], g_dec_bad_start[CHANNEL_MAX], g_dec_mid_gop[CHANNEL_MAX];
+static atomic_int g_cam_since_key[2];       /* the fake camera's, [0] main, [1] extra */
 
 static int dec_count(int *a, int ch)
 {
@@ -1601,15 +1751,18 @@ int hal_dec_open(int ch, vg_codec_t c, const vg_stream_info_t *si)
     int ok = used < g_dec_slots;
     g_dec_open[ch] = ok;
     ++*(ok ? &g_dec_opens[ch] : &g_dec_fails[ch]);
+    g_dec_first[ch] = ok;
+    if (ok && atomic_load(&g_cam_since_key[si->width == 640]) > 3) ++g_dec_mid_gop[ch];
     pthread_mutex_unlock(&g_dec_lock);
     return ok ? 0 : -1;
 }
 int hal_dec_send(int ch, const vg_au_t *au)
 {
-    (void)au;
     pthread_mutex_lock(&g_dec_lock);
     int ok = g_dec_open[ch];
     g_dec_sent[ch] += ok;
+    if (ok && g_dec_first[ch]) g_dec_bad_start[ch] += !au->key;
+    g_dec_first[ch] = 0;
     pthread_mutex_unlock(&g_dec_lock);
     return ok ? 0 : -1;
 }
@@ -1621,23 +1774,27 @@ void hal_dec_close(int ch)
     pthread_mutex_unlock(&g_dec_lock);
 }
 
-static vg_ratio_t g_aspect_at[CHANNEL_MAX]; /* hal_display_set_aspect, last */
-static int        g_aspect_sets[CHANNEL_MAX];
-void hal_display_set_aspect(int ch, unsigned w, unsigned h)
+static vg_ratio_t  g_aspect_at[CHANNEL_MAX]; /* hal_display_set_aspect, last */
+static vg_aspect_t g_aspect_how[CHANNEL_MAX];
+static int         g_aspect_sets[CHANNEL_MAX];
+void hal_display_set_aspect(int ch, unsigned w, unsigned h, vg_aspect_t how)
 {
     pthread_mutex_lock(&g_dec_lock);
     g_aspect_at[ch] = (vg_ratio_t){ w, h };
+    g_aspect_how[ch] = how;
     ++g_aspect_sets[ch];
     pthread_mutex_unlock(&g_dec_lock);
 }
 
-static int aspect_now(int ch, unsigned w, unsigned h)
+static int aspect_is(int ch, unsigned w, unsigned h, vg_aspect_t how)
 {
     pthread_mutex_lock(&g_dec_lock);
-    int v = g_aspect_sets[ch] && g_aspect_at[ch].w == w && g_aspect_at[ch].h == h;
+    int v = g_aspect_sets[ch] && g_aspect_at[ch].w == w && g_aspect_at[ch].h == h && g_aspect_how[ch] == how;
     pthread_mutex_unlock(&g_dec_lock);
     return v;
 }
+
+static int aspect_now(int ch, unsigned w, unsigned h) { return aspect_is(ch, w, h, VG_ASPECT_FIT); }
 
 static vg_rect_t g_tile_at[CHANNEL_MAX];    /* w == 0: cleared */
 static int       g_tile_sets[CHANNEL_MAX], g_tile_clears[CHANNEL_MAX];
@@ -1809,6 +1966,8 @@ static void *cam_client(void *arg)
             memcpy(m, key ? ihead : phead, hl - 4);
             put_le32(m + hl - 4, len);
             if (cam_send(fd, 1412, m, hl + len) < 0) goto out_msg;
+            if (key) atomic_store(&g_cam_since_key[extra], 0);
+            else atomic_fetch_add(&g_cam_since_key[extra], 1);
             len = 0;
             key = 0;
             usleep(10 * 1000);
@@ -2014,23 +2173,26 @@ static void test_channel_substream(void)
     CHECK(view_is(0, "main", 1920), "full screen: the main stream decodes");
     CHECK(atomic_load(&g_cam.streaming[0]) == 1, "still one main connection");
 
-    /* Back to 2x2 within the sub-stream's linger: no new connection. */
+    /* Back to 2x2: the sub-stream's connection was never dropped. */
     channels_set_tiles(quad);
     WAIT_FOR(view_is(0, "sub", 640), 5000);
     CHECK(view_is(0, "sub", 640), "2x2 again: the sub-stream");
     CHECK(atomic_load(&g_cam.streaming[1]) == 1, "the sub-stream's connection was kept");
 
-    /* Off screen: no decoder, and the sub-stream goes after its linger;
-     * the main stream and its recording stay. */
+    /* Off screen: no decoder; both streams stay connected, the main one
+     * recording. */
     channels_set_tiles(none);
-    WAIT_FOR(atomic_load(&g_cam.streaming[1]) == 0, 9000);
+    WAIT_FOR(!dec_count(g_dec_open, 0), 3000);
+    usleep(300 * 1000);
     channels_status(0, &st);
     CHECK(!st.decoding && !dec_count(g_dec_open, 0) && !st.view[0], "hidden: not decoding ('%s')", st.view);
-    CHECK(atomic_load(&g_cam.streaming[1]) == 0 && atomic_load(&g_cam.streaming[0]) == 1,
-          "hidden: the sub-stream's connection is gone, the main one stays");
+    CHECK(atomic_load(&g_cam.streaming[1]) == 1 && atomic_load(&g_cam.streaming[0]) == 1 &&
+              st.sub_status == CH_LIVE && st.main_status == CH_LIVE,
+          "hidden: both connections stay (main %d, extra %d)", atomic_load(&g_cam.streaming[0]),
+          atomic_load(&g_cam.streaming[1]));
     channels_set_tiles(quad);
     WAIT_FOR(view_is(0, "sub", 640), 5000);
-    CHECK(view_is(0, "sub", 640), "shown again: the sub-stream comes back");
+    CHECK(view_is(0, "sub", 640), "shown again: the sub-stream decodes");
 
     /* An explicit sub_url wins, and changing it restarts only the
      * sub-stream. */
@@ -2054,9 +2216,65 @@ static void test_channel_substream(void)
     if (system(cmd)) {}
 }
 
+/* Full screen and back, and off screen and back: each time the stream
+ * wanted decodes from the GOP it kept, without waiting for the camera's
+ * next keyframe, every decoder starting at a keyframe all the same. */
+static void test_channel_instant_switch(void)
+{
+    int port = cam_start("majestic_1080p.h265", "testsrc_640x360.h264");
+    if (!port) return;
+    char url[64];
+    snprintf(url, sizeof url, "netip://127.0.0.1:%d/?ch=0&stream=main", port);
+    g_fake_caps.dec_shown_only = 1;
+    g_dec_slots = 2;
+    channels_set_screen(1280, 720);
+    vg_rect_t quad[CHANNEL_MAX] = { { 0, 40, 640, 300 } };
+    vg_rect_t full[CHANNEL_MAX] = { { 0, 40, 1280, 600 } };
+    vg_rect_t none[CHANNEL_MAX] = { { 0 } };
+    channels_config_t cc = { .urls = { url }, .n = 1, .seg_secs = 60 };
+    CHECK(channels_start(&cc, quad) == 0, "start");
+    WAIT_FOR(view_is(0, "sub", 640), 5000);
+    CHECK(view_is(0, "sub", 640), "2x2: the sub-stream");
+    pthread_mutex_lock(&g_dec_lock);
+    g_dec_mid_gop[0] = g_dec_bad_start[0] = 0;
+    pthread_mutex_unlock(&g_dec_lock);
+
+    int opens = dec_count(g_dec_opens, 0), ok = 1;
+    for (int i = 0; i < 6; ++i) {
+        usleep(300 * 1000);                 /* both GOPs kept again */
+        channels_set_tiles(i % 3 == 2 ? none : full);
+        if (i % 3 == 2) {
+            WAIT_FOR(!dec_count(g_dec_open, 0), 2000);
+            usleep(300 * 1000);
+        } else {
+            WAIT_FOR(view_is(0, "main", 1920), 2000);
+            ok &= view_is(0, "main", 1920);
+            usleep(300 * 1000);
+        }
+        channels_set_tiles(quad);
+        WAIT_FOR(view_is(0, "sub", 640), 2000);
+        ok &= view_is(0, "sub", 640);
+    }
+    CHECK(ok, "every switch decoded the stream wanted");
+    int mid = dec_count(g_dec_mid_gop, 0), bad = dec_count(g_dec_bad_start, 0);
+    CHECK(dec_count(g_dec_opens, 0) - opens >= 10 && mid >= 3,
+          "decoders opened mid-GOP from the cache (%d of %d)", mid, dec_count(g_dec_opens, 0) - opens);
+    CHECK(bad == 0, "every decoder started at a keyframe (%d did not)", bad);
+    CHECK(atomic_load(&g_cam.streaming[0]) == 1 && atomic_load(&g_cam.streaming[1]) == 1,
+          "one connection per stream all along");
+
+    channels_stop();
+    CHECK(gop_cache_used() == 0, "stopped: every GOP given back (%zu)", gop_cache_used());
+    cam_stop();
+    channels_set_screen(0, 0);
+    g_fake_caps.dec_shown_only = 0;
+    g_dec_slots = 0;
+}
+
 /* A 16:9 camera whose sub-stream is anamorphic D1 (704x576, claiming square
  * pixels): the sub-stream is shown at the main stream's 16:9, before and
- * after a switch to full screen; stretch, at once 0:0. */
+ * after a switch to full screen; stretch, at once 0:0; fill, at once at
+ * 16:9. */
 static void test_channel_aspect(void)
 {
     int port = cam_start("majestic_1080p.h265", "testsrc_704x576.h264");
@@ -2073,9 +2291,11 @@ static void test_channel_aspect(void)
     WAIT_FOR(view_is(0, "sub", 704) && aspect_now(0, 16, 9), 6000);
     CHECK(view_is(0, "sub", 704) && aspect_now(0, 16, 9), "the D1 sub-stream at the main stream's 16:9 (%u:%u)",
           g_aspect_at[0].w, g_aspect_at[0].h);
-    channels_set_stretch(1);
-    CHECK(aspect_now(0, 0, 0), "stretch: at once");
-    channels_set_stretch(0);
+    channels_set_aspect(VG_ASPECT_STRETCH);
+    CHECK(aspect_is(0, 0, 0, VG_ASPECT_STRETCH), "stretch: at once");
+    channels_set_aspect(VG_ASPECT_FILL);
+    CHECK(aspect_is(0, 16, 9, VG_ASPECT_FILL), "fill: at once, at the main stream's 16:9");
+    channels_set_aspect(VG_ASPECT_FIT);
     CHECK(aspect_now(0, 16, 9), "fit again");
     channels_set_tiles(full);
     WAIT_FOR(view_is(0, "main", 1920), 5000);
@@ -2159,15 +2379,16 @@ static void test_channel_stream_states(void)
     CHECK(!strcmp(st.title, "Front door") && !strcmp(st.name, "Front door"), "the camera's name: '%s' '%s'",
           st.title, st.name);
 
-    /* Full screen: the sub-stream's picture stays until it goes (its
-     * linger), then the tile says what the main stream does. */
+    /* Full screen: the main stream never comes to take over, so the
+     * sub-stream, connected all along, keeps the picture up; the main
+     * stream's failure is still said as its own. */
     channels_set_tiles(full);
-    usleep(500 * 1000);
-    CHECK(status_is(0, CH_LIVE, NULL), "full screen, the sub-stream still up: live");
-    WAIT_FOR(status_is(0, CH_ERROR, NULL), 9000);
+    usleep(1500 * 1000);
     channels_status(0, &st);
-    CHECK(st.status == CH_ERROR && !st.decoding && strstr(st.state, "monitor refused") && st.sub_status == CH_EMPTY,
-          "full screen: the main stream's error (%s '%s')", ch_state_name(st.status), st.state);
+    CHECK(st.status == CH_LIVE && st.decoding && !strcmp(st.view, "sub") && st.sub_status == CH_LIVE &&
+              st.main_status == CH_ERROR && strstr(st.main_state, "monitor refused"),
+          "full screen, main refused: the sub-stream's picture stays (%s '%s', view '%s', main %s)",
+          ch_state_name(st.status), st.state, st.view, ch_state_name(st.main_status));
 
     /* A configured name wins over the camera's. */
     cc.names[0] = "Gate";
@@ -2768,6 +2989,15 @@ static void test_ports(void)
     const char *w81 = "{\"listen\":\"0.0.0.0:81\"}";
     CHECK(config_put_json("web", w81, strlen(w81), &e) == CONFIG_EINVAL && !strcmp(e.e[0].path, "web.listen") &&
           strstr(e.e[0].msg, "in use") && !strcmp(g_lc_what, "web"), "web.listen onto a port in use: refused, why");
+    const char *o81 = "{\"enabled\":true,\"port\":81}", *o81off = "{\"enabled\":false,\"port\":81}";
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("onvif_server", o81, strlen(o81), &e) == CONFIG_EINVAL &&
+          !strcmp(e.e[0].path, "onvif_server.port") && !strcmp(g_lc_what, "onvif") && !strcmp(g_lc_listen, "81"),
+          "onvif_server.port onto a port in use: refused (%s)", e.n ? e.e[0].msg : "");
+    g_lc_what[0] = 0;
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("onvif_server", o81off, strlen(o81off), &e) == CONFIG_OK && !g_lc_what[0],
+          "ONVIF off: its port is not tried");
     g_lc_what[0] = 0;
     const char *api_same = "{\"listen\":\"0.0.0.0:8080\"}";
     memset(&e, 0, sizeof e);
@@ -2806,6 +3036,9 @@ static void test_display_config(void)
           !strcmp(c.display.name_position, "bottom-left") && !strcmp(c.display.name_background, "outline") &&
           !strcmp(c.display.icons_position, "bottom-right") && !strcmp(c.display.icons_background, "outline"),
           "display defaults: 720p60, an outlined clock at the top right, names bottom left, icons bottom right");
+    CHECK(c.display.rec_icon == 1 && c.display.alarm_icons == 1 && c.display.tile_dividers == 1 &&
+              c.display.alert_frame == 0,
+          "display defaults: REC and alarm icons, lines between tiles, no alarm frame");
 
     unsigned w = 0, h = 0, hz = 0;
     CHECK(config_output_mode("1920x1080@50", &w, &h, &hz) == 0 && w == 1920 && h == 1080 && hz == 50,
@@ -2824,7 +3057,10 @@ static void test_display_config(void)
                      "  clock_background: box\n"
                      "  name_position: \"off\"\n"
                      "  icons_position: top-left\n"
-                     "  icons_background: none\n");
+                     "  icons_background: none\n"
+                     "  rec_icon: false\n"
+                     "  tile_dividers: false\n"
+                     "  alert_frame: true\n");
     schema_errors_t e = { 0 };
     CHECK(config_load_file(path, &c, &e) == 0, "display read: %s %s", e.n ? e.e[0].path : "", e.n ? e.e[0].msg : "");
     CHECK(!strcmp(c.display.output, "1920x1080@60") && !strcmp(c.display.clock_position, "bottom-center") &&
@@ -2832,6 +3068,9 @@ static void test_display_config(void)
           !strcmp(c.display.name_position, "off") && !strcmp(c.display.name_size, "medium") &&
           !strcmp(c.display.icons_position, "top-left") && !strcmp(c.display.icons_background, "none"),
           "display as written, the rest defaults");
+    CHECK(!c.display.rec_icon && c.display.alarm_icons && !c.display.tile_dividers && c.display.alert_frame,
+          "display switches as written, alarm_icons by default: %d %d %d %d", c.display.rec_icon,
+          c.display.alarm_icons, c.display.tile_dividers, c.display.alert_frame);
 
     /* written back with its help, and read again the same */
     CHECK(config_save_file(path, &c, err, sizeof err) == 0, "save: %s", err);
@@ -2839,7 +3078,8 @@ static void test_display_config(void)
     CHECK(raw && strstr(raw, "\n# Display: The HDMI/VGA output") && strstr(raw, "\ndisplay:\n") &&
           strstr(raw, "  output: \"1920x1080@60\"\n") && strstr(raw, "  clock_background: box\n") &&
           strstr(raw, "  name_position: \"off\"\n") && strstr(raw, "  icons_background: none\n") &&
-          strstr(raw, "  # Clock background: outline: hard-edged text"),
+          strstr(raw, "  # Clock background: outline: hard-edged text") && strstr(raw, "  rec_icon: false\n") &&
+          strstr(raw, "  alarm_icons: true\n") && strstr(raw, "  alert_frame: true\n"),
           "display in the YAML, with its help:\n%s", raw ? raw : "");
     free(raw);
     vigil_config_t d;
@@ -2856,6 +3096,7 @@ static void test_display_config(void)
         { "display:\n  icons_position: \"off\"\n", "display.icons_position" },
         { "display:\n  clock_size: huge\n", "display.clock_size" },
         { "display:\n  name_background: shadow\n", "display.name_background" },
+        { "display:\n  alert_frame: sometimes\n", "display.alert_frame" },
     };
     for (size_t i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
         write_file(path, bad[i].yaml);
@@ -2895,6 +3136,7 @@ int main(int argc, char **argv)
     g_data = argc > 1 ? argv[1] : "tests/data";
     test_sps();
     test_au_norm();
+    test_gop_cache();
     test_depay();
     test_rtsp_read();
     test_rtsp_request();
@@ -2911,10 +3153,12 @@ int main(int argc, char **argv)
     test_aspect_ratio();
     test_aspect_fit();
     test_aspect_scaled();
+    test_aspect_fill();
     test_channel_tiles();
     test_channel_decode();
     test_sub_url();
     test_channel_substream();
+    test_channel_instant_switch();
     test_channel_aspect();
     test_netip_title_parse();
     test_channel_stream_states();

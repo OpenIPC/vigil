@@ -5,6 +5,7 @@
 #include "api.h"
 #include "config.h"
 #include "log.h"
+#include "onvif.h"
 #include "web.h"
 
 int api_start(void)
@@ -54,5 +55,22 @@ int web_listening(char *listen, size_t cap, char *why, size_t wcap)
 {
     if (listen && cap) listen[0] = 0;
     if (why) snprintf(why, wcap, "this vigild is built without the web server");
+    return 0;
+}
+
+int onvif_start(void)
+{
+    vigil_config_t c;
+    config_get(&c);
+    if (c.onvif_server.enabled) vg_log("onvif_server.enabled is on, but this vigild is built without the API");
+    return 0;
+}
+
+void onvif_stop(void) {}
+
+int onvif_listening(char *listen, size_t cap, char *why, size_t wcap)
+{
+    if (listen && cap) listen[0] = 0;
+    if (why) snprintf(why, wcap, "this vigild is built without the API");
     return 0;
 }

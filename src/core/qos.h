@@ -6,8 +6,8 @@
  * traffic:
  *
  *   QOS_VIDEO       the zero channel's picture (web.c's WebSocket)
- *   QOS_MANAGEMENT  the HTTP API, the web pages and logins, DDNS, camera
- *                   searches (broadcasts)
+ *   QOS_MANAGEMENT  the HTTP API, the web pages and logins, the ONVIF
+ *                   service and WS-Discovery, DDNS, camera searches
  *   QOS_CAMERA      vigild's connections to cameras: RTSP and NETIP
  *                   control, and the ACKs of the video they send
  *   QOS_ALARM       events: the API's event WebSocket, the alarm center's

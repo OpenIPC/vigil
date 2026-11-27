@@ -18,7 +18,9 @@ the camera's display aspect ratio (a sub-stream at its main stream's; see
 [architecture](../architecture.md), "The picture's shape"), centred, with
 black bars in the rest of the tile (`display.video_aspect: stretch`: the
 whole tile), and the decoder shrinks it to about the window's size (below,
-"Picture geometry").
+"Picture geometry"). In `fill` the window is the whole tile, the decoder
+shrinks the picture to about the size that covers it, and the display's
+zoom-in window shows the middle of that (below).
 
 The UI is drawn on the GOP framebuffer `/dev/fb0` above the video layer.
 fbdev.ko sets its size and format from `fbdev.ini` (1280x720, ARGB8888 on
@@ -53,7 +55,13 @@ new decoder is made beside the old one when the heap and `mi_vdec` have
 room for both, else the old one goes without the port being cleared, and
 the port keeps the old picture's size until a picture of the new size has
 reached it (`RecvBuf_W/H` in `/proc/mi_modules/mi_disp/mi_disp0`; set at
-once, the display read the old picture at the wrong size). In emulation
+once, the display read the old picture at the wrong size). A decoder made
+beside the old one holds a second `MI_VDEC` channel number until it goes
+on screen; when another channel needs a number and none is free, that
+takeover is finished at once (its port keeps the old picture until the
+new decoder's first), rather than the other channel saying "no decoder"
+until the core asks again 10 s later: with 4 numbers, a 2x2 page coming
+back from full screen ran into it every time. In emulation
 the new decoder's first picture comes about 5 s after the switch; an
 `MI_VDEC` channel bound to nothing decodes nothing there.
 
@@ -85,6 +93,20 @@ stretched, the picture keeps its shape: a 16:9 camera full screen at
 1280x1024 is 1280x720 with bars above and below. What the SDK's modules do,
 read off them:
 
+- **mi_disp**'s zoom-in window (`MI_DISP_SetZoomInWindow`) is a rectangle
+  of the port's source picture (`u16SrcWidth` x `u16SrcHeight`, the
+  decoder's output), every edge even (open_mhal's
+  `_HalDispIfGetInfoInputPortCrop` refuses odd ones); one outside the
+  source is dropped with only a log line. mi_disp keeps it and crops every
+  picture to it on its way to the MOP (`MHAL_DISP_InputPortSetCropAttr`:
+  the plane's address moved to the corner, the low four bits of x in the
+  window's ADDR16 field, the source size and the scaling ratios the
+  part's), whatever the picture's size, until it is given another: in
+  emulation the top left of a larger picture showed, enlarged, after a
+  fill tile went back to fit and then full screen. So vigild sets it at
+  every placement of a port, to all of the picture outside fill, as the
+  SDK's NVR demo ends a zoom (`st_main_vdec.c`). In fill the part is never
+  larger than the window, as the display only enlarges (next point).
 - **mi_disp** (open_mhal's `_HalDispIfSetInputPortAttr`, the MOP windows)
   only enlarges: a window larger than the port's source size gets the ratio
   source / window, a smaller one 1:1, so the picture's top left part shows
@@ -156,7 +178,19 @@ larger tile and full screen its main stream, and recording always takes
 the main stream ([architecture](../architecture.md)). Give RTSP cameras a
 `sub_url` (the vendor's second stream, e.g. `.../stream2` or
 `.../h264Preview_01_sub`): without one they decode their main stream in
-every tile.
+every tile. Both streams of every camera stay connected, and a switch
+between them (full screen and back, another page) opens the decoder at
+once from the GOP the stream kept, the whole GOP so far sent in one go
+([architecture](../architecture.md), "Main stream and sub-stream").
+`MI_VDEC_SendStream` takes it into the bitstream buffer in a few
+milliseconds (a 720p GOP of 500 KiB in a 1 MiB buffer); the decoder is in
+`E_MI_VDEC_DISPLAY_MODE_PREVIEW` and the display port in free-run, so what
+is decoded faster than the display shows is not shown. In emulation the
+first picture after the switch was the live one, without artefacts; what
+the board's VPU makes of a GOP burst (a few pictures shown fast, or only
+the last) is unverified. The caches take about 1 MiB per 720p main stream
+at 1.5 Mbit/s with a 3 s GOP and 128 KiB per sub-stream; all of them at
+most 24 MiB of the about 80 MiB Linux has.
 
 The bitstream buffer is sized as the SDK's decoder sample does (512 KiB up
 to D1, 1 MiB up to 1080p, 2 MiB above) and grows, with a new decoder, at a
@@ -309,6 +343,24 @@ frame: with the stock model a 1080-line stream came out 0.8 % too tall.
 Whether mi_disp on a board crops to the content as it does in emulation is
 unverified.
 
+Fill, also only in emulation (OpenIPC firmware image, four NETIP cameras
+with a test picture of a circle, a grid and a coloured band along each
+edge: 2592x1944 4:3 with a 704x576 sub-stream drawn at 4:3, 2560x1440 with
+800x448, 2048x1536 4:3 with a sub-stream coded 800x448 but drawn at 4:3,
+1920x1080 H.265 with a 704x576 H.265 one at 16:9), on qemu-bench's machine
+with a MOP model that reads the ADDR16 field (branch
+`sigmastar/i2m-mop-crop`; the stock model ignored it, and a crop whose x
+was not a multiple of 16 showed shifted by up to 15 source pixels, 4 to 10
+screen pixels at 1280x1024): in 2x2 and full screen at 1280x720 the 4:3
+cameras lost their top and bottom bands and the 16:9 ones nothing; at
+1280x1024 (5:4 tiles) the 16:9 cameras lost the sides, x offsets 20, 104,
+118 and 268. The circle stayed round (width over height 1.00 within 1 %)
+and centred in its tile to 2 pixels, mi_disp's `/proc` file listed the
+crops, and the zero channel's picture matched the screendump. Back to fit
+and stretch, the whole picture came back, full screen included. What a
+board's MOP does with the crop, and the zero channel's on a board, are
+unverified.
+
 The zero channel, also only in emulation (OpenIPC firmware image, the four
 NETIP cameras above at 10 pictures a second, a 2x2 live view at 720p, on
 qemu-bench's machine with the cursor plane model): headless Chrome logged
@@ -326,6 +378,21 @@ pictures from each decoder with a viewer as without. Emulated cores are
 not a board's: the time a picture takes on a Cortex-A7, whether the
 decoders' pictures are linear NV12 on a board too, and whether keeping
 one of them aside costs a board's decoder anything are unverified.
+
+Both streams connected and the switch from the GOP so far, also only in
+emulation (OpenIPC firmware image, four NETIP cameras with 720p main
+streams and 640x360 sub-streams, 10 pictures a second, a keyframe every
+3 s, three H.264 and one H.265; mi_vdec with 4 channel numbers; each of
+the four tiles of a 2x2 view full screen with Enter and back, twice): the
+eight connections stayed up through every switch (none was made again),
+the main stream's decoder opened 70 to 320 ms after the key (a median of
+1.9 s before, waiting for the keyframe) and back on the grid all four
+tiles had a new picture within 0.24 to 0.4 s (once 1.9 s; before, every
+sub-stream connected again, and the last channel back often had no
+decoder number for 10 s). The full-screen picture itself still came about
+6 s after the key, as before: the emulated machine stops for 4 to 6 s
+whenever a 720p decoder is made. vigild's resident memory went from 3.5
+to 7.8 MiB.
 
 The HDMI and VGA signals, hot-plug and decoder limits are unverified on
 hardware.

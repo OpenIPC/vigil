@@ -8,7 +8,9 @@
  *   -> channels_start (one thread per camera: source -> decode + record)
  *   -> mgmt_start (the management pages' jobs and timers: network
  *      rollback, NTP, DDNS, network storage, alarm center, mail)
- *   -> api_start (HTTP/WebSocket API on its own threads, if configured)
+ *   -> api_start (HTTP/WebSocket API on its own threads, if configured),
+ *      web_start (the zero channel), onvif_start (the ONVIF server and
+ *      WS-Discovery, while onvif_server.enabled)
  *   -> frontend_run (LVGL quad view, or status lines when headless); on
  *      this thread, a configuration the API saved is applied
  *      (channels_apply)
@@ -36,6 +38,7 @@
 #include "mgmt.h"
 #include "net.h"
 #include "source.h"
+#include "onvif.h"
 #include "web.h"
 
 static volatile sig_atomic_t g_stop;
@@ -231,6 +234,12 @@ static char     g_api_listen[64];
 static char     g_web_listen[64];
 static char     g_output[16];           /* display.output last applied */
 
+/* display.video_aspect, as the channels take it */
+static vg_aspect_t video_aspect(const char *v)
+{
+    return !strcmp(v, "stretch") ? VG_ASPECT_STRETCH : !strcmp(v, "fill") ? VG_ASPECT_FILL : VG_ASPECT_FIT;
+}
+
 /* display.output, when it changed in the file (the API, the UI's Keep):
  * the output follows. The UI tries a mode before it saves it (its "keep
  * this resolution?"), so a mode the output already runs at is left as
@@ -295,7 +304,8 @@ static int listen_check(const char *what, const char *listen, char *err, size_t 
 {
     char cur[64] = "";
     if (!strcmp(what, "api")) api_listening(cur, sizeof cur, NULL, 0);
-    else web_listening(cur, sizeof cur, NULL, 0);
+    else if (!strcmp(what, "web")) web_listening(cur, sizeof cur, NULL, 0);
+    else onvif_listening(cur, sizeof cur, NULL, 0);
     if (cur[0] && config_listen_port(cur) == config_listen_port(listen)) return 0;
     return net_listen_check(listen, err, cap);
 }
@@ -313,7 +323,7 @@ static void apply_config(void)
     apply_qos(&c);
     int failed = channels_apply(&cc);
     apply_output(c.display.output);
-    channels_set_stretch(!strcmp(c.display.video_aspect, "stretch"));
+    channels_set_aspect(video_aspect(c.display.video_aspect));
     g_applied_gen = gen;
     config_mark_applied(gen);
     if (failed) {
@@ -463,7 +473,7 @@ int main(int argc, char **argv)
     vg_rect_t tiles[CHANNEL_MAX];
     frontend_tiles(tiles, CHANNEL_MAX);
     channels_set_screen(SCREEN_W, SCREEN_H);
-    channels_set_stretch(!strcmp(cfg.display.video_aspect, "stretch"));
+    channels_set_aspect(video_aspect(cfg.display.video_aspect));
     int rc = 1;
     static vigil_config_t running;      /* channels_config_t points into it */
     g_applied_gen = config_get(&running);
@@ -478,7 +488,9 @@ int main(int argc, char **argv)
         disc_set_max_channels(caps->max_channels);
         api_start();                    /* failing to start it is logged, not fatal */
         web_start();                    /* the same */
+        onvif_start();                  /* the same */
         rc = frontend_run(run_secs, &g_stop, apply_config) < 0 ? 1 : 0;
+        onvif_stop();
         web_stop();
         api_stop();
         disc_shutdown();

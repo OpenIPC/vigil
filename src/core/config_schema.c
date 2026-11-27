@@ -253,7 +253,7 @@ static const char *const corners_off[] = { "off", "top-left", "top-right", "bott
 static const char *const corners[] = { "top-left", "top-right", "bottom-left", "bottom-right", NULL };
 static const char *const osd_sizes[] = { "small", "medium", "large", "xlarge", NULL };
 static const char *const osd_backgrounds[] = { "outline", "none", "box", NULL };
-static const char *const video_aspects[] = { "fit", "stretch", NULL };
+static const char *const video_aspects[] = { "fit", "stretch", "fill", NULL };
 
 int config_output_mode(const char *s, unsigned *w, unsigned *h, unsigned *hz)
 {
@@ -460,7 +460,9 @@ static const schema_field_t display_fields[] = {
       .label = "Video aspect",
       .help = "fit: each picture keeps its shape inside its tile or the full screen, with black bars "
               "where the shapes differ; a sub-stream (704x576, 352x288, ...) is shown at its main "
-              "stream's shape. stretch: the picture fills the tile." },
+              "stream's shape. stretch: the picture fills the tile, whatever its shape. fill: the picture "
+              "keeps its shape and covers the whole tile, what overflows cut off (a 4:3 camera in a 16:9 "
+              "tile loses a strip at the top and at the bottom)." },
     { .key = "clock_position", ENUM(config_display_t, clock_position, clock_positions), .def_str = "top-right",
       .live = 1, .label = "Clock",
       .help = "Where the date and time are on the live view; their format is ui.date_format and "
@@ -481,6 +483,17 @@ static const schema_field_t display_fields[] = {
               "just above the name (below it at the top)." },
     { .key = "icons_background", ENUM(config_display_t, icons_background, osd_backgrounds),
       .def_str = "outline", .live = 1, .label = "Status icons background", .help = OSD_BG_HELP },
+    { .key = "rec_icon", BOOL(config_display_t, rec_icon), .def_int = 1, .live = 1, .label = "REC icon",
+      .help = "REC in the status icons' corner of each tile while its channel records." },
+    { .key = "alarm_icons", BOOL(config_display_t, alarm_icons), .def_int = 1, .live = 1, .label = "Alarm icons",
+      .help = "The events the camera reports (motion, human, face, vehicle) as icons in the status "
+              "icons' corner, while they last." },
+    { .key = "tile_dividers", BOOL(config_display_t, tile_dividers), .def_int = 1, .live = 1,
+      .label = "Lines between tiles",
+      .help = "A thin line around each tile of the live view. Off: the pictures touch." },
+    { .key = "alert_frame", BOOL(config_display_t, alert_frame), .def_int = 0, .live = 1, .label = "Alarm frame",
+      .help = "A red frame, blinking, inside the edge of a tile while its camera reports an event "
+              "(the alarm icons' events); none otherwise." },
 };
 
 static const schema_field_t api_fields[] = {
@@ -535,6 +548,18 @@ static const schema_field_t discovery_fields[] = {
               "NETIP names both streams, ONVIF asks the camera, Dahua's RTSP path is fixed." },
 };
 
+static const schema_field_t onvif_server_fields[] = {
+    { .key = "enabled", BOOL(config_onvif_server_t, enabled), .def_int = 1, .live = 1, .label = "On",
+      .help = "Be an ONVIF device for video management software and other recorders: a profile "
+              "for each camera's main and sub-stream with its RTSP address, and WS-Discovery "
+              "so they find this recorder (docs/onvif.md). They log in as vigil's users; the "
+              "video needs the live permission." },
+    { .key = "port", INT(config_onvif_server_t, port), .def_int = 8899, .min = 1, .max = 65535, .live = 1,
+      .label = "Port",
+      .help = "TCP port of its web service, whose device service is /onvif/device_service (port "
+              "80 is the zero channel's). Discovery tells clients which port it is." },
+};
+
 /* ---- QoS ------------------------------------------------------------------------- */
 
 static const char *const qos_types[] = { "off", "standard", "custom", NULL };
@@ -552,7 +577,8 @@ static const schema_field_t qos_fields[] = {
     DSCP("video", video, 34, "Video DSCP",
          "With type custom: the zero channel's picture (web.listen's WebSocket)."),
     DSCP("management", management, 16, "Management DSCP",
-         "With type custom: the HTTP API, the web pages and logins, DDNS, camera searches."),
+         "With type custom: the HTTP API, the web pages and logins, the ONVIF service and its "
+         "WS-Discovery, DDNS, camera searches."),
     DSCP("camera", camera, 34, "Camera DSCP",
          "With type custom: vigild's connections to cameras, RTSP and NETIP control and the ACKs of "
          "their video; a connection open when this changes is marked at once."),
@@ -578,7 +604,7 @@ void config_to_qos(const vigil_config_t *c, int dscp[QOS_CLASSES])
     }
 }
 
-/* ---- ports of the servers to come ---------------------------------------------- */
+/* ---- ports of vigild's servers ---------------------------------------------------- */
 
 #define SERVER_PORT(NAME, WHAT, DEF, HELP) \
     static const schema_field_t NAME[] = { \
@@ -586,9 +612,6 @@ void config_to_qos(const vigil_config_t *c, int dscp[QOS_CLASSES])
           .label = WHAT " port", .help = HELP " vigild has no " WHAT " server yet: the port is kept for it, " \
                                          "and no other of vigild's servers may take it." } }
 SERVER_PORT(rtsp_server_fields, "RTSP", 554, "The cameras' streams, served again to players and other recorders.");
-/* 80 is the web server's (web.listen); 8899 is where XM/NETIP cameras,
- * whose protocol vigild speaks, answer ONVIF. */
-SERVER_PORT(onvif_server_fields, "ONVIF", 8899, "ONVIF for video management software.");
 SERVER_PORT(netip_server_fields, "NETIP", 34567, "XM's NETIP (CMS, VMS), as XM recorders have it.");
 
 int config_listen_port(const char *listen)
@@ -654,10 +677,10 @@ static const schema_section_t sections[] = {
     OBJECT("web", web, web_fields, "Zero channel"),
     { .key = "discovery", .off = offsetof(vigil_config_t, discovery), .fields = discovery_fields,
       .n_fields = N(discovery_fields), .label = "Camera search" },
+    OBJECT("onvif_server", onvif_server, onvif_server_fields, "ONVIF server"),
     { .key = "qos", .off = offsetof(vigil_config_t, qos), .fields = qos_fields, .n_fields = N(qos_fields),
       .label = "QoS", .help = "DSCP marking of vigild's packets, so that the network can prioritise them." },
     OBJECT("rtsp_server", rtsp_server, rtsp_server_fields, "RTSP server"),
-    OBJECT("onvif_server", onvif_server, onvif_server_fields, "ONVIF server"),
     OBJECT("netip_server", netip_server, netip_server_fields, "NETIP server"),
 };
 

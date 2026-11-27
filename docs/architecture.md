@@ -125,8 +125,10 @@ pictures after it would refer to a picture the decoder never got.
 
 A camera can have a second session: its **sub-stream** (`sub_url`, or for
 NETIP the same URL with `stream=extra`), a second thread with its own
-source and normalizer. The main session above always runs: the camera's
-events follow it, and it records. Each session keeps its own state; the
+source and normalizer. Both sessions run, and reconnect with the same
+back-off, for as long as the channel does, whatever is on screen: the main
+one carries the camera's events and the recording, the sub-stream is there
+the moment a small tile wants it. Each session keeps its own state; the
 channel's status is the state of the one whose picture is on screen (the
 decoder's holder, else the one the tile waits for), and the status carries
 the main and the sub-stream's states besides, so a main stream that fails
@@ -136,13 +138,26 @@ decoded (`channels_set_tiles`): a tile of a quarter of the screen or less
 shows the sub-stream, a larger one or full screen the main stream; a
 channel off screen, where the platform's decoders are scarce
 (`dec_shown_only`), neither. The channel's one decoder belongs to one
-session at a time: the wanted one takes it over at its first keyframe and
-the other keeps feeding it until then, so the picture stays up through a
-switch. The sub-session starts when its tile becomes small and ends 5 s
-after it no longer is, so layouts flipped back and forth keep the
-connection. A camera has at most two connections; full screen, the display
-and the recording share the main one. A view change never touches the main
-session, so recording goes on in the same segment.
+session at a time, and the wanted one takes it over at once, without
+waiting for its camera's next keyframe (1-4 s on most cameras): each
+session keeps the GOP it is in (`gop_cache.c`: the access units since the
+last keyframe, as `au_norm` hands them out), the sub-stream always and the
+main stream while its tile is on screen (only such a tile can go full
+screen). At its next access unit after the view changes the wanted session
+opens the decoder at the cached keyframe, feeds it the GOP so far and goes
+on live; the platform decodes the cached pictures as fast as it can, so
+the picture runs fast up to the present for a moment. Full screen and
+back, another page or layout all switch that way. Without a GOP to start
+from (dropped, or the stream just connected) the wanted session takes the
+decoder at its keyframe as before, and the other keeps feeding it until
+then, so the picture stays up through a switch; a channel that comes on
+screen full size, whose main stream's GOP was not kept, shows its
+sub-stream's meanwhile. A GOP may take 1 MiB (sub-stream) or 4 MiB (main
+stream), and all of them 24 MiB (`GOP_CACHE_BUDGET`): one that outgrows
+either is dropped until the next keyframe, and a switch to it waits for
+that keyframe. A camera has at most two connections; full screen, the
+display and the recording share the main one. A view change never touches
+the main session, so recording goes on in the same segment.
 
 A decoder the platform cannot give (out of media memory or decoder
 channels) is retried after 10 s, or as soon as another channel closes its
@@ -163,8 +178,11 @@ sample aspect ratio its SPS's VUI gives (1:1 when it gives none). A ratio
 within 2 % of a common one (16:9, 4:3, 16:10, 5:4, 3:2, 1:1, 2:1, 32:9) is
 taken as that one: 800x448 or an uncropped 1920x1088 is 16:9. The core
 tells the platform the ratio before a decoder opens and whenever it
-changes (`hal_display_set_aspect`); `display.video_aspect: stretch` makes
-it 0:0, the picture filling the tile.
+changes (`hal_display_set_aspect`), with how the picture fills the tile:
+`display.video_aspect: stretch` stretches it over the tile whatever its
+shape, and `fill` keeps its shape and covers the whole tile, the part that
+overflows cut off, centred (`aspect_crop`: a 4:3 camera in a 16:9 tile
+loses a strip at the top and at the bottom).
 
 ### Recording
 
@@ -296,13 +314,20 @@ the API (`api_disc.c`) and the UI (through `ui_model.h`) start them and
 read their state. Formats, sources and the protocol matrix are in
 `disc_proto.h`, `disc_ops.h` and [api.md](api.md#discovery).
 
+The other way round, the **ONVIF server** (`src/api/onvif.c`,
+[onvif.md](onvif.md)) makes the recorder an ONVIF device for VMS: like
+the API it only reads snapshots (`channels_status` gives each stream's
+codec and size, `config_get`), its wire formats are pure functions in
+`src/core/onvif_proto.c`, and the camera search skips its WS-Discovery
+answers by their endpoint reference (`disc_set_self`).
+
 ## The HAL
 
 | Header | What the platform does |
 |---|---|
 | `hal.h` | `hal_init(w, h, out)` brings up the media system and the output (a w x h screen sent out at mode `out` where the platform can); `hal_caps()` says what is there (display, decoder and its maximum size, number of channels, capture inputs); `hal_shutdown()`. |
 | `hal_decoder.h` | One hardware decoder per channel: open for a codec, size and reference count; send an AU; reset after a reconnect; close. Decoded pictures go to that channel's tile without passing through the core. |
-| `hal_display.h` | Where each channel's tile is on the screen, and the display aspect ratio its picture is fitted inside it at (`aspect_fit`), or stretched. The output modes it can switch to, the one in force, and a switch while running (the screen keeps its size, scaled to the mode). |
+| `hal_display.h` | Where each channel's tile is on the screen, and the display aspect ratio its picture is fitted inside it at (`aspect_fit`), stretched over it, or covering it with the overflow cut off (`aspect_crop`). The output modes it can switch to, the one in force, and a switch while running (the screen keeps its size, scaled to the mode). |
 | `hal_capture.h` | Local inputs: start input N in tile `ch` (the platform shows it itself) and deliver its *encoded* AUs to a callback for recording. |
 | `hal_ui.h` | Create the LVGL display on the graphics layer above the video, and say how the UI makes a tile transparent (a colour key, or alpha). |
 
@@ -374,6 +399,10 @@ adding a platform is covered in [porting.md](porting.md).
   scan, merge, address changes over each protocol with wrong and right
   passwords, a dry run, adding to a channel, auto-add, the rate limit and
   that no password leaks.
+- `onvif`: SOAP requests, UsernameToken and HTTP Digest (published
+  vectors), WS-Discovery probes and their matching, our ProbeMatches as
+  the camera search reads them; each request cut at every length.
+  `onvif_e2e`: `vigild`'s ONVIF server as a client sees it.
 - `theme_tokens`: the generated `theme_tokens.h` and `web/theme.css` match
   `src/ui/theme.json`.
 - `ui_screens`: the UI on an in-memory display, driven through the evdev

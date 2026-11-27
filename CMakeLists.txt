@@ -67,8 +67,10 @@ add_library(vigil_core STATIC
   src/core/disc_proto.c
   src/core/discovery.c
   src/core/events.c
+  src/core/gop_cache.c
   src/core/md5.c
   src/core/net.c
+  src/core/onvif_proto.c
   src/core/qos.c
   src/core/schema.c
   src/core/schema_yaml.c

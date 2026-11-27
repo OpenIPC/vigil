@@ -135,7 +135,7 @@ typedef struct {
 /* The HDMI/VGA output and what the live view draws over the video. */
 typedef struct {
     char output[16];                /* "1920x1080@60" (config_output_mode) */
-    char video_aspect[8];           /* "fit" | "stretch" */
+    char video_aspect[8];           /* "fit" | "stretch" | "fill" */
     char clock_position[16];        /* "off" | "top-left" | "top-center" | ... | "bottom-right" */
     char clock_size[8];             /* "small" | "medium" | "large" | "xlarge" */
     char clock_background[8];       /* "outline" | "none" | "box" */
@@ -144,6 +144,11 @@ typedef struct {
     char name_background[8];
     char icons_position[16];        /* a tile corner */
     char icons_background[8];
+    /* What the tiles show besides the video (booleans). */
+    int  rec_icon;                  /* REC while the channel records */
+    int  alarm_icons;               /* the camera's events (motion, human, face, vehicle) */
+    int  tile_dividers;             /* a line between the tiles */
+    int  alert_frame;               /* a frame around a tile while its camera reports an event */
 } config_display_t;
 
 typedef struct {
@@ -166,14 +171,20 @@ typedef struct {
     char prefer[32];                /* "netip,onvif,dhip" */
 } config_discovery_t;
 
+/* vigild as an ONVIF device (src/api/onvif.c, docs/onvif.md). */
+typedef struct {
+    int  enabled;
+    int  port;                      /* its web service; WS-Discovery is UDP 3702 */
+} config_onvif_server_t;
+
 /* DSCP marking of vigild's packets (qos.h). */
 typedef struct {
     char type[12];                  /* "off" | "standard" | "custom" */
     int  video, management, camera, alarm;     /* custom: DSCP 0..63 */
 } config_qos_t;
 
-/* A server vigild is to have (RTSP, ONVIF, NETIP): its port, kept and
- * checked against the others before the server exists. */
+/* A server vigild is to have (RTSP, NETIP): its port, kept and checked
+ * against the others before the server exists. */
 typedef struct {
     int port;
 } config_server_t;
@@ -197,8 +208,9 @@ typedef struct {
     config_api_t    api;
     config_web_t    web;
     config_discovery_t discovery;
+    config_onvif_server_t onvif_server;
     config_qos_t    qos;
-    config_server_t rtsp_server, onvif_server, netip_server;
+    config_server_t rtsp_server, netip_server;
 } vigil_config_t;
 
 /* "mon".."sun" */
@@ -230,14 +242,16 @@ void config_to_qos(const vigil_config_t *c, int dscp[QOS_CLASSES]);
 int config_listen_port(const char *listen);
 
 /* No two of vigild's servers on one port: web.listen, api.listen,
- * rtsp_server, onvif_server, netip_server (an empty listen is none).
+ * onvif_server.port, and rtsp_server and netip_server, kept for the
+ * servers to come (an empty listen is none).
  * 0, or -1 with an error at the later one's path. config_put_json checks
  * it; a file is loaded anyway (the server that comes second does not
  * start, logged). */
 int config_check_ports(const vigil_config_t *c, schema_errors_t *errs);
 
-/* Before config_put_json saves a changed api.listen or web.listen
- * (`what` "api" or "web"), whether it can be listened on: 0, or -1 with
+/* Before config_put_json saves a changed api.listen, web.listen or
+ * onvif_server.port while ONVIF is on (`what` "api", "web" or "onvif"; for
+ * ONVIF `listen` is the port alone), whether it can be listened on: 0, or -1 with
  * `err`. Set by vigild (it knows which ports its own servers hold); NULL
  * (the default): not asked. */
 typedef int (*config_listen_check_fn)(const char *what, const char *listen, char *err, size_t cap);

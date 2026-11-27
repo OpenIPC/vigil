@@ -352,22 +352,26 @@ static config_listen_check_fn g_listen_check;
 
 void config_set_listen_check(config_listen_check_fn fn) { g_listen_check = fn; }
 
-/* A changed api.listen or web.listen that cannot be listened on is
- * refused here, so the API and the UI say why at once instead of vigild
- * finding out when it applies it. */
+/* A changed api.listen, web.listen or onvif_server.port (while ONVIF is
+ * on) that cannot be listened on is refused here, so the API and the UI
+ * say why at once instead of vigild finding out when it applies it. */
 static int check_listens(const vigil_config_t *nc, const vigil_config_t *old, schema_errors_t *errs)
 {
     if (!g_listen_check) return 0;
-    const struct { const char *what; const char *now, *was; } l[] = {
-        { "api", nc->api.listen, old->api.listen }, { "web", nc->web.listen, old->web.listen },
+    char onvif_now[8] = "", onvif_was[8] = "";
+    if (nc->onvif_server.enabled) snprintf(onvif_now, sizeof onvif_now, "%d", nc->onvif_server.port);
+    if (old->onvif_server.enabled) snprintf(onvif_was, sizeof onvif_was, "%d", old->onvif_server.port);
+    const struct { const char *what, *path; const char *now, *was; } l[] = {
+        { "api", "api.listen", nc->api.listen, old->api.listen },
+        { "web", "web.listen", nc->web.listen, old->web.listen },
+        { "onvif", "onvif_server.port", onvif_now, onvif_was },
     };
     int rc = 0;
     for (size_t i = 0; i < sizeof l / sizeof l[0]; ++i) {
-        char err[128] = "", path[16];
+        char err[128] = "";
         if (!strcmp(l[i].now, l[i].was) || !l[i].now[0]) continue;
         if (g_listen_check(l[i].what, l[i].now, err, sizeof err) < 0) {
-            snprintf(path, sizeof path, "%s.listen", l[i].what);
-            schema_error(errs, path, "%s", err[0] ? err : "cannot listen there");
+            schema_error(errs, l[i].path, "%s", err[0] ? err : "cannot listen there");
             rc = -1;
         }
     }

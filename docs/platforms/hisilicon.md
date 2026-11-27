@@ -132,7 +132,12 @@ capture input and showed live video in all four tiles with the UI on top.
 Not verified yet: the mouse-driven UI's layouts ([ui.md](../ui.md)). A
 channel shown full screen (1280x600) needs VPSS output pictures larger
 than the common pool's 640x320 blocks, which `hal_init` sizes for the 2x2
-tiles; full screen may stay black until that pool is sized for it.
+tiles; full screen may stay black until that pool is sized for it. Nor
+`display.video_aspect: fill`: the VPSS group crops the decoded picture to
+the middle the tile shows (`HI_MPI_VPSS_SetGrpCrop`, offsets and sizes
+multiples of 4) and the VO channel stretches that over the tile; it has
+only been compiled. The hi3520dv200 does not place pictures by their shape
+at all.
 
 ## hi3520dv200 (DVR) — experimental
 

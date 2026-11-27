@@ -2,19 +2,26 @@
 /* channel.c — camera channels (see channel.h).
  *
  * A channel has up to two sessions with its camera, each a thread with its
- * own source and au_norm:
+ * own source and au_norm, both connected for as long as the channel runs,
+ * whatever the view:
  *
- *   main   the camera's `url`, always: the connection the events follow,
- *          the recording, and the picture when the tile is large
- *   sub    the sub-stream (`sub_url`, or derived from a NETIP main URL),
- *          only while the tile is small (multi-window): its picture there
+ *   main   the camera's `url`: the connection the events follow, the
+ *          recording, and the picture when the tile is large
+ *   sub    the sub-stream (`sub_url`, or derived from a NETIP main URL):
+ *          the picture while the tile is small (multi-window)
  *
  * The channel's one decoder (hal_decoder.h) belongs to one session at a
- * time; the one the tile wants (`view`) takes it over at its first
- * keyframe, and the other keeps the picture up until then. A view change
- * never touches the main session, so recording goes on unbroken. Each
- * session keeps its own state; the channel's status is that of the one
- * whose picture is on screen.
+ * time. Each session keeps the GOP it is in (gop_cache.h: the sub-stream
+ * always, the main stream while the tile is on screen), so the one the
+ * tile wants (`view`) takes the decoder over at its next AU, not its next
+ * keyframe: the decoder opens at the cached keyframe and is fed the GOP so
+ * far, then the live stream. Without a GOP (dropped, too big, just
+ * connected) it waits for the keyframe, and the other session keeps the
+ * picture up until then; a channel coming on screen with no picture to
+ * keep shows its sub-stream's GOP meanwhile. A view change never touches
+ * the main session, so recording goes on unbroken. Each session keeps its
+ * own state; the channel's status is that of the one whose picture is on
+ * screen.
  */
 #define _DEFAULT_SOURCE
 #include <errno.h>
@@ -31,6 +38,7 @@
 #include "au_norm.h"
 #include "channel.h"
 #include "events.h"
+#include "gop_cache.h"
 #include "hal.h"
 #include "hal_decoder.h"
 #include "hal_display.h"
@@ -47,9 +55,11 @@
 #define DEC_RETRY_SECS     10       /* retry a failed decoder setup */
 #define REC_RETRY_SECS     10       /* retry a recording directory that could not be set up */
 #define PATH_MAX_WHY       400      /* a reason, with a path in it, for the log */
-/* A sub-stream no longer shown keeps its connection this long: layouts
- * switched back and forth do not reconnect. */
-#define SUB_LINGER_SECS    5
+/* The most a session's GOP cache may hold: a sub-stream's GOP is far
+ * smaller, a 4 MP main stream's at 4 Mbit/s and 4 s about 2 MiB. All of
+ * them together: GOP_CACHE_BUDGET. */
+#define GOP_SUB_MAX        (1u << 20)
+#define GOP_MAIN_MAX       (4u << 20)
 /* A sub-stream waits this long for its main stream's first SPS before its
  * decoder opens at its own shape (aspect_of_camera). */
 #define MAIN_SPS_WAIT_SECS 3
@@ -68,8 +78,12 @@ typedef struct {
     pthread_t       thread;
     int             thread_up;      /* under c->lock (the sub's is read by the status) */
     int             done;           /* the thread is ending (under c->lock) */
-    time_t          unwanted_since; /* sub: the tile stopped wanting it (under c->lock) */
     int             dec_ok;         /* feeding the decoder since the last keyframe */
+    /* The GOP so far, the session thread's own; whether it holds one is
+     * also read by the other session (gop_ok). */
+    gop_cache_t     gop;
+    atomic_int      gop_ok;
+    int             gop_told;       /* a dropped GOP was logged */
     int             was_viewed;
     unsigned        frames;
     unsigned        frames_total;   /* video AUs on this connection, for the log */
@@ -82,6 +96,8 @@ typedef struct {
     int             live;
     unsigned        fps, width, height;
     vg_codec_t      codec;
+    uint64_t        bytes;          /* video received since the last rate (its thread's) */
+    unsigned        kbps;           /* ... over 2 s, under c->lock */
 } sess_t;
 
 struct channel {
@@ -113,6 +129,9 @@ struct channel {
      * VIEW_NONE (off screen where decoders are scarce). Set by the thread
      * that calls channels_set_tiles. */
     atomic_int      view;
+    /* The tile is on the screen: only then is the main stream's GOP kept
+     * (only such a tile can be double-clicked). Set with `view`. */
+    atomic_int      on_screen;
     /* The decoder, under *dec_lock: which session's stream it was opened
      * for (VIEW_NONE: none), and for what. */
     pthread_mutex_t *dec_lock;      /* g_dec_locks[idx] */
@@ -126,6 +145,7 @@ struct channel {
     vg_stream_info_t main_info;
     int             main_known;
     vg_ratio_t      aspect;         /* what the platform was told ... */
+    vg_aspect_t     aspect_how;
     int             aspect_told;    /* ... if anything yet */
     time_t          dec_failed_at;
     unsigned        dec_failed_frees; /* g_dec_frees when it failed */
@@ -152,7 +172,7 @@ static vg_rect_t       g_tiles[CHANNEL_MAX];
 static int             g_have_tiles;
 static int             g_shown_only;   /* hal_caps()->dec_shown_only with a display */
 static unsigned long long g_screen_area; /* 0: unknown, the main stream everywhere */
-static atomic_int      g_stretch;   /* display.video_aspect stretch */
+static atomic_int      g_aspect;    /* display.video_aspect: a vg_aspect_t */
 /* Decoders closed so far: a channel that could not get one (memory, the
  * decoder's channels) tries again as soon as another lets its go. */
 static atomic_uint     g_dec_frees;
@@ -269,6 +289,16 @@ void channels_status(int idx, channel_status_t *st)
         st->width = v->width;
         st->height = v->height;
         st->fps = v->fps;
+        st->main_kbps = c->s[S_MAIN].kbps;
+        st->sub_kbps = sub_up ? sub->kbps : 0;
+        for (int i = 0; i < S_N; ++i) {
+            const sess_t *si = &c->s[i];
+            if (i == S_SUB && !sub_up) continue;
+            st->streams[i].codec = si->codec;
+            st->streams[i].width = si->width;
+            st->streams[i].height = si->height;
+            st->streams[i].fps = si->fps;
+        }
         snprintf(st->view, sizeof st->view, "%s", view_name(holder != VIEW_NONE ? holder : view));
         st->recording = c->rec_on && c->seg.f != NULL;
         st->rec_bytes = c->seg.bytes;
@@ -292,17 +322,32 @@ int channels_count(void)
 /* ---- decoding (under c->dec_lock) ------------------------------------------- */
 
 /* Tell the platform the shape of the picture for `si` (`id` the session
- * whose stream it is), if that changed: the camera's display aspect ratio,
- * or 0:0 to stretch it over the tile. */
+ * whose stream it is) and how it fills the tile, if that changed: the
+ * camera's display aspect ratio (0:0 when stretched over the tile). */
 static void aspect_tell(channel_t *c, const vg_stream_info_t *si, int id)
 {
     if (!hal_caps()->display || c->self_displayed) return;
+    vg_aspect_t how = (vg_aspect_t)atomic_load(&g_aspect);
     vg_ratio_t a = { 0, 0 };
-    if (!atomic_load(&g_stretch))
+    if (how != VG_ASPECT_STRETCH)
         a = aspect_of_camera(si, id == S_SUB, c->main_known ? &c->main_info : NULL);
-    if (c->aspect_told && a.w == c->aspect.w && a.h == c->aspect.h) return;
-    hal_display_set_aspect(c->idx, a.w, a.h);
+    if (c->aspect_told && a.w == c->aspect.w && a.h == c->aspect.h && how == c->aspect_how) return;
+    /* With what it came from: a wrong shape on a board is a misread SPS
+     * (size, VUI) or a camera that says something odd, and only this tells
+     * which. */
+    char main[64] = "main unknown";
+    if (c->main_known)
+        snprintf(main, sizeof main, "main %ux%u sar %u:%u", c->main_info.width, c->main_info.height,
+                 c->main_info.sar_w, c->main_info.sar_h);
+    if (a.w)
+        vg_log("CAM%d: picture %u:%u%s (%s, shown %s %ux%u sar %u:%u)", c->idx + 1, a.w, a.h,
+               how == VG_ASPECT_FILL ? " filled" : "", main, id == S_SUB ? "sub" : "main", si->width, si->height, si->sar_w, si->sar_h);
+    else
+        vg_log("CAM%d: picture stretched over the tile (%s, shown %s %ux%u)", c->idx + 1, main,
+               id == S_SUB ? "sub" : "main", si->width, si->height);
+    hal_display_set_aspect(c->idx, a.w, a.h, how);
     c->aspect = a;
+    c->aspect_how = how;
     c->aspect_told = 1;
 }
 
@@ -334,7 +379,7 @@ static int decoder_ensure(channel_t *c, sess_t *s, vg_codec_t codec)
      * stream's SPS tells: at the start give it a moment, rather than show
      * the (often anamorphic) picture at its own shape first and make the
      * decoder again for the right one a second later. */
-    if (s->id == S_SUB && !c->main_known && !atomic_load(&g_stretch)) {
+    if (s->id == S_SUB && !c->main_known && atomic_load(&g_aspect) != VG_ASPECT_STRETCH) {
         time_t now = time(NULL);
         if (!s->info_at) s->info_at = now;
         if (now - s->info_at < MAIN_SPS_WAIT_SECS) return 0;
@@ -377,10 +422,43 @@ static int decoder_ensure(channel_t *c, sess_t *s, vg_codec_t codec)
     return 1;
 }
 
-/* One AU of session s, for the decoder. The session the tile wants opens
- * the decoder at its keyframe; the other one keeps feeding a decoder it
- * holds until then, so the picture stays up through a switch; off screen
- * (VIEW_NONE) the holder gives it back. */
+static long ms_since(const struct timespec *t)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (now.tv_sec - t->tv_sec) * 1000L + (now.tv_nsec - t->tv_nsec) / 1000000L;
+}
+
+/* Session s has just been given the decoder in the middle of a GOP: feed
+ * it the GOP so far, the current AU being its last. Returns 0, or -1 if
+ * the platform dropped one (then the next keyframe, as after any drop).
+ * The platform decodes the pictures as fast as it can, so the picture
+ * runs fast up to the present for a moment. */
+static int dec_replay(channel_t *c, sess_t *s)
+{
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (unsigned i = 0; i < s->gop.n; ++i) {
+        vg_au_t au;
+        gop_cache_get(&s->gop, i, &au);
+        if (hal_dec_send(c->idx, &au) < 0) {
+            vg_log("CAM%d%s: the GOP so far was not taken (%u of %u pictures); waiting for a keyframe",
+                   c->idx + 1, s->id == S_SUB ? " sub" : "", i, s->gop.n);
+            return -1;
+        }
+    }
+    vg_log("CAM%d%s: decoding from the GOP so far: %u pictures, %zu KiB in %ld ms", c->idx + 1,
+           s->id == S_SUB ? " sub" : "", s->gop.n, s->gop.len >> 10, ms_since(&t0));
+    return 0;
+}
+
+/* One AU of session s, for the decoder. The session the tile wants takes
+ * the decoder at once from its GOP so far, else at its keyframe; the other
+ * one keeps feeding a decoder it holds until then, so the picture stays up
+ * through a switch; off screen (VIEW_NONE) the holder gives it back. A
+ * channel with no picture at all whose wanted stream has no GOP to start
+ * from shows its sub-stream's meanwhile (back on screen with a full-size
+ * tile, the main stream's GOP was not kept). */
 static void dec_feed(sess_t *s, const vg_au_t *au)
 {
     channel_t *c = s->c;
@@ -395,27 +473,62 @@ static void dec_feed(sess_t *s, const vg_au_t *au)
         pthread_mutex_unlock(c->dec_lock);
     }
     int view = atomic_load(&c->view), viewed = view == s->id;
-    if (!viewed && atomic_load(&c->dec_holder) != s->id) {
+    int gop = gop_cache_ready(&s->gop) && s->gop.gen == s->norm.info_gen;
+    int stand_in = !viewed && view != VIEW_NONE && s->id == S_SUB && gop &&
+                   !atomic_load(&c->s[view].gop_ok);
+    if (!viewed && !stand_in && atomic_load(&c->dec_holder) != s->id) {
         s->dec_ok = 0;
         s->was_viewed = 0;
         return;
     }
     pthread_mutex_lock(c->dec_lock);
+    int holder = atomic_load(&c->dec_holder);
+    stand_in = stand_in && holder == VIEW_NONE;
     if (viewed && !s->was_viewed) c->dec_failed_at = 0;  /* back on screen: try at once */
     s->was_viewed = viewed;
     if (view == VIEW_NONE) {
         decoder_close(c);
         s->dec_ok = 0;
+    } else if ((viewed || stand_in) && holder != s->id && !au->key && gop) {
+        /* The GOP holds this AU too. */
+        s->dec_ok = decoder_ensure(c, s, s->gop.codec) && dec_replay(c, s) == 0;
     } else {
         if (au->key)
-            s->dec_ok = viewed ? decoder_ensure(c, s, au->codec)
-                               : c->dec_codec == au->codec && c->dec_gen == s->norm.info_gen;
+            s->dec_ok = viewed || stand_in ? decoder_ensure(c, s, au->codec)
+                                           : c->dec_codec == au->codec && c->dec_gen == s->norm.info_gen;
         /* A dropped AU breaks the reference chain: wait for the next
          * keyframe instead of feeding pictures that cannot decode. */
         if (s->dec_ok && atomic_load(&c->dec_holder) == s->id && hal_dec_send(c->idx, au) < 0)
             s->dec_ok = 0;
     }
     pthread_mutex_unlock(c->dec_lock);
+}
+
+/* Keep AU au in session s's GOP, if its GOP is kept: the sub-stream's
+ * always, the main stream's while the tile is on screen. */
+static void gop_keep(sess_t *s, const vg_au_t *au)
+{
+    channel_t *c = s->c;
+    if (s->id == S_MAIN && !atomic_load(&c->on_screen)) {
+        if (s->gop.cap) gop_cache_free(&s->gop);
+        atomic_store(&s->gop_ok, 0);
+        return;
+    }
+    int whole = gop_cache_ready(&s->gop);          /* the last GOP, until this keyframe */
+    int rc = gop_cache_add(&s->gop, au, s->norm.info_gen);
+    atomic_store(&s->gop_ok, gop_cache_ready(&s->gop));
+    if (rc == GOP_KEPT || rc == GOP_IDLE) {
+        if (au->key && whole) s->gop_told = 0;     /* said again once one fitted */
+        return;
+    }
+    if (s->gop_told) return;
+    s->gop_told = 1;
+    if (rc == GOP_OVER_CAP)
+        vg_log("CAM%d%s: its GOP is over %zu KiB, not kept: a switch to it waits for a keyframe",
+               c->idx + 1, s->id == S_SUB ? " sub" : "", s->gop.limit >> 10);
+    else
+        vg_log("CAM%d%s: the %zu KiB for every channel's GOP are taken: a switch to it waits for a keyframe",
+               c->idx + 1, s->id == S_SUB ? " sub" : "", (size_t)GOP_CACHE_BUDGET >> 10);
 }
 
 /* Close the open segment (caller holds c->lock); report a lost tail. */
@@ -579,7 +692,10 @@ static void on_au(void *user, const vg_au_t *au)
     sess_t *s = user;
     channel_t *c = s->c;
 
-    if (g_can_decode && !s->src->ops->self_displayed) dec_feed(s, au);
+    if (g_can_decode && !s->src->ops->self_displayed) {
+        gop_keep(s, au);
+        dec_feed(s, au);
+    }
     if (au->key && s->norm.info_gen) {
         pthread_mutex_lock(c->lock);
         s->width = s->norm.info.width;
@@ -652,6 +768,7 @@ static void on_raw_au(void *user, const vg_au_t *au)
      * packets must not hold off the no-data reconnect. */
     s->last_video = time(NULL);
     ++s->frames_total;
+    s->bytes += au->len;
     if (au->codec != s->norm.codec) {
         au_norm_free(&s->norm);
         au_norm_init(&s->norm, au->codec);
@@ -684,28 +801,6 @@ static void sleep_interruptible(volatile int *stop, int secs)
     for (int i = 0; i < secs * 10 && !*stop; ++i) usleep(100 * 1000);
 }
 
-/* Whether session s should go on: the main one always; the sub-stream
- * while the tile wants it and SUB_LINGER_SECS after. Deciding to end, it
- * says so (done) under the lock views_update looks at it with, so a view
- * that comes back at that moment starts a new session. */
-static int sess_wanted(sess_t *s)
-{
-    if (s->id == S_MAIN) return 1;
-    channel_t *c = s->c;
-    time_t now = time(NULL);
-    pthread_mutex_lock(c->lock);
-    int want = 1;
-    if (atomic_load(&c->view) == S_SUB) {
-        s->unwanted_since = 0;
-    } else {
-        if (!s->unwanted_since) s->unwanted_since = now;
-        want = now - s->unwanted_since < SUB_LINGER_SECS;
-        if (!want) s->done = 1;
-    }
-    pthread_mutex_unlock(c->lock);
-    return want;
-}
-
 static void *sess_thread(void *arg)
 {
     sess_t *s = arg;
@@ -713,7 +808,7 @@ static void *sess_thread(void *arg)
     int ch = c->idx + 1, backoff = 1, told_fail = 0, main = s->id == S_MAIN;
     const char *tag = main ? "" : " sub";
 
-    while (!s->stop && sess_wanted(s)) {
+    while (!s->stop) {
         set_state(s, 0, CH_CONNECTING, "CONNECTING");
         if (s->src->ops->open(s->src) < 0) {
             set_state(s, 0, fail_state(s->src->fail), "%.40s", s->src->err);
@@ -758,7 +853,8 @@ static void *sess_thread(void *arg)
         time_t sec = time(NULL);
         s->last_video = sec;
         s->frames_total = 0;
-        while (!s->stop && sess_wanted(s)) {
+        s->bytes = 0;
+        while (!s->stop) {
             int rc = s->src->ops->poll(s->src, on_raw_au, s);
             time_t now = time(NULL);
             if (s->src->title[0] && !s->title_taken) take_title(s);
@@ -783,6 +879,8 @@ static void *sess_thread(void *arg)
                 pthread_mutex_lock(c->lock);
                 s->fps = (s->frames + (unsigned)(now - sec) / 2) / (unsigned)(now - sec);
                 s->frames = 0;
+                s->kbps = (unsigned)(s->bytes * 8 / 1000 / (uint64_t)(now - sec));
+                s->bytes = 0;
                 pthread_mutex_unlock(c->lock);
                 sec = now;
             }
@@ -800,14 +898,20 @@ static void *sess_thread(void *arg)
         pthread_mutex_lock(c->lock);
         if (main) rec_close(c);
         s->fps = 0;
+        s->kbps = 0;
         s->live = 0;
         pthread_mutex_unlock(c->lock);
-        if (!s->stop && sess_wanted(s)) sleep_interruptible(&s->stop, 1);
+        /* The next connection starts at a keyframe: nothing to keep. */
+        atomic_store(&s->gop_ok, 0);
+        gop_cache_free(&s->gop);
+        if (!s->stop) sleep_interruptible(&s->stop, 1);
     }
     /* A decoder this stream still holds goes with it. */
     pthread_mutex_lock(c->dec_lock);
     if (atomic_load(&c->dec_holder) == s->id) decoder_close(c);
     pthread_mutex_unlock(c->dec_lock);
+    atomic_store(&s->gop_ok, 0);
+    gop_cache_free(&s->gop);
     pthread_mutex_lock(c->lock);
     s->done = 1;
     pthread_mutex_unlock(c->lock);
@@ -829,13 +933,17 @@ static int sess_start(channel_t *c, int id, const char *url)
     s->frames = 0;
     s->info_at = 0;
     au_norm_init(&s->norm, VG_CODEC_NONE);
+    gop_cache_init(&s->gop, id == S_SUB ? GOP_SUB_MAX : GOP_MAIN_MAX);
+    atomic_store(&s->gop_ok, 0);
+    s->gop_told = 0;
     pthread_mutex_lock(c->lock);
     s->done = 0;
-    s->unwanted_since = 0;
     s->status = CH_CONNECTING;
     snprintf(s->state, sizeof s->state, "CONNECTING");
     s->live = 0;
     s->fps = s->width = s->height = 0;
+    s->kbps = 0;
+    s->bytes = 0;
     s->codec = VG_CODEC_NONE;
     pthread_mutex_unlock(c->lock);
     if (pthread_create(&s->thread, NULL, sess_thread, s) != 0) {
@@ -860,6 +968,7 @@ static void sess_reap(channel_t *c, int id)
     s->thread_up = 0;
     s->live = 0;
     s->fps = 0;
+    s->kbps = 0;
     pthread_mutex_unlock(c->lock);
     source_destroy(s->src);
     s->src = NULL;
@@ -880,25 +989,17 @@ static int view_for(const channel_t *c, int i)
     return S_MAIN;
 }
 
-/* Set every channel's view and start the sub-streams now wanted; reap
- * the ones that ended (a sub-stream no longer wanted ends by itself after
- * SUB_LINGER_SECS). */
+static void view_set(channel_t *c, int i)
+{
+    atomic_store(&c->on_screen, g_have_tiles && g_tiles[i].w > 0 && g_tiles[i].h > 0);
+    atomic_store(&c->view, view_for(c, i));
+}
+
+/* Set every channel's view: the sessions see it at their next AU. */
 static void views_update(void)
 {
-    for (int i = 0; i < CHANNEL_MAX; ++i) {
-        channel_t *c = &g_ch[i];
-        if (!c->active) continue;
-        int v = view_for(c, i);
-        atomic_store(&c->view, v);
-        sess_t *sub = &c->s[S_SUB];
-        pthread_mutex_lock(c->lock);
-        int ended = sub->thread_up && (sub->done || sub->stop);
-        int running = sub->thread_up && !ended;
-        pthread_mutex_unlock(c->lock);
-        if (ended) sess_reap(c, S_SUB);
-        if (v == S_SUB && !running && sess_start(c, S_SUB, c->sub_url) < 0)
-            vg_log("CAM%d: cannot start its sub-stream", i + 1);
-    }
+    for (int i = 0; i < CHANNEL_MAX; ++i)
+        if (g_ch[i].active) view_set(&g_ch[i], i);
 }
 
 /* ---- public ---------------------------------------------------------------- */
@@ -990,12 +1091,16 @@ static int slot_start(int i, const channels_config_t *cfg)
     }
     if (g_have_tiles && hal_caps()->display && !c->self_displayed && g_tiles[i].w > 0)
         hal_display_set_tile(i, &g_tiles[i]);
-    atomic_store(&c->view, view_for(c, i));
+    view_set(c, i);
     if (sess_start(c, S_MAIN, url) < 0) {
         vg_log("CAM%d: cannot start its thread", i + 1);
         slot_teardown(c);
         return -1;
     }
+    /* Both streams for as long as the channel runs: the sub-stream's
+     * picture is there the moment a tile wants it. */
+    if (c->sub_url[0] && sess_start(c, S_SUB, c->sub_url) < 0)
+        vg_log("CAM%d: cannot start its sub-stream", i + 1);
     pthread_mutex_lock(c->lock);
     c->active = 1;
     pthread_mutex_unlock(c->lock);
@@ -1040,6 +1145,9 @@ int channels_apply(const channels_config_t *cfg)
                     c->s[S_SUB].stop = 1;
                     sess_reap(c, S_SUB);
                     snprintf(c->sub_url, sizeof c->sub_url, "%s", sub);
+                    view_set(c, i);
+                    if (sub[0] && sess_start(c, S_SUB, sub) < 0)
+                        vg_log("CAM%d: cannot start its sub-stream", i + 1);
                 }
             }
             continue;
@@ -1089,10 +1197,10 @@ void channels_set_screen(unsigned w, unsigned h)
     g_screen_area = (unsigned long long)w * h;
 }
 
-void channels_set_stretch(int stretch)
+void channels_set_aspect(vg_aspect_t how)
 {
     pthread_once(&g_once, locks_init);
-    if (atomic_exchange(&g_stretch, !!stretch) == !!stretch) return;
+    if (atomic_exchange(&g_aspect, (int)how) == (int)how) return;
     for (int i = 0; i < CHANNEL_MAX; ++i) {
         channel_t *c = &g_ch[i];
         /* Only this thread starts and stops channels: active is stable. */

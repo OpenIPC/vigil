@@ -20,8 +20,8 @@ live view                  tiles over the whole screen, clock in a corner
  +-> Main menu             cards: PLAYBACK, AI, ALARM, OPERATION, BACKUP, DISPLAY
       |                    MANAGEMENT: CAMERA, NETWORK, STORAGE, SYSTEM, ACCOUNT
       +-> CAMERA           Channels: cameras found on the network (Search, Add,
-      |    |               Change IP, Mass change, Auto add, Manual add) and every channel
-      |    |               (Edit, Clear, Add / Replace with a device found)
+      |    |               Change IP, Mass change, Auto add, Manual add; Show) and every
+      |    |               channel (bandwidth; X / +; Clear, Delete, Edit, Title)
       |    +-> a camera    form: URL, name, enabled
       +-> NETWORK          settings screen: Ethernet, Wi-Fi, LTE, Ports, DDNS,
       |                    UPnP, SMTP, Alarm center, QoS, P2P
@@ -33,7 +33,7 @@ live view                  tiles over the whole screen, clock in a corner
       |               +-> Channel info: every channel's state, stream, codec,
       |                   size, fps, main stream, recording, events
       +-> DISPLAY          settings screen: Output, Clock, Camera names,
-                           Status icons
+                           Status icons, Video, Tiles
 ```
 
 **Live view.** The tiles take the whole screen (2x2 on a 1280x720 output:
@@ -47,7 +47,15 @@ on the picture (see below); in another (bottom right), icons only, a red
 dot while the channel records and an amber icon for each event the camera
 reports now (motion, human, face, vehicle; each held 5 s after the camera's
 last report). Where they go, their size and what they stand on are
-`display.*` (Display, below). The stream's codec, size
+`display.*` (Display, below), and so are whether REC and the event icons
+are shown at all, the 1-pixel line around each tile (2 px between two;
+without it the pictures touch), and an alarm frame: a red 3-pixel frame
+inside the edge of a tile while its camera reports any event, blinking
+(750 ms on, 250 ms off; on and off, never faded, as a translucent edge over
+a colour-keyed hole would show the key colour), off by default. The events
+come from `channels_report_events` (NETIP alarms and ONVIF events are to
+come) or from outside, `POST /api/v1/channels/<n>/events`
+([API](api.md)). The stream's codec, size
 and frame rate are not on the tiles but on the Channel info page
 (System). The middle of a tile says something only when there is no
 picture, outlined like the name. It is about the stream on screen: a small
@@ -215,11 +223,12 @@ interface is not up yet, Save also sets `wlandev` and loads the driver;
 without one, "No Wi-Fi adapter" and nothing to fill in. *LTE*: the USB
 modems plugged in, each with its driver and profile and "Use this profile"
 (`wlandev`, for the next boot), and the modem's interface once it is up;
-or "No modem found". *Ports*: the web server's and the HTTP API's ports
-(`web.listen`, `api.listen`; the address part is kept), each with what it
-listens on now, refreshed every second, or why not, or the last move that
-failed; and, under "Services not available yet", the RTSP, ONVIF and NETIP
-ports, with a note that nothing listens on them. Save refuses two on one
+or "No modem found". *Ports*: the web server's, the HTTP API's and the ONVIF
+server's ports (`web.listen`, `api.listen`, the address part kept;
+`onvif_server.port`), each with what it listens on now, refreshed every
+second, or why not, or the last move that failed; and, under "Services
+not available yet", the RTSP and NETIP ports, with a note that nothing
+listens on them. Save refuses two on one
 port (the one changed is marked, both named in a toast) and saves one
 section at a time, those moving onto a port another one leaves last; the
 store refuses a port that is taken, with the reason, and the port typed
@@ -320,11 +329,17 @@ with one mode says so. *Clock*: position (off, a corner, the middle of the
 top or bottom edge), size, background, and the date and time formats (the
 same settings as System, General). *Camera names*: position (off or a
 tile corner), size (a step smaller in tiles under 400 pixels wide),
-background. *Status icons*: the corner, background. *Video*:
+background. *Status icons*: REC and Alarms (`display.rec_icon`,
+`display.alarm_icons`, switches, on by default), the corner, background.
+*Tiles*: Lines between tiles (`display.tile_dividers`, on) and Alarm frame
+(`display.alert_frame`, off). *Video*:
 `display.video_aspect`, Fit (the default: each picture at its camera's
 shape inside its tile or the full screen, black bars where the shapes
 differ, a sub-stream at its main stream's shape; see
-[architecture](architecture.md)) or Stretch (the picture fills the tile).
+[architecture](architecture.md)), Stretch (the picture fills the tile,
+whatever its shape) or Fill (the picture keeps its shape and covers the
+whole tile, what overflows cut off: the top and bottom of a 4:3 camera in a
+16:9 tile).
 Sizes are Small,
 Medium, Large and Extra large (Montserrat 14, 16, 20, 24: the only font
 built in; another family would cost the firmware's flash). Backgrounds are
@@ -420,10 +435,13 @@ windows of the 8-split) shows the camera's sub-stream, a larger one (1x1,
 full screen, the 8-split's large window) its main stream. The sub-stream is
 the camera's `sub_url`, or for a NETIP camera the same URL with
 `stream=extra`; a camera without either shows its main stream everywhere.
-The switch keeps the old picture up until the new stream's first keyframe
-(and the tile's state stays that picture's stream until then),
-and a sub-stream no longer shown keeps its connection for 5 s, so flipping
-between full screen and a layout does not reconnect. The tile's stream line
+Both streams stay connected whatever is on screen, and each keeps the GOP
+it is in, so full screen and back, or another page, shows the new stream
+at once rather than at the camera's next keyframe (see
+[architecture](architecture.md), "Main stream and sub-stream"); when there
+is no GOP to start from, the old picture stays up until the new stream's
+first keyframe (and the tile's state stays that picture's stream until
+then). The tile's stream line
 (`H.264 352x288 10 fps`) is the stream on screen; recording always takes
 the main stream. Where decoders are scarce (`dec_shown_only`, SigmaStar)
 channels not on the page decode nothing, and a tile whose camera is live
@@ -488,7 +506,11 @@ The page CAMERA and the context menu's **Channels** open
 (its progress and how many have answered beside it), and a table of the
 devices found: a check box, address, port, MAC, vendor and model, the
 protocols that answered, and "New" or "On channel N" (the channel whose
-camera URL points at that address). Devices show **as they answer**: the
+camera URL points at that address). **Show** (after Select all) narrows
+the table to the devices **Not added** to a channel or those **Added**
+(as "On channel N" says), or shows **All**; the count beside it says "N
+found, M shown", **Select all** checks the rows shown, and a device the
+filter hides is not checked. Devices show **as they answer**: the
 page polls the model's generation (`disc_gen`, moved by the core with each
 answer that tells something new) and reads the devices only when it moved.
 A row keeps its place while the list fills: a device already listed stays
@@ -498,7 +520,7 @@ so the row under the pointer or the keyboard's focus does not move. A new
 search starts from the list sorted by address; devices an earlier search
 found are dimmed, "No answer", until they answer this one. While it runs,
 Search is **Stop** (the search ends, keeping what it found), and the list
-stays usable: Add, Add to..., Replace, and the Change IP, Mass change,
+stays usable: Add, Add to..., a channel's +, and the Change IP, Mass change,
 Auto add and Manual add pages stop it first (discovery runs one job at a
 time). The two panes share the page 3:2, each table scrolling inside
 (wheel, drag, or the keyboard's focus). A device row's **Add to...** opens a small menu of the empty
@@ -533,14 +555,31 @@ device) with the device's message under it. **Save** puts the camera there
 
 ![Manual add, tested](../tests/ui/manual_test_ok.png)
 
-**Channels** (bottom): one row per channel: name, source URL (password
-hidden), protocol, state (as the tiles say it), enabled; **Edit** (the
-camera form), **Clear** (asks, then empties the slot), **Add** on an
-empty one (the camera form, or with one device checked, that device), and
-with one device checked, **Replace** on the others.
+**Channels** (bottom): after the title, **Bandwidth**: what the cameras
+bring in now, every stream (main and sub-stream) of every channel,
+averaged over 2 s (the channels' `main_kbps` and `sub_kbps`), against what
+the chip is rated for (`hal_caps()->max_in_kbps`: 64 Mbit/s on the
+SSR621Q, from its recorders' spec sheets; only the current figure where the
+platform does not know it). It turns amber from 80 % of the rating and red
+over it. One row per channel: a check box, the camera's address (no URL,
+no password), **X** on a channel with a camera (deletes it from the
+channel, asked first) or **+** on an empty one (the one device checked
+above goes there; otherwise Manual add opens with that channel chosen),
+protocol, state (as the tiles say it; "Disabled" for a camera switched
+off), and the channel's name (the configured one, else the camera's). A
+click on a row checks it. The buttons beside the title act on the
+channels checked: **Clear** deletes every channel's camera (asked first),
+**Delete** the checked channels' cameras (asked first), **Edit** (one
+checked) opens the camera form (a new camera on an empty channel), and
+**Title** (one checked, with a camera) asks for the name the screen shows
+for it, with the on-screen keyboard for the mouse; an empty name shows the
+camera's own. A button that does not apply is greyed. Deleting empties
+the slot: the cameras after it keep their channels.
 
 ![A search running: the first two devices](../tests/ui/channels_searching.png)
 ![Search results, one device checked](../tests/ui/channels_results.png)
+![Show: Added](../tests/ui/channels_show_added.png)
+![Title of a channel](../tests/ui/channels_title.png)
 ![34 devices, scrolled to the end](../tests/ui/channels_scroll_bottom.png)
 ![Opened from channel 4's "+"](../tests/ui/tile_add_channels.png)
 ![Mass change preview](../tests/ui/channels_mass_preview.png)
@@ -746,9 +785,10 @@ longer opens the on-screen keyboard: type into it.
 | | Ctrl+S | Save |
 | | Esc with unsaved changes | asks first (Cancel is focused: Enter keeps the page) |
 | Channels: devices | arrows, Enter or Space | move, check the device |
-| Channels: channels | Enter | edit the camera (an empty channel: add one) |
-| | Delete | clear the channel (asks first) |
-| | A, + | put the checked device on the channel |
+| Channels: channels | arrows, Enter or Space | move, check the channel |
+| | E | edit the camera (an empty channel: add one) |
+| | Delete | delete the channel's camera (asks first) |
+| | A, + | an empty channel: the device checked above, else Manual add for it |
 
 ![Keyboard shortcuts](../tests/ui/help.png)
 

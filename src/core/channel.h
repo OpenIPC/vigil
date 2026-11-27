@@ -5,10 +5,13 @@
  * source.h), normalizes its access units, records them as-is
  * (seg_writer.h) and decodes them into the channel's tile when the
  * platform has a decoder (hal_decoder.h, sized from the stream's SPS;
- * rebuilt when the stream changes). While the tile is small (a quarter of
- * the screen or less) a second thread brings the camera's sub-stream and
- * decodes that instead; the main stream is still recorded, through its
- * own connection, whatever the view.
+ * rebuilt when the stream changes). A camera with a sub-stream has a
+ * second thread for it, connected as long as the main one, whatever the
+ * view: a small tile (a quarter of the screen or less) decodes the
+ * sub-stream, a large one the main stream, and the main stream is
+ * recorded whatever the view. Each stream keeps the GOP it is in, so a
+ * switch between them (full screen and back, another page or layout)
+ * decodes the new one at once instead of at its next keyframe.
  * Sources the platform displays itself (local capture) are only recorded.
  * Recording does not depend on decoding. A decoder that cannot be had (the
  * platform out of memory or decoder channels) is asked for again after a
@@ -91,8 +94,8 @@ typedef struct {
     unsigned   events;              /* CH_EV_* the camera reports now */
     int        live;                /* video of that stream arrived within the last 3 s */
     /* Each stream on its own: the main one (recorded; the picture in a
-     * large tile) and the sub-stream (small tiles; CH_EMPTY and "" while
-     * none runs). */
+     * large tile) and the sub-stream (small tiles; connected all along;
+     * CH_EMPTY and "" when the camera has none). */
     ch_state_t main_status, sub_status;
     char       main_state[48], sub_state[48];
     int        decoding;            /* a decoder is running */
@@ -114,6 +117,12 @@ typedef struct {
     uint64_t   rec_bytes;
     vg_codec_t codec;
     unsigned   width, height, fps;  /* fps averaged over 2 s */
+    /* What each stream brings in, kbit/s of video averaged over 2 s (the
+     * access units as received); 0 while it does not run. */
+    unsigned   main_kbps, sub_kbps;
+    /* Each stream's own, whether shown or not: [0] main, [1] sub (for the
+     * ONVIF server's profiles). 0 / VG_CODEC_NONE until it is known. */
+    struct { vg_codec_t codec; unsigned width, height, fps; } streams[2];
     char       host[64];
     char       name[32];            /* the configured name, else `title` */
     char       title[32];           /* what the camera calls the channel (NETIP
@@ -140,8 +149,9 @@ void channels_stop(void);
  * others start in their tile; sources the platform shows itself (local
  * capture) stay where the platform put them. Where the decoders do not
  * stretch to every channel (hal_caps()->dec_shown_only), a channel that
- * leaves the screen frees its decoder and gets one again at the first
- * keyframe after it comes back; recording is not affected. */
+ * leaves the screen frees its decoder and gets one again when it comes
+ * back, from the GOP its sub-stream kept (else at the next keyframe);
+ * neither the connections nor the recording are affected. */
 void channels_set_tiles(const vg_rect_t *tiles);
 
 /* The screen's size, which tile sizes are judged by: a tile of a quarter
@@ -149,11 +159,11 @@ void channels_set_tiles(const vg_rect_t *tiles);
  * Unset (0), the main stream everywhere. Before channels_start. */
 void channels_set_screen(unsigned w, unsigned h);
 
-/* How pictures fill their tiles (display.video_aspect): 0 fitted at the
- * camera's display aspect ratio, black bars around (aspect.h), 1 stretched
- * over the whole tile. From the thread that calls channels_apply; applies
- * at once. */
-void channels_set_stretch(int stretch);
+/* How pictures fill their tiles (display.video_aspect): fitted at the
+ * camera's display aspect ratio, black bars around (aspect.h); stretched
+ * over the whole tile; or covering it at that ratio, the overflow cut off.
+ * From the thread that calls channels_apply; applies at once. */
+void channels_set_aspect(vg_aspect_t how);
 
 /* Stop recording into `dir` and everything under it (a disk about to be
  * unmounted or formatted): the channels recording there close their
