@@ -72,6 +72,8 @@ add_library(vigil_core STATIC
   src/core/net.c
   src/core/overscan.c
   src/core/picture.c
+  src/core/onvif_proto.c
+  src/core/qos.c
   src/core/schema.c
   src/core/schema_yaml.c
   src/core/sha1.c

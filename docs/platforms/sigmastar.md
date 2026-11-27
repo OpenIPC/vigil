@@ -18,7 +18,9 @@ the camera's display aspect ratio (a sub-stream at its main stream's; see
 [architecture](../architecture.md), "The picture's shape"), centred, with
 black bars in the rest of the tile (`display.video_aspect: stretch`: the
 whole tile), and the decoder shrinks it to about the window's size (below,
-"Picture geometry").
+"Picture geometry"). In `fill` the window is the whole tile, the decoder
+shrinks the picture to about the size that covers it, and the display's
+zoom-in window shows the middle of that (below).
 
 The UI is drawn on the GOP framebuffer `/dev/fb0` above the video layer.
 fbdev.ko sets its size and format from `fbdev.ini` (1280x720, ARGB8888 on
@@ -91,6 +93,20 @@ stretched, the picture keeps its shape: a 16:9 camera full screen at
 1280x1024 is 1280x720 with bars above and below. What the SDK's modules do,
 read off them:
 
+- **mi_disp**'s zoom-in window (`MI_DISP_SetZoomInWindow`) is a rectangle
+  of the port's source picture (`u16SrcWidth` x `u16SrcHeight`, the
+  decoder's output), every edge even (open_mhal's
+  `_HalDispIfGetInfoInputPortCrop` refuses odd ones); one outside the
+  source is dropped with only a log line. mi_disp keeps it and crops every
+  picture to it on its way to the MOP (`MHAL_DISP_InputPortSetCropAttr`:
+  the plane's address moved to the corner, the low four bits of x in the
+  window's ADDR16 field, the source size and the scaling ratios the
+  part's), whatever the picture's size, until it is given another: in
+  emulation the top left of a larger picture showed, enlarged, after a
+  fill tile went back to fit and then full screen. So vigild sets it at
+  every placement of a port, to all of the picture outside fill, as the
+  SDK's NVR demo ends a zoom (`st_main_vdec.c`). In fill the part is never
+  larger than the window, as the display only enlarges (next point).
 - **mi_disp** (open_mhal's `_HalDispIfSetInputPortAttr`, the MOP windows)
   only enlarges: a window larger than the port's source size gets the ratio
   source / window, a smaller one 1:1, so the picture's top left part shows
@@ -277,6 +293,10 @@ percentage of the output, even). Each layer follows:
   mode; the video layer stays the whole output, its black background
   around. The zero channel reads the windows back into screen coordinates
   (`overscan_unmap`), so its picture is the 1280x720 screen, undistorted.
+  In fill the zoom-in window is cut from the tile's window as placed in
+  the inner rectangle, so the crop shows the same part with margins, and
+  the zero channel's copy follows it (seen in emulation at 720p and
+  1080p, 5 %).
 - *UI layer*: the GOP's stretch window stays the whole output and the UI
   is shrunk into the buffer as LVGL flushes it (`hal_ui_fbdev.c`,
   `soft_flush`: nearest pixel, which keeps the colour key exact; the
@@ -411,6 +431,24 @@ took a fix to qemu-bench's VPU model, which scaled the cropped picture
 where mi_vdec's content size says the firmware scales the whole decoded
 frame: with the stock model a 1080-line stream came out 0.8 % too tall.
 Whether mi_disp on a board crops to the content as it does in emulation is
+unverified.
+
+Fill, also only in emulation (OpenIPC firmware image, four NETIP cameras
+with a test picture of a circle, a grid and a coloured band along each
+edge: 2592x1944 4:3 with a 704x576 sub-stream drawn at 4:3, 2560x1440 with
+800x448, 2048x1536 4:3 with a sub-stream coded 800x448 but drawn at 4:3,
+1920x1080 H.265 with a 704x576 H.265 one at 16:9), on qemu-bench's machine
+with a MOP model that reads the ADDR16 field (branch
+`sigmastar/i2m-mop-crop`; the stock model ignored it, and a crop whose x
+was not a multiple of 16 showed shifted by up to 15 source pixels, 4 to 10
+screen pixels at 1280x1024): in 2x2 and full screen at 1280x720 the 4:3
+cameras lost their top and bottom bands and the 16:9 ones nothing; at
+1280x1024 (5:4 tiles) the 16:9 cameras lost the sides, x offsets 20, 104,
+118 and 268. The circle stayed round (width over height 1.00 within 1 %)
+and centred in its tile to 2 pixels, mi_disp's `/proc` file listed the
+crops, and the zero channel's picture matched the screendump. Back to fit
+and stretch, the whole picture came back, full screen included. What a
+board's MOP does with the crop, and the zero channel's on a board, are
 unverified.
 
 The zero channel, also only in emulation (OpenIPC firmware image, the four

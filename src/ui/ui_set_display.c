@@ -16,7 +16,10 @@
  *
  * Clock, Camera names, Status icons, Video: drop-downs of display.* (and
  * the clock's format, ui.date_format and ui.time_format, which System ->
- * General also sets); the live view follows a save at once. */
+ * General also sets); the live view follows a save at once.
+ *
+ * Status icons and Tiles also have switches (display.rec_icon,
+ * alarm_icons, tile_dividers, alert_frame): a row of a page may be either. */
 #define _DEFAULT_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,6 +43,10 @@ static int save_fields(const char *key, const char *const *keys, const char *con
     int sec = ui_set_section_index(key);
     if (sec < 0) return -1;
     const ui_section_t *u = &ui_model()->sections[sec];
+    if (u->n_fields > SEC_FIELDS_MAX) {         /* the section outgrew this page: save nothing */
+        ui_toast(UI_TOAST_BAD, "Not saved: %s has more than %d settings", key, SEC_FIELDS_MAX);
+        return -1;
+    }
     char buf[SEC_FIELDS_MAX][64];
     const char *v[SEC_FIELDS_MAX];
     unsigned gen = ui_model()->config_generation ? ui_model()->config_generation() : 0;
@@ -511,6 +518,7 @@ typedef struct {
     const char *const *values;          /* as stored */
     const char *const *names;           /* as shown */
     int                n;
+    int                sw;              /* a switch of a boolean: values k_bool, no names */
 } drow_t;
 
 #define DROWS_MAX 6
@@ -518,9 +526,25 @@ typedef struct {
 typedef struct {
     const drow_t *rows;
     int           n;
-    lv_obj_t     *dd[DROWS_MAX];
+    lv_obj_t     *dd[DROWS_MAX];        /* a drop-down, or a switch (drow_t.sw) */
     int           sel0[DROWS_MAX];      /* what is stored */
 } dpage_t;
+
+/* A boolean as the model has it, by the switch's state. */
+static const char *const k_bool[] = { "0", "1" };
+
+static int row_sel(const dpage_t *d, int i)
+{
+    if (d->rows[i].sw) return lv_obj_has_state(d->dd[i], LV_STATE_CHECKED);
+    return dd_sel(d->dd[i]);
+}
+
+static void row_set(dpage_t *d, int i, int sel)
+{
+    if (!d->rows[i].sw) lv_dropdown_set_selected(d->dd[i], (uint32_t)sel);
+    else if (sel) lv_obj_add_state(d->dd[i], LV_STATE_CHECKED);
+    else lv_obj_remove_state(d->dd[i], LV_STATE_CHECKED);
+}
 
 static const char *const k_pos_names[UI_N_POS] = { "Off", "Top left", "Top centre", "Top right", "Bottom left",
                                                    "Bottom centre", "Bottom right" };
@@ -551,8 +575,11 @@ static const drow_t k_name_rows[] = {
       UI_N_SIZES },
     { "display", "name_background", "Background", BG_HELP, ui_bg_keys, k_bg_names, UI_N_BGS },
 };
-/* REC and the events are always shown: a corner, no Off. */
+/* A corner, no Off: REC and the events each have a switch. */
 static const drow_t k_icon_rows[] = {
+    { "display", "rec_icon", "REC", "While the channel records.", k_bool, NULL, 2, 1 },
+    { "display", "alarm_icons", "Alarms",
+      "The events the camera reports (motion, human, face, vehicle), while they last.", k_bool, NULL, 2, 1 },
     { "display", "icons_position", "Position",
       "The corner of each tile with REC and the camera's events; in the names' corner they go just above "
       "the name (below it at the top).",
@@ -560,15 +587,23 @@ static const drow_t k_icon_rows[] = {
     { "display", "icons_background", "Background", BG_HELP, ui_bg_keys, k_bg_names, UI_N_BGS },
 };
 
-/* Two values: the drop-down needs no third. */
-static const char *const k_aspect_keys[] = { "fit", "stretch" };
-static const char *const k_aspect_names[] = { "Fit (keep its shape)", "Stretch to the tile" };
+static const char *const k_aspect_keys[] = { "fit", "stretch", "fill" };
+static const char *const k_aspect_names[] = { "Fit (keep its shape)", "Stretch to the tile", "Fill (crop to the tile)" };
 static const drow_t k_video_rows[] = {
     { "display", "video_aspect", "Video aspect",
       "Fit: each camera's picture keeps its shape in its tile and full screen, with black bars where "
       "the shapes differ; a sub-stream is shown at its main stream's shape. Stretch: the picture fills "
-      "the tile, whatever its shape.",
-      k_aspect_keys, k_aspect_names, 2 },
+      "the tile, whatever its shape. Fill: the picture keeps its shape and covers the whole tile, the "
+      "part that overflows cut off (top and bottom of a 4:3 camera in a 16:9 tile).",
+      k_aspect_keys, k_aspect_names, 3 },
+};
+
+static const drow_t k_tile_rows[] = {
+    { "display", "tile_dividers", "Lines between tiles",
+      "A thin line around each tile. Off: the pictures touch.", k_bool, NULL, 2, 1 },
+    { "display", "alert_frame", "Alarm frame",
+      "A red frame, blinking, inside the edge of a tile while its camera reports an event; none "
+      "otherwise.", k_bool, NULL, 2, 1 },
 };
 
 static void dpage_load(dpage_t *d)
@@ -579,7 +614,7 @@ static void dpage_load(dpage_t *d)
         d->sel0[i] = 0;
         for (int k = 0; k < d->rows[i].n; ++k)
             if (!strcmp(d->rows[i].values[k], v)) d->sel0[i] = k;
-        lv_dropdown_set_selected(d->dd[i], (uint32_t)d->sel0[i]);
+        row_set(d, i, d->sel0[i]);
     }
 }
 
@@ -591,13 +626,17 @@ static void *dpage_open(ui_set_t *s, lv_obj_t *pane, const char *title, const dr
     d->n = n < DROWS_MAX ? n : DROWS_MAX;
     lv_obj_t *sect = ui_set_section(pane, title);
     for (int i = 0; i < d->n; ++i) {
+        if (i && strcmp(rows[i].sec, rows[i - 1].sec)) sect = ui_set_section(pane, "Format");
+        lv_obj_t *box = ui_set_row(sect, rows[i].label, rows[i].help);
+        if (rows[i].sw) {
+            d->dd[i] = ui_set_switch(s, box, 0);
+            continue;
+        }
         char opts[256] = "";
         for (int k = 0; k < rows[i].n; ++k) {
             size_t l = strlen(opts);
             snprintf(opts + l, sizeof opts - l, "%s%s", k ? "\n" : "", rows[i].names[k]);
         }
-        if (i && strcmp(rows[i].sec, rows[i - 1].sec)) sect = ui_set_section(pane, "Format");
-        lv_obj_t *box = ui_set_row(sect, rows[i].label, rows[i].help);
         d->dd[i] = ui_set_dropdown(s, box, opts, 0, 320);
     }
     dpage_load(d);
@@ -608,7 +647,7 @@ static int dpage_dirty(void *st)
 {
     dpage_t *d = st;
     for (int i = 0; d && i < d->n; ++i)
-        if (dd_sel(d->dd[i]) != d->sel0[i]) return 1;
+        if (row_sel(d, i) != d->sel0[i]) return 1;
     return 0;
 }
 
@@ -625,8 +664,8 @@ static int dpage_save(void *st)
         int k = 0, changed = 0;
         for (int j = i; j < d->n && !strcmp(d->rows[j].sec, d->rows[i].sec); ++j) {
             keys[k] = d->rows[j].key;
-            vals[k++] = d->rows[j].values[dd_sel(d->dd[j])];
-            changed |= dd_sel(d->dd[j]) != d->sel0[j];
+            vals[k++] = d->rows[j].values[row_sel(d, j)];
+            changed |= row_sel(d, j) != d->sel0[j];
         }
         if (changed && save_fields(d->rows[i].sec, keys, vals, k) < 0) failed = 1;
     }
@@ -660,6 +699,10 @@ static void *video_open(ui_set_t *s, lv_obj_t *pane)
 {
     return dpage_open(s, pane, "Camera pictures", k_video_rows, N(k_video_rows));
 }
+static void *tiles_open(ui_set_t *s, lv_obj_t *pane)
+{
+    return dpage_open(s, pane, "The live view's tiles", k_tile_rows, N(k_tile_rows));
+}
 
 static const ui_set_item_t g_items[] = {
     { "Output", &ui_icon_nav_output, out_open, out_dirty, out_save, out_cancel, out_close },
@@ -667,6 +710,7 @@ static const ui_set_item_t g_items[] = {
     { "Camera names", &ui_icon_nav_names, names_open, dpage_dirty, dpage_save, dpage_cancel, dpage_close },
     { "Status icons", &ui_icon_nav_icons, icons_open, dpage_dirty, dpage_save, dpage_cancel, dpage_close },
     { "Video", &ui_icon_nav_aspect, video_open, dpage_dirty, dpage_save, dpage_cancel, dpage_close },
+    { "Tiles", &ui_icon_nav_tiles, tiles_open, dpage_dirty, dpage_save, dpage_cancel, dpage_close },
 };
 
 void ui_display_open(void) { ui_display_open_at(UI_DISPLAY_OUTPUT); }

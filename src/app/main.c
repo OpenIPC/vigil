@@ -8,7 +8,9 @@
  *   -> channels_start (one thread per camera: source -> decode + record)
  *   -> mgmt_start (the management pages' jobs and timers: network
  *      rollback, NTP, DDNS, network storage, alarm center, mail)
- *   -> api_start (HTTP/WebSocket API on its own threads, if configured)
+ *   -> api_start (HTTP/WebSocket API on its own threads, if configured),
+ *      web_start (the zero channel), onvif_start (the ONVIF server and
+ *      WS-Discovery, while onvif_server.enabled)
  *   -> frontend_run (LVGL quad view, or status lines when headless); on
  *      this thread, a configuration the API saved is applied
  *      (channels_apply)
@@ -24,6 +26,7 @@
 #include <unistd.h>
 
 #include "api.h"
+#include "cJSON.h"
 #include "channel.h"
 #include "config.h"
 #include "events.h"
@@ -34,7 +37,9 @@
 #include "hal_audio.h"
 #include "log.h"
 #include "mgmt.h"
+#include "net.h"
 #include "source.h"
+#include "onvif.h"
 #include "web.h"
 
 static volatile sig_atomic_t g_stop;
@@ -230,6 +235,12 @@ static char     g_api_listen[64];
 static char     g_web_listen[64];
 static char     g_output[16];           /* display.output last applied */
 
+/* display.video_aspect, as the channels take it */
+static vg_aspect_t video_aspect(const char *v)
+{
+    return !strcmp(v, "stretch") ? VG_ASPECT_STRETCH : !strcmp(v, "fill") ? VG_ASPECT_FILL : VG_ASPECT_FIT;
+}
+
 /* display.output, when it changed in the file (the API, the UI's Keep):
  * the output follows. The UI tries a mode before it saves it (its "keep
  * this resolution?"), so a mode the output already runs at is left as
@@ -276,6 +287,60 @@ static void apply_output_adj(const config_display_t *d, int force)
     last = *d;
 }
 
+/* qos.h: the values in force, and the open sockets marked again. */
+static void apply_qos(const vigil_config_t *c)
+{
+    static int last[QOS_CLASSES] = { -1 };
+    int dscp[QOS_CLASSES];
+    config_to_qos(c, dscp);
+    if (!memcmp(dscp, last, sizeof dscp)) return;
+    int n = qos_set(dscp);
+    vg_log("qos: %s: DSCP video %d, management %d, camera %d, alarm %d (%d open socket(s) marked)", c->qos.type,
+           dscp[QOS_VIDEO], dscp[QOS_MANAGEMENT], dscp[QOS_CAMERA], dscp[QOS_ALARM], n);
+    memcpy(last, dscp, sizeof dscp);
+}
+
+/* api.listen or web.listen changed: the server moves there now. If it
+ * cannot (the port was taken since the store checked it), it goes back
+ * to `cur` and the setting is put back, so that the file says what runs;
+ * Network -> Ports shows why (api_listening, web_listening). */
+static void relisten(const char *what, const char *want, char *cur, int (*restart)(const char *, char *, size_t))
+{
+    char err[160] = "";
+    if (restart(want, err, sizeof err) == 0) {
+        vg_log("%s: now on '%s' (was '%s')", what, want, cur);
+        snprintf(cur, 64, "%s", want);
+        return;
+    }
+    vg_log("%s.listen '%s': %s; back on '%s'", what, want, err, cur);
+    events_push(0, "%s port: %.24s", what, err);
+    restart(cur, NULL, 0);
+    char *json = config_get_json(what, 0);
+    cJSON *doc = json ? cJSON_Parse(json) : NULL;
+    free(json);
+    if (doc) {
+        cJSON_ReplaceItemInObjectCaseSensitive(doc, "listen", cJSON_CreateString(cur));
+        char *body = cJSON_PrintUnformatted(doc);
+        schema_errors_t errs = { 0 };
+        if (!body || config_put_json(what, body, strlen(body), &errs) != CONFIG_OK)
+            vg_log("%s.listen: cannot put '%s' back: %s", what, cur, errs.n ? errs.e[0].msg : "out of memory");
+        free(body);
+        cJSON_Delete(doc);
+    }
+}
+
+/* config_put_json asks before saving a new api.listen or web.listen: a
+ * port vigild's own server holds now is free for it (the server moves). */
+static int listen_check(const char *what, const char *listen, char *err, size_t cap)
+{
+    char cur[64] = "";
+    if (!strcmp(what, "api")) api_listening(cur, sizeof cur, NULL, 0);
+    else if (!strcmp(what, "web")) web_listening(cur, sizeof cur, NULL, 0);
+    else onvif_listening(cur, sizeof cur, NULL, 0);
+    if (cur[0] && config_listen_port(cur) == config_listen_port(listen)) return 0;
+    return net_listen_check(listen, err, cap);
+}
+
 static void apply_config(void)
 {
     if (mgmt_power_pending() != MGMT_POWER_NONE) g_stop = 1;    /* reboot or shutdown: stop first */
@@ -286,10 +351,11 @@ static void apply_config(void)
     config_to_channels(&c, &cc);
     rec_week_t weeks[CHANNEL_MAX];
     rec_sched_set(weeks, config_to_schedule(&c, weeks));
+    apply_qos(&c);
     int failed = channels_apply(&cc);
     apply_output(c.display.output);
     apply_output_adj(&c.display, 0);
-    channels_set_stretch(!strcmp(c.display.video_aspect, "stretch"));
+    channels_set_aspect(video_aspect(c.display.video_aspect));
     g_applied_gen = gen;
     config_mark_applied(gen);
     if (failed) {
@@ -299,10 +365,8 @@ static void apply_config(void)
         vg_log("configuration %u applied", gen);
         events_push(0, "config applied");
     }
-    if (strcmp(c.api.listen, g_api_listen) != 0)
-        vg_log("api.listen is now '%s'; it takes effect when vigild starts again", c.api.listen);
-    if (strcmp(c.web.listen, g_web_listen) != 0)
-        vg_log("web.listen is now '%s'; it takes effect when vigild starts again", c.web.listen);
+    if (strcmp(c.api.listen, g_api_listen) != 0) relisten("api", c.api.listen, g_api_listen, api_restart);
+    if (strcmp(c.web.listen, g_web_listen) != 0) relisten("web", c.web.listen, g_web_listen, web_restart);
 }
 
 int main(int argc, char **argv)
@@ -417,6 +481,7 @@ int main(int argc, char **argv)
     }
     config_override(&cfg);
     snprintf(g_api_listen, sizeof g_api_listen, "%s", cfg.api.listen);
+    config_set_listen_check(listen_check);
     snprintf(g_web_listen, sizeof g_web_listen, "%s", cfg.web.listen);
     if (write_path) {
         int wrc = write_config(write_path, cfg_path, loaded, &cfg);
@@ -441,7 +506,7 @@ int main(int argc, char **argv)
     vg_rect_t tiles[CHANNEL_MAX];
     frontend_tiles(tiles, CHANNEL_MAX);
     channels_set_screen(SCREEN_W, SCREEN_H);
-    channels_set_stretch(!strcmp(cfg.display.video_aspect, "stretch"));
+    channels_set_aspect(video_aspect(cfg.display.video_aspect));
     int rc = 1;
     static vigil_config_t running;      /* channels_config_t points into it */
     g_applied_gen = config_get(&running);
@@ -449,13 +514,16 @@ int main(int argc, char **argv)
     config_to_channels(&running, &cc);
     rec_week_t weeks[CHANNEL_MAX];
     rec_sched_set(weeks, config_to_schedule(&running, weeks));
+    apply_qos(&running);
     if (channels_start(&cc, caps->display ? tiles : NULL) == 0) {
         config_mark_applied(g_applied_gen);
         if (mgmt_start() < 0) vg_log("mgmt: cannot start its threads; the management pages will not act");
         disc_set_max_channels(caps->max_channels);
         api_start();                    /* failing to start it is logged, not fatal */
         web_start();                    /* the same */
+        onvif_start();                  /* the same */
         rc = frontend_run(run_secs, &g_stop, apply_config) < 0 ? 1 : 0;
+        onvif_stop();
         web_stop();
         api_stop();
         disc_shutdown();

@@ -7,8 +7,9 @@
  *   compositor:      ~30 times a second, RGA scales each slot's frame into
  *                    its tile of the back NV12 mosaic (at the display
  *                    aspect ratio hal_display_set_aspect gave, black
- *                    bars; aspect_fit), then flips the mosaic onto the
- *                    video plane
+ *                    bars, aspect_fit; stretched; or the middle of the
+ *                    frame over the whole tile, aspect_crop), then flips
+ *                    the mosaic onto the video plane
  *
  * Libraries: rockchip-linux/mpp and librga, built from source by
  * scripts/rockchip/build-deps.sh.
@@ -62,7 +63,8 @@ typedef struct {
     int              clear;             /* tile background needs repainting */
     unsigned         last_w, last_h;
     int              asp_set;           /* hal_display_set_aspect said: */
-    vg_ratio_t       asp;               /* the picture's shape; 0:0 fill the tile */
+    vg_ratio_t       asp;               /* the picture's shape; 0:0 the frame's own */
+    vg_aspect_t      how;               /* ... and how it fills the tile */
 } chan_t;
 
 static chan_t          g_ch[MAX_CH];
@@ -108,14 +110,18 @@ static void compose_one(chan_t *c, rk_buf_t *dst)
         tile_clear(dst, &c->tile);
         --c->clear;
     }
-    /* even for NV12; before the core says, the picture's own shape */
-    vg_rect_t d = aspect_fit(&c->tile, c->asp_set ? c->asp : (vg_ratio_t){ w, h }, 2);
+    /* even for NV12; before the core says, the picture's own shape, fitted */
+    vg_ratio_t a = c->asp_set && c->asp.w ? c->asp : (vg_ratio_t){ w, h };
+    vg_aspect_t how = c->asp_set ? c->how : VG_ASPECT_FIT;
+    vg_rect_t d = aspect_fit(&c->tile, how == VG_ASPECT_FIT ? a : (vg_ratio_t){ 0, 0 }, 2);
+    vg_rect_t s = { 0, 0, (int)w, (int)h };
+    if (how == VG_ASPECT_FILL) s = aspect_crop(w, h, a, (unsigned)d.w, (unsigned)d.h, 2);
     rga_buffer_t src = wrapbuffer_fd_t(fd, (int)w, (int)h, (int)hs, (int)vs, RK_FORMAT_YCbCr_420_SP);
     rga_buffer_t out = wrapbuffer_fd_t(dst->fd, (int)dst->width, (int)dst->height,
                                        (int)dst->pitch, (int)dst->height, RK_FORMAT_YCbCr_420_SP);
     rga_buffer_t pat;
     memset(&pat, 0, sizeof pat);
-    im_rect srect = { 0, 0, (int)w, (int)h }, drect = { d.x, d.y, d.w, d.h }, prect = { 0, 0, 0, 0 };
+    im_rect srect = { s.x, s.y, s.w, s.h }, drect = { d.x, d.y, d.w, d.h }, prect = { 0, 0, 0, 0 };
     IM_STATUS st = improcess(src, out, pat, srect, drect, prect, IM_SYNC);
     if (st != IM_STATUS_SUCCESS && st != IM_STATUS_NOERROR)
         fprintf(stderr, "rockchip: RGA compose failed: %s\n", imStrError_t(st));
@@ -216,12 +222,13 @@ int hal_display_set_tile(int ch, const vg_rect_t *r)
     return 0;
 }
 
-void hal_display_set_aspect(int ch, unsigned w, unsigned h)
+void hal_display_set_aspect(int ch, unsigned w, unsigned h, vg_aspect_t how)
 {
     if (ch < 0 || ch >= MAX_CH) return;
     pthread_mutex_lock(&g_ch[ch].lock);
     g_ch[ch].asp_set = 1;
     g_ch[ch].asp = w && h ? (vg_ratio_t){ w, h } : (vg_ratio_t){ 0, 0 };
+    g_ch[ch].how = how;
     g_ch[ch].clear = 2;                 /* other bars: both mosaic buffers */
     pthread_mutex_unlock(&g_ch[ch].lock);
     __atomic_store_n(&g_repaint, 2, __ATOMIC_RELEASE);

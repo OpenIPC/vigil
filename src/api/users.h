@@ -13,6 +13,7 @@
  *       group: viewer
  *       enabled: true
  *       password: "$6$...$..."       (crypt(3); never leaves the process)
+ *       onvif: "..."                 (the password, base64: users_login_with)
  *
  * Two groups always exist, whether the file has them or not: "admin"
  * (every permission; cannot be changed or deleted) and "user" (live view
@@ -120,6 +121,17 @@ users_rc_t users_group_delete(const char *name, users_err_t *e);
  * wrong or the user unknown or disabled, -1 when it cannot be checked
  * (`why`, for the log: no shadow file, a locked account, ...). */
 int users_login(const char *name, const char *pass, unsigned *perms, char *why, size_t cap);
+
+/* Check a login whose password the client proves it knows without
+ * sending it (ONVIF's WS-UsernameToken digest, HTTP Digest): `check`
+ * gets the password and says whether the client's proof fits it (1).
+ * That needs the password itself, which a crypt(3) hash cannot give:
+ * users of the file have an ONVIF key (the password, base64) written
+ * with it while onvif_server is on; the system account has none.
+ * Returns as users_login: 1 with `*perms`, 0 refused, -1 cannot be
+ * checked (`why`: no key yet, the system account). */
+int users_login_with(const char *name, int (*check)(const char *pass, void *ctx), void *ctx, unsigned *perms,
+                     char *why, size_t cap);
 
 /* A crypt(3) hash of `pass` with a fresh random salt: SHA-512, else
  * SHA-256, else MD5, whichever the C library has. 0, or -1. */

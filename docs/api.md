@@ -92,17 +92,25 @@ defaults, commented.
 | `alarm.enabled`, `protocol`, `host`, `port`, `path`, `interval` | | off, `http`, 80, `/`, 60 s | Every event POSTed as JSON, and a heartbeat. |
 | `time.ntp`, `time.ntp_interval` | boolean, minutes 10..1440 | `true`, 60 | NTP on (the firmware's ntpd, with the servers of `/etc/ntp.conf`), and how often vigild checks itself. |
 | `ui.language`, `date_format`, `time_format` | enums | `en`, `YYYY-MM-DD`, `24h` | The on-screen UI. |
-| `api.listen` | `"port"` or `"a.b.c.d:port"` | `"0.0.0.0:8080"` | Where the API listens (IPv4). Empty: no API. Read at start only. |
+| `api.listen` | `"port"` or `"a.b.c.d:port"` | `"0.0.0.0:8080"` | Where the API listens (IPv4). Empty: no API. A change moves it at once ([Ports](#ports)). |
 | `api.auth` | boolean | `true` | Require a login. See [Authentication](#authentication). |
 | `api.user` | string | `"root"` | The system account: it logs in with every permission (and as `admin` while no user of that name exists). |
 | `api.shadow` | absolute path | `"/etc/shadow"` | The shadow file holding that account's password hash. |
 | `api.users` | absolute path | `"/etc/vigil.users.yaml"` | vigil's own users and groups ([Accounts and permissions](#accounts-and-permissions)). |
 | `web.enabled` | boolean | `true` | The [zero channel](#zero-channel): the screen, mouse and keyboard in a browser. Off: its pages answer `503` and its viewers are disconnected. |
-| `web.listen` | `"port"` or `"a.b.c.d:port"` | `"0.0.0.0:80"` | Where its web server listens (IPv4). Empty: none. Read at start only. |
+| `web.listen` | `"port"` or `"a.b.c.d:port"` | `"0.0.0.0:80"` | Where its web server listens (IPv4). Empty: none. A change moves it at once ([Ports](#ports)). |
 | `web.fps` | integer 1..30 | 15 | Its pictures a second, at most. |
 | `discovery.interfaces` | string | `""` | Interfaces to search for cameras on, comma separated; empty: every IPv4 interface ([Discovery](#discovery)). |
 | `discovery.targets` | IPv4 addresses, comma separated | `""` | Also searched by unicast: cameras on a routed subnet. |
 | `discovery.prefer` | `netip`, `onvif`, `dhip`, comma separated | `"netip,onvif,dhip"` | The protocol a camera that answers several is added with. |
+| `qos.type` | `off`, `standard`, `custom` | `"off"` | DSCP marking of vigild's packets ([QoS](#qos-dscp-marking)). `off`: DSCP 0 everywhere; `standard`: the defaults below; `custom`: the four values below. |
+| `qos.video` | integer 0..63 | 34 (AF41) | The zero channel's picture: `web.listen`'s WebSocket. |
+| `qos.management` | integer 0..63 | 16 (CS2) | The HTTP API and the web server's pages and logins, the ONVIF service and WS-Discovery, DDNS, camera searches. |
+| `qos.camera` | integer 0..63 | 34 (AF41) | vigild's connections to cameras: RTSP and NETIP control and the ACKs of their video. |
+| `qos.alarm` | integer 0..63 | 18 (AF21) | The API's event WebSocket (`/api/v1/ws`), the alarm center's POSTs, mails. |
+| `rtsp_server.port` | integer 1..65535 | 554 | Kept for an RTSP server, which vigild does not have yet ([Ports](#ports)). |
+| `onvif_server.enabled`, `.port` | boolean, integer 1..65535 | `true`, 8899 | vigild as an ONVIF device ([onvif.md](onvif.md)); 80, ONVIF's usual port, is the web server's, 8899 is XM's. Its port counts in [Ports](#ports). |
+| `netip_server.port` | integer 1..65535 | 34567 | Kept for a NETIP server (not yet), XM's port. |
 
 `GET /api/v1/schema` returns this table as data (below), so it is never out
 of date for a client.
@@ -165,8 +173,7 @@ configuration is not changed: `record.path` stays what was set.
 
 ## What applies when
 
-Every setting except `api.listen` applies while `vigild` runs (`"live"` in
-the schema). The main thread notices the new configuration within a fraction
+Every setting applies while `vigild` runs (`"live"` in the schema). The main thread notices the new configuration within a fraction
 of a second and:
 
 - **renames** a camera without touching its stream;
@@ -178,6 +185,51 @@ The result is reported as events (`config applied`, `CAMn added`,
 `restarted`, `removed`, `config: N camera(s) failed`) on the TV's event
 strip, in the log and on the WebSocket. `status.config` shows the saved
 (`generation`) and the running (`applied`) configuration.
+
+## QoS (DSCP marking)
+
+With `qos.type` other than `off`, vigild sets the DSCP of the packets it
+sends (`IP_TOS` = DSCP << 2 on IPv4, `IPV6_TCLASS` on IPv6; the ECN bits
+stay 0), by traffic class:
+
+| Class | What |
+|---|---|
+| video | the zero channel's WebSocket on `web.listen` (port 80), from its upgrade on |
+| management | the API's, the web server's and the ONVIF service's listeners, so every connection they accept (pages, logins, REST calls, ONVIF requests); WS-Discovery; DDNS updates (curl); the camera searches' broadcasts |
+| camera | every connection vigild makes to a camera (RTSP, NETIP, the discovery jobs' NETIP logins), from its SYN; RTSP runs over TCP (interleaved), so the video's ACKs carry it too |
+| alarm | the API's event WebSocket `/api/v1/ws`, the alarm center's POSTs and the mails (curl's `ip-tos`, which curl has since 8.9: OpenIPC's curl 8.15 does) |
+
+A change applies at once: new sockets get the new values; the listeners,
+the camera sessions and the WebSockets open are marked again. An open
+HTTP connection to the API or the web pages keeps its mark until it is
+closed (they are short). What vigild does not send is not marked: sshd,
+ntpd, the firmware's own `httpd` would need iptables' `DSCP` target, and
+the OpenIPC kernels built for these boards have no netfilter.
+
+## Ports
+
+`web.listen`, `api.listen`, `rtsp_server.port`, `onvif_server.port` and
+`netip_server.port`: no two on one port (an empty listen holds none); a
+`PUT` that would put two there is refused (`400`, the later one's path:
+`onvif_server.port: port 80 is web.listen's already`). A file that has
+them clash is still loaded, with the clash logged: the server that starts
+second does not get the port.
+
+A changed `api.listen`, `web.listen` or (while ONVIF is on)
+`onvif_server.port` is tried before it is saved (bound for a moment, as
+the server will): a port another program holds, one below
+1024 without root, or an address the recorder does not have is refused
+with the reason (`api.listen: port 8081 is in use ...`). Saved, the server
+moves at once: it stops (its open connections and WebSockets close) and
+listens on the new port. Should that fail all the same (the port was taken
+in between), it goes back to the old one, the setting is put back, the
+event `api port: ...` says why, and Network -> Ports shows it. The ONVIF
+server follows its port itself (`src/api/onvif.c`), and if the port cannot
+be had it tries again every 30 s; the page says so.
+
+vigild has no RTSP or NETIP server yet: their ports are settings only,
+kept and checked so that no other server of vigild's can take them before
+those servers come.
 
 ## Authentication
 
@@ -232,11 +284,14 @@ that says what its users may do. They are kept in `api.users`
 like `vigil.yaml`; passwords are stored as `crypt(3)` hashes (SHA-512,
 `$6$`, with a random salt; SHA-256 or MD5 where the C library has no
 SHA-512) and never leave `vigild`: the API shows `"password_set": true`.
+While the [ONVIF server](onvif.md#logging-in) is on, setting a password
+also stores the user's ONVIF key (the password itself, base64) next to the
+hash: ONVIF's digest logins need it.
 
 Permissions: `live` (live view, status, events), `playback`, `ptz`,
 `cameras` (the camera list, discovery), `storage` (recording, schedule,
 quota, disks, network storage), `network` (network, DDNS, UPnP, mail,
-alarm center), `system` (time, host name, the UI's settings, the whole
+alarm center, QoS), `system` (time, host name, the UI's settings, the whole
 configuration), `users` (accounts, and the `api` and `web` sections,
 which decide who gets in at all), `remote` (the [zero
 channel](#zero-channel): the screen, mouse and keyboard from a browser,
@@ -267,7 +322,7 @@ saved over it until it is fixed or removed.
 | `PUT /config` | every permission but `remote` |
 | `/config/cameras`, `discovery` | `cameras` |
 | `/config/record`, `schedule`, `quota`, `nas` | `storage` |
-| `/config/ddns`, `upnp`, `smtp`, `alarm` | `network` |
+| `/config/ddns`, `upnp`, `smtp`, `alarm`, `onvif_server`, `qos`, `rtsp_server`, `netip_server` | `network` |
 | `/config/time`, `ui`, `display` | `system` |
 | `/config/api`, `web` | `users` |
 | `/network/…` | `network` |
@@ -416,7 +471,7 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `GET /api/v1/status` | Platform, uptime, configuration generation, one entry per camera. |
 | `GET /api/v1/config` | The configuration in force, passwords redacted. |
 | `PUT /api/v1/config` | Replace the whole configuration. Sections and keys it omits get their defaults. |
-| `GET /api/v1/config/<section>` | One section (`cameras`, `record`, `schedule`, `quota`, `nas`, `ddns`, `upnp`, `smtp`, `alarm`, `time`, `ui`, `display`, `api`, `discovery`). |
+| `GET /api/v1/config/<section>` | One section (`cameras`, `record`, `schedule`, `quota`, `nas`, `ddns`, `upnp`, `smtp`, `alarm`, `time`, `ui`, `display`, `api`, `discovery`, `qos`, `rtsp_server`, `onvif_server`, `netip_server`). |
 | `PUT /api/v1/config/<section>` | Replace one section; the others stay. |
 | `GET /api/v1/schema` | Every setting: type, default, limits, label, help. |
 | `GET /api/v1/ws` | WebSocket: pushed status, events and configuration changes. |
@@ -427,6 +482,7 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `GET /api/v1/discovery/job` | The current or last discovery job. |
 | `POST /api/v1/discovery/ip` | Change devices' addresses, or (`dry_run`) show the plan. |
 | `POST /api/v1/channels/<n>/assign` | Add a device found to channel n. |
+| `POST /api/v1/channels/<n>/events` | Events of channel n's camera, reported from outside ([below](#post-apiv1channelsnevents)). |
 | `POST /api/v1/discovery/autoadd` | Add every new device to the empty channels. |
 | `POST /api/v1/devices/test` | Connect to a camera described by hand: codec and size, or why not. |
 
@@ -476,7 +532,7 @@ For example:
   "config": { "generation": 7, "applied": 7 },
   "platform": { "name": "sigmastar", "display": true, "decoder": true,
                 "decoder_max_width": 2592, "decoder_max_height": 2592,
-                "max_channels": 4, "capture_inputs": 0 },
+                "max_channels": 4, "capture_inputs": 0, "max_in_kbps": 64000 },
   "channels": [
     { "camera": 1, "url": "rtsp://admin:***@192.168.1.10/stream=0", "name": "Gate",
       "enabled": true, "host": "192.168.1.10", "running": true, "live": true,
@@ -484,7 +540,8 @@ For example:
       "main": { "status": "live", "state": "" }, "sub": null,
       "events": ["motion"], "decoding": true, "view": "main", "no_decoder": false, "recording": true, "rec_state": "recording",
       "rec_bytes": 73400320,
-      "codec": "H.265", "width": 1920, "height": 1080, "fps": 25 }
+      "codec": "H.265", "width": 1920, "height": 1080, "fps": 25,
+      "main_kbps": 4096, "sub_kbps": 0 }
   ]
 }
 ```
@@ -526,7 +583,11 @@ for again; `view`: the stream on screen, or about to be
 (`main`, `sub` for the camera's sub-stream in a small tile, `""` when the
 channel is not on screen or nothing decodes it); `codec`, `width`,
 `height` and `fps` (averaged over 2 s) are that stream's; `codec` is `null`
-until the stream says.
+until the stream says. `main_kbps` and `sub_kbps` are what each stream
+brings in, kbit/s of video averaged over 2 s (0 while it does not run);
+the platform's `max_in_kbps` is the chip's rated incoming bandwidth for
+network cameras, every stream together (0: not known), which the Channels
+page shows their sum against.
 
 ### `GET /api/v1/schema`
 
@@ -773,6 +834,24 @@ paths given. The results show the URLs, redacted (`url`, `sub_url`). A
 manual device is not refused for being on another channel already (an NVR's
 channels share an address).
 
+### `POST /api/v1/channels/<n>/events`
+
+`{"events": ["motion", "human"]}` reports events of channel n's camera as
+if the camera had (any of `motion`, `human`, `face`, `vehicle`): for an
+alarm input vigild does not read itself (a script relaying a camera's or a
+sensor's alarm), and for trying the tiles' alarm icons and frame
+(`display.alarm_icons`, `display.alert_frame`). Each is held 5 s after
+its last report, like a camera's, so a source repeats it while it lasts;
+the status's `events` and the live view show it meanwhile. The answer is
+the events held now, `{"channel": 1, "events": ["motion", "human"]}`.
+`400` for an unknown event, `404` past the channels. Needs `cameras`.
+
+```sh
+while sleep 2; do
+  curl -s -u root:PASSWORD -d '{"events": ["motion"]}' $NVR/api/v1/channels/1/events
+done
+```
+
 ### `POST /api/v1/devices/test`
 
 The same description as `manual` above, as the body. The job connects as
@@ -831,6 +910,8 @@ say which device went where.
   `cmake/embed.cmake`); `src/app/kvm.c`, `kvm_enc.c`, `kvm_input.c`,
   `jpeg_enc.c`: its pictures, their changed parts as JPEGs (an encoder of
   its own: libjpeg is not on the firmware) and its input.
+  `src/api/onvif.c`: the [ONVIF server](onvif.md#inside), a third
+  CivetWeb context and the WS-Discovery responder.
   `src/api/api_disc.c`: the discovery endpoints, over
   `src/core/discovery.{h,c}` (the device table and the jobs),
   `src/core/disc_proto.{h,c}` (the searches and their answers, as pure

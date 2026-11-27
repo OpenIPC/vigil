@@ -12,4 +12,9 @@
 int net_connect(const char *host, int port, int timeout_ms, const volatile int *stop,
                 char *err, size_t errcap);
 
+/* Whether a TCP server could listen on `listen` ("port", "a.b.c.d:port")
+ * now: bound for a moment (SO_REUSEADDR, as CivetWeb does) and closed.
+ * 0, or -1 with `err` ("port 80 is in use", ...). */
+int net_listen_check(const char *listen, char *err, size_t errcap);
+
 #endif /* NET_H */

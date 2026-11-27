@@ -31,6 +31,10 @@ typedef struct {
     int      margins;           /* hal_display_set_margins */
     int      picture;           /* hal_display_set_picture */
     int      audio_out;         /* hal_audio_set_volume reaches the HDMI sound */
+    unsigned max_in_kbps;       /* the chip's rated incoming bandwidth for
+                                 * network cameras (every stream, main and
+                                 * sub), kbit/s, as its datasheet or product
+                                 * brief gives it; 0: not known */
 } hal_caps_t;
 
 /* Bring up the media system and the display: a w x h screen (the UI's

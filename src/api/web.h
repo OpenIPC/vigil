@@ -6,9 +6,15 @@
 #ifndef WEB_H
 #define WEB_H
 
+#include <stddef.h>
+
 /* After the UI is up (kvm.h). 0 when serving or off (logged), -1 when it
  * could not listen (logged; vigild runs on without it). */
 int  web_start(void);
 void web_stop(void);
+
+/* As api_restart and api_listening (api.h), for web.listen. */
+int  web_restart(const char *listen, char *err, size_t cap);
+int  web_listening(char *listen, size_t cap, char *why, size_t wcap);
 
 #endif /* WEB_H */
