@@ -245,6 +245,19 @@ static void apply_output(const char *output)
     else vg_log("display: %s", output);
 }
 
+/* qos.h: the values in force, and the open sockets marked again. */
+static void apply_qos(const vigil_config_t *c)
+{
+    static int last[QOS_CLASSES] = { -1 };
+    int dscp[QOS_CLASSES];
+    config_to_qos(c, dscp);
+    if (!memcmp(dscp, last, sizeof dscp)) return;
+    int n = qos_set(dscp);
+    vg_log("qos: %s: DSCP video %d, management %d, camera %d, alarm %d (%d open socket(s) marked)", c->qos.type,
+           dscp[QOS_VIDEO], dscp[QOS_MANAGEMENT], dscp[QOS_CAMERA], dscp[QOS_ALARM], n);
+    memcpy(last, dscp, sizeof dscp);
+}
+
 static void apply_config(void)
 {
     if (mgmt_power_pending() != MGMT_POWER_NONE) g_stop = 1;    /* reboot or shutdown: stop first */
@@ -255,6 +268,7 @@ static void apply_config(void)
     config_to_channels(&c, &cc);
     rec_week_t weeks[CHANNEL_MAX];
     rec_sched_set(weeks, config_to_schedule(&c, weeks));
+    apply_qos(&c);
     int failed = channels_apply(&cc);
     apply_output(c.display.output);
     channels_set_stretch(!strcmp(c.display.video_aspect, "stretch"));
@@ -416,6 +430,7 @@ int main(int argc, char **argv)
     config_to_channels(&running, &cc);
     rec_week_t weeks[CHANNEL_MAX];
     rec_sched_set(weeks, config_to_schedule(&running, weeks));
+    apply_qos(&running);
     if (channels_start(&cc, caps->display ? tiles : NULL) == 0) {
         config_mark_applied(g_applied_gen);
         if (mgmt_start() < 0) vg_log("mgmt: cannot start its threads; the management pages will not act");

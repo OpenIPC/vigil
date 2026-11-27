@@ -278,3 +278,26 @@ discovery:
   # answers more than one: NETIP names both streams, ONVIF asks the camera,
   # Dahua's RTSP path is fixed. Default netip,onvif,dhip.
   prefer: "netip,onvif,dhip"
+
+# QoS: DSCP marking of vigild's packets, so that the network can prioritise
+# them.
+qos:
+  # QoS type: DSCP marking of the packets vigild sends, for switches and
+  # routers that queue by it. off: nothing marked (DSCP 0); standard: video
+  # AF41 (34), management CS2 (16), cameras AF41 (34), alarms AF21 (18);
+  # custom: the values below. One of: off, standard, custom. Default off.
+  type: "off"
+  # Video DSCP: With type custom: the zero channel's picture (web.listen's
+  # WebSocket). 0..63, default 34.
+  video: 34
+  # Management DSCP: With type custom: the HTTP API, the web pages and logins,
+  # DDNS, camera searches. 0..63, default 16.
+  management: 16
+  # Camera DSCP: With type custom: vigild's connections to cameras, RTSP and
+  # NETIP control and the ACKs of their video; a connection open when this
+  # changes is marked at once. 0..63, default 34.
+  camera: 34
+  # Alarm DSCP: With type custom: events, the API's event WebSocket, the alarm
+  # center's POSTs and mails (curl 8.9 or later marks those). 0..63, default
+  # 18.
+  alarm: 18

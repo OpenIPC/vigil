@@ -546,6 +546,8 @@ static void *viewer(void *arg)
 static void ws_ready(struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
+    /* The pages and the login were management; this is the picture. */
+    api_qos_conn(conn, QOS_VIDEO);
     pthread_mutex_lock(&g_ws_lock);
     for (int i = 0; i < KVM_CLIENTS; ++i) {
         ws_t *w = &g_ws[i];
@@ -679,6 +681,7 @@ int web_start(void)
         mg_exit_library();
         return -1;
     }
+    api_qos_listeners(g_ctx, QOS_MANAGEMENT);
     mg_set_request_handler(g_ctx, "/", request_handler, NULL);
     mg_set_websocket_handler(g_ctx, "/ws", ws_connect, ws_ready, ws_data, ws_close, NULL);
     vg_log("web: zero channel on %s", cfg.listen);

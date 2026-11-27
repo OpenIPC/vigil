@@ -27,6 +27,7 @@
     X(S_SMTP, "SMTP") \
     X(S_ALARM_CENTER, "Alarm center") \
     X(S_P2P, "P2P") \
+    X(S_QOS, "QoS") \
     X(S_BASIC, "Basic") \
     X(S_SCHEDULE, "Schedule") \
     X(S_DISK_MANAGER, "Disk Manager") \

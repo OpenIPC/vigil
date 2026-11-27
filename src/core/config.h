@@ -39,6 +39,7 @@
 #include <stddef.h>
 
 #include "channel.h"
+#include "qos.h"
 #include "rec_sched.h"
 #include "schema.h"
 
@@ -165,6 +166,12 @@ typedef struct {
     char prefer[32];                /* "netip,onvif,dhip" */
 } config_discovery_t;
 
+/* DSCP marking of vigild's packets (qos.h). */
+typedef struct {
+    char type[12];                  /* "off" | "standard" | "custom" */
+    int  video, management, camera, alarm;     /* custom: DSCP 0..63 */
+} config_qos_t;
+
 typedef struct {
     int             n_cameras;
     config_camera_t cameras[CHANNEL_MAX];
@@ -184,6 +191,7 @@ typedef struct {
     config_api_t    api;
     config_web_t    web;
     config_discovery_t discovery;
+    config_qos_t    qos;
 } vigil_config_t;
 
 /* "mon".."sun" */
@@ -205,6 +213,10 @@ void config_to_channels(const vigil_config_t *c, channels_config_t *cc);
 /* The cameras' weeks (record schedule) for rec_sched_set; returns the
  * number of entries (CHANNEL_MAX). A camera listed twice: the last wins. */
 int config_to_schedule(const vigil_config_t *c, rec_week_t weeks[CHANNEL_MAX]);
+
+/* The DSCP of each class (qos_class_t) that `c.qos` sets: 0 for "off",
+ * the fields' defaults for "standard", the fields for "custom". */
+void config_to_qos(const vigil_config_t *c, int dscp[QOS_CLASSES]);
 
 /* display.output "1920x1080@60" as numbers; 0, or -1 when it is not one. */
 int config_output_mode(const char *s, unsigned *w, unsigned *h, unsigned *hz);

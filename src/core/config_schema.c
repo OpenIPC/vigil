@@ -533,6 +533,49 @@ static const schema_field_t discovery_fields[] = {
               "NETIP names both streams, ONVIF asks the camera, Dahua's RTSP path is fixed." },
 };
 
+/* ---- QoS ------------------------------------------------------------------------- */
+
+static const char *const qos_types[] = { "off", "standard", "custom", NULL };
+
+/* The defaults are the "standard" preset (RFC 4594's classes): AF41 for
+ * video, as surveillance video is usually queued; CS2 (OAM) for
+ * management; AF21 (low-latency data) for alarms and events. */
+#define DSCP(K, M, D, L, H) { .key = K, INT(config_qos_t, M), .def_int = D, .min = 0, .max = QOS_DSCP_MAX, \
+                              .live = 1, .label = L, .help = H }
+static const schema_field_t qos_fields[] = {
+    { .key = "type", ENUM(config_qos_t, type, qos_types), .def_str = "off", .live = 1, .label = "QoS type",
+      .help = "DSCP marking of the packets vigild sends, for switches and routers that queue by it. "
+              "off: nothing marked (DSCP 0); standard: video AF41 (34), management CS2 (16), cameras "
+              "AF41 (34), alarms AF21 (18); custom: the values below." },
+    DSCP("video", video, 34, "Video DSCP",
+         "With type custom: the zero channel's picture (web.listen's WebSocket)."),
+    DSCP("management", management, 16, "Management DSCP",
+         "With type custom: the HTTP API, the web pages and logins, DDNS, camera searches."),
+    DSCP("camera", camera, 34, "Camera DSCP",
+         "With type custom: vigild's connections to cameras, RTSP and NETIP control and the ACKs of "
+         "their video; a connection open when this changes is marked at once."),
+    DSCP("alarm", alarm, 18, "Alarm DSCP",
+         "With type custom: events, the API's event WebSocket, the alarm center's POSTs and mails "
+         "(curl 8.9 or later marks those)."),
+};
+
+void config_to_qos(const vigil_config_t *c, int dscp[QOS_CLASSES])
+{
+    const config_qos_t *q = &c->qos;
+    int custom[QOS_CLASSES] = { [QOS_VIDEO] = q->video, [QOS_MANAGEMENT] = q->management,
+                                [QOS_CAMERA] = q->camera, [QOS_ALARM] = q->alarm };
+    static const char *const keys[QOS_CLASSES] = { [QOS_VIDEO] = "video", [QOS_MANAGEMENT] = "management",
+                                                   [QOS_CAMERA] = "camera", [QOS_ALARM] = "alarm" };
+    for (int k = 0; k < QOS_CLASSES; ++k) {
+        if (!strcmp(q->type, "custom")) dscp[k] = custom[k];
+        else if (!strcmp(q->type, "standard")) {
+            dscp[k] = 0;
+            for (size_t f = 0; f < sizeof qos_fields / sizeof qos_fields[0]; ++f)
+                if (!strcmp(qos_fields[f].key, keys[k])) dscp[k] = qos_fields[f].def_int;
+        } else dscp[k] = 0;
+    }
+}
+
 #define N(a) (int)(sizeof(a) / sizeof((a)[0]))
 
 static const schema_section_t sections[] = {
@@ -569,6 +612,8 @@ static const schema_section_t sections[] = {
     OBJECT("web", web, web_fields, "Zero channel"),
     { .key = "discovery", .off = offsetof(vigil_config_t, discovery), .fields = discovery_fields,
       .n_fields = N(discovery_fields), .label = "Camera search" },
+    { .key = "qos", .off = offsetof(vigil_config_t, qos), .fields = qos_fields, .n_fields = N(qos_fields),
+      .label = "QoS", .help = "DSCP marking of vigild's packets, so that the network can prioritise them." },
 };
 
 const schema_t config_schema = {

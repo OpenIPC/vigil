@@ -2040,6 +2040,32 @@ static void test_network_pages(void)
     click_text("Send test mail");
     run(800);
     CHECK(find("done", 1), "test mail: the job's result");
+    nav_to("QoS");
+    lv_obj_t *qdd = nth_of(&lv_dropdown_class, 0);
+    lv_obj_t *video = textarea(0);
+    CHECK(qdd && lv_dropdown_get_selected(qdd) == 0 && find("Nothing is marked", 1) && !find("Video", 1),
+          "QoS: off, no classes shown");
+    if (qdd) {
+        lv_dropdown_set_selected(qdd, 1);
+        lv_obj_send_event(qdd, LV_EVENT_VALUE_CHANGED, NULL);
+    }
+    run(50);
+    video = textarea(0);
+    CHECK(find("Video", 1) && video && !strcmp(lv_textarea_get_text(video), "34") &&
+          lv_obj_has_state(video, LV_STATE_DISABLED) && find("AF41", 0), "QoS standard: the preset, greyed");
+    if (qdd) {
+        lv_dropdown_set_selected(qdd, 2);
+        lv_obj_send_event(qdd, LV_EVENT_VALUE_CHANGED, NULL);
+    }
+    run(50);
+    if (video) lv_textarea_set_text(video, "46");
+    run(50);
+    CHECK(video && !lv_obj_has_state(video, LV_STATE_DISABLED) && find("EF", 0), "QoS custom: editable, named");
+    click_text(SAVE);
+    run(100);
+    config_get(&c);
+    CHECK(!strcmp(c.qos.type, "custom") && c.qos.video == 46 && c.qos.management == 16,
+          "QoS saved through the store: %s %d %d", c.qos.type, c.qos.video, c.qos.management);
     nav_to("P2P");
     CHECK(find("P2P is not available", 0), "P2P: said so");
     button(BTN_RIGHT);
@@ -2066,10 +2092,23 @@ static void shots_settings(const char *tile, const char *prefix, const char *con
 
 static void shots_network(void)
 {
-    static const char *const items[] = { "Ethernet", "Wi-Fi", "LTE", "DDNS", "UPnP", "SMTP", "Alarm center", "P2P" };
-    shots_settings("NETWORK", "network", items, 8);
+    static const char *const items[] = { "Ethernet", "Wi-Fi", "LTE", "DDNS", "UPnP", "SMTP", "Alarm center", "QoS",
+                                         "P2P" };
+    shots_settings("NETWORK", "network", items, (int)(sizeof items / sizeof items[0]));
     g_mg_wifi = 1;
     click_text("NETWORK");
+    nav_to("QoS");
+    for (int t = 1; t <= 2; ++t) {
+        lv_obj_t *qdd = nth_of(&lv_dropdown_class, 0);
+        if (qdd) {
+            lv_dropdown_set_selected(qdd, (uint32_t)t);
+            lv_obj_send_event(qdd, LV_EVENT_VALUE_CHANGED, NULL);
+        }
+        if (t == 2 && textarea(0)) lv_textarea_set_text(textarea(0), "46");
+        shot(t == 1 ? "network-qos-standard" : "network-qos-custom");
+    }
+    click_text("Cancel");
+    run(50);
     nav_to("Wi-Fi");
     shot("network-wifi-adapter");
     click_text("Scan");

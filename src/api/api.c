@@ -740,6 +740,8 @@ static int ws_connect(const struct mg_connection *conn, void *cbdata)
 static void ws_ready(struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
+    /* What this WebSocket carries is events, the alarm class's. */
+    api_qos_conn(conn, QOS_ALARM);
     /* A client starts with the state of things, not a second of silence. */
     char *st = message("status", status_json());
     char *cf = config_message(config_generation());
@@ -865,6 +867,21 @@ static void random_key_once(void)
         g_cache_key[i] = (unsigned char)('!' + g_cache_key[i] % 90);
 }
 
+void api_qos_listeners(const struct mg_context *ctx, qos_class_t c)
+{
+    struct mg_server_port ports[4];
+    int n = mg_get_server_ports(ctx, 4, ports);
+    for (int i = 0; i < n; ++i)
+        if (qos_mark_listeners(ports[i].port, c) <= 0) vg_log("qos: no listener found on port %d", ports[i].port);
+}
+
+void api_qos_conn(const struct mg_connection *conn, qos_class_t c)
+{
+    const struct mg_request_info *ri = mg_get_request_info(conn);
+    if (ri && qos_mark_peer(ri->server_port, ri->remote_addr, ri->remote_port, c) < 0)
+        vg_log("qos: the connection from %s:%d not found", ri->remote_addr, ri->remote_port);
+}
+
 void api_auth_init(void)
 {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
@@ -904,6 +921,7 @@ int api_start(void)
         mg_exit_library();
         return -1;
     }
+    api_qos_listeners(g_ctx, QOS_MANAGEMENT);
     mg_set_auth_handler(g_ctx, "/api", auth_handler, NULL);
     mg_set_request_handler(g_ctx, "/api/v1", request_handler, NULL);
     mg_set_websocket_handler(g_ctx, "/api/v1/ws", ws_connect, ws_ready, ws_data, ws_close, NULL);

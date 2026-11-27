@@ -19,6 +19,7 @@ The same actions are in the HTTP API ([api.md](api.md#management)).
 | | UPnP | stored | The settings are kept; vigild has no UPnP client yet. |
 | | SMTP | works | A test mail; trouble (disk full, recording failed, a camera offline) mailed, at most one mail per 10 minutes, through curl. |
 | | Alarm center | works | Every event POSTed as JSON to `http://server:port/path`, and a heartbeat. |
+| | QoS | works | DSCP marking of vigild's own packets (`qos`): off, standard (RFC 4594: video AF41, management CS2, cameras AF41, alarms AF21) or custom values 0..63 per class; applied at once. Other programs (sshd, ntpd) are not marked: the firmware's kernel has no netfilter, so no iptables `DSCP` target. |
 | | P2P | none | vigil has no P2P service; the page says so. |
 | Storage | Basic | works | When the disk is full: overwrite the oldest recordings, or stop (event `REC disk full`); segment length in minutes; the recording directory. |
 | | Schedule | works | A week per camera in half hours: continuous, motion only, off. Motion only records while the camera reports motion, which no source does yet. |

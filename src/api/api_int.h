@@ -6,9 +6,11 @@
 
 #include <stddef.h>
 
+#include "qos.h"
 #include "schema.h"
 
 struct mg_connection;
+struct mg_context;
 typedef struct cJSON cJSON;
 
 /* Answers; each returns the status sent. send_json takes `doc`. */
@@ -49,5 +51,11 @@ int api_users_request(struct mg_connection *conn, const char *uri, const char *m
 
 /* /api/v1/discovery..., /api/v1/channels/N/assign (api_disc.c). */
 int api_disc_request(struct mg_connection *conn, const char *uri, const char *method);
+
+/* QoS (qos.h): mark a server's listeners, whose new connections inherit
+ * the class; mark one connection (a WebSocket after its upgrade).
+ * CivetWeb does not hand out its sockets: they are found by address. */
+void api_qos_listeners(const struct mg_context *ctx, qos_class_t c);
+void api_qos_conn(const struct mg_connection *conn, qos_class_t c);
 
 #endif /* API_INT_H */

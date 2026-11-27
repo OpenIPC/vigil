@@ -14,6 +14,7 @@
 #include <sys/time.h>
 
 #include "net.h"
+#include "qos.h"
 
 /* Slices of the connect wait: a camera that drops SYNs would otherwise
  * hold a channel's stop (a configuration change, a shutdown) for the whole
@@ -36,6 +37,8 @@ int net_connect(const char *host, int port, int timeout_ms, const volatile int *
         snprintf(err, errcap, "socket: %s", strerror(errno));
         return -1;
     }
+    /* Before connect: the SYN already carries the class. */
+    qos_mark(fd, QOS_CAMERA, 0);
     fcntl(fd, F_SETFL, O_NONBLOCK);
     int rc = connect(fd, ai->ai_addr, ai->ai_addrlen);
     freeaddrinfo(ai);
@@ -63,6 +66,9 @@ int net_connect(const char *host, int port, int timeout_ms, const volatile int *
         return -1;
     }
     fcntl(fd, F_SETFL, 0);
+    /* Tracked once connected (by its addresses), so that a camera session
+     * open when the class changes is marked again. */
+    qos_mark(fd, QOS_CAMERA, 1);
 
     struct timeval tv = { .tv_sec = 1 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);

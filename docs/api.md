@@ -103,6 +103,11 @@ defaults, commented.
 | `discovery.interfaces` | string | `""` | Interfaces to search for cameras on, comma separated; empty: every IPv4 interface ([Discovery](#discovery)). |
 | `discovery.targets` | IPv4 addresses, comma separated | `""` | Also searched by unicast: cameras on a routed subnet. |
 | `discovery.prefer` | `netip`, `onvif`, `dhip`, comma separated | `"netip,onvif,dhip"` | The protocol a camera that answers several is added with. |
+| `qos.type` | `off`, `standard`, `custom` | `"off"` | DSCP marking of vigild's packets ([QoS](#qos-dscp-marking)). `off`: DSCP 0 everywhere; `standard`: the defaults below; `custom`: the four values below. |
+| `qos.video` | integer 0..63 | 34 (AF41) | The zero channel's picture: `web.listen`'s WebSocket. |
+| `qos.management` | integer 0..63 | 16 (CS2) | The HTTP API and the web server's pages and logins, DDNS, camera searches. |
+| `qos.camera` | integer 0..63 | 34 (AF41) | vigild's connections to cameras: RTSP and NETIP control and the ACKs of their video. |
+| `qos.alarm` | integer 0..63 | 18 (AF21) | The API's event WebSocket (`/api/v1/ws`), the alarm center's POSTs, mails. |
 
 `GET /api/v1/schema` returns this table as data (below), so it is never out
 of date for a client.
@@ -179,6 +184,26 @@ The result is reported as events (`config applied`, `CAMn added`,
 strip, in the log and on the WebSocket. `status.config` shows the saved
 (`generation`) and the running (`applied`) configuration.
 
+## QoS (DSCP marking)
+
+With `qos.type` other than `off`, vigild sets the DSCP of the packets it
+sends (`IP_TOS` = DSCP << 2 on IPv4, `IPV6_TCLASS` on IPv6; the ECN bits
+stay 0), by traffic class:
+
+| Class | What |
+|---|---|
+| video | the zero channel's WebSocket on `web.listen` (port 80), from its upgrade on |
+| management | the API's and the web server's listeners, so every connection they accept (pages, logins, REST calls); DDNS updates (curl); the camera searches' broadcasts |
+| camera | every connection vigild makes to a camera (RTSP, NETIP, the discovery jobs' NETIP logins), from its SYN; RTSP runs over TCP (interleaved), so the video's ACKs carry it too |
+| alarm | the API's event WebSocket `/api/v1/ws`, the alarm center's POSTs and the mails (curl's `ip-tos`, which curl has since 8.9: OpenIPC's curl 8.15 does) |
+
+A change applies at once: new sockets get the new values; the listeners,
+the camera sessions and the WebSockets open are marked again. An open
+HTTP connection to the API or the web pages keeps its mark until it is
+closed (they are short). What vigild does not send is not marked: sshd,
+ntpd, the firmware's own `httpd` would need iptables' `DSCP` target, and
+the OpenIPC kernels built for these boards have no netfilter.
+
 ## Authentication
 
 HTTP Basic, checked against vigil's own users ([Accounts and
@@ -236,7 +261,7 @@ SHA-512) and never leave `vigild`: the API shows `"password_set": true`.
 Permissions: `live` (live view, status, events), `playback`, `ptz`,
 `cameras` (the camera list, discovery), `storage` (recording, schedule,
 quota, disks, network storage), `network` (network, DDNS, UPnP, mail,
-alarm center), `system` (time, host name, the UI's settings, the whole
+alarm center, QoS), `system` (time, host name, the UI's settings, the whole
 configuration), `users` (accounts, and the `api` and `web` sections,
 which decide who gets in at all), `remote` (the [zero
 channel](#zero-channel): the screen, mouse and keyboard from a browser,
@@ -267,7 +292,7 @@ saved over it until it is fixed or removed.
 | `PUT /config` | every permission but `remote` |
 | `/config/cameras`, `discovery` | `cameras` |
 | `/config/record`, `schedule`, `quota`, `nas` | `storage` |
-| `/config/ddns`, `upnp`, `smtp`, `alarm` | `network` |
+| `/config/ddns`, `upnp`, `smtp`, `alarm`, `qos` | `network` |
 | `/config/time`, `ui`, `display` | `system` |
 | `/config/api`, `web` | `users` |
 | `/network/…` | `network` |
@@ -416,7 +441,7 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `GET /api/v1/status` | Platform, uptime, configuration generation, one entry per camera. |
 | `GET /api/v1/config` | The configuration in force, passwords redacted. |
 | `PUT /api/v1/config` | Replace the whole configuration. Sections and keys it omits get their defaults. |
-| `GET /api/v1/config/<section>` | One section (`cameras`, `record`, `schedule`, `quota`, `nas`, `ddns`, `upnp`, `smtp`, `alarm`, `time`, `ui`, `display`, `api`, `discovery`). |
+| `GET /api/v1/config/<section>` | One section (`cameras`, `record`, `schedule`, `quota`, `nas`, `ddns`, `upnp`, `smtp`, `alarm`, `time`, `ui`, `display`, `api`, `discovery`, `qos`). |
 | `PUT /api/v1/config/<section>` | Replace one section; the others stay. |
 | `GET /api/v1/schema` | Every setting: type, default, limits, label, help. |
 | `GET /api/v1/ws` | WebSocket: pushed status, events and configuration changes. |

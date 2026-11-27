@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* ui_set_network.c — Network: Ethernet, Wi-Fi, LTE, DDNS, UPnP, SMTP,
- * Alarm center, P2P (docs/management.md).
+ * Alarm center, QoS, P2P (docs/management.md).
  *
  * Ethernet and Wi-Fi change the system through the model's management
  * calls (jobs); an Ethernet change is undone unless "Keep" is pressed
@@ -603,6 +603,198 @@ static void svc_close(void *st)
     free(st);
 }
 
+/* ---- QoS --------------------------------------------------------------------------- */
+
+/* vigil.yaml's `qos`: the type, and a DSCP per traffic class. "standard"
+ * is the fields' defaults (the schema's), shown greyed; "custom", the
+ * fields themselves. Saved like a form: through the store, applied at
+ * once (main.c marks the open sockets again). */
+
+#define QOS_N 4
+static const char *const k_qos_keys[QOS_N] = { "video", "management", "camera", "alarm" };
+static const char *const k_qos_types[] = { "off", "standard", "custom" };
+
+typedef struct {
+    int       sec;                  /* the section's index in the model */
+    int       type;                 /* stored: index in k_qos_types */
+    int       val[QOS_N], def[QOS_N];   /* stored custom values; the defaults */
+    lv_obj_t *type_dd, *classes, *classes_title, *off_note;
+    lv_obj_t *num[QOS_N], *name[QOS_N];
+} qos_t;
+
+/* The common names of DSCP values (RFC 2474, 2597, 3246, 5865, 8622). */
+static const char *dscp_name(int v)
+{
+    static const char *const af[] = { "AF11", "AF12", "AF13", "AF21", "AF22", "AF23",
+                                      "AF31", "AF32", "AF33", "AF41", "AF42", "AF43" };
+    static const char *const cs[] = { "CS0 (best effort)", "CS1", "CS2", "CS3", "CS4", "CS5", "CS6", "CS7" };
+    if (v % 8 == 0 && v >= 0 && v <= 56) return cs[v / 8];
+    if (v >= 10 && v <= 38 && v % 2 == 0 && (v % 8) != 0 && (v % 8) <= 6) return af[(v / 8 - 1) * 3 + (v % 8) / 2 - 1];
+    if (v == 46) return "EF";
+    if (v == 44) return "VOICE-ADMIT";
+    if (v == 1) return "LE (lower effort)";
+    return "";
+}
+
+static int qos_field(const qos_t *q, const char *key)
+{
+    const ui_section_t *u = &ui_model()->sections[q->sec];
+    for (int f = 0; f < u->n_fields; ++f)
+        if (!strcmp(u->fields[f].key, key)) return f;
+    return -1;
+}
+
+static void qos_name_cb(lv_event_t *ev)
+{
+    lv_obj_t *name = lv_event_get_user_data(ev);
+    lv_obj_t *ta = lv_event_get_target(ev);
+    lv_label_set_text(name, dscp_name(ui_set_number_get(ta)));
+}
+
+static void qos_set_num(qos_t *q, int k, int v)
+{
+    char t[8];
+    snprintf(t, sizeof t, "%d", v);
+    lv_textarea_set_text(q->num[k], t);
+    lv_label_set_text(q->name[k], dscp_name(v));
+}
+
+/* The rows as the type chosen shows them. */
+static void show_if(lv_obj_t *o, int shown)
+{
+    if (shown) lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void qos_show(qos_t *q, int type)
+{
+    show_if(q->classes, type != 0);
+    show_if(q->classes_title, type != 0);
+    show_if(q->off_note, type == 0);
+    for (int k = 0; k < QOS_N; ++k) {
+        qos_set_num(q, k, type == 1 ? q->def[k] : q->val[k]);
+        lv_obj_t *box = lv_obj_get_parent(q->num[k]);
+        for (uint32_t i = 0; i < lv_obj_get_child_count(box); ++i) {
+            lv_obj_t *c = lv_obj_get_child(box, (int32_t)i);
+            if (type == 2) lv_obj_remove_state(c, LV_STATE_DISABLED);
+            else lv_obj_add_state(c, LV_STATE_DISABLED);
+        }
+    }
+}
+
+static void qos_type_cb(lv_event_t *ev)
+{
+    qos_t *q = lv_event_get_user_data(ev);
+    qos_show(q, (int)lv_dropdown_get_selected(q->type_dd));
+}
+
+static void qos_load(qos_t *q)
+{
+    const ui_section_t *u = &ui_model()->sections[q->sec];
+    char v[32];
+    int f = qos_field(q, "type");
+    q->type = 0;
+    if (f >= 0) {
+        ui_model()->get_value(q->sec, -1, f, v, sizeof v);
+        for (int i = 0; i < 3; ++i)
+            if (!strcmp(v, k_qos_types[i])) q->type = i;
+    }
+    for (int k = 0; k < QOS_N; ++k) {
+        f = qos_field(q, k_qos_keys[k]);
+        q->val[k] = q->def[k] = 0;
+        if (f < 0) continue;
+        ui_model()->get_value(q->sec, -1, f, v, sizeof v);
+        q->val[k] = atoi(v);
+        q->def[k] = u->fields[f].def ? atoi(u->fields[f].def) : 0;
+    }
+    lv_dropdown_set_selected(q->type_dd, (uint32_t)q->type);
+    qos_show(q, q->type);
+}
+
+static void *qos_open(ui_set_t *s, lv_obj_t *pane)
+{
+    int sec = ui_set_section_index("qos");
+    if (sec < 0) return NULL;
+    qos_t *q = calloc(1, sizeof *q);
+    if (!q) return NULL;
+    q->sec = sec;
+    static const char *const labels[QOS_N] = { "Video", "Management", "Cameras", "Alarms and events" };
+    static const char *const helps[QOS_N] = {
+        "The zero channel's picture: the WebSocket of the web server (web.listen, port 80).",
+        "The HTTP API, the web pages and logins, DDNS, camera searches.",
+        "vigild's connections to cameras: RTSP and NETIP control, and the ACKs of the video they send.",
+        "The API's event WebSocket, the alarm center's POSTs and the mails.",
+    };
+    lv_obj_t *sec_o = ui_set_section(pane, "QoS (DSCP marking)");
+    q->type_dd = ui_set_dropdown(s, ui_set_row(sec_o, "QoS type",
+                                               "Marks the packets vigild sends with a DSCP class, for switches "
+                                               "and routers that queue by it."),
+                                 "Off\nStandard (RFC 4594)\nCustom", 0, 320);
+    lv_obj_add_event_cb(q->type_dd, qos_type_cb, LV_EVENT_VALUE_CHANGED, q);
+    q->off_note = ui_set_note(pane, "Nothing is marked: every packet goes with DSCP 0 (best effort).", UI_C(TEXT2));
+    q->classes = ui_set_section(pane, "DSCP per traffic class");
+    q->classes_title = lv_obj_get_child(pane, lv_obj_get_index(q->classes) - 1);
+    for (int k = 0; k < QOS_N; ++k) {
+        q->num[k] = ui_set_number(s, ui_set_row(q->classes, labels[k], helps[k]), 0, 0, 63);
+        q->name[k] = ui_label(lv_obj_get_parent(q->num[k]), "", VG_FONT_MD_LV, UI_C(TEXT));
+        lv_obj_add_event_cb(q->num[k], qos_name_cb, LV_EVENT_VALUE_CHANGED, q->name[k]);
+    }
+    ui_set_note(pane, "Applied at once to new connections, to the cameras' sessions and to open WebSockets; an "
+                      "open web page or API connection keeps its old mark until it reconnects. Only vigild's own "
+                      "packets are marked, not other programs' (sshd, ntpd).", UI_C(TEXT2));
+    qos_load(q);
+    return q;
+}
+
+static int qos_dirty(void *st)
+{
+    qos_t *q = st;
+    if (!q) return 0;
+    int type = (int)lv_dropdown_get_selected(q->type_dd);
+    if (type != q->type) return 1;
+    if (type != 2) return 0;
+    for (int k = 0; k < QOS_N; ++k)
+        if (ui_set_number_get(q->num[k]) != q->val[k]) return 1;
+    return 0;
+}
+
+static int qos_save(void *st)
+{
+    qos_t *q = st;
+    if (!q) return 0;
+    const ui_section_t *u = &ui_model()->sections[q->sec];
+    int type = (int)lv_dropdown_get_selected(q->type_dd);
+    char buf[8][32];
+    const char *v[8];
+    if (u->n_fields > 8) return -1;
+    for (int f = 0; f < u->n_fields; ++f) {
+        ui_model()->get_value(q->sec, -1, f, buf[f], sizeof buf[f]);
+        if (!strcmp(u->fields[f].key, "type")) snprintf(buf[f], sizeof buf[f], "%s", k_qos_types[type]);
+        /* Only "custom" takes the numbers: the others keep the stored ones
+         * for when it is chosen again. */
+        for (int k = 0; k < QOS_N && type == 2; ++k)
+            if (!strcmp(u->fields[f].key, k_qos_keys[k]))
+                snprintf(buf[f], sizeof buf[f], "%d", ui_set_number_get(q->num[k]));
+        v[f] = buf[f];
+    }
+    unsigned gen = ui_model()->config_generation ? ui_model()->config_generation() : 0;
+    ui_errors_t errs;
+    memset(&errs, 0, sizeof errs);
+    ui_save_rc_t rc = ui_model()->save(q->sec, 1, v, NULL, gen, &errs);
+    if (rc != UI_SAVE_OK && rc != UI_SAVE_UNSYNCED) {
+        ui_toast(UI_TOAST_BAD, "Not saved: %s", errs.n ? errs.e[0].msg : "the settings changed meanwhile");
+        return -1;
+    }
+    ui_toast(UI_TOAST_OK, "QoS: %s", type == 0 ? "off" : "applied");
+    qos_load(q);
+    return 0;
+}
+
+static void qos_cancel(void *st)
+{
+    if (st) qos_load(st);
+}
+
 /* ---- P2P --------------------------------------------------------------------------- */
 
 static void *p2p_open(ui_set_t *s, lv_obj_t *pane)
@@ -619,7 +811,7 @@ static void *p2p_open(ui_set_t *s, lv_obj_t *pane)
 
 static void free_st(void *st) { free(st); }
 
-static ui_set_item_t g_items[8];
+static ui_set_item_t g_items[9];
 
 void ui_network_open(int first)
 {
@@ -631,8 +823,9 @@ void ui_network_open(int first)
         { TR(S_UPNP), &ui_icon_nav_upnp, upnp_open, svc_dirty, svc_save, svc_cancel, svc_close },
         { TR(S_SMTP), &ui_icon_nav_smtp, smtp_open, svc_dirty, svc_save, svc_cancel, svc_close },
         { TR(S_ALARM_CENTER), &ui_icon_nav_alarm, alarm_open, svc_dirty, svc_save, svc_cancel, svc_close },
+        { TR(S_QOS), &ui_icon_nav_qos, qos_open, qos_dirty, qos_save, qos_cancel, free_st },
         { TR(S_P2P), &ui_icon_nav_p2p, p2p_open, NULL, NULL, NULL, NULL },
     };
     memcpy(g_items, items, sizeof items);
-    ui_settings_open(TR(S_NETWORK), g_items, 8, first);
+    ui_settings_open(TR(S_NETWORK), g_items, (int)(sizeof items / sizeof items[0]), first);
 }

@@ -248,7 +248,7 @@ def main():
         secs = {s["key"]: s for s in schema["sections"]} if st == 200 else {}
         seg = [f for f in secs.get("record", {}).get("fields", []) if f["key"] == "segment"]
         check(set(secs) == {"cameras", "record", "schedule", "quota", "nas", "ddns", "upnp", "smtp",
-                              "alarm", "time", "ui", "display", "api", "web", "discovery"} and seg and seg[0]["min"] == 10 and
+                              "alarm", "time", "ui", "display", "api", "web", "discovery", "qos"} and seg and seg[0]["min"] == 10 and
               seg[0]["max"] == 3600 and seg[0]["live"], "schema: sections and limits")
         st, _, _ = api.json("GET", "/api/v1/nothing")
         check(st == 404, "unknown endpoint: 404")
@@ -256,6 +256,19 @@ def main():
         check(st == 405 and "PUT" in hdr.get("Allow", ""), "DELETE config: 405 with Allow")
         st, _, _ = api.json("PUT", "/api/v1/config/nope", {})
         check(st == 404, "unknown section: 404")
+
+        # ---- QoS: a section like the others, 0..63
+        st, _, q = api.json("GET", "/api/v1/config/qos")
+        check(st == 200 and q == {"type": "off", "video": 34, "management": 16, "camera": 34, "alarm": 18},
+              "qos: off by default (%s %s)" % (st, q))
+        st, _, err = api.json("PUT", "/api/v1/config/qos", {"type": "custom", "video": 64})
+        check(st == 400 and err["errors"][0]["path"] == "qos.video", "qos: DSCP 64 refused (%s)" % st)
+        st, _, _ = api.json("PUT", "/api/v1/config/qos", {"type": "custom", "video": 46, "camera": 26})
+        st2, _, q = api.json("GET", "/api/v1/config/qos")
+        check(st == 200 and q["type"] == "custom" and q["video"] == 46 and q["camera"] == 26 and q["alarm"] == 18,
+              "qos: custom saved (%s %s)" % (st, q))
+        st, _, _ = api.json("PUT", "/api/v1/config/qos", {"type": "off"})
+        check(st == 200, "qos: back off (%s)" % st)
 
         # ---- management: on a host vigild does not manage, it shows and refuses
         st, _, eth = api.json("GET", "/api/v1/network/ethernet")

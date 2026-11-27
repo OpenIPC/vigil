@@ -22,6 +22,7 @@
 #include "cJSON.h"
 #include "config.h"
 #include "discovery.h"
+#include "qos.h"
 #include "log.h"
 #include "schema.h"
 #include "source.h"
@@ -386,6 +387,7 @@ static int udp_socket(int port)
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof one);
     setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &one, sizeof one);
+    qos_mark(fd, QOS_MANAGEMENT, 0);    /* the searches: short-lived, not tracked */
     if (port) setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port) };
     if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) {
