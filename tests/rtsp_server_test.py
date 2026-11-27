@@ -269,6 +269,16 @@ def run(vigild, data, tmp, procs):
               "%s: %d packets in sequence" % (path, len(seqs)))
         c.close()
 
+    # UDP to the last port: no port left for RTCP after it.
+    c = Rtsp(port, "anna", "secret")
+    c.request("DESCRIBE", base + "/ch1/sub")
+    code, _, _ = c.request("SETUP", base + "/ch1/sub/trackID=0", "Transport: RTP/AVP;unicast;client_port=65535\r\n")
+    code2, hdr, _ = c.request("SETUP", base + "/ch1/sub/trackID=0",
+                              "Transport: RTP/AVP;unicast;client_port=65535,RTP/AVP;unicast;client_port=50000\r\n")
+    check(code == 461 and code2 == 200 and "client_port=50000-50001" in hdr,
+          "UDP client_port=65535 alone: 461; the next offer taken (%d, %d)" % (code, code2))
+    c.close()
+
     # max_clients: 3
     held = []
     for i in range(3):

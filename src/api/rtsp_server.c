@@ -948,6 +948,7 @@ static void do_setup(rs_conn_t *c, const char *req, const char *cseq, int ch, in
             int n = sscanf(v, "%d-%d", &a, &b);
             if (n < 1 || a <= 0 || a > 65535) continue;
             if (n < 2 || b <= 0 || b > 65535) b = a + 1;
+            if (b > 65535) continue;        /* RTP on 65535: no port left for its RTCP */
             tcp = 0;
         }
     }
