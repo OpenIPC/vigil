@@ -75,6 +75,21 @@ void      ui_outlined_set_color(lv_obj_t *o, lv_color_t c);
 /* The text label (for its text, width or long mode). */
 lv_obj_t *ui_outlined_label(lv_obj_t *o);
 
+/* What text and icons over the video stand on (display.*_background). */
+typedef enum {
+    UI_OSD_OUTLINE,             /* hard edges, the dark outline (ui_outlined) */
+    UI_OSD_NONE,                /* hard edges alone */
+    UI_OSD_BOX,                 /* an opaque chip (ui_st_chip), soft text on it */
+} ui_osd_bg_t;
+
+/* A label over the video in that style; set its text and colour with
+ * ui_outlined_set_text / _set_color, whatever the style. */
+lv_obj_t *ui_osd_text(lv_obj_t *parent, const lv_font_t *font, uint32_t rgb, ui_osd_bg_t bg);
+/* An icon (A8, icons.h) over the video: hard-edged, outlined or not, for
+ * OUTLINE and NONE (a copy of `img`, which is then the object's user
+ * data); as ui_icon for BOX, whose chip is the parent's. */
+lv_obj_t *ui_osd_icon(lv_obj_t *parent, const lv_image_dsc_t *img, uint32_t rgb, ui_osd_bg_t bg);
+
 lv_obj_t *ui_label(lv_obj_t *parent, const char *text, const lv_font_t *font, lv_color_t color);
 
 #endif /* UI_THEME_H */

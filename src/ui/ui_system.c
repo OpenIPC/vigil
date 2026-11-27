@@ -1,8 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* ui_system.c — System: what the box is and how it is doing, read-only.
- * Refreshed every second while shown (uptime, memory). And Display: what
- * the live view shows and how, read-only until the UI has settings of its
- * own. */
+ * Refreshed every second while shown (uptime, memory). */
 #include <stdio.h>
 #include <string.h>
 
@@ -218,30 +216,5 @@ void ui_system_open(void)
     lv_obj_set_user_data(p->body, lv_timer_create(sys_tick_cb, 1000, s));
     lv_obj_t *ci_btn = ui_btn(p->actions, LV_SYMBOL_LIST, "Channel info");
     lv_obj_add_event_cb(ci_btn, channel_info_cb, LV_EVENT_CLICKED, NULL);
-    ui_page_ready(p);
-}
-
-void ui_display_open(void)
-{
-    ui_page_t *p = ui_page_push("Display");
-    if (!p) return;
-    ui_label(p->body, "The display has no settings of its own yet: this is how it is set up in this version.",
-             VG_FONT_SM_LV, UI_C(TEXT2));
-    ui_info_t info[4];
-    memset(info, 0, sizeof info);
-    snprintf(info[0].label, sizeof info[0].label, "Output");
-    snprintf(info[0].value, sizeof info[0].value, "%d x %d", (int)lv_display_get_horizontal_resolution(NULL),
-             (int)lv_display_get_vertical_resolution(NULL));
-    snprintf(info[1].label, sizeof info[1].label, "Clock");
-    snprintf(info[1].value, sizeof info[1].value, "%s", ui_live_clock_corner());
-    snprintf(info[2].label, sizeof info[2].label, "Split layouts");
-    for (int i = 0; i < ui_n_layouts; ++i) {
-        if (!ui_live_layout_offered(ui_layouts[i])) continue;
-        size_t n = strlen(info[2].value);
-        snprintf(info[2].value + n, sizeof info[2].value - n, "%s%d", n ? ", " : "", ui_layouts[i]);
-    }
-    snprintf(info[3].label, sizeof info[3].label, "At start");
-    snprintf(info[3].value, sizeof info[3].value, "%s", ui_live_layout_offered(4) ? "2x2" : "1x1");
-    info_rows(info_panel(p), info, 4, NULL);
     ui_page_ready(p);
 }

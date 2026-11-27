@@ -32,19 +32,21 @@ live view                  tiles over the whole screen, clock in a corner
       +-> OPERATION        platform, version, uptime, memory, storage (read-only)
       |               +-> Channel info: every channel's state, stream, codec,
       |                   size, fps, recording, events
-      +-> DISPLAY          output, clock corner, layouts (read-only for now)
+      +-> DISPLAY          settings screen: Output, Clock, Camera names,
+                           Status icons
 ```
 
 **Live view.** The tiles take the whole screen (2x2 on a 1280x720 output:
 four 640x360 tiles); there is no header or footer bar. Each tile is a
 *hole*: LVGL paints it in the colour the platform keys out (or fully
 transparent where the UI layer has alpha, `hal_ui_hole`), so the decoded
-video below shows through. Bottom left, the camera's name from the
-configuration (or `CAM n`) as outlined text straight on the picture (no
-chip; see below); bottom right, in a small opaque chip, icons only,
-a red dot while the channel records and an amber icon for each event the
-camera reports now (motion, human, face, vehicle; each held 5 s after the
-camera's last report); nothing at the top left. The stream's codec, size
+video below shows through. In one corner (bottom left by default), the
+camera's name from the configuration (or `CAM n`) as outlined text straight
+on the picture (see below); in another (bottom right), icons only, a red
+dot while the channel records and an amber icon for each event the camera
+reports now (motion, human, face, vehicle; each held 5 s after the camera's
+last report). Where they go, their size and what they stand on are
+`display.*` (Display, below). The stream's codec, size
 and frame rate are not on the tiles but on the Channel info page
 (System). The middle of a tile says something only when there is no
 picture, outlined like the name:
@@ -71,9 +73,12 @@ the layout. A tile flashes when its camera has an event.
 
 ![Every state, 16 channels](../tests/ui/split16.png)
 
-The date and time are in a corner of the screen (top right;
-`CLOCK_CORNER` in `ui_live.c` picks another corner or none, until the UI
-has settings of its own), in an opaque chip like the tiles' labels.
+The date and time are at the top right of the screen by default, outlined
+like the names; `display.clock_position` puts them in another corner, the
+middle of the top or bottom edge, or nowhere. A name or the icons that
+would meet the clock move inward (down from the top, up from the bottom)
+past it, in whichever tile and corner that happens; icons in the names'
+corner go just past the name.
 
 Camera events are wired through (`channels_report_events`, `events` in the
 channel status, the API and `ui_chan_t`) but nothing reports them yet:
@@ -108,8 +113,8 @@ every chip over the video. PgUp/PgDn and `[`/`]` do the same.
 
 The **context menu** (right button, or the Menu key) is, in this order:
 **Main menu**; **Channels** (the Channels page); **Playback**; **Record**
-(the recording settings); **PTZ**; **Display** (output, clock corner and
-layouts, read-only until the UI has settings of its own); **Split**, a
+(the recording settings); **PTZ**; **Display** (the Display settings
+screen, below); **Split**, a
 submenu of the layouts; and **Exit**: Logout, Reboot, Shutdown, Cancel
 (below). Nothing else (full screen is a double click or Enter, pages the
 arrows, pinning the bar its own button). Playback and
@@ -253,6 +258,26 @@ Playback, PTZ, Cameras, Storage, Network, System, Users), saved with Save;
 ask for a login yet: the accounts are enforced on the HTTP API, where the
 system account (root) always logs in as an administrator.
 
+**Display.** *Output*: the resolution in use and the board's modes
+(`ui_model_t.out_modes`, from `hal_display_modes`). Save switches at once
+and asks "Keep this resolution?" with a 15 s countdown; Keep saves
+`display.output`, while Undo, Esc, the right button or no answer put the
+old mode back and save nothing, so a monitor that cannot show the new mode
+gets its picture back by itself. The menus keep their 1280x720 layout and
+are scaled to the output (stretched on a 5:4 or 16:10 monitor); a board
+with one mode says so. *Clock*: position (off, a corner, the middle of the
+top or bottom edge), size, background, and the date and time formats (the
+same settings as System, General). *Camera names*: position (off or a
+tile corner), size (a step smaller in tiles under 400 pixels wide),
+background. *Status icons*: the corner, background. Sizes are Small,
+Medium, Large and Extra large (Montserrat 14, 16, 20, 24: the only font
+built in; another family would cost the firmware's flash). Backgrounds are
+**Outline** (the default: hard-edged text with a black outline straight on
+the video), **None** (hard-edged, no outline) and **Box** (the opaque chip
+of earlier versions). A save applies to the live view at once.
+
+![Display, Output](../tests/ui/display.png)
+
 ## Login and Exit
 
 **Exit**, the context menu's last item, offers Logout, Reboot, Shutdown and
@@ -295,6 +320,7 @@ src/ui/ui_menu.c        main menu
 src/ui/ui_form.c        settings forms and lists, from the schema
 src/ui/ui_channels.c    Channels: camera search (discovery jobs) and the channel table
 src/ui/ui_system.c      System page
+src/ui/ui_set_display.c Display: the output resolution (with its keep-or-undo question), clock, names, icons
 src/ui/ui_layout.c      tile geometry (plain C, shared with frontend_tiles)
 src/ui/ui_theme.c       LVGL styles from the design tokens
 src/ui/ui_cursor.c      the software mouse pointer
@@ -534,7 +560,10 @@ key, was looked at: SigmaStar's GOP has it (`MI_FB_GlobalAlpha_t` with
 `bAlphaChannel` in `sstarFb.h`, `FBIOSET_GLOBAL_ALPHA`), but the
 emulator's GOP composites the plane opaque with only the key, so it could
 not be checked there, and the HiSilicon boards would still key. Text on a
-chip (menus, the clock) keeps its smoothing: its edges lie on the chip.
+chip (menus, or a clock, name or icons with the `box` background) keeps its
+smoothing: its edges lie on the chip. The icons over the video get the same
+treatment as the text (`ui_osd_icon`: a hard-edged copy of the A8 icon,
+outlined by drawing it eight times in black).
 
 The screenshot target (below) shows it over a made-up picture
 (`live-16-text-over-video.png`): with `--shots` the tests' screens use the
