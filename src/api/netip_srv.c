@@ -27,6 +27,7 @@
 #include <fcntl.h>
 #include <ifaddrs.h>
 #include <net/if.h>
+#include <netpacket/packet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -197,17 +198,24 @@ static void this_device(uint32_t addr, disc_device_t *d)
 }
 
 /* The serial clients tell devices apart by: XM's are 16 hex digits; ours
- * the MAC of the first interface, so it stays the same across restarts. */
+ * the MAC of the first Ethernet interface (else any but loopback), so it
+ * stays the same across restarts, whether or not it has an address yet. */
 static void make_serial(void)
 {
-    char ifn[IF_NAMESIZE] = "", hex[13] = "";
-    if (iface_of(0, ifn, sizeof ifn) == 0) {
-        net_status_t st;
-        net_status(ifn, &st);
-        size_t n = 0;
-        for (const char *p = st.mac; *p && n < 12; ++p)
-            if (*p != ':') hex[n++] = *p >= 'a' && *p <= 'f' ? (char)(*p - 32) : *p;
-        hex[n] = 0;
+    char hex[13] = "";
+    struct ifaddrs *ifa = NULL;
+    if (getifaddrs(&ifa) == 0) {
+        for (int pass = 0; pass < 2 && !hex[0]; ++pass)
+            for (struct ifaddrs *i = ifa; i && !hex[0]; i = i->ifa_next) {
+                if (!i->ifa_addr || i->ifa_addr->sa_family != AF_PACKET || (i->ifa_flags & IFF_LOOPBACK)) continue;
+                if (!pass && strncmp(i->ifa_name, "eth", 3)) continue;
+                const struct sockaddr_ll *ll = (const struct sockaddr_ll *)i->ifa_addr;
+                unsigned any = 0;
+                for (int k = 0; k < 6 && ll->sll_halen == 6; ++k) any |= ll->sll_addr[k];
+                if (!any) continue;
+                for (int k = 0; k < 6; ++k) snprintf(hex + 2 * k, 3, "%02X", ll->sll_addr[k]);
+            }
+        freeifaddrs(ifa);
     }
     if (!hex[0]) {
         /* No MAC to be had: the host name's, stable as well. */
@@ -217,10 +225,7 @@ static void make_serial(void)
         md5_raw(host, strlen(host), d);
         for (int i = 0; i < 6; ++i) snprintf(hex + 2 * i, 3, "%02X", d[i]);
     }
-    size_t k = strlen(hex);
-    memset(g_serial, '0', 16);
-    memcpy(g_serial + 16 - k, hex, k);
-    g_serial[16] = 0;
+    snprintf(g_serial, sizeof g_serial, "0000%s", hex);
 }
 
 /* ---- sending -------------------------------------------------------------------------- */
