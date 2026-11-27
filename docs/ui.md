@@ -224,15 +224,15 @@ without one, "No Wi-Fi adapter" and nothing to fill in. *LTE*: the USB
 modems plugged in, each with its driver and profile and "Use this profile"
 (`wlandev`, for the next boot), and the modem's interface once it is up;
 or "No modem found". *Ports*: the web server's, the HTTP API's, the ONVIF
-server's and the NETIP server's ports (`web.listen`, `api.listen`, the
-address part kept; `onvif_server.port`, `netip_server.port`), each with
-what it listens on now, refreshed every second, or why not, or the last
-move that failed; and, under "Services not available yet", the RTSP
-port, with a note that nothing listens on it. Save refuses two on one
+server's, the RTSP server's and the NETIP server's ports (`web.listen`,
+`api.listen`, the address part kept; `onvif_server.port`,
+`rtsp_server.port`, `netip_server.port`), each with what it listens on
+now, refreshed every second, or why not, or the last move that failed.
+Save refuses two on one
 port (the one changed is marked, both named in a toast) and saves one
 section at a time, those moving onto a port another one leaves last; the
 store refuses a port that is taken, with the reason, and the port typed
-stays there, marked. The web and API ports need the users permission
+stays there, marked. The web, API and RTSP ports need the users permission
 too, as their sections do. *DDNS*, *SMTP*: the form, the last
 update or mail and its result, and "Update now" / "Send test mail" (which
 use the saved settings: with unsaved changes they ask to save first).

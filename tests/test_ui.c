@@ -733,6 +733,7 @@ static void fm_listening(int server, ui_listen_t *out)
     snprintf(out->listen, sizeof out->listen, "%s",
              server == UI_SERVER_WEB     ? "0.0.0.0:80"
              : server == UI_SERVER_ONVIF ? "0.0.0.0:8899"
+             : server == UI_SERVER_RTSP  ? "0.0.0.0:554"
              : server == UI_SERVER_NETIP ? "0.0.0.0:34567"
                                          : "0.0.0.0:8080");
     if (server == UI_SERVER_API && g_mg_move_failed)
@@ -2179,13 +2180,14 @@ static void test_network_pages(void)
     g_mg_modem = 0;
     g_mg_lte_profile[0] = 0;
     nav_to("Ports");
-    lv_obj_t *pw = textarea(0), *pa = textarea(1), *po = textarea(2), *pn = textarea(3);
-    CHECK(pw && pa && po && pn && !strcmp(lv_textarea_get_text(pw), "80") &&
+    lv_obj_t *pw = textarea(0), *pa = textarea(1), *po = textarea(2), *pr = textarea(3), *pn = textarea(4);
+    CHECK(pw && pa && po && pr && pn && !strcmp(lv_textarea_get_text(pw), "80") &&
           !strcmp(lv_textarea_get_text(pa), "8080") && !strcmp(lv_textarea_get_text(po), "8899") &&
-          !strcmp(lv_textarea_get_text(pn), "34567") && find("Listening on 0.0.0.0:80", 1) &&
-          find("Listening on 0.0.0.0:8899", 1) && find("Listening on 0.0.0.0:34567", 1) &&
-          find("Services not available yet", 0) && find("nothing listens on its port", 1),
-          "Ports: web 80, API 8080, ONVIF 8899, NETIP 34567, what each listens on, the RTSP port to come");
+          !strcmp(lv_textarea_get_text(pr), "554") && !strcmp(lv_textarea_get_text(pn), "34567") &&
+          find("Listening on 0.0.0.0:80", 1) && find("Listening on 0.0.0.0:8899", 1) &&
+          find("Listening on 0.0.0.0:554", 1) && find("Listening on 0.0.0.0:34567", 1) &&
+          !find("Services not available yet", 0),
+          "Ports: web 80, API 8080, ONVIF 8899, RTSP 554, NETIP 34567, what each listens on");
     if (po) lv_textarea_set_text(po, "80");
     click_text(SAVE);
     run(100);

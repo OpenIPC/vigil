@@ -72,7 +72,6 @@
 #define SEEN_N       64             /* recent UsernameToken nonces, against replays */
 #define IFACE_MAX    8
 #define PROBE_RATE   20             /* probe answers a second, at most */
-#define RTSP_PORT    554            /* the RTSP server's (rtsp_server.port, once it lands) */
 
 /* ---- state ------------------------------------------------------------------------- */
 
@@ -472,11 +471,19 @@ static void put_profile2(buf_t *b, const chan_t *c, int sub, int vs, int ve)
     bput(b, "</tr2:Profiles>");
 }
 
+/* No stream URI while the RTSP server is off: a URI nothing answers at
+ * would only send the client into retries. */
+static int rtsp_off(req_t *q)
+{
+    return fault(q, 500, "s:Receiver", "ter:ActionNotSupported", NULL,
+                 "The RTSP server is off (rtsp_server.enabled)");
+}
+
 static void put_uri(buf_t *b, const req_t *q, int ch, int sub)
 {
     bput(b, "rtsp://");
     besc(b, q->hostname);
-    bput(b, ":%d/ch%d/%s", RTSP_PORT, ch, sub_name(sub));
+    bput(b, ":%d/ch%d/%s", q->cfg->rtsp_server.port, ch, sub_name(sub));
 }
 
 /* ---- device ------------------------------------------------------------------------- */
@@ -686,9 +693,9 @@ static int dev_protocols(req_t *q, buf_t *b)
     bput(b, "<tds:GetNetworkProtocolsResponse>"
             "<tds:NetworkProtocols><tt:Name>HTTP</tt:Name><tt:Enabled>true</tt:Enabled><tt:Port>%d</tt:Port>"
             "</tds:NetworkProtocols>"
-            "<tds:NetworkProtocols><tt:Name>RTSP</tt:Name><tt:Enabled>true</tt:Enabled><tt:Port>%d</tt:Port>"
+            "<tds:NetworkProtocols><tt:Name>RTSP</tt:Name><tt:Enabled>%s</tt:Enabled><tt:Port>%d</tt:Port>"
             "</tds:NetworkProtocols></tds:GetNetworkProtocolsResponse>",
-         q->cfg->onvif_server.port, RTSP_PORT);
+         q->cfg->onvif_server.port, q->cfg->rtsp_server.enabled ? "true" : "false", q->cfg->rtsp_server.port);
     return 0;
 }
 
@@ -845,6 +852,7 @@ static int m1_uri(req_t *q, buf_t *b)
     arg(q, "Stream", stream, sizeof stream);
     if (!strcmp(stream, "RTP-Multicast"))
         return bad_arg(q, "ter:InvalidStreamSetup", "Only unicast streams (RTSP over UDP or TCP)");
+    if (!q->cfg->rtsp_server.enabled) return rtsp_off(q);
     chans_t *cs = load_chans(q);
     if (!cs) return -1;
     int sub;
@@ -982,6 +990,7 @@ static int m2_uri(req_t *q, buf_t *b)
     arg(q, "Protocol", proto, sizeof proto);
     if (!strcmp(proto, "RtspMulticast"))
         return bad_arg(q, "ter:InvalidStreamSetup", "Only unicast streams (RTSP over UDP or TCP)");
+    if (!q->cfg->rtsp_server.enabled) return rtsp_off(q);
     chans_t *cs = load_chans(q);
     if (!cs) return -1;
     int sub;

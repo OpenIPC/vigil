@@ -559,6 +559,23 @@ static const schema_field_t web_fields[] = {
               "take more than half a CPU core." },
 };
 
+static const schema_field_t rtsp_server_fields[] = {
+    { .key = "enabled", BOOL(config_rtsp_server_t, enabled), .def_int = 1, .live = 1, .label = "On",
+      .help = "The cameras' streams to other clients (a VMS, VLC, another recorder) at "
+              "rtsp://<this recorder>/ch1/main and /ch1/sub, as the cameras send them "
+              "(docs/rtsp.md)." },
+    { .key = "port", INT(config_rtsp_server_t, port), .def_int = 554, .min = 1, .max = 65535, .live = 1,
+      .label = "Port", .help = "Its TCP port; RTP over UDP goes from a pair of ports from 6970 up." },
+    { .key = "auth", BOOL(config_rtsp_server_t, auth), .def_int = 1, .live = 1,
+      .label = "Require a password",
+      .help = "Digest authentication against vigil's users; their group needs the live permission. "
+              "Off: anyone on the network can watch every camera." },
+    { .key = "max_clients", INT(config_rtsp_server_t, max_clients), .def_int = 8, .min = 1, .max = 32,
+      .live = 1, .label = "Clients at once, at most",
+      .help = "Clients being sent a stream at the same time. Clients of one stream share its "
+              "buffer (2 to 4 MiB for a main stream, less for a sub-stream)." },
+};
+
 static const schema_field_t netip_server_fields[] = {
     { .key = "enabled", BOOL(config_netip_server_t, enabled), .def_int = 1, .live = 1, .label = "On",
       .help = "Xiongmai's own clients (CMS, VMS, XMEye on the LAN) see this recorder as an XM one: "
@@ -610,11 +627,12 @@ static const schema_field_t qos_fields[] = {
               "off: nothing marked (DSCP 0); standard: video AF41 (34), management CS2 (16), cameras "
               "AF41 (34), alarms AF21 (18); custom: the values below." },
     DSCP("video", video, 34, "Video DSCP",
-         "With type custom: the zero channel's picture (web.listen's WebSocket), the NETIP "
-         "server's live streams."),
+         "With type custom: the zero channel's picture (web.listen's WebSocket), the RTSP "
+         "and NETIP servers' video."),
     DSCP("management", management, 16, "Management DSCP",
          "With type custom: the HTTP API, the web pages and logins, the ONVIF service and its "
-         "WS-Discovery, the NETIP server's requests and search answers, DDNS, camera searches."),
+         "WS-Discovery, the RTSP server's requests, the NETIP server's requests and search answers, "
+         "DDNS, camera searches."),
     DSCP("camera", camera, 34, "Camera DSCP",
          "With type custom: vigild's connections to cameras, RTSP and NETIP control and the ACKs of "
          "their video; a connection open when this changes is marked at once."),
@@ -641,13 +659,6 @@ void config_to_qos(const vigil_config_t *c, int dscp[QOS_CLASSES])
 }
 
 /* ---- ports of vigild's servers ---------------------------------------------------- */
-
-#define SERVER_PORT(NAME, WHAT, DEF, HELP) \
-    static const schema_field_t NAME[] = { \
-        { .key = "port", INT(config_server_t, port), .def_int = DEF, .min = 1, .max = 65535, .live = 1, \
-          .label = WHAT " port", .help = HELP " vigild has no " WHAT " server yet: the port is kept for it, " \
-                                         "and no other of vigild's servers may take it." } }
-SERVER_PORT(rtsp_server_fields, "RTSP", 554, "The cameras' streams, served again to players and other recorders.");
 
 int config_listen_port(const char *listen)
 {

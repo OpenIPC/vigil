@@ -42,6 +42,10 @@ stream_tap_t *stream_tap_open(int ch, int sub, stream_tap_fn fn, void *user);
 /* After it returns, fn is never called again for this tap. Any thread (not from fn). */
 void stream_tap_close(stream_tap_t *t);
 
+/* Whether the stream exists (its channel runs, with that stream), known
+ * or not yet. */
+int stream_tap_exists(int ch, int sub);
+
 /* What the stream is now: 0 and *si, *codec filled when known (SPS seen), -1 else. */
 int stream_tap_info(int ch, int sub, vg_stream_info_t *si, vg_codec_t *codec);
 

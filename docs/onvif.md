@@ -30,10 +30,12 @@ turned off without touching the console. Clients rarely need to know the
 port: WS-Discovery and `GetCapabilities` / `GetServices` give the full
 addresses. When adding the recorder by hand, give the client port 8899.
 
-The video itself comes from the recorder's RTSP server:
-`GetStreamUri` answers `rtsp://<recorder>:554/ch<N>/main` and
-`/ch<N>/sub`, N from 1, with the host the client used to reach the ONVIF
-service.
+The video itself comes from the recorder's [RTSP server](rtsp.md):
+`GetStreamUri` answers `rtsp://<recorder>:<rtsp_server.port>/ch<N>/main`
+and `/ch<N>/sub` (port 554 by default), N from 1, with the host the client
+used to reach the ONVIF service. With the RTSP server off
+(`rtsp_server.enabled`), `GetStreamUri` answers a fault
+(`ter:ActionNotSupported`) rather than an address nothing answers at.
 
 ## Logging in
 
@@ -111,7 +113,8 @@ Device (`http://www.onvif.org/ver10/device/wsdl`, `/onvif/device_service`):
   `GetServiceCapabilities`, `GetWsdlUrl`, `GetHostname`, `GetScopes`,
   `GetDiscoveryMode` (always discoverable), `GetNetworkInterfaces` (each
   IPv4 interface, DHCP or manual from the network settings),
-  `GetNetworkProtocols` (HTTP at the ONVIF port, RTSP at 554).
+  `GetNetworkProtocols` (HTTP at the ONVIF port, RTSP at `rtsp_server.port`,
+  enabled as `rtsp_server.enabled`).
 - `GetUsers`: vigil's users and the system account, read-only (Administrator:
   a group with `system` and `users`; Operator: one with `cameras`,
   `storage`, `network` or `system`; User: the rest).

@@ -89,6 +89,16 @@ void stream_tap_close(stream_tap_t *t)
     free(t);
 }
 
+int stream_tap_exists(int ch, int sub)
+{
+    tap_stream_t *st = stream_of(ch, sub);
+    if (!st) return 0;
+    pthread_mutex_lock(&st->lock);
+    int present = st->present;
+    pthread_mutex_unlock(&st->lock);
+    return present;
+}
+
 int stream_tap_info(int ch, int sub, vg_stream_info_t *si, vg_codec_t *codec)
 {
     tap_stream_t *st = stream_of(ch, sub);

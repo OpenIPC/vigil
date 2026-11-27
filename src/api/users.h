@@ -132,6 +132,18 @@ users_rc_t users_group_delete(const char *name, users_err_t *e);
  * (`why`, for the log: no shadow file, a locked account, ...). */
 int users_login(const char *name, const char *pass, unsigned *perms, char *why, size_t cap);
 
+/* The realm of Digest logins (the RTSP server): a user's HA1 is
+ * md5(name:USERS_REALM:password). */
+#define USERS_REALM "vigil"
+
+/* For a Digest login (RFC 2617): `name`'s HA1 (32 hex digits) and its
+ * permissions. 1 when the user may log in and its HA1 is known; 0 when
+ * not (unknown, disabled, no password); -1 when it may but its HA1 is not
+ * known: a password set before vigild kept HA1s and not used to log in
+ * since (crypt hashes cannot give one). The system account's is learnt
+ * when it logs in (UI, API, web), as its NETIP hash is, and kept in the
+ * file for as long as its shadow entry is the same. */
+int users_digest(const char *name, char ha1[33], unsigned *perms);
 /* Check a login whose password the client proves it knows without
  * sending it (ONVIF's WS-UsernameToken digest, HTTP Digest): `check`
  * gets the password and says whether the client's proof fits it (1).

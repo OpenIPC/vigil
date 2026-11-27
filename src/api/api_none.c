@@ -6,6 +6,7 @@
 #include "config.h"
 #include "log.h"
 #include "netip_srv.h"
+#include "rtsp_server.h"
 #include "onvif.h"
 #include "web.h"
 
@@ -56,6 +57,24 @@ int web_listening(char *listen, size_t cap, char *why, size_t wcap)
 {
     if (listen && cap) listen[0] = 0;
     if (why) snprintf(why, wcap, "this vigild is built without the web server");
+    return 0;
+}
+
+int rtsp_server_start(void)
+{
+    vigil_config_t c;
+    config_get(&c);
+    if (c.rtsp_server.enabled) vg_log("rtsp_server.enabled is on, but this vigild is built without the API's users");
+    return 0;
+}
+
+void rtsp_server_stop(void) {}
+void rtsp_server_apply(void) {}
+
+int rtsp_server_listening(char *listen, size_t cap, char *why, size_t wcap)
+{
+    if (listen && cap) listen[0] = 0;
+    if (why) snprintf(why, wcap, "this vigild is built without the RTSP server");
     return 0;
 }
 

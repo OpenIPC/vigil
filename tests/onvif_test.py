@@ -14,6 +14,7 @@ passwords refused, permissions, PasswordText for the system account.
 Only the standard library.
 """
 import base64
+import shutil
 import hashlib
 import http.client
 import json
@@ -150,7 +151,7 @@ def probe(port, types="dn:NetworkVideoTransmitter", wait=2.0):
 def main():
     vigild, clip = sys.argv[1], sys.argv[2]
     tmp = tempfile.mkdtemp(prefix="vigil-onvif-", dir=os.getcwd())
-    api_port, cam_port, onvif_port = free_port(), free_port(), free_port()
+    api_port, cam_port, onvif_port, rtsp_port = free_port(), free_port(), free_port(), free_port()
     wsd_port = free_port(socket.SOCK_DGRAM)
     shadow = os.path.join(tmp, "shadow")
     with open(shadow, "w") as f:
@@ -160,7 +161,9 @@ def main():
         f.write("cameras:\n  - url: \"netip://admin:cam@127.0.0.1:%d/\"\n    name: \"Gate <1>\"\n"
                 "api:\n  listen: 127.0.0.1:%d\n  shadow: %s\n  users: %s\n"
                 "onvif_server:\n  enabled: true\n  port: %d\n"
-                % (cam_port, api_port, json.dumps(shadow), json.dumps(os.path.join(tmp, "users.yaml")), onvif_port))
+                "rtsp_server:\n  port: %d\n"
+                % (cam_port, api_port, json.dumps(shadow), json.dumps(os.path.join(tmp, "users.yaml")), onvif_port,
+                   rtsp_port))
     cam = subprocess.Popen([sys.executable, os.path.join(HERE, "netip_server.py"), clip, "--port", str(cam_port),
                             "--password", "cam"], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
     log_path = os.path.join(tmp, "vigild.log")
@@ -219,7 +222,17 @@ def main():
               and "<tt:Name>Gate &lt;1&gt; main</tt:Name>" in b, "media GetProfiles: ch1_main, ch1_sub, 640x360")
         st, _, b = o.call(MEDIA, "GetStreamUri", "<StreamSetup><Stream>RTP-Unicast</Stream></StreamSetup>"
                           "<ProfileToken>ch1_sub</ProfileToken>", header=wsse("anna", "annapw"))
-        check(st == 200 and "<tt:Uri>rtsp://127.0.0.1:554/ch1/sub</tt:Uri>" in b, "media GetStreamUri ch1_sub")
+        m = re.search(r"<tt:Uri>([^<]*)</tt:Uri>", b)
+        uri = m.group(1) if m else ""
+        check(st == 200 and uri == "rtsp://127.0.0.1:%d/ch1/sub" % rtsp_port,
+              "media GetStreamUri ch1_sub: rtsp_server.port")
+        if shutil.which("ffprobe"):
+            # The URI plays, with the same user (its RTSP digest set with its password).
+            r = subprocess.run(["ffprobe", "-v", "error", "-rtsp_transport", "tcp", "-show_entries",
+                                "stream=codec_name,width,height", "-of", "csv=p=0",
+                                uri.replace("rtsp://", "rtsp://anna:annapw@")],
+                               capture_output=True, text=True, timeout=30)
+            check(r.stdout.strip() == "h264,640,360", "the URI plays: %s" % (r.stdout.strip() or r.stderr[-200:]))
         st, _, b = o.call(MEDIA, "GetStreamUri", "<ProfileToken>ch7_main</ProfileToken>", header=wsse("anna", "annapw"))
         check(st == 400 and "ter:NoProfile" in b, "a profile that is not there (%s)" % st)
         st, _, b = o.call(MEDIA2, "GetProfiles", "<Type>All</Type>", header=wsse("anna", "annapw"))
@@ -227,7 +240,20 @@ def main():
               "media2 GetProfiles with configurations")
         st, _, b = o.call(MEDIA2, "GetStreamUri", "<Protocol>RtspUnicast</Protocol><ProfileToken>ch1_main"
                           "</ProfileToken>", header=wsse("anna", "annapw"))
-        check(st == 200 and "<tr2:Uri>rtsp://127.0.0.1:554/ch1/main</tr2:Uri>" in b, "media2 GetStreamUri")
+        check(st == 200 and "<tr2:Uri>rtsp://127.0.0.1:%d/ch1/main</tr2:Uri>" % rtsp_port in b,
+              "media2 GetStreamUri")
+        st, _, b = o.call(DEV, "GetNetworkProtocols", header=wsse("anna", "annapw"))
+        check(st == 200 and "<tt:Name>RTSP</tt:Name><tt:Enabled>true</tt:Enabled><tt:Port>%d</tt:Port>" % rtsp_port in b,
+              "GetNetworkProtocols: RTSP at rtsp_server.port")
+        # The RTSP server off: no URI to give.
+        check(api(api_port, "PUT", "/api/v1/config/rtsp_server", {"enabled": False, "port": rtsp_port}) == 200, "RTSP server off")
+        st, _, b = o.call(MEDIA2, "GetStreamUri", "<Protocol>RtspUnicast</Protocol><ProfileToken>ch1_main"
+                          "</ProfileToken>", header=wsse("anna", "annapw"))
+        check(st == 500 and "ter:ActionNotSupported" in b and "rtsp_server.enabled" in b,
+              "GetStreamUri with the RTSP server off: a fault (%s)" % st)
+        st, _, b = o.call(DEV, "GetNetworkProtocols", header=wsse("anna", "annapw"))
+        check("<tt:Name>RTSP</tt:Name><tt:Enabled>false</tt:Enabled>" in b, "GetNetworkProtocols: RTSP off")
+        check(api(api_port, "PUT", "/api/v1/config/rtsp_server", {"enabled": True, "port": rtsp_port}) == 200, "RTSP server on again")
         st, _, b = o.call(MEDIA, "GetProfiles", path="/onvif/device_service",
                           header=wsse("anna", "annapw"))
         check(st == 200 and "trt:GetProfilesResponse" in b, "an operation goes by its namespace, not the path")

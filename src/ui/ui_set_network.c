@@ -497,20 +497,21 @@ static void *lte_open(ui_set_t *s, lv_obj_t *pane)
 /* ---- Ports ------------------------------------------------------------------------- */
 
 /* The ports of vigild's servers: the web server (web.listen), the API
- * (api.listen), ONVIF (onvif_server.port) and NETIP (netip_server.port),
- * which move at once when saved (main.c restarts the first two and NETIP,
- * onvif.c's thread follows its setting; a port that cannot be had is
- * refused by the store, or put back, and said here), and that of the
- * RTSP server vigild does not have yet (rtsp_server.port), kept for it.
+ * (api.listen), ONVIF (onvif_server.port), RTSP (rtsp_server.port) and
+ * NETIP (netip_server.port), which move at once when saved (main.c
+ * restarts the API, the web server, RTSP and NETIP, onvif.c's thread
+ * follows its setting; a port that cannot be had is refused by the store,
+ * or put back, and said here).
  * No two on one port. */
 
 #define PORTS_N   5
-#define SERVERS_N 4                     /* the first ones: running servers */
-enum { P_WEB, P_API, P_ONVIF, P_NETIP, P_RTSP };
-static const char *const k_port_sec[PORTS_N] = { "web", "api", "onvif_server", "netip_server", "rtsp_server" };
+#define SERVERS_N 5                     /* all of them run */
+enum { P_WEB, P_API, P_ONVIF, P_RTSP, P_NETIP };
+static const char *const k_port_sec[PORTS_N] = { "web", "api", "onvif_server", "rtsp_server", "netip_server" };
 static const char *const k_port_key[PORTS_N] = { "listen", "listen", "port", "port", "port" };
-static const char *const k_port_name[PORTS_N] = { "Web server", "HTTP API", "ONVIF", "NETIP", "RTSP" };
-static const int         k_port_server[SERVERS_N] = { UI_SERVER_WEB, UI_SERVER_API, UI_SERVER_ONVIF, UI_SERVER_NETIP };
+static const char *const k_port_name[PORTS_N] = { "Web server", "HTTP API", "ONVIF", "RTSP", "NETIP" };
+static const int         k_port_server[SERVERS_N] = { UI_SERVER_WEB, UI_SERVER_API, UI_SERVER_ONVIF,
+                                                      UI_SERVER_RTSP, UI_SERVER_NETIP };
 
 typedef struct {
     ui_set_t   *s;
@@ -589,9 +590,10 @@ static void *ports_open(ui_set_t *s, lv_obj_t *pane)
         "The HTTP API (api.listen): apps, scripts, the API's event WebSocket.",
         "ONVIF for video management software and other recorders (onvif_server). 8899 is XM's ONVIF "
         "port; 80, ONVIF's usual one, is the web server's here.",
+        "The cameras' streams to players, VMS and other recorders (rtsp_server). 554 is RTSP's own; "
+        "RTP over UDP goes from a pair of ports from 6970 up.",
         "XM's NETIP for CMS, VMS and XMEye (netip_server); 34567 is XM's. It also answers XM's search "
         "on UDP 34569.",
-        "554 is RTSP's own.",
     };
     lv_obj_t *sec = ui_set_section(pane, "Servers");
     int users = ui_allowed(UI_PERM_USERS);
@@ -607,18 +609,13 @@ static void *ports_open(ui_set_t *s, lv_obj_t *pane)
                      VG_FONT_SM_LV, UI_C(TEXT2));
     }
     if (!users)
-        ui_set_note(pane, "Changing the web server's and the API's ports needs the users permission, as their "
-                          "sections (api, web) do.",
+        ui_set_note(pane, "Changing the web server's, the API's and RTSP's ports needs the users permission, as "
+                          "their sections (api, web, rtsp_server: who gets in) do.",
                     UI_C(TEXT2));
     ui_set_note(pane, "Saved, a server moves to its new port at once; its open connections close (a browser "
                       "showing the zero channel reconnects at the new address; ONVIF clients find the new port "
                       "by WS-Discovery, XM's clients by their search). A port that cannot be had is refused, "
                       "and said why.", UI_C(TEXT2));
-    lv_obj_t *later = ui_set_section(pane, "Services not available yet");
-    for (int i = SERVERS_N; i < PORTS_N; ++i)
-        p->num[i] = ui_set_number(s, ui_set_row(later, k_port_name[i], helps[i]), p->port[i], 1, 65535);
-    ui_set_note(pane, LV_SYMBOL_WARNING "  vigild has no RTSP server yet: nothing listens on its port. It is kept "
-                                        "for that server, and no other server of vigild's may take it.", UI_C(WARN));
     ports_load(p);
     p->timer = lv_timer_create(ports_tick, 1000, p);
     return p;

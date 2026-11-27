@@ -49,16 +49,19 @@ typedef struct {
     char group[USERS_NAME_MAX];
     int  enabled;
     char password[HASH_MAX];
+    char digest[33];
     char onvif[KEY_MAX];                /* the password, base64; "" none (users_login_with) */
     char netip[NETIP_HASH];             /* Xiongmai's hash of it; "" none (users_login_netip) */
 } user_rec_t;
 
-/* The system account's NETIP hash, learnt when it logs in with its
- * password (users_login), and which shadow entry it belongs to: the MD5
- * of the account's hash there, so a new password (passwd) forgets it.
+/* The system account's NETIP hash and Digest HA1s (as api.user, and as
+ * "admin" while no user has that name), learnt when it logs in with its
+ * password (users_login), and which shadow entry they belong to: the MD5
+ * of the account's hash there, so a new password (passwd) forgets them.
  * It has no ONVIF key: its password stays in the shadow file alone. */
 typedef struct {
     char netip[NETIP_HASH];
+    char digest[33], admin_digest[33];
     char shadow[40];
 } system_rec_t;
 
@@ -123,6 +126,10 @@ static const schema_field_t user_fields[] = {
     { .key = "password", .type = SCHEMA_STRING, .off = offsetof(user_rec_t, password), .size = HASH_MAX,
       .def_str = "", .secret = SCHEMA_SECRET, .label = "Password",
       .help = "A crypt(3) hash, set through the API or the UI; empty: cannot log in." },
+    { .key = "digest", .type = SCHEMA_STRING, .off = offsetof(user_rec_t, digest), .size = 33,
+      .def_str = "", .secret = SCHEMA_SECRET, .label = "RTSP password hash",
+      .help = "md5 of name:vigil:password (Digest's HA1), for logins to the RTSP server; "
+              "written with the password, or at the user's next login when missing." },
     { .key = "onvif", .type = SCHEMA_STRING, .off = offsetof(user_rec_t, onvif), .size = KEY_MAX,
       .def_str = "", .secret = SCHEMA_SECRET, .label = "ONVIF key",
       .help = "The password itself, base64-encoded: ONVIF clients prove they know it with a "
@@ -139,6 +146,13 @@ static const schema_field_t system_fields[] = {
       .def_str = "", .secret = SCHEMA_SECRET, .label = "NETIP password",
       .help = "Xiongmai's hash of the system account's password, for NETIP clients: learnt when "
               "the account logs in to the API, the web page or the UI." },
+    { .key = "digest", .type = SCHEMA_STRING, .off = offsetof(system_rec_t, digest), .size = 33,
+      .def_str = "", .secret = SCHEMA_SECRET, .label = "RTSP password hash",
+      .help = "md5 of name:vigil:password for the account's name, for the RTSP server's Digest "
+              "logins: learnt as the NETIP password is." },
+    { .key = "admin_digest", .type = SCHEMA_STRING, .off = offsetof(system_rec_t, admin_digest), .size = 33,
+      .def_str = "", .secret = SCHEMA_SECRET, .label = "RTSP password hash as admin",
+      .help = "The same for the name \"admin\", the account's other name while no user has it." },
     { .key = "shadow", .type = SCHEMA_STRING, .off = offsetof(system_rec_t, shadow), .size = 40,
       .def_str = "", .label = "Shadow entry",
       .help = "Which password that was (an MD5 of the account's shadow hash): a new one forgets it." },
@@ -157,7 +171,7 @@ static const schema_section_t user_sections[] = {
       .help = "Besides these, the system account (api.user) logs in with every permission." },
     { .key = "system", .off = offsetof(users_db_t, system), .fields = system_fields,
       .n_fields = N(system_fields), .label = "System account",
-      .help = "What NETIP clients need to log in as the system account." },
+      .help = "What NETIP and RTSP clients need to log in as the system account." },
 };
 
 static const schema_t users_schema = { .version = 1, .sections = user_sections,
@@ -167,8 +181,9 @@ static const char file_header[] =
     "vigil's users and groups: https://github.com/OpenIPC/vigil/blob/main/docs/api.md\n"
     "Written by vigild when accounts are changed through its HTTP API or on-screen\n"
     "UI; comments written by hand are not kept. Passwords are crypt(3) hashes; each\n"
-    "also has Xiongmai's hash of it for NETIP clients, and while the ONVIF server is\n"
-    "on an \"onvif\" key: the password itself.";
+    "also has the md5 digest the RTSP server's Digest logins need, Xiongmai's hash\n"
+    "of it for NETIP clients, and while the ONVIF server is on an \"onvif\" key: the\n"
+    "password itself.";
 
 /* ---- the store --------------------------------------------------------------------- */
 
@@ -414,6 +429,16 @@ int users_hash(const char *pass, char *out, size_t cap)
     return -1;
 }
 
+/* Digest's HA1 for `name` and `pass` in vigil's realm. */
+static void ha1_of(const char *name, const char *pass, char out[33])
+{
+    char buf[USERS_NAME_MAX + sizeof USERS_REALM + 260];
+    int n = snprintf(buf, sizeof buf, "%s:%s:%s", name, USERS_REALM, pass);
+    md5_hex(buf, n < 0 ? 0 : (size_t)n >= sizeof buf ? sizeof buf - 1 : (size_t)n, out);
+    volatile char *w = buf;
+    for (size_t i = 0; i < sizeof buf; ++i) w[i] = 0;
+}
+
 static users_rc_t check_password(const char *pass, users_err_t *e)
 {
     if (strlen(pass) < USERS_PASS_MIN)
@@ -452,12 +477,14 @@ static void wipe(void *p, size_t n)
 typedef struct {
     char onvif[KEY_MAX];
     char netip[NETIP_HASH];
+    char digest[33];                    /* `name`'s HA1 (ha1_of) */
 } secrets_t;
 
-static void secrets_of(const char *pass, secrets_t *s)
+static void secrets_of(const char *name, const char *pass, secrets_t *s)
 {
     onvif_key(pass, s->onvif, sizeof s->onvif);
     md5_sofia(pass, s->netip);
+    ha1_of(name, pass, s->digest);
 }
 
 /* A new password: its secrets replace the old ones ("" where it has none). */
@@ -465,6 +492,7 @@ static void secrets_set(user_rec_t *u, const secrets_t *s)
 {
     snprintf(u->onvif, sizeof u->onvif, "%s", s->onvif);
     snprintf(u->netip, sizeof u->netip, "%s", s->netip);
+    snprintf(u->digest, sizeof u->digest, "%s", s->digest);
 }
 
 /* A login with the password: what the record lacks or has stale is filled
@@ -479,6 +507,10 @@ static int secrets_learn(user_rec_t *u, const secrets_t *s)
     }
     if (strcmp(u->netip, s->netip)) {
         snprintf(u->netip, sizeof u->netip, "%s", s->netip);
+        change = 1;
+    }
+    if (strcmp(u->digest, s->digest)) {
+        snprintf(u->digest, sizeof u->digest, "%s", s->digest);
         change = 1;
     }
     return change;
@@ -500,7 +532,7 @@ users_rc_t users_add(const char *name, const char *group, const char *password, 
     secrets_t sec;
     if (users_hash(password, hash, sizeof hash) < 0)
         return fail(e, USERS_EIO, "password", "%scannot hash passwords here (crypt)", "");
-    secrets_of(password, &sec);
+    secrets_of(name, password, &sec);
     pthread_mutex_lock(&g_lock);
     load();
     users_db_t db = g_db;
@@ -529,13 +561,13 @@ users_rc_t users_update(const char *name, const char *group, int enabled, const 
 {
     memset(e, 0, sizeof *e);
     char hash[HASH_MAX] = "";
-    secrets_t sec = { "", "" };
+    secrets_t sec = { "", "", "" };
     if (password) {
         users_rc_t rc = check_password(password, e);
         if (rc) return rc;
         if (users_hash(password, hash, sizeof hash) < 0)
             return fail(e, USERS_EIO, "password", "%scannot hash passwords here (crypt)", "");
-        secrets_of(password, &sec);
+        secrets_of(name, password, &sec);
     }
     pthread_mutex_lock(&g_lock);
     load();
@@ -656,7 +688,9 @@ users_rc_t users_group_delete(const char *name, users_err_t *e)
 static void learn(const char *name, const char *pass, const char *id)
 {
     secrets_t sec;
-    secrets_of(pass, &sec);
+    char admin[33];
+    secrets_of(name, pass, &sec);
+    ha1_of("admin", pass, admin);
     users_db_t *db = malloc(sizeof *db);
     if (!db) {
         wipe(&sec, sizeof sec);
@@ -669,19 +703,62 @@ static void learn(const char *name, const char *pass, const char *id)
     user_rec_t *u = id ? NULL : find_user(db, name);
     if (u) {
         change = secrets_learn(u, &sec);
-    } else if (id && (strcmp(db->system.netip, sec.netip) || strcmp(db->system.shadow, id))) {
+    } else if (id && (strcmp(db->system.netip, sec.netip) || strcmp(db->system.shadow, id) ||
+                      strcmp(db->system.digest, sec.digest) || strcmp(db->system.admin_digest, admin))) {
         snprintf(db->system.netip, sizeof db->system.netip, "%s", sec.netip);
+        snprintf(db->system.digest, sizeof db->system.digest, "%s", sec.digest);
+        snprintf(db->system.admin_digest, sizeof db->system.admin_digest, "%s", admin);
         snprintf(db->system.shadow, sizeof db->system.shadow, "%s", id);
         change = 1;
     }
     users_err_t e;
     if (change && !g_bad && save_locked(db, &e) == USERS_OK)
-        vg_log("users: kept what %s's password gives the NETIP%s clients", id ? "the system account" : name,
+        vg_log("users: kept what %s's password gives the RTSP, NETIP%s clients", id ? "the system account" : name,
                id || !sec.onvif[0] ? "" : " and ONVIF");
     pthread_mutex_unlock(&g_lock);
     wipe(&sec, sizeof sec);
+    wipe(admin, sizeof admin);
     wipe(db, sizeof *db);
     free(db);
+}
+
+int users_digest(const char *name, char ha1[33], unsigned *perms)
+{
+    *perms = 0;
+    ha1[0] = 0;
+    config_api_t api;
+    api_settings(&api);
+    int rc = 0, sys = 0;
+    char have[33] = "", sys_id[40] = "";
+    pthread_mutex_lock(&g_lock);
+    load_locked(api.users);
+    user_rec_t *u = find_user(&g_db, name);
+    if (u) {
+        group_rec_t *g = find_group(&g_db, u->group);
+        if (u->enabled && u->password[0]) {
+            snprintf(have, sizeof have, "%s", u->digest);
+            *perms = g ? rec_perms(g) : 0;
+            rc = -1;
+        }
+    } else if (!strcmp(name, api.user) || (!strcmp(name, "admin") && !find_user(&g_db, "admin"))) {
+        sys = 1;
+        snprintf(have, sizeof have, "%s", !strcmp(name, api.user) ? g_db.system.digest : g_db.system.admin_digest);
+        snprintf(sys_id, sizeof sys_id, "%s", g_db.system.shadow);
+        *perms = PERM_ALL;
+        rc = -1;
+    }
+    pthread_mutex_unlock(&g_lock);
+    if (sys) {
+        /* Only while the shadow entry is the one it was learnt from. */
+        char id[33], why[8];
+        if (auth_shadow_id(api.shadow, api.user, id, why, sizeof why) < 0 || strcmp(id, sys_id)) have[0] = 0;
+    }
+    if (rc && strlen(have) == 32) {
+        memcpy(ha1, have, 33);
+        return 1;
+    }
+    *perms = 0;
+    return rc;
 }
 
 int users_login(const char *name, const char *pass, unsigned *perms, char *why, size_t cap)

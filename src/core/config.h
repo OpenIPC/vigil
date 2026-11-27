@@ -172,6 +172,14 @@ typedef struct {
     int  fps;                       /* at most this many pictures a second */
 } config_web_t;
 
+/* vigild's RTSP server: the cameras' streams to other clients (docs/rtsp.md). */
+typedef struct {
+    int enabled;
+    int port;
+    int auth;                       /* Digest against vigil's users (live permission) */
+    int max_clients;                /* streams being sent at once */
+} config_rtsp_server_t;
+
 typedef struct {
     int  enabled;
     int  port;                      /* TCP; discovery answers on UDP 34569 */
@@ -195,12 +203,6 @@ typedef struct {
     int  video, management, camera, alarm;     /* custom: DSCP 0..63 */
 } config_qos_t;
 
-/* A server vigild is to have (RTSP): its port, kept and checked against
- * the others before the server exists. */
-typedef struct {
-    int port;
-} config_server_t;
-
 typedef struct {
     int             n_cameras;
     config_camera_t cameras[CHANNEL_MAX];
@@ -223,7 +225,7 @@ typedef struct {
     config_discovery_t discovery;
     config_onvif_server_t onvif_server;
     config_qos_t    qos;
-    config_server_t rtsp_server;
+    config_rtsp_server_t rtsp_server;
 } vigil_config_t;
 
 /* "mon".."sun" */
@@ -255,17 +257,17 @@ void config_to_qos(const vigil_config_t *c, int dscp[QOS_CLASSES]);
 int config_listen_port(const char *listen);
 
 /* No two of vigild's servers on one port: web.listen, api.listen,
- * onvif_server.port, netip_server.port, and rtsp_server's, kept for the
- * server to come (an empty listen is none).
+ * onvif_server.port, netip_server.port and rtsp_server.port (an empty
+ * listen is none).
  * 0, or -1 with an error at the later one's path. config_put_json checks
  * it; a file is loaded anyway (the server that comes second does not
  * start, logged). */
 int config_check_ports(const vigil_config_t *c, schema_errors_t *errs);
 
-/* Before config_put_json saves a changed api.listen, web.listen,
- * onvif_server.port while ONVIF is on or netip_server.port while NETIP is
- * (`what` "api", "web", "onvif" or "netip"; for ONVIF and NETIP `listen`
- * is the port alone), whether it can be listened on: 0, or -1 with
+/* Before config_put_json saves a changed api.listen, web.listen, or the
+ * port of ONVIF, RTSP or NETIP while that server is on (`what` "api",
+ * "web", "onvif", "rtsp" or "netip"; for the last three `listen` is the
+ * port alone), whether it can be listened on: 0, or -1 with
  * `err`. Set by vigild (it knows which ports its own servers hold); NULL
  * (the default): not asked. */
 typedef int (*config_listen_check_fn)(const char *what, const char *listen, char *err, size_t cap);

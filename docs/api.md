@@ -100,15 +100,18 @@ defaults, commented.
 | `web.enabled` | boolean | `true` | The [zero channel](#zero-channel): the screen, mouse and keyboard in a browser. Off: its pages answer `503` and its viewers are disconnected. |
 | `web.listen` | `"port"` or `"a.b.c.d:port"` | `"0.0.0.0:80"` | Where its web server listens (IPv4). Empty: none. A change moves it at once ([Ports](#ports)). |
 | `web.fps` | integer 1..30 | 15 | Its pictures a second, at most. |
+| `rtsp_server.enabled` | boolean | `true` | The cameras' streams to other clients over RTSP ([docs/rtsp.md](rtsp.md)). |
+| `rtsp_server.port` | integer 1..65535 | 554 | Its TCP port; it counts in [Ports](#ports). |
+| `rtsp_server.auth` | boolean | `true` | Require a Digest login of a user with the `live` permission. |
+| `rtsp_server.max_clients` | integer 1..32 | 8 | Clients being sent a stream at once. |
 | `discovery.interfaces` | string | `""` | Interfaces to search for cameras on, comma separated; empty: every IPv4 interface ([Discovery](#discovery)). |
 | `discovery.targets` | IPv4 addresses, comma separated | `""` | Also searched by unicast: cameras on a routed subnet. |
 | `discovery.prefer` | `netip`, `onvif`, `dhip`, comma separated | `"netip,onvif,dhip"` | The protocol a camera that answers several is added with. |
 | `qos.type` | `off`, `standard`, `custom` | `"off"` | DSCP marking of vigild's packets ([QoS](#qos-dscp-marking)). `off`: DSCP 0 everywhere; `standard`: the defaults below; `custom`: the four values below. |
-| `qos.video` | integer 0..63 | 34 (AF41) | The zero channel's picture: `web.listen`'s WebSocket. |
-| `qos.management` | integer 0..63 | 16 (CS2) | The HTTP API and the web server's pages and logins, the ONVIF service and WS-Discovery, DDNS, camera searches. |
+| `qos.video` | integer 0..63 | 34 (AF41) | The zero channel's picture (`web.listen`'s WebSocket); the RTSP server's video (its RTP over UDP, an interleaved connection from its `PLAY`); the NETIP server's live streams. |
+| `qos.management` | integer 0..63 | 16 (CS2) | The HTTP API and the web server's pages and logins, the ONVIF service and WS-Discovery, the RTSP and NETIP servers' requests (and NETIP's search answers), DDNS, camera searches. |
 | `qos.camera` | integer 0..63 | 34 (AF41) | vigild's connections to cameras: RTSP and NETIP control and the ACKs of their video. |
 | `qos.alarm` | integer 0..63 | 18 (AF21) | The API's event WebSocket (`/api/v1/ws`), the alarm center's POSTs, mails. |
-| `rtsp_server.port` | integer 1..65535 | 554 | Kept for an RTSP server, which vigild does not have yet ([Ports](#ports)). |
 | `onvif_server.enabled`, `.port` | boolean, integer 1..65535 | `true`, 8899 | vigild as an ONVIF device ([onvif.md](onvif.md)); 80, ONVIF's usual port, is the web server's, 8899 is XM's. Its port counts in [Ports](#ports). |
 | `netip_server.enabled`, `.port` | boolean, integer 1..65535 | `true`, 34567 | vigild as an XM NETIP device ([NETIP server](#netip-server)); 34567 is XM's. Its port counts in [Ports](#ports). |
 
@@ -194,8 +197,8 @@ stay 0), by traffic class:
 
 | Class | What |
 |---|---|
-| video | the zero channel's WebSocket on `web.listen` (port 80), from its upgrade on; a NETIP connection carrying a live stream, from the stream's start |
-| management | the API's, the web server's, the ONVIF service's and the NETIP server's listeners, so every connection they accept (pages, logins, REST calls, ONVIF and NETIP requests); WS-Discovery; the NETIP server's answers to XM's search; DDNS updates (curl); the camera searches' broadcasts |
+| video | the zero channel's WebSocket on `web.listen` (port 80), from its upgrade on; the [RTSP server](rtsp.md)'s RTP and RTCP over UDP, and each interleaved RTSP connection from its `PLAY` to its `TEARDOWN`; a NETIP connection carrying a live stream, from the stream's start |
+| management | the API's, the web server's, the ONVIF service's, the RTSP server's and the NETIP server's listeners, so every connection they accept (pages, logins, REST calls, ONVIF, RTSP and NETIP requests); WS-Discovery; the NETIP server's answers to XM's search; DDNS updates (curl); the camera searches' broadcasts |
 | camera | every connection vigild makes to a camera (RTSP, NETIP, the discovery jobs' NETIP logins), from its SYN; RTSP runs over TCP (interleaved), so the video's ACKs carry it too |
 | alarm | the API's event WebSocket `/api/v1/ws`, the alarm center's POSTs and the mails (curl's `ip-tos`, which curl has since 8.9: OpenIPC's curl 8.15 does) |
 
@@ -216,23 +219,20 @@ them clash is still loaded, with the clash logged: the server that starts
 second does not get the port.
 
 A changed `api.listen`, `web.listen` or (while that server is on)
-`onvif_server.port` or `netip_server.port` is tried before it is saved (bound for a moment, as
+`onvif_server.port`, `rtsp_server.port` or `netip_server.port` is tried before it is saved (bound for a moment, as
 the server will): a port another program holds, one below
 1024 without root, or an address the recorder does not have is refused
 with the reason (`api.listen: port 8081 is in use ...`). Saved, the server
 moves at once: it stops (its open connections and WebSockets close) and
 listens on the new port. Should that fail all the same (the port was taken
 in between), it goes back to the old one, the setting is put back, the
-event `api port: ...` says why, and Network -> Ports shows it. The ONVIF
+event `api port: ...` (`rtsp port: ...`) says why, and Network -> Ports
+shows it. The ONVIF
 server follows its port itself (`src/api/onvif.c`), and if the port cannot
 be had it tries again every 30 s; the page says so. The NETIP server moves
 with the configuration too (its clients reconnect and find it again by
 XM's search); if the new port cannot be had it stays on the old one, the
 event `netip port: ...` and the page saying so.
-
-vigild has no RTSP server yet: its port is a setting only, kept and
-checked so that no other server of vigild's can take it before that
-server comes.
 
 ## Authentication
 
@@ -287,6 +287,10 @@ that says what its users may do. They are kept in `api.users`
 like `vigil.yaml`; passwords are stored as `crypt(3)` hashes (SHA-512,
 `$6$`, with a random salt; SHA-256 or MD5 where the C library has no
 SHA-512) and never leave `vigild`: the API shows `"password_set": true`.
+Beside each hash the file keeps `md5(name:vigil:password)` (`digest`),
+which the [RTSP server](rtsp.md#logins)'s Digest logins need and a `crypt`
+hash cannot give: written with the password, and for a user from before
+it, at its next login.
 While the [ONVIF server](onvif.md#logging-in) is on, setting a password
 also stores the user's ONVIF key (the password itself, base64) next to the
 hash: ONVIF's digest logins need it.
@@ -295,8 +299,8 @@ Permissions: `live` (live view, status, events), `playback`, `ptz`,
 `cameras` (the camera list, discovery), `storage` (recording, schedule,
 quota, disks, network storage), `network` (network, DDNS, UPnP, mail,
 alarm center, QoS), `system` (time, host name, the UI's settings, the whole
-configuration), `users` (accounts, and the `api` and `web` sections,
-which decide who gets in at all), `remote` (the [zero
+configuration), `users` (accounts, and the `api`, `web` and
+`rtsp_server` sections, which decide who gets in at all), `remote` (the [zero
 channel](#zero-channel): the screen, mouse and keyboard from a browser,
 which is the console). Two groups always exist: **admin**, every
 permission, which cannot be changed or deleted, and **user**, live view
@@ -325,9 +329,9 @@ saved over it until it is fixed or removed.
 | `PUT /config` | every permission but `remote` |
 | `/config/cameras`, `discovery` | `cameras` |
 | `/config/record`, `schedule`, `quota`, `nas` | `storage` |
-| `/config/ddns`, `upnp`, `smtp`, `alarm`, `onvif_server`, `qos`, `rtsp_server`, `netip_server` | `network` |
+| `/config/ddns`, `upnp`, `smtp`, `alarm`, `onvif_server`, `qos`, `netip_server` | `network` |
 | `/config/time`, `ui`, `display` | `system` |
-| `/config/api`, `web` | `users` |
+| `/config/api`, `web`, `rtsp_server` | `users` |
 | `/network/…` | `network` |
 | `/system/…` | `system` |
 | `/disks…`, `/storage/…` | `storage` |
@@ -1005,6 +1009,8 @@ say which device went where.
   `cmake/embed.cmake`); `src/app/kvm.c`, `kvm_enc.c`, `kvm_input.c`,
   `jpeg_enc.c`: its pictures, their changed parts as JPEGs (an encoder of
   its own: libjpeg is not on the firmware) and its input.
+  `src/api/rtsp_server.c`: the [RTSP server](rtsp.md), its own thread,
+  fed by `src/core/stream_tap.c`.
   `src/api/onvif.c`: the [ONVIF server](onvif.md#inside), a third
   CivetWeb context and the WS-Discovery responder.
   `src/api/api_disc.c`: the discovery endpoints, over

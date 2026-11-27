@@ -18,6 +18,7 @@
 #include "api.h"
 #include "netip_srv.h"
 #include "onvif.h"
+#include "rtsp_server.h"
 #include "users.h"
 #include "web.h"
 #endif
@@ -531,6 +532,7 @@ static void listening(int server, ui_listen_t *out)
     memset(out, 0, sizeof *out);
     int (*fn)(char *, size_t, char *, size_t) = server == UI_SERVER_API     ? api_listening
                                                 : server == UI_SERVER_ONVIF ? onvif_listening
+                                                : server == UI_SERVER_RTSP  ? rtsp_server_listening
                                                 : server == UI_SERVER_NETIP ? netip_server_listening
                                                                             : web_listening;
     out->on = fn(out->listen, sizeof out->listen, out->why, sizeof out->why);

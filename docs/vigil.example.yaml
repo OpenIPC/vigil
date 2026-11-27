@@ -354,11 +354,12 @@ qos:
   # custom: the values below. One of: off, standard, custom. Default off.
   type: "off"
   # Video DSCP: With type custom: the zero channel's picture (web.listen's
-  # WebSocket), the NETIP server's live streams. 0..63, default 34.
+  # WebSocket), the RTSP and NETIP servers' video. 0..63, default 34.
   video: 34
   # Management DSCP: With type custom: the HTTP API, the web pages and logins,
-  # the ONVIF service and its WS-Discovery, the NETIP server's requests and
-  # search answers, DDNS, camera searches. 0..63, default 16.
+  # the ONVIF service and its WS-Discovery, the RTSP server's requests, the
+  # NETIP server's requests and search answers, DDNS, camera searches. 0..63,
+  # default 16.
   management: 16
   # Camera DSCP: With type custom: vigild's connections to cameras, RTSP and
   # NETIP control and the ACKs of their video; a connection open when this
@@ -371,7 +372,18 @@ qos:
 
 # RTSP server
 rtsp_server:
-  # RTSP port: The cameras' streams, served again to players and other
-  # recorders. vigild has no RTSP server yet: the port is kept for it, and no
-  # other of vigild's servers may take it. 1..65535, default 554.
+  # On: The cameras' streams to other clients (a VMS, VLC, another recorder)
+  # at rtsp://<this recorder>/ch1/main and /ch1/sub, as the cameras send them
+  # (docs/rtsp.md). Default true.
+  enabled: true
+  # Port: Its TCP port; RTP over UDP goes from a pair of ports from 6970 up.
+  # 1..65535, default 554.
   port: 554
+  # Require a password: Digest authentication against vigil's users; their
+  # group needs the live permission. Off: anyone on the network can watch
+  # every camera. Default true.
+  auth: true
+  # Clients at once, at most: Clients being sent a stream at the same time.
+  # Clients of one stream share its buffer (2 to 4 MiB for a main stream, less
+  # for a sub-stream). 1..32, default 8.
+  max_clients: 8

@@ -359,7 +359,7 @@ typedef struct {
 /* One of vigild's servers (Network -> Ports): what it listens on now
  * ("": nothing), and why not, or the last move to another port that
  * failed (""). */
-enum { UI_SERVER_WEB, UI_SERVER_API, UI_SERVER_ONVIF, UI_SERVER_NETIP };
+enum { UI_SERVER_WEB, UI_SERVER_API, UI_SERVER_ONVIF, UI_SERVER_RTSP, UI_SERVER_NETIP };
 typedef struct {
     int  on;
     char listen[64];
