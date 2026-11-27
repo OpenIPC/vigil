@@ -127,6 +127,8 @@ typedef struct {
     char language[8];
     char date_format[12];           /* "YYYY-MM-DD" | "DD.MM.YYYY" | "MM/DD/YYYY" */
     char time_format[4];            /* "24h" | "12h" */
+    int  login;                     /* the menus ask for a user (users.h) */
+    int  idle_logout;               /* minutes without input that log out; 0: never */
 } config_ui_t;
 
 typedef struct {

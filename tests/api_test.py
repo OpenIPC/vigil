@@ -273,6 +273,11 @@ def main():
               "time (%s)" % st)
         st, _, _ = api.json("PUT", "/api/v1/system/time", {"zone": "Europe/Berlin"})
         check(st == 409, "time zone: refused here (%s)" % st)
+        # not a system vigild manages (the host): no reboot, and only POST
+        st, _, _ = api.json("POST", "/api/v1/system/reboot", {})
+        check(st == 409, "reboot: refused on a system vigild does not manage (%s)" % st)
+        st, _, _ = api.json("GET", "/api/v1/system/shutdown")
+        check(st == 405, "shutdown: POST only (%s)" % st)
         st, _, h = api.json("GET", "/api/v1/system/hostname")
         st2, _, status2 = api.json("GET", "/api/v1/status")
         check(st == 200 and h["hostname"] and status2["hostname"] == h["hostname"], "hostname, also in status")
@@ -527,6 +532,8 @@ def main():
         check(st == 403, "storage user: network 403 (%s)" % st)
         st, _, _ = vera.json("GET", "/api/v1/system/time")
         check(st == 403, "viewer: system time 403 (%s)" % st)
+        st, _, err = vera.json("POST", "/api/v1/system/reboot", {})
+        check(st == 403 and err["needs"] == "system", "viewer: reboot 403 (%s)" % st)
         try:
             kws = WebSocket(api_port, kim.auth)
             got = wait_for(lambda: kws.find(lambda m: True), 2)

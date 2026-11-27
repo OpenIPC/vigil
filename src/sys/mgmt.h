@@ -114,6 +114,21 @@ int mgmt_ntp_sync(void);
 
 int mgmt_hostname_set(const char *name, char *err, size_t cap);
 
+/* ---- reboot and shutdown ----------------------------------------------------------- */
+
+typedef enum { MGMT_POWER_NONE = 0, MGMT_POWER_REBOOT, MGMT_POWER_OFF } mgmt_power_t;
+
+/* Ask for a reboot or a shutdown (the UI's Exit, the API's
+ * /system/reboot and /system/shutdown): vigild's main loop sees it
+ * (mgmt_power_pending), stops like on SIGTERM (the channels close their
+ * segments) and then calls mgmt_power_run. MGMT_OK, or MGMT_EUNMANAGED
+ * when this is not a system vigild manages (a desktop is not rebooted). */
+int          mgmt_power_request(mgmt_power_t what);
+mgmt_power_t mgmt_power_pending(void);
+/* sync(), then busybox's reboot or poweroff. Returns only when that
+ * failed (logged). */
+void         mgmt_power_run(mgmt_power_t what);
+
 /* ---- services (vigil.yaml: ddns, smtp, alarm) --------------------------------------- */
 
 typedef struct {

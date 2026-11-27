@@ -178,6 +178,13 @@ ui:
   date_format: YYYY-MM-DD
   # Time format. One of: 24h, 12h. Default 24h.
   time_format: "24h"
+  # Log in on screen: The menus and settings ask for a user and its password
+  # (vigil's users, or the system account, which always works); the live view
+  # stays. Default false.
+  login: false
+  # Log out after (min): Without a key or the mouse for this long. 0: never.
+  # 0..240, default 10.
+  idle_logout: 10
 
 # HTTP API
 api:

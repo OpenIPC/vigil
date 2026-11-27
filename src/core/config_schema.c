@@ -421,6 +421,11 @@ static const schema_field_t ui_fields[] = {
       .live = 1, .label = "Date format", .help = "" },
     { .key = "time_format", ENUM(config_ui_t, time_format, time_formats), .def_str = "24h", .live = 1,
       .label = "Time format", .help = "" },
+    { .key = "login", BOOL(config_ui_t, login), .def_int = 0, .live = 1, .label = "Log in on screen",
+      .help = "The menus and settings ask for a user and its password (vigil's users, or the "
+              "system account, which always works); the live view stays." },
+    { .key = "idle_logout", INT(config_ui_t, idle_logout), .def_int = 10, .min = 0, .max = 240, .live = 1,
+      .label = "Log out after (min)", .help = "Without a key or the mouse for this long. 0: never." },
 };
 
 static const schema_field_t api_fields[] = {

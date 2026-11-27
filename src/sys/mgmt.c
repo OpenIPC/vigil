@@ -743,6 +743,33 @@ int mgmt_ntp_sync(void)
     return submit(&j);
 }
 
+/* ---- reboot and shutdown --------------------------------------------------------------- */
+
+static volatile int g_power;            /* mgmt_power_t; set once, read by the main loop */
+
+int mgmt_power_request(mgmt_power_t what)
+{
+    if (what != MGMT_POWER_REBOOT && what != MGMT_POWER_OFF) return MGMT_EINVAL;
+    if (!sys_managed()) return MGMT_EUNMANAGED;
+    vg_log("%s asked for", what == MGMT_POWER_REBOOT ? "reboot" : "shutdown");
+    events_push(0, "%s", what == MGMT_POWER_REBOOT ? "rebooting" : "shutting down");
+    __atomic_store_n(&g_power, (int)what, __ATOMIC_SEQ_CST);
+    return MGMT_OK;
+}
+
+mgmt_power_t mgmt_power_pending(void) { return (mgmt_power_t)__atomic_load_n(&g_power, __ATOMIC_SEQ_CST); }
+
+void mgmt_power_run(mgmt_power_t what)
+{
+    if (what == MGMT_POWER_NONE) return;
+    /* The recordings were closed by the stop; the disks get them now. */
+    sync();
+    char out[256];
+    const char *prog = what == MGMT_POWER_REBOOT ? "reboot" : "poweroff";
+    int rc = sys_run(out, sizeof out, 30, prog, NULL);
+    if (rc != 0) vg_log("%s: exit status %d: %s", prog, rc, out);
+}
+
 int mgmt_hostname_set(const char *name, char *err, size_t cap)
 {
     if (!sys_managed()) return MGMT_EUNMANAGED;
