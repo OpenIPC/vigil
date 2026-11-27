@@ -45,6 +45,10 @@ void ui_ring_room(lv_obj_t *o);
 
 /* No padding, border, radius, background or scrolling. */
 void ui_plain(lv_obj_t *o);
+/* A visible scroll bar on `o` (which ui_plain left without one), there
+ * while its content overflows: a list longer than its box shows that it
+ * is, and where the view is. */
+void ui_scrollbar(lv_obj_t *o);
 
 /* A flat button with an optional symbol (LV_SYMBOL_...) and text. */
 lv_obj_t *ui_btn(lv_obj_t *parent, const char *symbol, const char *text);

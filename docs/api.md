@@ -342,7 +342,8 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `GET /api/v1/schema` | Every setting: type, default, limits, label, help. |
 | `GET /api/v1/ws` | WebSocket: pushed status, events and configuration changes. |
 | `POST /api/v1/discovery/scan` | Search the LAN for cameras ([Discovery](#discovery)). |
-| `GET /api/v1/discovery` | The devices found, and the current or last discovery job. |
+| `GET /api/v1/discovery` | The devices found (so far, while a scan runs), and the current or last discovery job. |
+| `POST /api/v1/discovery/stop` | End a running scan now, keeping what it found. |
 | `DELETE /api/v1/discovery` | Forget the devices found. |
 | `GET /api/v1/discovery/job` | The current or last discovery job. |
 | `POST /api/v1/discovery/ip` | Change devices' addresses, or (`dry_run`) show the plan. |
@@ -592,6 +593,21 @@ on a routed subnet; `discovery.targets` are asked too),
 behind port forwarding, test responders). Devices are kept 10 minutes after
 they last answered, 64 at most.
 
+Each answer goes into the device list the moment it is parsed, merged by
+MAC (else address) with what other protocols said, so `GET
+/api/v1/discovery` shows the scan's results while it runs: poll it (every
+few hundred milliseconds) while `running` is true. Its `generation` moves
+whenever the list changes (a device heard for the first time or telling
+something new, a scan starting, one dropped); `job.found` counts the
+devices that have answered this scan, `answered` marks them.
+
+### `POST /api/v1/discovery/stop`
+
+Ends the running scan within a fraction of a second and answers its final
+state (`200`; `message` "N devices, stopped"); what it found stays. `409`
+if no scan runs: other jobs are not stopped (an address change half done
+is worse than one not started).
+
 ### `GET /api/v1/discovery`
 
 ```json
@@ -601,16 +617,18 @@ they last answered, 64 at most.
       "protocols": ["netip", "onvif"], "vendor": "Xiongmai", "model": "IPC", "name": "LocalHost",
       "serial": "abcdef0123456789", "version": "V4.02.R11...", "channels": 1,
       "ports": { "netip": 34567, "http": 80 }, "onvif": "http://192.168.1.10:8899/onvif/device_service",
-      "interface": "eth0", "age": 4, "channel": null,
+      "interface": "eth0", "age": 4, "answered": true, "channel": null,
       "urls": { "netip": "netip://192.168.1.10:34567/?ch=0&stream=main" } } ],
-  "job": { ... } }
+  "count": 1, "generation": 12, "running": true,
+  "job": { "id": 9, "kind": "scan", "running": true, "progress": 40, "found": 1, ... } }
 ```
 
 `device` is the key the other requests take (the MAC, else the address).
 `channel` is the channel whose camera URL points at this address, or
 `null`. `urls` are what adding it would use, without credentials (ONVIF's
 come from the device when it is added). `age`: seconds since it last
-answered.
+answered; `answered`: it answered the last scan (the running one, while one
+runs). `count` is the number of devices listed, `running` the job's.
 
 ### `POST /api/v1/discovery/ip`
 

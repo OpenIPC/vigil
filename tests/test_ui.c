@@ -23,6 +23,7 @@
 
 #include "channel.h"
 #include "config.h"
+#include "discovery.h"
 #include "hal.h"
 #include "hal_capture.h"
 #include "hal_decoder.h"
@@ -79,6 +80,7 @@ int  hal_display_set_mode(const vg_mode_t *m)
  * as the video layer would: what is drawn over the video can be judged,
  * and a pixel blended with the key would show as a fringe. */
 static int g_shots;                     /* --shots: every screen, not the tests */
+static int g_live;                      /* --live-search: the real discovery, not the fakes */
 static int g_video_all;                 /* a picture behind every tile, whatever its state */
 #define KEY 0xFF00FFu
 
@@ -196,8 +198,28 @@ static const ui_disc_dev_t k_ddev[] = {
       "DS-2CD", "Lobby", UI_DISC_ONVIF, 80, 0 },
 };
 
+static int g_dj_many;                   /* > 0: that many made-up devices instead */
+
 static int fake_disc_devices(ui_disc_dev_t *out, int max)
 {
+    if (g_dj_many) {
+        static const char *const vendors[][2] = { { "Xiongmai", "IPC" }, { "Dahua", "IPC-HFW1230S" },
+                                                  { "OpenIPC", "SigmaStar" }, { "Acme", "DS-2CD" } };
+        int n = g_dj_many < max ? g_dj_many : max;
+        for (int i = 0; i < n; ++i) {
+            ui_disc_dev_t *d = &out[i];
+            memset(d, 0, sizeof *d);
+            snprintf(d->mac, sizeof d->mac, "02:00:00:00:01:%02x", (unsigned)i & 0xffu);
+            snprintf(d->key, sizeof d->key, "%s", d->mac);
+            snprintf(d->ip, sizeof d->ip, "10.0.0.%u", 10u + ((unsigned)i & 0x3fu));
+            snprintf(d->mask, sizeof d->mask, "255.255.0.0");
+            snprintf(d->vendor, sizeof d->vendor, "%s", vendors[i % 4][0]);
+            snprintf(d->model, sizeof d->model, "%s", vendors[i % 4][1]);
+            d->protos = i % 3 == 0 ? UI_DISC_NETIP | UI_DISC_ONVIF : i % 3 == 1 ? UI_DISC_ONVIF : UI_DISC_DHIP;
+            d->port = d->protos & UI_DISC_NETIP ? 34567 : 80;
+        }
+        return n;
+    }
     int n = g_dj_devices < max ? g_dj_devices : max;
     memcpy(out, k_ddev, (size_t)n * sizeof *out);
     return n;
@@ -225,6 +247,16 @@ static void fake_job_end(void)
         g_dj_devices = (int)(sizeof k_ddev / sizeof k_ddev[0]);
         snprintf(g_dj.msg, sizeof g_dj.msg, "%d devices", g_dj_devices);
     }
+}
+
+/* Stop: the search ends with what it has. */
+static int fake_disc_stop(void)
+{
+    if (!g_dj.running || g_dj.kind != UI_JOB_SCAN) return -1;
+    g_dj.running = 0;
+    g_dj.progress = 100;
+    snprintf(g_dj.msg, sizeof g_dj.msg, "%d devices, stopped", g_dj_devices);
+    return (int)g_dj.id;
 }
 
 static int fake_disc_scan(unsigned protos, char *err, size_t cap)
@@ -376,6 +408,8 @@ static void fake_discovery(ui_model_t *m)
     m->disc_test = fake_disc_test;
     m->disc_assign_manual = fake_disc_assign_manual;
     m->disc_scan = fake_disc_scan;
+    m->disc_stop = fake_disc_stop;
+    m->disc_gen = NULL;                 /* the fakes change under it: read on every poll of a search */
     m->disc_devices = fake_disc_devices;
     m->disc_job = fake_disc_job;
     m->disc_ip = fake_disc_ip;
@@ -1535,8 +1569,20 @@ static void test_channels_discovery(void)
     g_dj_hold = 1;
     click_text(LV_SYMBOL_REFRESH "  Search");
     run(300);
-    CHECK(find("Searching... 40%", 1), "Search: the job's progress");
+    CHECK(find("Searching (40%)... 0 found", 1) && find(LV_SYMBOL_STOP "  Stop", 0), "Search: progress, and Stop");
+    /* The devices show as they answer, while the search runs. */
+    g_dj_devices = 2;
+    g_dj.found = 2;
+    g_dj.progress = 60;
+    run(300);
+    CHECK(find("Searching (60%)... 2 found", 1) && find("192.168.1.10", 0) && find("192.168.1.108", 0) &&
+          !find("192.168.1.175", 0), "the first two, while it runs");
     shot("channels_searching");
+    lv_obj_t *first_row = find("192.168.1.108", 0);
+    g_dj_devices = 4;
+    g_dj.found = 4;
+    run(300);
+    CHECK(find("192.168.1.108", 0) == first_row && find("192.168.1.22", 0), "two more; the rows heard first stay");
     fake_job_end();
     g_dj_hold = 0;
     run(300);
@@ -1605,6 +1651,77 @@ static void test_channels_discovery(void)
     CHECK(find("added to channel 3", 1), "added: a toast");
     button(BTN_RIGHT);
     g_dj_devices = 0;
+}
+
+/* A search that finds more devices than the table shows: Stop keeps what
+ * was found; the list scrolls with the wheel and with the keyboard's
+ * focus; the channel table too. */
+static void test_channels_scroll(void)
+{
+    quiet();
+    click_text("CAMERA");
+    g_dj_hold = 1;
+    click_text(LV_SYMBOL_REFRESH "  Search");
+    g_dj_many = 34;
+    g_dj.found = 34;
+    run(300);
+    click_text(LV_SYMBOL_STOP "  Stop");
+    run(300);
+    CHECK(!g_dj.running && find(LV_SYMBOL_REFRESH "  Search", 0) && find("34 found", 0), "Stop: 34 kept");
+    g_dj_hold = 0;
+    lv_obj_t *top = find("10.0.0.10", 0), *last = find("10.0.0.43", 0);
+    lv_obj_t *table = top ? lv_obj_get_parent(lv_obj_get_parent(top)) : NULL;
+    CHECK(table && lv_obj_get_scroll_bottom(table) > 0, "34 rows: the table scrolls");
+    if (!table || !last) return;
+    lv_area_t ta, la;
+    int x, y;
+    center_of(top, &x, &y);
+    move_to(x, y);
+    shot("channels_scroll_top");
+    for (int i = 0; i < 5; ++i) ev(EV_REL, REL_WHEEL, -1);
+    ev(EV_SYN, SYN_REPORT, 0);
+    run(100);
+    CHECK(lv_obj_get_scroll_y(table) > 0, "the wheel scrolls the list under the pointer (%d)",
+          (int)lv_obj_get_scroll_y(table));
+    shot("channels_scroll_middle");
+    for (int i = 0; i < 20; ++i) ev(EV_REL, REL_WHEEL, -1);
+    ev(EV_SYN, SYN_REPORT, 0);
+    run(100);
+    lv_obj_get_coords(table, &ta);
+    lv_obj_get_coords(last, &la);
+    CHECK(lv_obj_get_scroll_bottom(table) <= 0 && la.y2 <= ta.y2, "... to its end");
+    shot("channels_scroll_bottom");
+    for (int i = 0; i < 30; ++i) ev(EV_REL, REL_WHEEL, 1);
+    ev(EV_SYN, SYN_REPORT, 0);
+    run(100);
+    CHECK(lv_obj_get_scroll_y(table) == 0, "and back up");
+
+    /* Keys as the keypad gives them to the focused table (gridnav): Down
+     * through the rows, the focused one in view. */
+    lv_group_focus_obj(table);
+    uint32_t k = LV_KEY_DOWN;
+    for (int i = 0; i < 20; ++i) lv_obj_send_event(table, LV_EVENT_KEY, &k);
+    run(400);
+    lv_obj_t *row = NULL;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(table); ++i)
+        if (lv_obj_has_state(lv_obj_get_child(table, (int32_t)i), LV_STATE_FOCUSED)) row = lv_obj_get_child(table, (int32_t)i);
+    lv_area_t ra;
+    if (row) lv_obj_get_coords(row, &ra);
+    lv_obj_get_coords(table, &ta);
+    CHECK(row && lv_obj_get_index(row) == 20 && ra.y1 >= ta.y1 && ra.y2 <= ta.y2 + 1, "row 21 focused, in view (%d: %d..%d in %d..%d)",
+          row ? (int)lv_obj_get_index(row) : -1, (int)ra.y1, (int)ra.y2, (int)ta.y1, (int)ta.y2);
+    /* Space checks it: the table is updated in place, the focus stays. */
+    k = ' ';
+    lv_obj_send_event(table, LV_EVENT_KEY, &k);
+    run(200);
+    CHECK(row && lv_obj_has_state(row, LV_STATE_FOCUSED) && find("1 checked", 0), "checked; still focused");
+    shot("channels_scroll_keyboard");
+    lv_obj_send_event(table, LV_EVENT_KEY, &k);
+    run(200);
+    lv_group_focus_obj(NULL);
+    g_dj_many = 0;
+    button(BTN_RIGHT);
+    run(100);
 }
 
 /* Manual add: the page per protocol, Test (OK, an authentication
@@ -3002,9 +3119,10 @@ static lv_obj_t *osk(void)
     return kb && lv_obj_check_type(kb, &lv_keyboard_class) ? kb : NULL;
 }
 
-/* An empty slot's "+": the camera form for that channel; the on-screen
- * keyboard (mouse only) next to the field; a camera added at channel 4
- * with 2 and 3 left empty. Then Channel info. */
+/* An empty slot's "+": Channels with that channel marked; its row's Add
+ * opens the camera form for it; the on-screen keyboard (mouse only) next
+ * to the field; a camera added at channel 4 with 2 and 3 left empty. Then
+ * Channel info. */
 static void test_empty_slot(void)
 {
     vigil_config_t c;
@@ -3020,6 +3138,15 @@ static void test_empty_slot(void)
     if (!plus) return;
     int x, y;
     center_of(plus, &x, &y);
+    click_at(x, y);
+    run(100);
+    CHECK(find("Channel 4: check a device above", 1), "\"+\": Channels, for channel 4");
+    shot("tile_add_channels");
+    /* The toolbar's Add, then the empty channels' (2, 3, 4). */
+    lv_obj_t *add4 = find_nth(lv_screen_active(), LV_SYMBOL_PLUS "  Add", 3);
+    CHECK(add4 != NULL, "channel 4: Add");
+    if (!add4) return;
+    center_of(add4, &x, &y);
     click_at(x, y);
     run(100);
     CHECK(find("Cameras 4: new", 0), "the form for a camera on channel 4");
@@ -3054,6 +3181,9 @@ static void test_empty_slot(void)
           c.n_cameras);
     button(BTN_RIGHT);
     run(VG_DURATION_TOAST);
+    CHECK(find("Channel 4: check a device above", 1), "back on Channels");
+    button(BTN_RIGHT);
+    run(100);
 
     /* A field low on the screen: the keyboard opens above it; a click
      * outside closes it (the page hides it on LV_EVENT_CANCEL). */
@@ -3310,6 +3440,23 @@ static void test_split16(void)
     CHECK(rect_is(0, 0, 0, 960, 540), "8: the 8-split again");
     key(KEY_PAGEDOWN);
     CHECK(rect_is(8, 0, 0, 960, 540) && g_tiles[0].w == 0, "PageDown: CAM9 in the large window");
+
+    /* Channels opened for channel 14 (an empty tile's "+"): its row is
+     * scrolled into view in the channel table. */
+    ui_channels_open_at(13);
+    run(100);
+    lv_obj_t *n14 = find("14", 0);
+    lv_obj_t *table = n14 ? lv_obj_get_parent(lv_obj_get_parent(n14)) : NULL;
+    lv_area_t ra, ta;
+    if (table) {
+        lv_obj_get_coords(lv_obj_get_parent(n14), &ra);
+        lv_obj_get_coords(table, &ta);
+    }
+    CHECK(find("Channel 14: check a device above", 1) && table && lv_obj_get_scroll_y(table) > 0 &&
+          ra.y1 >= ta.y1 && ra.y2 <= ta.y2 + 1, "Channels for channel 14: its row scrolled into view");
+    shot("channels16_target");
+    button(BTN_RIGHT);
+    run(100);
 }
 
 /* 64 channels: 32 (8x4) and 64 (8x8) too. */
@@ -3354,13 +3501,13 @@ static int setup(int channels, const char *json, char *path, size_t cap)
     g_model.show_tiles = fake_tiles;
     g_model.now = fake_now;
     g_model.system_info = fake_info;
-    fake_discovery(&g_model);
+    if (!g_live) fake_discovery(&g_model);
     fake_mgmt(&g_model);
     ui_app_create(&g_model);
     if (pipe(g_mouse) < 0 || pipe(g_kbd) < 0) return -1;
     fcntl(g_mouse[0], F_SETFL, O_NONBLOCK);
     fcntl(g_kbd[0], F_SETFL, O_NONBLOCK);
-    static const input_hooks_t hooks = { ui_app_back, ui_app_key, ui_app_keyboards };
+    static const input_hooks_t hooks = { ui_app_back, ui_app_key, ui_app_keyboards, ui_app_wheel };
     ui_app_set_pointer(input_evdev_create(disp, &hooks, 0));
     ui_app_set_keypad(input_evdev_keypad());
     input_evdev_attach(g_mouse[0], "test mouse", 0, 0, 0, 0, 0);
@@ -3795,6 +3942,108 @@ static int shots_16(void)
     return g_fail ? 1 : 0;
 }
 
+/* ---- a live search, for people (tests/live_search_shots.sh) ------------------------------ */
+
+/* The real discovery and bridge against fake_discovery.py's devices,
+ * which answer late (0.2 s to 3 s): screenshots while the search runs
+ * show the rows coming in. The search asks only 127.0.0.1 on the fake's
+ * ports, by unicast: nothing leaves the machine. */
+static int g_live_port[3];
+
+static int live_scan(unsigned protos, char *err, size_t cap)
+{
+    disc_scan_opts_t o;
+    memset(&o, 0, sizeof o);
+    o.protos = protos;
+    o.seconds = 4;
+    o.no_broadcast = 1;
+    snprintf(o.targets, sizeof o.targets, "127.0.0.1");
+    memcpy(o.port, g_live_port, sizeof o.port);
+    int id = disc_scan(&o);
+    if (id < 0) snprintf(err, cap, "cannot start");
+    return id;
+}
+
+static long long real_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000LL + ts.tv_nsec / 1000000;
+}
+
+/* The UI in step with the clock (the search's thread runs on it) until
+ * `ms` after `t0`. */
+static void run_until(long long t0, int ms)
+{
+    while (real_ms() - t0 < ms) {
+        usleep(5000);
+        g_ms += 5;
+        lv_timer_handler();
+    }
+}
+
+static void live_shot(long long t0, const char *what)
+{
+    char name[64];
+    snprintf(name, sizeof name, "live-%05.2fs-%s", (double)(real_ms() - t0) / 1000.0, what);
+    shot(name);
+    printf("%s\n", name);
+}
+
+static int live_search(const char *ports)
+{
+    if (sscanf(ports, "%d,%d,%d", &g_live_port[0], &g_live_port[1], &g_live_port[2]) != 3) return 2;
+    char path[512];
+    g_live = 1;
+    /* Channel 1's camera is one of the fakes: its row says so. */
+    if (setup(4, "{\"version\":1,\"cameras\":[{\"url\":\"rtsp://10.20.0.31/stream1\",\"name\":\"Gate\"}]}", path,
+              sizeof path) < 0)
+        return 1;
+    g_model.disc_scan = live_scan;
+    ui_channels_open();
+    run(300);
+    move_to(640, 600);
+    click_text(LV_SYMBOL_REFRESH "  Search");
+    long long t0 = real_ms();
+    static const struct { int ms; const char *what; } at[] = {
+        { 100, "started" }, { 450, "first" }, { 1100, "more" }, { 1700, "merged" }, { 2300, "filling" },
+        { 3200, "late" }, { 4600, "done" },
+    };
+    for (size_t i = 0; i < sizeof at / sizeof at[0]; ++i) {
+        run_until(t0, at[i].ms);
+        live_shot(t0, at[i].what);
+    }
+    lv_obj_t *top = find("10.20.0.31", 0);
+    if (top) {
+        int x, y;
+        center_of(top, &x, &y);
+        move_to(x + 300, y);
+        for (int i = 0; i < 4; ++i) ev(EV_REL, REL_WHEEL, -1);
+        ev(EV_SYN, SYN_REPORT, 0);
+        run(100);
+        live_shot(t0, "wheel-middle");
+        for (int i = 0; i < 30; ++i) ev(EV_REL, REL_WHEEL, -1);
+        ev(EV_SYN, SYN_REPORT, 0);
+        run(100);
+        live_shot(t0, "wheel-bottom");
+        for (int i = 0; i < 40; ++i) ev(EV_REL, REL_WHEEL, 1);
+        ev(EV_SYN, SYN_REPORT, 0);
+        run(100);
+    }
+    /* Again: what the last search found is dimmed until it answers. */
+    move_to(640, 600);
+    click_text(LV_SYMBOL_REFRESH "  Search");
+    t0 = real_ms();
+    run_until(t0, 700);
+    live_shot(t0, "again");
+    run_until(t0, 4600);
+    live_shot(t0, "again-done");
+    disc_shutdown();
+    input_evdev_delete();
+    unlink(path);
+    return 0;
+}
+
 static int shots(void)
 {
     int (*const run_one[])(void) = { shots_4, shots_16 };
@@ -3818,6 +4067,11 @@ int main(int argc, char **argv)
         setenv("TZ", "UTC", 1);
         tzset();
         return shots();
+    }
+    if (argc > 3 && !strcmp(argv[1], "--live-search")) {
+        g_out = argv[2];
+        mkdir(g_out, 0755);
+        return live_search(argv[3]);
     }
     g_out = argc > 1 ? argv[1] : ".";
     setenv("TZ", "UTC", 1);
@@ -3870,7 +4124,7 @@ int main(int argc, char **argv)
 
     if (pipe(g_mouse) < 0) return 1;
     fcntl(g_mouse[0], F_SETFL, O_NONBLOCK);
-    static const input_hooks_t hooks = { ui_app_back, ui_app_key, ui_app_keyboards };
+    static const input_hooks_t hooks = { ui_app_back, ui_app_key, ui_app_keyboards, ui_app_wheel };
     lv_indev_t *ptr = input_evdev_create(disp, &hooks, 0);
     ui_app_set_pointer(ptr);
     ui_app_set_keypad(input_evdev_keypad());
@@ -3883,6 +4137,7 @@ int main(int argc, char **argv)
     test_menu_and_settings();
     test_cameras();
     test_channels_discovery();
+    test_channels_scroll();
     test_channels_manual();
     test_system();
     test_same_redacted_urls();

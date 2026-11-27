@@ -41,6 +41,8 @@ static volatile int    g_stop;
 static int             g_max_ch = CHANNEL_MAX;
 static unsigned        g_prefer[3] = { DISC_NETIP, DISC_ONVIF, DISC_DHIP };
 static disc_scan_opts_t g_last;      /* the last scan's interfaces, targets and ports */
+static unsigned        g_gen;        /* the table's generation: moves with every change */
+static unsigned        g_scan;       /* the id of the last scan job */
 
 static time_t mono(void)
 {
@@ -103,36 +105,34 @@ static void expire(void)
     int k = 0;
     for (int i = 0; i < g_ndev; ++i)
         if (now - g_dev[i].seen <= DISC_TTL) g_dev[k++] = g_dev[i];
+    if (k != g_ndev) ++g_gen;
     g_ndev = k;
 }
 
+/* Each answer as it comes: the screen and the API see a device the
+ * moment it is heard, not when the scan ends. */
 static void table_add(const disc_device_t *in)
 {
     pthread_mutex_lock(&g_lock);
-    int i;
-    for (i = 0; i < g_ndev; ++i)
-        if (disc_same(&g_dev[i], in)) break;
-    if (i < g_ndev) {
-        disc_merge(&g_dev[i], in);
-        /* The address changed hands: another entry still claiming it
-         * without a MAC is the same device, heard before its MAC was. */
-        for (int j = 0; j < g_ndev; ++j)
-            if (j != i && !g_dev[j].mac[0] && !strcmp(g_dev[j].ip, g_dev[i].ip)) {
-                disc_merge(&g_dev[i], &g_dev[j]);
-                g_dev[j] = g_dev[--g_ndev];
-                if (i == g_ndev) i = j;
-                break;
-            }
-    } else {
-        if (g_ndev == DISC_MAX) {             /* full: the one heard least recently goes */
-            int old = 0;
-            for (int j = 1; j < g_ndev; ++j)
-                if (g_dev[j].seen < g_dev[old].seen) old = j;
-            g_dev[old] = g_dev[--g_ndev];
-        }
-        g_dev[g_ndev++] = *in;
-    }
+    if (disc_table_add(g_dev, &g_ndev, DISC_MAX, in)) ++g_gen;
     pthread_mutex_unlock(&g_lock);
+}
+
+unsigned disc_generation(void)
+{
+    pthread_mutex_lock(&g_lock);
+    expire();
+    unsigned g = g_gen;
+    pthread_mutex_unlock(&g_lock);
+    return g;
+}
+
+unsigned disc_last_scan(void)
+{
+    pthread_mutex_lock(&g_lock);
+    unsigned id = g_scan;
+    pthread_mutex_unlock(&g_lock);
+    return id;
 }
 
 static int cmp_ip(const void *a, const void *b)
@@ -158,6 +158,7 @@ void disc_clear(void)
 {
     pthread_mutex_lock(&g_lock);
     g_ndev = 0;
+    ++g_gen;
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -254,6 +255,9 @@ void disc_job_get(disc_job_t *out)
 {
     pthread_mutex_lock(&g_lock);
     *out = g_job;
+    out->found = 0;
+    if (g_job.kind == DISC_JOB_SCAN)
+        for (int i = 0; i < g_ndev; ++i) out->found += g_dev[i].scan == g_job.id;
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -296,6 +300,10 @@ static int job_start(job_args_t *a)
     g_job.running = 1;
     g_job.dry_run = a->dry_run;
     g_stop = 0;
+    if (a->kind == DISC_JOB_SCAN) {
+        g_scan = id;
+        ++g_gen;                     /* every device "not heard by it" until it answers */
+    }
     if (pthread_create(&g_thread, NULL, job_main, a) != 0) {
         g_job.running = 0;
         snprintf(g_job.msg, sizeof g_job.msg, "cannot start a thread");
@@ -308,6 +316,15 @@ static int job_start(job_args_t *a)
     g_thread_up = 1;
     pthread_mutex_unlock(&g_lock);
     return (int)id;
+}
+
+int disc_scan_stop(void)
+{
+    pthread_mutex_lock(&g_lock);
+    int id = g_job.running && g_job.kind == DISC_JOB_SCAN ? (int)g_job.id : -1;
+    if (id > 0) g_stop = 1;
+    pthread_mutex_unlock(&g_lock);
+    return id;
 }
 
 void disc_shutdown(void)
@@ -452,6 +469,7 @@ typedef struct {
     int broadcast;
     int port[3];
     char msgid[64];
+    unsigned scan;                   /* the scan job's id; 0: another job listens */
 } scanner_t;
 
 static void scanner_close(scanner_t *s)
@@ -565,6 +583,7 @@ static void scanner_listen(scanner_t *s, int ms, void (*heard)(const disc_device
                  * address that answered; devices on another subnet still
                  * report their own. */
                 d.seen = mono();
+                d.scan = s->scan;
                 snprintf(d.iface, sizeof d.iface, "%s", ifn);
                 (void)from;
                 table_add(&d);
@@ -591,22 +610,29 @@ static void run_scan(const job_args_t *a)
         job_msg("no interface to search on");
         return;
     }
+    pthread_mutex_lock(&g_lock);
+    s.scan = g_job.id;
+    pthread_mutex_unlock(&g_lock);
     job_msg("searching");
     long long t0 = mono_ms(), total = secs * 1000LL;
     for (int round = 0; round < ROUNDS && round < secs && !g_stop; ++round) {
         scanner_send(&s, 0);
-        scanner_listen(&s, 1000, NULL, NULL);
-        job_progress((int)((mono_ms() - t0) * 100 / total));
+        /* In quarters: the progress moves while the results come in. */
+        for (int q = 0; q < 4 && !g_stop; ++q) {
+            scanner_listen(&s, 250, NULL, NULL);
+            job_progress((int)((mono_ms() - t0) * 100 / total));
+        }
     }
     while (!g_stop && mono_ms() - t0 < total) {
         scanner_listen(&s, 250, NULL, NULL);
         job_progress((int)((mono_ms() - t0) * 100 / total));
     }
     scanner_close(&s);
+    int stopped = g_stop;
     disc_device_t *list = malloc(DISC_MAX * sizeof *list);
     int n = list ? disc_devices(list, DISC_MAX) : 0;
     free(list);
-    job_msg("%d device%s", n, n == 1 ? "" : "s");
+    job_msg("%d device%s%s", n, n == 1 ? "" : "s", stopped ? ", stopped" : "");
 }
 
 /* ---- address changes ---------------------------------------------------------------- */

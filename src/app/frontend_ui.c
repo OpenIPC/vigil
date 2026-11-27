@@ -36,7 +36,7 @@ int frontend_run(int run_secs, volatile sig_atomic_t *stop, void (*tick)(void))
         return -1;
     }
     ui_app_create(&model);
-    static const input_hooks_t hooks = { ui_app_back, ui_app_key, ui_app_keyboards };
+    static const input_hooks_t hooks = { ui_app_back, ui_app_key, ui_app_keyboards, ui_app_wheel };
     ui_app_set_pointer(input_evdev_create(disp, &hooks, 1));
     ui_app_set_keypad(input_evdev_keypad());
 

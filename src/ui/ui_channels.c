@@ -9,6 +9,19 @@
  *             state, enabled; Edit, Clear, "+ Add" on an empty one, and
  *             with one device checked, Add/Replace puts it there
  *
+ * A search shows each device the moment it answers: the page polls the
+ * model's generation (disc_gen) and reads the devices only when it moved.
+ * Rows keep their places while the list fills (a device already listed
+ * stays where it is, a new one goes to the end), so nothing moves under
+ * the pointer or the focus; devices an earlier search found are dimmed
+ * until they answer this one. Search turns into Stop while it runs, and
+ * the list stays usable: adding a device, or opening Change IP and the
+ * other pages, ends the search first (one discovery job at a time).
+ *
+ * Opened for a channel (the "+" of an empty tile), that channel's row is
+ * marked and shown, Add puts the first device checked there, and Manual
+ * add offers it first.
+ *
  * A device row's "Add to..." opens a small menu of the empty channels.
  * Change IP, Mass change and Auto add are pages of their own with the
  * credentials and the result of the job. All network work is a discovery
@@ -32,8 +45,8 @@
 #include "ui_theme.h"
 
 #define POLL_MS     200
-#define DEV_H       150             /* the device table's rows (four), scrolled */
 #define QUEUE_MAX   UI_DISC_MAX
+#define SCROLLBAR_W 12              /* room at the tables' right for their scroll bar */
 
 typedef struct {
     ui_page_t     *page;
@@ -41,18 +54,22 @@ typedef struct {
     lv_obj_t      *kb;
     lv_obj_t      *proto, *search, *status, *user, *pass, *hint;
     lv_obj_t      *add, *chip, *mass, *autoadd, *manual, *all;
-    lv_obj_t      *devs, *chans;
+    lv_obj_t      *devs, *chans, *empty;
     lv_obj_t      *state_cell[UI_MAX_CHANNELS];
     lv_timer_t    *timer;
     ui_disc_dev_t  dev[UI_DISC_MAX];
     int            n_dev;
+    unsigned       dev_gen;         /* the model's disc_gen when `dev` was read */
+    int            target;          /* the channel (0-based) the page was opened for; -1 */
     char           checked[UI_DISC_MAX][24];
     int            n_checked;
     unsigned       job;             /* the job this page started and waits for */
     ui_disc_job_t *jb;
-    /* Add with several devices checked: one assign job after another. */
+    /* Adding: one assign job after another (one device: a queue of one).
+     * The first goes to q_ch (0: the first empty channel), replacing its
+     * camera with q_replace; q_wait: a search is being stopped first. */
     char           queue[QUEUE_MAX][24];
-    int            q_n, q_i, q_ok, q_fail;
+    int            q_n, q_i, q_ok, q_fail, q_ch, q_replace, q_wait;
     char           q_err[96];
     int            pick_ch;         /* "Add to..." menu: the device's index */
     unsigned       gen;
@@ -124,6 +141,8 @@ static lv_obj_t *table_rows(lv_obj_t *parent, int h)
     lv_obj_set_layout(t, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(t, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_hor(t, VG_SPACE_XS, 0);     /* room for the focus ring */
+    lv_obj_set_style_pad_right(t, SCROLLBAR_W, 0);   /* ... and the scroll bar, beside the rows' buttons */
+    ui_scrollbar(t);
     return t;
 }
 
@@ -178,22 +197,38 @@ static lv_obj_t *tbtn(lv_obj_t *row, const char *sym, const char *text, lv_event
 }
 
 /* The check box of a device row: a bordered square with a tick. */
-static lv_obj_t *tick(lv_obj_t *row, int on)
+static void tick_set(lv_obj_t *b, int on)
+{
+    lv_obj_set_style_border_color(b, on ? UI_C(ACCENT) : UI_C(TEXT2), 0);
+    lv_obj_set_style_bg_opa(b, on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_obj_t *l = lv_obj_get_child(b, 0);
+    if (on && !l) {
+        l = ui_label(b, LV_SYMBOL_OK, VG_FONT_SM_LV, UI_C(TEXT));
+        lv_obj_center(l);
+    } else if (!on && l) {
+        lv_obj_delete(l);
+    }
+}
+
+static lv_obj_t *tick(lv_obj_t *row)
 {
     lv_obj_t *b = lv_obj_create(row);
     ui_plain(b);
     ui_inert(b);
     lv_obj_set_size(b, 20, 20);
     lv_obj_set_style_border_width(b, 2, 0);
-    lv_obj_set_style_border_color(b, on ? UI_C(ACCENT) : UI_C(TEXT2), 0);
     lv_obj_set_style_radius(b, VG_RADIUS_SM, 0);
     lv_obj_set_style_bg_color(b, UI_C(ACCENT), 0);
-    lv_obj_set_style_bg_opa(b, on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-    if (on) {
-        lv_obj_t *l = ui_label(b, LV_SYMBOL_OK, VG_FONT_SM_LV, UI_C(TEXT));
-        lv_obj_center(l);
-    }
+    tick_set(b, 0);
     return b;
+}
+
+/* A label's text and colour, each set only when it differs: a row set
+ * again with what it shows already is not redrawn. */
+static void label_set(lv_obj_t *l, const char *text, lv_color_t col)
+{
+    if (strcmp(lv_label_get_text(l), text)) lv_label_set_text(l, text);
+    if (!lv_color_eq(lv_obj_get_style_text_color(l, 0), col)) lv_obj_set_style_text_color(l, col, 0);
 }
 
 /* ---- text fields and the on-screen keyboard -------------------------------------------- */
@@ -367,46 +402,75 @@ static void add_to_cb(lv_event_t *e)
     ui_popup_place(&at);
 }
 
+/* A device row: its cells, empty until dev_row_set fills them. */
+static lv_obj_t *dev_row_new(chans_t *c, int i)
+{
+    lv_obj_t *r = trow(c->devs, 0);
+    lv_obj_set_user_data(r, (void *)(intptr_t)i);
+    lv_obj_add_event_cb(r, dev_click_cb, LV_EVENT_CLICKED, c);
+    lv_obj_add_event_cb(r, dev_key_cb, LV_EVENT_KEY, c);
+    tick(r);
+    static const int w[] = { 130, 56, 150, 0, 150, 140 };
+    for (size_t k = 0; k < sizeof w / sizeof w[0]; ++k) tcell(r, "", w[k], UI_C(TEXT));
+    lv_obj_t *b = tbtn(r, LV_SYMBOL_PLUS, "Add to...", add_to_cb, c, i);
+    lv_obj_set_width(b, 96);
+    return r;
+}
+
+/* Row `r` shows c->dev[i]; only what changed is set. */
+static void dev_row_set(chans_t *c, lv_obj_t *r, int i)
+{
+    const ui_disc_dev_t *d = &c->dev[i];
+    char port[16], vm[160], pr[48], st[32];
+    snprintf(port, sizeof port, "%d", d->port);
+    const char *who = d->model[0] ? d->model : d->name;
+    snprintf(vm, sizeof vm, "%s%s%s", d->vendor, d->vendor[0] && who[0] ? " / " : "", who);
+    protos_text(d->protos, pr, sizeof pr);
+    if (d->channel) snprintf(st, sizeof st, "On channel %d", d->channel);
+    else snprintf(st, sizeof st, "%s", d->stale ? "No answer" : "New");
+    /* Not heard by the last search: dimmed until it answers. */
+    lv_color_t text = d->stale ? UI_C(TEXT2) : UI_C(TEXT);
+    tick_set(lv_obj_get_child(r, 0), is_checked(c, d->key));
+    label_set(lv_obj_get_child(r, 1), d->ip, text);
+    label_set(lv_obj_get_child(r, 2), d->port ? port : "-", text);
+    label_set(lv_obj_get_child(r, 3), d->mac[0] ? d->mac : "-", text);
+    label_set(lv_obj_get_child(r, 4), vm[0] ? vm : "-", text);
+    label_set(lv_obj_get_child(r, 5), pr, text);
+    label_set(lv_obj_get_child(r, 6), st, d->stale ? UI_C(TEXT2) : d->channel ? UI_C(OK) : UI_C(ACCENT));
+    lv_obj_t *b = lv_obj_get_child(r, 7);
+    if (!!d->channel != lv_obj_has_state(b, LV_STATE_DISABLED)) {
+        if (d->channel) lv_obj_add_state(b, LV_STATE_DISABLED);
+        else lv_obj_remove_state(b, LV_STATE_DISABLED);
+    }
+}
+
+/* The device table shows c->dev: rows set in place, added at the end or
+ * taken from it, never built anew, so the row under the pointer or the
+ * focus, and the scroll position, stay while a search fills the list. */
 static void devs_build(chans_t *c)
 {
     lv_obj_t *t = c->devs;
-    int32_t sy = lv_obj_get_scroll_y(t);
-    lv_obj_clean(t);
     if (!c->n_dev) {
-        lv_obj_t *e = ui_label(t, M()->disc_scan ? "No devices yet: Search finds the cameras on the network."
-                                                 : "This vigild cannot search for cameras.",
-                               VG_FONT_MD_LV, UI_C(TEXT2));
-        lv_obj_set_style_pad_ver(e, VG_SPACE_LG, 0);
+        if (!c->empty) {
+            lv_obj_clean(t);
+            c->empty = ui_label(t, M()->disc_scan ? "No devices yet: Search finds the cameras on the network."
+                                                  : "This vigild cannot search for cameras.",
+                                VG_FONT_MD_LV, UI_C(TEXT2));
+            lv_obj_set_style_pad_ver(c->empty, VG_SPACE_LG, 0);
+        }
+        return;
     }
-    lv_obj_t *first = NULL;
-    for (int i = 0; i < c->n_dev; ++i) {
-        const ui_disc_dev_t *d = &c->dev[i];
-        lv_obj_t *r = trow(t, 0);
-        lv_obj_set_user_data(r, (void *)(intptr_t)i);
-        lv_obj_add_event_cb(r, dev_click_cb, LV_EVENT_CLICKED, c);
-        lv_obj_add_event_cb(r, dev_key_cb, LV_EVENT_KEY, c);
-        if (!first) first = r;
-        int on = is_checked(c, d->key);
-        tick(r, on);
-        char port[16], vm[160], pr[48], st[32];
-        snprintf(port, sizeof port, "%d", d->port);
-        const char *who = d->model[0] ? d->model : d->name;
-        snprintf(vm, sizeof vm, "%s%s%s", d->vendor, d->vendor[0] && who[0] ? " / " : "", who);
-        protos_text(d->protos, pr, sizeof pr);
-        if (d->channel) snprintf(st, sizeof st, "On channel %d", d->channel);
-        else snprintf(st, sizeof st, "New");
-        tcell(r, d->ip, 130, UI_C(TEXT));
-        tcell(r, d->port ? port : "-", 56, UI_C(TEXT));
-        tcell(r, d->mac[0] ? d->mac : "-", 150, UI_C(TEXT));
-        tcell(r, vm[0] ? vm : "-", 0, UI_C(TEXT));
-        tcell(r, pr, 150, UI_C(TEXT));
-        tcell(r, st, 140, d->channel ? UI_C(OK) : UI_C(ACCENT));
-        lv_obj_t *b = tbtn(r, LV_SYMBOL_PLUS, "Add to...", add_to_cb, c, i);
-        lv_obj_set_width(b, 96);
-        if (d->channel) lv_obj_add_state(b, LV_STATE_DISABLED);
+    if (c->empty) {
+        lv_obj_delete(c->empty);
+        c->empty = NULL;
     }
-    if (first) ui_gridnav_focus(t, first);
-    lv_obj_scroll_to_y(t, sy, LV_ANIM_OFF);
+    int rows = (int)lv_obj_get_child_count(t);
+    for (int i = rows - 1; i >= c->n_dev; --i) lv_obj_delete(lv_obj_get_child(t, i));
+    for (int i = rows; i < c->n_dev; ++i) dev_row_new(c, i);
+    for (int i = 0; i < c->n_dev; ++i) dev_row_set(c, lv_obj_get_child(t, i), i);
+    /* LVGL redraws only the rows added or taken: the scroll bar, beside
+     * them, would keep its old length (or not appear). */
+    if (rows != c->n_dev) lv_obj_invalidate(t);
 }
 
 typedef struct {
@@ -428,6 +492,7 @@ static void header(lv_obj_t *parent, const col_t *cols, size_t n)
 {
     lv_obj_t *h = trow(parent, 1);
     lv_obj_set_style_pad_hor(h, VG_SPACE_SM + VG_SPACE_XS, 0);  /* the rows' own and their container's */
+    lv_obj_set_style_pad_right(h, VG_SPACE_SM + SCROLLBAR_W, 0);
     for (size_t i = 0; i < n; ++i) tcell(h, cols[i].t, cols[i].w, UI_C(TEXT2));
 }
 
@@ -583,6 +648,10 @@ static void chans_build(chans_t *c)
 {
     lv_obj_t *t = c->chans;
     int32_t sy = lv_obj_get_scroll_y(t);
+    /* The keyboard's row stays its row (rebuilt when a device is checked). */
+    int focus = c->target;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(t); ++i)
+        if (lv_obj_has_state(lv_obj_get_child(t, (int32_t)i), LV_STATE_FOCUSED)) focus = (int)i;
     lv_obj_clean(t);
     memset(c->state_cell, 0, sizeof c->state_cell);
     c->gen = M()->config_generation ? M()->config_generation() : 0;
@@ -594,9 +663,13 @@ static void chans_build(chans_t *c)
         lv_obj_set_user_data(r, (void *)(intptr_t)ch);
         lv_obj_add_event_cb(r, chan_click_cb, LV_EVENT_CLICKED, c);
         lv_obj_add_event_cb(r, chan_key_cb, LV_EVENT_KEY, c);
-        if (!first) first = r;
+        if (!first || ch == focus) first = r;
+        if (ch == c->target) {
+            lv_obj_set_style_bg_color(r, UI_C(ACCENT), 0);
+            lv_obj_set_style_bg_opa(r, LV_OPA_20, 0);
+        }
         snprintf(idx, sizeof idx, "%d", ch + 1);
-        tcell(r, idx, 28, UI_C(TEXT));
+        tcell(r, idx, 28, ch == c->target ? UI_C(ACCENT) : UI_C(TEXT));
         slot_value(c, ch, "url", url, sizeof url);
         const ui_chan_t *st = ui_channel(ch);
         if (!url[0]) {
@@ -651,35 +724,76 @@ static void creds(const chans_t *c, const char **user, const char **pass)
     if (!**user) *user = "admin";
 }
 
-static void assign_start(chans_t *c, const char *key, int ch, int replace)
+/* A search of anyone's runs (and could be stopped). */
+static int scanning(const chans_t *c)
 {
-    if (!M()->disc_assign) return;
-    const char *user, *pass;
-    creds(c, &user, &pass);
-    char err[96] = "";
-    c->q_n = c->q_i = c->q_ok = c->q_fail = 0;
-    c->q_err[0] = 0;
-    started(c, M()->disc_assign(key, ch, user, pass, replace, err, sizeof err), err);
-    buttons_sync(c);
+    return M()->disc_job && c->jb->running && c->jb->kind == UI_JOB_SCAN;
 }
 
-/* Add: the checked devices, each to the next empty channel. */
-static void add_next(chans_t *c)
+/* A search runs: stop it, and run what waits (q_wait) when it has ended.
+ * 0 if nothing has to wait. */
+static int scan_out_of_the_way(chans_t *c)
+{
+    if (!scanning(c) || !M()->disc_stop) return 0;
+    M()->disc_stop();
+    return 1;
+}
+
+/* The next device of the queue, until one starts: 1, or 0 when none is
+ * left (each that could not start counted as not added). */
+static int add_next(chans_t *c)
 {
     const char *user, *pass;
     creds(c, &user, &pass);
     while (c->q_i < c->q_n) {
         char err[96] = "";
-        int id = M()->disc_assign(c->queue[c->q_i++], 0, user, pass, 0, err, sizeof err);
+        int first = c->q_i == 0;
+        int id = M()->disc_assign(c->queue[c->q_i++], first ? c->q_ch : 0, user, pass, first && c->q_replace, err,
+                                  sizeof err);
         if (id >= 0) {
             c->job = (unsigned)id;
-            return;
+            return 1;
         }
         ++c->q_fail;
-        snprintf(c->q_err, sizeof c->q_err, "%s", err);
+        snprintf(c->q_err, sizeof c->q_err, "%s", err[0] ? err : "Cannot start");
     }
+    return 0;
 }
 
+/* The queue is through: how it went (`r`: the last job's result). */
+static void queue_end(chans_t *c, const ui_disc_res_t *r)
+{
+    if (c->q_n == 1 && c->q_ok && r) ui_toast(UI_TOAST_OK, "%s added to channel %d", r->ip, r->channel);
+    else if (c->q_n == 1) ui_toast(UI_TOAST_BAD, "Not added: %s", c->q_err);
+    else if (c->q_fail) ui_toast(UI_TOAST_BAD, "%d added, %d not: %s", c->q_ok, c->q_fail, c->q_err);
+    else ui_toast(UI_TOAST_OK, "%d added", c->q_ok);
+    c->q_n = 0;
+    c->n_checked = 0;
+}
+
+/* Start adding the `n` devices in c->queue, the first to channel `ch`
+ * (1-based; 0: the first empty one); a search is stopped first. */
+static void queue_start(chans_t *c, int n, int ch, int replace)
+{
+    c->q_n = n;
+    c->q_i = c->q_ok = c->q_fail = 0;
+    c->q_err[0] = 0;
+    c->q_ch = ch;
+    c->q_replace = replace;
+    c->q_wait = scan_out_of_the_way(c);
+    if (!c->q_wait && !add_next(c)) queue_end(c, NULL);
+    buttons_sync(c);
+}
+
+static void assign_start(chans_t *c, const char *key, int ch, int replace)
+{
+    if (!M()->disc_assign) return;
+    snprintf(c->queue[0], sizeof c->queue[0], "%s", key);
+    queue_start(c, 1, ch, replace);
+}
+
+/* Add: the checked devices, each to the next empty channel; the first to
+ * the channel the page was opened for, while it is empty. */
 static void add_cb(lv_event_t *e)
 {
     chans_t *c = lv_event_get_user_data(e);
@@ -687,18 +801,16 @@ static void add_cb(lv_event_t *e)
         ui_toast(UI_TOAST_WARN, "Check the devices to add first");
         return;
     }
-    c->q_n = c->q_i = c->q_ok = c->q_fail = 0;
-    c->q_err[0] = 0;
+    int n = 0;
     for (int k = 0; k < c->n_checked; ++k) {
         int i = device_index(c, c->checked[k]);
-        if (i >= 0 && !c->dev[i].channel) snprintf(c->queue[c->q_n++], sizeof c->queue[0], "%s", c->checked[k]);
+        if (i >= 0 && !c->dev[i].channel) snprintf(c->queue[n++], sizeof c->queue[0], "%s", c->checked[k]);
     }
-    if (!c->q_n) {
+    if (!n) {
         ui_toast(UI_TOAST_WARN, "The devices checked are on channels already");
         return;
     }
-    add_next(c);
-    buttons_sync(c);
+    queue_start(c, n, c->target >= 0 && slot_empty(c, c->target) ? c->target + 1 : 0, 0);
 }
 
 static void select_all_cb(lv_event_t *e)
@@ -712,15 +824,28 @@ static void select_all_cb(lv_event_t *e)
     buttons_sync(c);
 }
 
+static void devices_load(chans_t *c, int sorted);
+
+/* Search, or Stop while a search runs. */
 static void search_cb(lv_event_t *e)
 {
     chans_t *c = lv_event_get_user_data(e);
+    if (scanning(c)) {
+        if (M()->disc_stop) M()->disc_stop();
+        return;
+    }
     if (!M()->disc_scan) return;
     static const unsigned bits[] = { UI_DISC_NETIP | UI_DISC_ONVIF | UI_DISC_DHIP, UI_DISC_NETIP, UI_DISC_ONVIF,
                                      UI_DISC_DHIP };
     uint32_t sel = lv_dropdown_get_selected(c->proto);
     char err[96] = "";
-    started(c, M()->disc_scan(bits[sel < 4 ? sel : 0], err, sizeof err), err);
+    if (started(c, M()->disc_scan(bits[sel < 4 ? sel : 0], err, sizeof err), err) == 0) {
+        /* A new search starts from the list in address order; what it
+         * finds then goes to the end. */
+        devices_load(c, 1);
+        devs_build(c);
+        if (M()->disc_job) M()->disc_job(c->jb);
+    }
     buttons_sync(c);
 }
 
@@ -737,13 +862,29 @@ static void change_ip_cb(lv_event_t *e)
         ui_toast(UI_TOAST_WARN, "Check one device to change its address");
         return;
     }
+    scan_out_of_the_way(c);             /* its job starts later, from that page */
     change_ip_open(c, i);
 }
 
 static void manual_open(chans_t *c);
-static void mass_cb(lv_event_t *e) { mass_open(lv_event_get_user_data(e)); }
-static void manual_cb(lv_event_t *e) { manual_open(lv_event_get_user_data(e)); }
-static void autoadd_cb(lv_event_t *e) { autoadd_open(lv_event_get_user_data(e)); }
+static void mass_cb(lv_event_t *e)
+{
+    chans_t *c = lv_event_get_user_data(e);
+    scan_out_of_the_way(c);
+    mass_open(c);
+}
+static void manual_cb(lv_event_t *e)
+{
+    chans_t *c = lv_event_get_user_data(e);
+    scan_out_of_the_way(c);
+    manual_open(c);
+}
+static void autoadd_cb(lv_event_t *e)
+{
+    chans_t *c = lv_event_get_user_data(e);
+    scan_out_of_the_way(c);
+    autoadd_open(c);
+}
 
 static void settings_cb(lv_event_t *e)
 {
@@ -752,37 +893,105 @@ static void settings_cb(lv_event_t *e)
         if (!strcmp(M()->sections[s].key, "discovery")) ui_form_open(s, -1);
 }
 
-static void buttons_sync(chans_t *c)
+static void enable(lv_obj_t *o, int on)
 {
-    int busy = 0;
-    if (M()->disc_job && c->jb) busy = c->jb->running || (c->job && c->jb->id != c->job);
-    lv_obj_t *need_dev[] = { c->add, c->chip };
-    for (size_t i = 0; i < sizeof need_dev / sizeof need_dev[0]; ++i) {
-        int off = busy || !c->n_checked || (need_dev[i] == c->chip && c->n_checked != 1);
-        if (off) lv_obj_add_state(need_dev[i], LV_STATE_DISABLED);
-        else lv_obj_remove_state(need_dev[i], LV_STATE_DISABLED);
+    if (on == lv_obj_has_state(o, LV_STATE_DISABLED)) {
+        if (on) lv_obj_remove_state(o, LV_STATE_DISABLED);
+        else lv_obj_add_state(o, LV_STATE_DISABLED);
     }
-    if (busy || !M()->disc_assign_manual) lv_obj_add_state(c->manual, LV_STATE_DISABLED);
-    else lv_obj_remove_state(c->manual, LV_STATE_DISABLED);
-    lv_obj_t *other[] = { c->search, c->mass, c->autoadd };
-    for (size_t i = 0; i < sizeof other / sizeof other[0]; ++i) {
-        if (busy || !M()->disc_scan || (other[i] != c->search && !c->n_dev)) lv_obj_add_state(other[i], LV_STATE_DISABLED);
-        else lv_obj_remove_state(other[i], LV_STATE_DISABLED);
-    }
-    char h[96];
-    if (c->n_checked) snprintf(h, sizeof h, "%d checked", c->n_checked);
-    else snprintf(h, sizeof h, "%d found", c->n_dev);
-    lv_label_set_text(c->hint, h);
 }
 
-static void devices_load(chans_t *c)
+static void buttons_sync(chans_t *c)
 {
-    c->n_dev = M()->disc_devices ? M()->disc_devices(c->dev, UI_DISC_MAX) : 0;
+    /* A search does not make the page busy: what needs the job thread
+     * stops it first. Another job (or one about to start) does. */
+    int scan = scanning(c);
+    int busy = 0;
+    if (M()->disc_job && c->jb) busy = (c->jb->running && !scan) || (c->job && c->jb->id != c->job) || c->q_wait;
+    enable(c->add, !busy && c->n_checked);
+    enable(c->chip, !busy && c->n_checked == 1);
+    enable(c->manual, !busy && M()->disc_assign_manual);
+    enable(c->mass, !busy && M()->disc_scan && c->n_dev);
+    enable(c->autoadd, !busy && M()->disc_scan && c->n_dev);
+    enable(c->search, M()->disc_scan && (scan ? M()->disc_stop != NULL : !busy));
+    const char *w = scan ? LV_SYMBOL_STOP "  Stop" : LV_SYMBOL_REFRESH "  Search";
+    lv_obj_t *l = ui_btn_label(c->search);
+    if (strcmp(lv_label_get_text(l), w)) lv_label_set_text(l, w);
+    int stale = 0;
+    for (int i = 0; i < c->n_dev; ++i) stale += c->dev[i].stale;
+    char h[96];
+    if (c->n_checked) snprintf(h, sizeof h, "%d checked", c->n_checked);
+    else if (scan) h[0] = 0;                /* the status says how many so far */
+    else if (stale) snprintf(h, sizeof h, "%d found, %d did not answer", c->n_dev - stale, stale);
+    else snprintf(h, sizeof h, "%d found", c->n_dev);
+    if (strcmp(lv_label_get_text(c->hint), h)) lv_label_set_text(c->hint, h);
+}
+
+/* The same device as `d`, in got[] (not yet `used`): the same key, else,
+ * one of them without a MAC, the same address (its key becomes the MAC
+ * when a protocol that tells it answers). */
+static int same_device(const ui_disc_dev_t *got, int n, const char *used, const ui_disc_dev_t *d)
+{
+    for (int j = 0; j < n; ++j)
+        if (!used[j] && !strcmp(got[j].key, d->key)) return j;
+    for (int j = 0; j < n; ++j)
+        if (!used[j] && (!got[j].mac[0] || !d->mac[0]) && !strcmp(got[j].ip, d->ip)) return j;
+    return -1;
+}
+
+/* The devices again. With `sorted`, in the model's order (by address);
+ * else the rows keep their places: a device listed stays where it is
+ * (merged with what it said since), a new one goes to the end, one gone
+ * is taken out. */
+static void devices_load(chans_t *c, int sorted)
+{
+    static ui_disc_dev_t got[UI_DISC_MAX], out[UI_DISC_MAX];  /* the UI thread's only */
+    if (M()->disc_gen) c->dev_gen = M()->disc_gen();         /* first: news after it shows next time */
+    int n = M()->disc_devices ? M()->disc_devices(got, UI_DISC_MAX) : 0, k = 0;
+    char used[UI_DISC_MAX] = { 0 };
+    for (int i = 0; !sorted && i < c->n_dev; ++i) {
+        int j = same_device(got, n, used, &c->dev[i]);
+        if (j < 0) continue;
+        used[j] = 1;
+        for (int m = 0; m < c->n_checked; ++m)         /* a check follows a key that changed */
+            if (!strcmp(c->checked[m], c->dev[i].key)) snprintf(c->checked[m], sizeof c->checked[0], "%s", got[j].key);
+        out[k++] = got[j];
+    }
+    for (int j = 0; j < n; ++j)
+        if (!used[j]) out[k++] = got[j];
+    memcpy(c->dev, out, (size_t)k * sizeof *out);
+    c->n_dev = k;
     /* Forget checks of devices no longer there. */
-    int k = 0;
+    int m = 0;
     for (int i = 0; i < c->n_checked; ++i)
-        if (device_index(c, c->checked[i]) >= 0) memmove(c->checked[k++], c->checked[i], sizeof c->checked[0]);
-    c->n_checked = k;
+        if (device_index(c, c->checked[i]) >= 0) memmove(c->checked[m++], c->checked[i], sizeof c->checked[0]);
+    c->n_checked = m;
+}
+
+/* The devices, when the model says they changed (or, without disc_gen,
+ * while a search runs); the channel table too if checks went away. */
+static void devices_poll(chans_t *c)
+{
+    int news = M()->disc_gen ? M()->disc_gen() != c->dev_gen : scanning(c);
+    if (!news) return;
+    int checked = c->n_checked;
+    devices_load(c, 0);
+    devs_build(c);
+    if (checked != c->n_checked) chans_build(c);
+}
+
+/* An assign job of the queue's ended: the next one, or the outcome. */
+static void assign_done(chans_t *c)
+{
+    const ui_disc_job_t *j = c->jb;
+    const ui_disc_res_t *r = j->n ? &j->r[0] : NULL;
+    if (r && r->ok) ++c->q_ok;
+    else {
+        ++c->q_fail;
+        if (c->q_n == 1) snprintf(c->q_err, sizeof c->q_err, "%.90s", r ? r->msg : j->msg);
+        else snprintf(c->q_err, sizeof c->q_err, "%s: %.64s", r ? r->ip : "?", r ? r->msg : j->msg);
+    }
+    if (!add_next(c)) queue_end(c, r);
 }
 
 /* A job of this page's ended. */
@@ -790,34 +999,10 @@ static void job_done(chans_t *c)
 {
     ui_disc_job_t *j = c->jb;
     c->job = 0;
-    if (j->kind == UI_JOB_SCAN) {
-        devices_load(c);
-        devs_build(c);
-        chans_build(c);
-    } else if (j->kind == UI_JOB_ASSIGN) {
-        const ui_disc_res_t *r = j->n ? &j->r[0] : NULL;
-        if (c->q_n) {
-            if (r && r->ok) ++c->q_ok;
-            else {
-                ++c->q_fail;
-                snprintf(c->q_err, sizeof c->q_err, "%s: %.64s", r ? r->ip : "?", r ? r->msg : j->msg);
-            }
-            if (c->q_i < c->q_n) add_next(c);
-            if (!c->job) {
-                if (c->q_fail) ui_toast(UI_TOAST_BAD, "%d added, %d not: %s", c->q_ok, c->q_fail, c->q_err);
-                else ui_toast(UI_TOAST_OK, "%d added", c->q_ok);
-                c->q_n = 0;
-            }
-        } else if (r && r->ok) {
-            ui_toast(UI_TOAST_OK, "%s added to channel %d", r->ip, r->channel);
-        } else {
-            ui_toast(UI_TOAST_BAD, "Not added: %s", r ? r->msg : j->msg);
-        }
-        devices_load(c);
-        c->n_checked = c->job ? c->n_checked : 0;
-        devs_build(c);
-        chans_build(c);
-    }
+    if (j->kind == UI_JOB_ASSIGN && c->q_n) assign_done(c);
+    devices_load(c, 0);
+    devs_build(c);
+    chans_build(c);
 }
 
 static void poll_cb(lv_timer_t *t)
@@ -827,12 +1012,18 @@ static void poll_cb(lv_timer_t *t)
         M()->disc_job(c->jb);
         const ui_disc_job_t *j = c->jb;
         char s[128];
-        if (j->running && j->kind == UI_JOB_SCAN) snprintf(s, sizeof s, LV_SYMBOL_REFRESH " Searching... %d%%", j->progress);
+        if (j->running && j->kind == UI_JOB_SCAN)
+            snprintf(s, sizeof s, LV_SYMBOL_REFRESH " Searching (%d%%)... %d found", j->progress, j->found);
         else if (j->running) snprintf(s, sizeof s, LV_SYMBOL_REFRESH " %s", j->msg);
         else s[0] = 0;                  /* the count beside it says how many */
         if (strcmp(lv_label_get_text(c->status), s)) lv_label_set_text(c->status, s);
         if (c->job && j->id == c->job && !j->running) job_done(c);
+        if (c->q_wait && !j->running) {     /* the search stopped for an add has ended */
+            c->q_wait = 0;
+            if (!add_next(c)) queue_end(c, NULL);
+        }
     }
+    devices_poll(c);
     chans_states(c);
     buttons_sync(c);
 }
@@ -841,7 +1032,7 @@ static void config_cb(lv_observer_t *o, lv_subject_t *s)
 {
     (void)s;
     chans_t *c = lv_observer_get_user_data(o);
-    devices_load(c);                /* "On channel N" follows the cameras */
+    devices_load(c, 0);             /* "On channel N" follows the cameras */
     devs_build(c);
     chans_build(c);
 }
@@ -862,7 +1053,7 @@ static void refresh_async(void *u)
 {
     chans_t *c = u;
     if (g_ch != c) return;
-    devices_load(c);
+    devices_load(c, 0);
     devs_build(c);
     chans_build(c);
 }
@@ -875,7 +1066,9 @@ static lv_obj_t *toolbar_btn(lv_obj_t *row, chans_t *c, const char *sym, const c
     return b;
 }
 
-void ui_channels_open(void)
+void ui_channels_open(void) { ui_channels_open_at(-1); }
+
+void ui_channels_open_at(int target)
 {
     int sec = -1;
     for (int s = 0; s < M()->n_sections; ++s)
@@ -893,6 +1086,7 @@ void ui_channels_open(void)
     g_ch = c;
     c->page = p;
     c->sec = sec;
+    c->target = target >= 0 && target < M()->channels && target < UI_MAX_CHANNELS ? target : -1;
     p->user = c;
     p->on_back = chans_back;
     p->on_close = chans_close;
@@ -901,8 +1095,12 @@ void ui_channels_open(void)
     lv_obj_set_style_pad_row(p->body, VG_SPACE_MD, 0);
     c->kb = osk_for(p);
 
-    /* Search */
+    /* Search, and Channels below, sharing the page 3:2 (the search pane's
+     * two rows of controls take room from its list), both lists scrolled
+     * inside: a search can find dozens of devices, a board has 16 channels. */
     lv_obj_t *sp = pane(p->body);
+    lv_obj_set_height(sp, 1);
+    lv_obj_set_flex_grow(sp, 3);
     lv_obj_t *r1 = row_box(sp, VG_SPACE_SM);
     pane_title(r1, &ui_icon_search, "Search");
     c->proto = lv_dropdown_create(r1);
@@ -936,17 +1134,23 @@ void ui_channels_open(void)
     c->pass = field(r2, p, c->kb, "", 170, 1, NULL, 63);
 
     header(sp, k_dev_cols, sizeof k_dev_cols / sizeof k_dev_cols[0]);
-    c->devs = table_rows(sp, DEV_H);
+    c->devs = table_rows(sp, 0);
     ui_gridnav(c->devs, LV_GRIDNAV_CTRL_NONE);
     lv_group_add_obj(p->group, c->devs);
 
     /* Channels */
     lv_obj_t *cp = pane(p->body);
-    lv_obj_set_flex_grow(cp, 1);
+    lv_obj_set_height(cp, 1);
+    lv_obj_set_flex_grow(cp, 2);
     lv_obj_t *r3 = row_box(cp, VG_SPACE_SM);
     pane_title(r3, &ui_icon_channels, "Channels");
-    lv_obj_t *ht = ui_label(r3, "Check one device above, then Add or Replace on a channel row.", VG_FONT_SM_LV,
-                            UI_C(TEXT2));
+    char hint[128];
+    if (c->target >= 0)
+        snprintf(hint, sizeof hint, "Channel %d: check a device above, then Add (or Add checked on its row).",
+                 c->target + 1);
+    else
+        snprintf(hint, sizeof hint, "Check one device above, then Add or Replace on a channel row.");
+    lv_obj_t *ht = ui_label(r3, hint, VG_FONT_SM_LV, c->target >= 0 ? UI_C(ACCENT) : UI_C(TEXT2));
     lv_obj_set_width(ht, 1);
     lv_obj_set_flex_grow(ht, 1);
     lv_label_set_long_mode(ht, LV_LABEL_LONG_DOT);
@@ -962,7 +1166,7 @@ void ui_channels_open(void)
             lv_obj_add_event_cb(b, settings_cb, LV_EVENT_CLICKED, c);
         }
 
-    devices_load(c);
+    devices_load(c, 1);
     devs_build(c);
     chans_build(c);
     if (M()->disc_job) M()->disc_job(c->jb);
@@ -970,6 +1174,13 @@ void ui_channels_open(void)
     c->timer = lv_timer_create(poll_cb, POLL_MS, c);
     if (c->kb) lv_obj_move_foreground(c->kb);       /* over the panes */
     ui_page_ready(p);
+    if (c->target >= 0) {
+        /* The channel it was opened for, in view (and the keyboard's). */
+        lv_obj_update_layout(p->body);
+        lv_obj_t *row = lv_obj_get_child(c->chans, c->target);
+        if (row) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+        if (ui_keyboard_in_use()) lv_group_focus_obj(c->chans);
+    }
 }
 
 /* ---- Change IP, Mass change, Auto add ------------------------------------------------------ */
@@ -1493,7 +1704,8 @@ static void manual_open(chans_t *c)
     m->subp = field(man_row(m, "Sub-stream", &m->row_sub), p, m->kb, "", 520, 0, NULL, 255);
     lv_textarea_set_placeholder_text(m->subp, "optional");
 
-    /* Every channel; the first empty one chosen, a camera's name shown. */
+    /* Every channel; the one the page was opened for chosen, else the
+     * first empty one, a camera's name shown. */
     r = man_row(m, "Channel", NULL);
     m->target = lv_dropdown_create(r);
     char opts[UI_MAX_CHANNELS * 48] = "", url[1024], nm[64];
@@ -1514,6 +1726,7 @@ static void manual_open(chans_t *c)
         ++n;
     }
     lv_dropdown_set_options(m->target, opts);
+    if (c->target >= 0 && c->target < n) first = c->target;
     if (first >= 0) lv_dropdown_set_selected(m->target, (uint32_t)first);
     lv_obj_set_width(m->target, 320);
     ui_focus_style(m->target);

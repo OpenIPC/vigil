@@ -18,6 +18,9 @@ typedef struct {
     uint32_t (*key)(uint32_t key, unsigned mods);
     /* The number of keyboards changed (plugged in, unplugged). */
     void (*keyboards)(int n);
+    /* The mouse wheel turned `steps` notches (> 0: away from the user,
+     * up), after LVGL's input processing; LVGL's pointer has no wheel. */
+    void (*wheel)(int steps);
 } input_hooks_t;
 
 /* The pointer for `disp` with its cursor, the keypad (input_evdev_keypad),

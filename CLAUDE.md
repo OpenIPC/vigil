@@ -80,7 +80,9 @@ comments; options override the file.
 - `tests/` — `test_core.c` unit tests, `test_api.c` (password check), a NETIP
   camera emulator, a GStreamer RTSP server, the scripts that run `vigild`
   against them, `api_test.py` (the API end to end), and `test_ui.c` with
-  `ui_compare.py` (the UI headless, screenshots against `tests/ui/*.png`).
+  `ui_compare.py` (the UI headless, screenshots against `tests/ui/*.png`;
+  `live_search_shots.sh`: a search on the Channels page filling as fake
+  devices answer, real discovery underneath, for looking at).
 - `docs/` — architecture, the UI, the management pages, porting guide, one
   page per platform.
 

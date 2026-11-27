@@ -27,7 +27,10 @@ on the device's address. --shared ADDR answers on 0.0.0.0 instead (one socket
 per protocol for all devices), joins the multicast groups on the
 interface with address ADDR, and sends NETIP answers to the broadcast
 address --netip-reply-to, as Xiongmai devices do: for broadcast and
-multicast tests on a real interface. Prints one line per request.
+multicast tests on a real interface. --delay [PROTO@]IP=SECONDS answers
+that device's searches (over that protocol only, with PROTO@) that much
+later, as slow devices do: a scan sees its devices arrive one by one.
+Prints one line per request.
 """
 import argparse
 import base64
@@ -213,10 +216,18 @@ def udp_loop(sock, devices, proto):
         except OSError:
             return
         for dev in devices:
-            try:
-                answer_udp(sock, dev, proto, data, peer, a)
-            except (OSError, ValueError, KeyError) as e:
-                log("udp error", e)
+            delay = a.delays.get((proto, dev.ip), a.delays.get((None, dev.ip), 0))
+            if delay > 0:
+                threading.Timer(delay, answer_safe, (sock, dev, proto, data, peer, a)).start()
+            else:
+                answer_safe(sock, dev, proto, data, peer, a)
+
+
+def answer_safe(sock, dev, proto, data, peer, a):
+    try:
+        answer_udp(sock, dev, proto, data, peer, a)
+    except (OSError, ValueError, KeyError) as e:
+        log("udp error", e)
 
 
 def answer_udp(sock, dev, proto, data, peer, a):
@@ -434,7 +445,13 @@ def main():
     ap.add_argument("--shared", help="answer on 0.0.0.0, multicast on the interface with this address")
     ap.add_argument("--netip-reply-to", help="send NETIP answers to this broadcast address, port 34569")
     ap.add_argument("--no-udp-set", action="store_true", help="ignore NETIP's broadcast set (1532)")
+    ap.add_argument("--delay", action="append", default=[], help="[PROTO@]IP=SECONDS: answer searches that late")
     a = ap.parse_args()
+    a.delays = {}
+    for spec in a.delay:
+        who, _, secs = spec.partition("=")
+        proto, _, ip = who.rpartition("@")
+        a.delays[(proto or None, ip)] = float(secs)
     a.ports = [int(x) for x in a.ports.split(",")]
     a.tcp = [int(x) for x in a.tcp_ports.split(",")]
     devices = [Device(spec, a, i) for i, spec in enumerate(a.device)]
