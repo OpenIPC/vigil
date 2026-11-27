@@ -229,6 +229,12 @@ static char     g_api_listen[64];
 static char     g_web_listen[64];
 static char     g_output[16];           /* display.output last applied */
 
+/* display.video_aspect, as the channels take it */
+static vg_aspect_t video_aspect(const char *v)
+{
+    return !strcmp(v, "stretch") ? VG_ASPECT_STRETCH : !strcmp(v, "fill") ? VG_ASPECT_FILL : VG_ASPECT_FIT;
+}
+
 /* display.output, when it changed in the file (the API, the UI's Keep):
  * the output follows. The UI tries a mode before it saves it (its "keep
  * this resolution?"), so a mode the output already runs at is left as
@@ -257,7 +263,7 @@ static void apply_config(void)
     rec_sched_set(weeks, config_to_schedule(&c, weeks));
     int failed = channels_apply(&cc);
     apply_output(c.display.output);
-    channels_set_stretch(!strcmp(c.display.video_aspect, "stretch"));
+    channels_set_aspect(video_aspect(c.display.video_aspect));
     g_applied_gen = gen;
     config_mark_applied(gen);
     if (failed) {
@@ -408,7 +414,7 @@ int main(int argc, char **argv)
     vg_rect_t tiles[CHANNEL_MAX];
     frontend_tiles(tiles, CHANNEL_MAX);
     channels_set_screen(SCREEN_W, SCREEN_H);
-    channels_set_stretch(!strcmp(cfg.display.video_aspect, "stretch"));
+    channels_set_aspect(video_aspect(cfg.display.video_aspect));
     int rc = 1;
     static vigil_config_t running;      /* channels_config_t points into it */
     g_applied_gen = config_get(&running);

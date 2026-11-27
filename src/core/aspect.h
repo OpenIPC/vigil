@@ -30,10 +30,24 @@ vg_ratio_t aspect_of_camera(const vg_stream_info_t *shown, int is_sub, const vg_
 
 /* The rectangle a picture of DAR `a` takes in tile `t`: the largest one of
  * that ratio inside it, centred, the bars (above and below, or at the
- * sides) black; a 0:0 ratio fills the tile (stretch). Offsets and sizes
+ * sides) black (VG_ASPECT_FIT); a 0:0 ratio fills the tile (stretch). Offsets and sizes
  * are multiples of `align` (at least `align`; the tile's own x/y kept).
  * Never larger than the tile. */
 vg_rect_t aspect_fit(const vg_rect_t *t, vg_ratio_t a, unsigned align);
+
+/* The rectangle a picture of DAR `a` takes when it covers tile `t`
+ * (VG_ASPECT_FILL): the smallest one of that ratio the tile fits inside,
+ * centred on the tile, so it overflows it one way (above and below, or at
+ * the sides). A 0:0 ratio is the tile. */
+vg_rect_t aspect_cover(const vg_rect_t *t, vg_ratio_t a);
+
+/* The part of a src_w x src_h picture of DAR `a` (0:0: the ratio of its
+ * size, square pixels) that shows when it covers a tile_w x tile_h tile
+ * (aspect_cover), in the picture's pixels: all of it one way, the middle
+ * of it the other. Offsets and sizes are multiples of `align` where the
+ * picture is cut; never outside the picture, never empty. */
+vg_rect_t aspect_crop(unsigned src_w, unsigned src_h, vg_ratio_t a, unsigned tile_w, unsigned tile_h,
+                      unsigned align);
 
 /* Rectangle `r` on a from_w x from_h screen as a rectangle on a to_w x
  * to_h one (the UI's coordinates on the output's video layer, which may

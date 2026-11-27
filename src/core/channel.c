@@ -126,6 +126,7 @@ struct channel {
     vg_stream_info_t main_info;
     int             main_known;
     vg_ratio_t      aspect;         /* what the platform was told ... */
+    vg_aspect_t     aspect_how;
     int             aspect_told;    /* ... if anything yet */
     time_t          dec_failed_at;
     unsigned        dec_failed_frees; /* g_dec_frees when it failed */
@@ -152,7 +153,7 @@ static vg_rect_t       g_tiles[CHANNEL_MAX];
 static int             g_have_tiles;
 static int             g_shown_only;   /* hal_caps()->dec_shown_only with a display */
 static unsigned long long g_screen_area; /* 0: unknown, the main stream everywhere */
-static atomic_int      g_stretch;   /* display.video_aspect stretch */
+static atomic_int      g_aspect;    /* display.video_aspect: a vg_aspect_t */
 /* Decoders closed so far: a channel that could not get one (memory, the
  * decoder's channels) tries again as soon as another lets its go. */
 static atomic_uint     g_dec_frees;
@@ -292,17 +293,19 @@ int channels_count(void)
 /* ---- decoding (under c->dec_lock) ------------------------------------------- */
 
 /* Tell the platform the shape of the picture for `si` (`id` the session
- * whose stream it is), if that changed: the camera's display aspect ratio,
- * or 0:0 to stretch it over the tile. */
+ * whose stream it is) and how it fills the tile, if that changed: the
+ * camera's display aspect ratio (0:0 when stretched over the tile). */
 static void aspect_tell(channel_t *c, const vg_stream_info_t *si, int id)
 {
     if (!hal_caps()->display || c->self_displayed) return;
+    vg_aspect_t how = (vg_aspect_t)atomic_load(&g_aspect);
     vg_ratio_t a = { 0, 0 };
-    if (!atomic_load(&g_stretch))
+    if (how != VG_ASPECT_STRETCH)
         a = aspect_of_camera(si, id == S_SUB, c->main_known ? &c->main_info : NULL);
-    if (c->aspect_told && a.w == c->aspect.w && a.h == c->aspect.h) return;
-    hal_display_set_aspect(c->idx, a.w, a.h);
+    if (c->aspect_told && a.w == c->aspect.w && a.h == c->aspect.h && how == c->aspect_how) return;
+    hal_display_set_aspect(c->idx, a.w, a.h, how);
     c->aspect = a;
+    c->aspect_how = how;
     c->aspect_told = 1;
 }
 
@@ -334,7 +337,7 @@ static int decoder_ensure(channel_t *c, sess_t *s, vg_codec_t codec)
      * stream's SPS tells: at the start give it a moment, rather than show
      * the (often anamorphic) picture at its own shape first and make the
      * decoder again for the right one a second later. */
-    if (s->id == S_SUB && !c->main_known && !atomic_load(&g_stretch)) {
+    if (s->id == S_SUB && !c->main_known && atomic_load(&g_aspect) != VG_ASPECT_STRETCH) {
         time_t now = time(NULL);
         if (!s->info_at) s->info_at = now;
         if (now - s->info_at < MAIN_SPS_WAIT_SECS) return 0;
@@ -1089,10 +1092,10 @@ void channels_set_screen(unsigned w, unsigned h)
     g_screen_area = (unsigned long long)w * h;
 }
 
-void channels_set_stretch(int stretch)
+void channels_set_aspect(vg_aspect_t how)
 {
     pthread_once(&g_once, locks_init);
-    if (atomic_exchange(&g_stretch, !!stretch) == !!stretch) return;
+    if (atomic_exchange(&g_aspect, (int)how) == (int)how) return;
     for (int i = 0; i < CHANNEL_MAX; ++i) {
         channel_t *c = &g_ch[i];
         /* Only this thread starts and stops channels: active is stable. */
