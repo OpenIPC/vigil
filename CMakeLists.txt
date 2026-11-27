@@ -125,12 +125,18 @@ if(VIGIL_HAS_UI OR (BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING))
   target_include_directories(vigil_ui PUBLIC src/ui src/hal)
   target_link_libraries(vigil_ui PUBLIC lvgl)
 endif()
+# The zero channel (src/app/kvm.c): its pixel loops and JPEG encoder are
+# the only hot code vigild runs on the CPU, so they are built for speed.
+set(VIGIL_KVM_SOURCES src/app/kvm.c src/app/kvm_enc.c src/app/kvm_input.c src/app/jpeg_enc.c)
+set_source_files_properties(src/app/kvm.c src/app/kvm_enc.c src/app/jpeg_enc.c
+                            ${CMAKE_SOURCE_DIR}/src/app/kvm.c ${CMAKE_SOURCE_DIR}/src/app/kvm_enc.c
+                            ${CMAKE_SOURCE_DIR}/src/app/jpeg_enc.c PROPERTIES COMPILE_OPTIONS "-O2")
 if(VIGIL_HAS_UI)
   list(APPEND VIGILD_SOURCES src/app/frontend_ui.c src/app/ui_bridge.c src/app/ui_mgmt.c
-       src/app/input_evdev.c)
+       src/app/input_evdev.c ${VIGIL_KVM_SOURCES})
   target_link_libraries(vigil_platform PRIVATE lvgl)
 else()
-  list(APPEND VIGILD_SOURCES src/app/frontend_headless.c src/ui/ui_layout.c)
+  list(APPEND VIGILD_SOURCES src/app/frontend_headless.c src/ui/ui_layout.c src/app/kvm_none.c)
 endif()
 
 # ---- API: CivetWeb + crypt(3); -DVIGIL_API=OFF drops both --------------------

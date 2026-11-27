@@ -3,6 +3,7 @@
 #include "api.h"
 #include "config.h"
 #include "log.h"
+#include "web.h"
 
 int api_start(void)
 {
@@ -13,3 +14,13 @@ int api_start(void)
 }
 
 void api_stop(void) {}
+
+int web_start(void)
+{
+    vigil_config_t c;
+    config_get(&c);
+    if (c.web.enabled && c.web.listen[0]) vg_log("web.enabled is on, but this vigild is built without the web server");
+    return 0;
+}
+
+void web_stop(void) {}

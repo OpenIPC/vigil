@@ -21,8 +21,8 @@ static const struct { const char *key; unsigned perm; } SECTIONS[] = {
     { "ddns", PERM_NETWORK }, { "upnp", PERM_NETWORK }, { "smtp", PERM_NETWORK },
     { "alarm", PERM_NETWORK },
     { "time", PERM_SYSTEM }, { "ui", PERM_SYSTEM }, { "display", PERM_SYSTEM },
-    /* api.auth and api.user decide who gets in at all. */
-    { "api", PERM_USERS },
+    /* api.auth and api.user decide who gets in at all; web, who reaches the console. */
+    { "api", PERM_USERS }, { "web", PERM_USERS },
 };
 
 unsigned api_perm_needed(const char *method, const char *uri)
@@ -30,7 +30,9 @@ unsigned api_perm_needed(const char *method, const char *uri)
     int get = !strcmp(method, "GET") || !strcmp(method, "HEAD");
     if (!strcmp(uri, "/api/v1/status") || !strcmp(uri, "/api/v1/ws")) return PERM_LIVE;
     if (!strcmp(uri, "/api/v1/schema") || !strcmp(uri, "/api/v1/me") || at(uri, "/api/v1/jobs")) return 0;
-    if (!strcmp(uri, "/api/v1/config")) return get ? PERM_SYSTEM : PERM_ALL;
+    /* Every permission the API itself knows: "remote" is the zero
+     * channel's (web.c), and a group with all the others always could. */
+    if (!strcmp(uri, "/api/v1/config")) return get ? PERM_SYSTEM : PERM_ALL & ~PERM_REMOTE;
     if (!strncmp(uri, "/api/v1/config/", 15)) {
         for (size_t i = 0; i < sizeof SECTIONS / sizeof SECTIONS[0]; ++i)
             if (!strcmp(uri + 15, SECTIONS[i].key)) return SECTIONS[i].perm;

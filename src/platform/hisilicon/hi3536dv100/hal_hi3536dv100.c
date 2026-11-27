@@ -329,3 +329,7 @@ int hal_display_set_mode(const vg_mode_t *m)
 {
     return m->w == g_mode.w && m->h == g_mode.h && m->hz == g_mode.hz ? 0 : -1;
 }
+
+/* No picture to read back: the zero channel shows the UI over black. */
+void hal_display_grab_keep(int on) { (void)on; }
+int  hal_display_grab(const hal_pic_t *pic) { (void)pic; return -1; }

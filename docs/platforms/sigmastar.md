@@ -57,6 +57,25 @@ once, the display read the old picture at the wrong size). In emulation
 the new decoder's first picture comes about 5 s after the switch; an
 `MI_VDEC` channel bound to nothing decodes nothing there.
 
+## Zero channel
+
+The [zero channel](../api.md#zero-channel) (the screen in a browser) needs
+the picture the monitor shows, and this display cannot give it: it has no
+writeback, and `MI_DISP_GetScreenFrame`, though in the SDK's API, is
+answered by the SDK's `mi_disp.ko` with an error without looking (its
+`MI_DISP_IMPL_GetScreenFrame` is `return 31`); the display HAL whose source
+the boot release has (opensigmastar `kernel/disp`) reads nothing back
+either. A JPEG encoder in `MI_VENC` would still need the picture made
+first, and the firmware ships no `libmi_venc`. So the picture is made in
+software: the UI from LVGL's own pixels as it draws them, and each tile
+from its decoder's newest picture (`hal_display_grab`): while a viewer is
+connected each decoder's output port keeps a user queue of one
+(`MI_SYS_SetChnOutputPortDepth(1, 4)`, back to `(0, 4)` when the last
+viewer goes), read with `MI_SYS_ChnOutputPortGetBuf` a row at a time after
+`MI_SYS_FlushInvCache`, scaled to the port's window and handed back at
+once. The decoders' pictures are linear NV12 in emulation; any other
+layout (tiled, compressed) is logged once and the tile stays black.
+
 ## Picture geometry
 
 Each tile is mapped from the UI's 1280x720 to the output's own size, edge by
@@ -289,6 +308,24 @@ where mi_vdec's content size says the firmware scales the whole decoded
 frame: with the stock model a 1080-line stream came out 0.8 % too tall.
 Whether mi_disp on a board crops to the content as it does in emulation is
 unverified.
+
+The zero channel, also only in emulation (OpenIPC firmware image, the four
+NETIP cameras above at 10 pictures a second, a 2x2 live view at 720p, on
+qemu-bench's machine with the cursor plane model): headless Chrome logged
+in, showed the picture (the tiles where the screendump has them, the
+names, clock and bars), opened the context menu with the right button,
+went through the menus, typed into a text field, and the monitor's
+screendump showed the remote pointer on the cursor plane. With one viewer
+at the screen's size the pictures came at 8 to 14 a second, each made in
+13 to 65 ms (a whole 1280x720 picture of the four tiles about 100 KB, a
+changed part a few KB), the context menu was on the page 130 to 220 ms
+after the click; at half size 11 to 12 a second; vigild took about 45 %
+of one emulated core with a viewer (35 % at half size) and 4 % with none,
+its memory 10 MB more while one watched, and the display took as many
+pictures from each decoder with a viewer as without. Emulated cores are
+not a board's: the time a picture takes on a Cortex-A7, whether the
+decoders' pictures are linear NV12 on a board too, and whether keeping
+one of them aside costs a board's decoder anything are unverified.
 
 The HDMI and VGA signals, hot-plug and decoder limits are unverified on
 hardware.

@@ -97,6 +97,9 @@ defaults, commented.
 | `api.user` | string | `"root"` | The system account: it logs in with every permission (and as `admin` while no user of that name exists). |
 | `api.shadow` | absolute path | `"/etc/shadow"` | The shadow file holding that account's password hash. |
 | `api.users` | absolute path | `"/etc/vigil.users.yaml"` | vigil's own users and groups ([Accounts and permissions](#accounts-and-permissions)). |
+| `web.enabled` | boolean | `true` | The [zero channel](#zero-channel): the screen, mouse and keyboard in a browser. Off: its pages answer `503` and its viewers are disconnected. |
+| `web.listen` | `"port"` or `"a.b.c.d:port"` | `"0.0.0.0:80"` | Where its web server listens (IPv4). Empty: none. Read at start only. |
+| `web.fps` | integer 1..30 | 15 | Its pictures a second, at most. |
 | `discovery.interfaces` | string | `""` | Interfaces to search for cameras on, comma separated; empty: every IPv4 interface ([Discovery](#discovery)). |
 | `discovery.targets` | IPv4 addresses, comma separated | `""` | Also searched by unicast: cameras on a routed subnet. |
 | `discovery.prefer` | `netip`, `onvif`, `dhip`, comma separated | `"netip,onvif,dhip"` | The protocol a camera that answers several is added with. |
@@ -234,8 +237,10 @@ Permissions: `live` (live view, status, events), `playback`, `ptz`,
 `cameras` (the camera list, discovery), `storage` (recording, schedule,
 quota, disks, network storage), `network` (network, DDNS, UPnP, mail,
 alarm center), `system` (time, host name, the UI's settings, the whole
-configuration), `users` (accounts, and the `api` section, which decides
-who gets in at all). Two groups always exist: **admin**, every
+configuration), `users` (accounts, and the `api` and `web` sections,
+which decide who gets in at all), `remote` (the [zero
+channel](#zero-channel): the screen, mouse and keyboard from a browser,
+which is the console). Two groups always exist: **admin**, every
 permission, which cannot be changed or deleted, and **user**, live view
 and playback to start with, which can be changed but not deleted. At most
 16 groups and 32 users; user and group names are 1 to 31 of `a-z 0-9 _ . -`.
@@ -259,12 +264,12 @@ saved over it until it is fixed or removed.
 | `GET /status`, `/ws` | `live` |
 | `GET /schema`, `/me`, `/jobs/…` | a login |
 | `GET /config` | `system` |
-| `PUT /config` | every permission |
+| `PUT /config` | every permission but `remote` |
 | `/config/cameras`, `discovery` | `cameras` |
 | `/config/record`, `schedule`, `quota`, `nas` | `storage` |
 | `/config/ddns`, `upnp`, `smtp`, `alarm` | `network` |
 | `/config/time`, `ui`, `display` | `system` |
-| `/config/api` | `users` |
+| `/config/api`, `web` | `users` |
 | `/network/…` | `network` |
 | `/system/…` | `system` |
 | `/disks…`, `/storage/…` | `storage` |
@@ -297,6 +302,80 @@ curl -u root:PASSWORD -X POST $NVR/api/v1/groups -d '{"name": "viewer", "permiss
 curl -u root:PASSWORD -X POST $NVR/api/v1/users -d '{"name": "anna", "group": "viewer", "password": "s3cret"}'
 curl -u anna:s3cret $NVR/api/v1/me
 ```
+
+## Zero channel
+
+`http://<recorder>/` (port 80, `web.listen`) shows the recorder's screen
+as the monitor has it, the video tiles and the UI over them, live, and
+takes the browser's mouse, wheel, touch and keyboard as if they were
+plugged into the recorder: a KVM, or what DVRs call the zero channel. It
+is a second web server in `vigild` (`src/api/web.c`), apart from the API,
+with one page and one WebSocket.
+
+**Who gets in.** A login is always required, whatever `api.auth` says: the
+API's accounts and password check (vigil's users, the system account),
+whose failures count with the API's (five in a row from one address lock
+that address out, for a doubling time up to a minute; every failure is
+answered a second late). Only users whose group has the `remote`
+permission get in: by default only **admin** (and the system account).
+Until such an account has a password, which on OpenIPC means until root
+has one, nobody does. The page logs in with a form (`POST /login`) that
+sets a session cookie (`HttpOnly`, `SameSite=Strict`, 12 hours at most,
+ended by `POST /logout` or when the shadow or users file changes); the
+login form and the WebSocket must come from the recorder's own page
+(`Origin`), and the pages may not be framed (`X-Frame-Options`, a
+`Content-Security-Policy` without inline scripts).
+
+**What they may do** is what someone at the monitor may do. With
+`ui.login` off (the default) that is everything; with it on, the menus ask
+for the UI's own login, as at the monitor, and check that user's
+permissions. `remote` is therefore given to whom you would give the keys
+to the room the recorder is in.
+
+| Path | |
+|---|---|
+| `GET /` | The viewer page; without a session `302` to `/login`. |
+| `GET /login`, `POST /login` | The login form; `user`, `password` → `303` to `/` with the cookie, or the form again with `401` (wrong), `403` (no `remote` permission, or posted from another site), `429` (locked out, `Retry-After`). |
+| `POST /logout` | `303` to `/login`, the cookie cleared. |
+| `GET /session` | `{"user": "root"}`, or `401`: the page asks after its WebSocket closed. |
+| `GET /kvm.js` | The page's script. |
+| WebSocket `/ws` | The pictures and the input. `401` without a session, `403` without `remote` or from another site's page, `503` with two viewers already or `web.enabled` off. |
+
+**The pictures** are composed in software: none of the SoCs reads its
+output back (on SigmaStar's i2m, `MI_DISP_GetScreenFrame` is in the SDK's
+API but its `mi_disp.ko` answers it with an error without looking, and the
+display has no writeback). The UI is LVGL's own pixels, copied as LVGL
+flushes what it drew; the video under the UI's holes is each decoder's
+newest picture, read from the decoder's output (a user queue of one, kept
+only while a viewer is connected) and drawn where the display shows it.
+Each viewer gets only the 16x16 blocks that changed since its last
+picture, gathered into a few rectangles, each a baseline JPEG
+(`src/app/kvm_enc.h`): a moving pointer or a menu opening sends that
+corner, a quad view of moving cameras the whole picture. The browser acks
+each picture after drawing it and at most two are on the way, so a slow
+link or browser lowers the rate instead of queueing; the rate is also at
+most `web.fps` and at most what keeps the encoding under half the time
+(half a core per viewer), and the viewer threads run below the cameras'.
+Nothing is captured while nobody watches. The page offers the screen's
+size or half of it, and three qualities.
+
+Messages on `/ws`: from the server, `{"type": "hello", "width": 1280,
+"height": 720, "user", "fps"}` first, then binary pictures (`'F'`, flags
+(1: whole), width, height, the number of parts, a sequence number, then
+each part's x, y, w, h, length and JPEG; little-endian), `{"type":
+"stats", "fps", "kbps", "ms"}` every second, `{"type": "pong", "c"}`, and
+`{"type": "error", "message"}` before a close. From the browser, as JSON:
+`{"t": "ack", "seq"}`, `{"t": "opts", "scale": 1|2, "quality": 10..95}`,
+`{"t": "ping", "c"}`, and the input, in screen pixels:
+`{"t": "move", "x", "y"}`, `{"t": "btn", "b": 0|1|2, "down"}` (left,
+middle, right: right opens the UI's menu), `{"t": "wheel", "n"}` (notches,
+positive away from the user), `{"t": "key", "code": "KeyA", "v": 1|0|2}`
+(press, release, repeat; `KeyboardEvent.code`, keys by their place on a
+US keyboard, as a USB keyboard at the recorder types). The input goes into
+the UI as one more absolute pointer and keyboard of the evdev reader
+(`src/app/input_evdev.c`), so it is handled exactly as a USB mouse's and
+keyboard's, and the monitor shows the remote pointer; a viewer that goes
+lets go of whatever it held.
 
 ## Passwords in camera URLs
 
@@ -747,7 +826,11 @@ say which device went where.
   `src/api/users.c`: the accounts file and logging in; `src/api/api_perm.c`:
   which permission each endpoint needs; `src/api/api_users.c`: the
   accounts' endpoints.
-  `src/api/auth.c`: Basic credentials, the shadow file, `crypt(3)`.
+  `src/api/web.c`: the zero channel's web server, a second CivetWeb
+  context with its pages built in (`src/api/web/`, embedded by
+  `cmake/embed.cmake`); `src/app/kvm.c`, `kvm_enc.c`, `kvm_input.c`,
+  `jpeg_enc.c`: its pictures, their changed parts as JPEGs (an encoder of
+  its own: libjpeg is not on the firmware) and its input.
   `src/api/api_disc.c`: the discovery endpoints, over
   `src/core/discovery.{h,c}` (the device table and the jobs),
   `src/core/disc_proto.{h,c}` (the searches and their answers, as pure

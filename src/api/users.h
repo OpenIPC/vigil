@@ -48,12 +48,13 @@ enum {
     PERM_NETWORK  = 1u << 5,            /* network, DDNS, mail, alarm center */
     PERM_SYSTEM   = 1u << 6,            /* time, host name, the UI, the whole configuration */
     PERM_USERS    = 1u << 7,            /* accounts, and the API's own settings */
-    PERM_N        = 8,
-    PERM_ALL      = (1u << 8) - 1,
+    PERM_REMOTE   = 1u << 8,            /* the zero channel: the screen and its mouse and keyboard */
+    PERM_N        = 9,
+    PERM_ALL      = (1u << 9) - 1,
 };
 
 /* "live", "playback", "ptz", "cameras", "storage", "network", "system",
- * "users": bit i's name. */
+ * "users", "remote": bit i's name. */
 extern const char *const users_perm_names[PERM_N];
 /* The bit of a name, 0 if none. */
 unsigned users_perm_bit(const char *name);

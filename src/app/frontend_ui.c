@@ -13,6 +13,7 @@
 #include "frontend.h"
 #include "hal_ui.h"
 #include "input_evdev.h"
+#include "kvm_app.h"
 #include "log.h"
 #include "ui_app.h"
 #include "ui_bridge.h"
@@ -39,6 +40,7 @@ int frontend_run(int run_secs, volatile sig_atomic_t *stop, void (*tick)(void))
     static const input_hooks_t hooks = { ui_app_back, ui_app_key, ui_app_keyboards, ui_app_wheel };
     ui_app_set_pointer(input_evdev_create(disp, &hooks, 1));
     ui_app_set_keypad(input_evdev_keypad());
+    kvm_attach(disp);                   /* the zero channel's picture and input (web.c) */
 
     time_t t0 = time(NULL);
     while (!*stop) {
@@ -49,6 +51,7 @@ int frontend_run(int run_secs, volatile sig_atomic_t *stop, void (*tick)(void))
         usleep((ms > LV_DEF_REFR_PERIOD ? LV_DEF_REFR_PERIOD : ms) * 1000u);
         if (run_secs > 0 && time(NULL) - t0 >= run_secs) break;
     }
+    kvm_detach();
     input_evdev_delete();
     lv_deinit();
     return 0;

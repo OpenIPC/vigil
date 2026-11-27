@@ -154,6 +154,12 @@ typedef struct {
 } config_api_t;
 
 typedef struct {
+    int  enabled;
+    char listen[64];                /* "addr:port", "port"; "" = off */
+    int  fps;                       /* at most this many pictures a second */
+} config_web_t;
+
+typedef struct {
     char interfaces[128];           /* "eth0,eth1"; "" = every IPv4 interface */
     char targets[256];              /* unicast addresses also searched */
     char prefer[32];                /* "netip,onvif,dhip" */
@@ -176,6 +182,7 @@ typedef struct {
     config_ui_t     ui;
     config_display_t display;
     config_api_t    api;
+    config_web_t    web;
     config_discovery_t discovery;
 } vigil_config_t;
 

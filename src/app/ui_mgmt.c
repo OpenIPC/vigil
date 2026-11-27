@@ -496,7 +496,8 @@ static int group_delete(const char *name, char *err, size_t cap)
 _Static_assert((unsigned)UI_PERM_LIVE == (unsigned)PERM_LIVE && (unsigned)UI_PERM_CAMERAS == (unsigned)PERM_CAMERAS &&
                    (unsigned)UI_PERM_STORAGE == (unsigned)PERM_STORAGE &&
                    (unsigned)UI_PERM_NETWORK == (unsigned)PERM_NETWORK &&
-                   (unsigned)UI_PERM_SYSTEM == (unsigned)PERM_SYSTEM && (unsigned)UI_PERM_USERS == (unsigned)PERM_USERS,
+                   (unsigned)UI_PERM_SYSTEM == (unsigned)PERM_SYSTEM && (unsigned)UI_PERM_USERS == (unsigned)PERM_USERS &&
+                   (unsigned)UI_PERM_REMOTE == (unsigned)PERM_REMOTE,
                "UI_PERM_* are users.h's PERM_*");
 
 static int login_(const char *name, const char *pass, unsigned *perms, char *why, size_t cap)

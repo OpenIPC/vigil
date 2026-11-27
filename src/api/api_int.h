@@ -29,6 +29,15 @@ int api_mgmt_request(struct mg_connection *conn, const char *uri, const char *me
  * logged-in user. One table for every endpoint (api_perm.c). */
 unsigned api_perm_needed(const char *method, const char *uri);
 
+/* A login from client address `addr`, checked as the API checks its
+ * Basic credentials (vigil's users, the system account; a good one is
+ * remembered a few minutes): 1 with *perms; 0 refused, answered a second
+ * late; -2 while the address is locked out after failures in a row,
+ * *retry_after seconds more. The failures counted are the API's and the
+ * zero channel's together. api_auth_init first. */
+int  api_login(const char *addr, const char *user, const char *pass, unsigned *perms, long *retry_after);
+void api_auth_init(void);
+
 /* Who sent the request being handled on this thread, as the
  * authorization hook found: the user ("" when api.auth is off) and the
  * permissions. */

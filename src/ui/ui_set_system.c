@@ -617,14 +617,24 @@ static void api_close(void *st)
     free(st);
 }
 
-static ui_set_item_t g_items[2];
+/* ---- the zero channel: this screen in a browser (web.c) ------------------------------- */
+
+static void *web_open(ui_set_t *s, lv_obj_t *pane)
+{
+    api_t *a = calloc(1, sizeof *a);
+    if (a) a->form = ui_set_form(s, pane, "web");
+    return a;
+}
+
+static ui_set_item_t g_items[3];
 
 void ui_sysset_open(int first)
 {
     const ui_set_item_t items[] = {
         { TR(S_GENERAL), &ui_icon_nav_general, gen_open, gen_dirty, gen_save, gen_cancel, gen_close },
         { "HTTP API", &ui_icon_nav_ethernet, api_open, api_dirty, api_save, api_cancel, api_close },
+        { "Zero channel", &ui_icon_nav_output, web_open, api_dirty, api_save, api_cancel, api_close },
     };
     memcpy(g_items, items, sizeof items);
-    ui_settings_open(TR(S_SYSTEM), g_items, 2, first);
+    ui_settings_open(TR(S_SYSTEM), g_items, 3, first);
 }

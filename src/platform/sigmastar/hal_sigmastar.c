@@ -32,6 +32,7 @@
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -114,6 +115,7 @@ static struct {
     int              asp_set;       /* hal_display_set_aspect was called: */
     vg_ratio_t       asp;           /* the picture's shape (0:0 fill the tile) */
     unsigned         src_w, src_h;  /* what the decoder outputs */
+    vg_rect_t        win;           /* the port's window on the output (port_place) */
     int              out_small;     /* the tile wants more: a new decoder at a keyframe */
     /* After a takeover the port keeps the old decoder's picture, and its
      * size (port_w x port_h), until it has a picture of the new one's. */
@@ -364,10 +366,13 @@ static int port_place(int ch)
         fprintf(stderr, "sigmastar: MI_DISP_SetInputPortAttr(%d) 0x%x\n", ch, rc);
         return -1;
     }
+    g_ch[ch].win = (vg_rect_t){ pa.stDispWin.u16X, pa.stDispWin.u16Y, pa.stDispWin.u16Width,
+                                pa.stDispWin.u16Height };
     return 0;
 }
 
 static unsigned long long dec_footprint(const vg_stream_info_t *si, unsigned buf, unsigned ow, unsigned oh);
+static void grab_depth(int vdec);
 
 /*
  * A running decoder's output to the size its tile now wants. Smaller, at
@@ -680,9 +685,9 @@ static int vdec_make(int ch, vg_codec_t codec, const vg_stream_info_t *si, unsig
         *ow = si->width;                    /* the picture as decoded */
         *oh = si->height;
     }
-    MI_SYS_ChnPort_t src = vdec_port(id);
-    /* Live view: a short queue, the newest picture wins. */
-    MI_SYS_SetChnOutputPortDepth(&src, 0, 4);
+    /* Live view: a short queue, the newest picture wins (and one for the
+     * zero channel while it reads them: grab_depth). */
+    grab_depth(id);
     g_vdec_busy[id] = 1;
     ++g_open;
     return id;
@@ -1067,3 +1072,165 @@ void hal_dec_reset(int ch)
 int  hal_cap_start(int in, int ch, hal_cap_cb cb, void *user) { (void)in; (void)ch; (void)cb; (void)user; return -1; }
 void hal_cap_stop(int in) { (void)in; }
 int  hal_cap_signal(int in) { (void)in; return 0; }
+
+/* ---- the zero channel: the video layer read back -------------------------------- */
+
+/*
+ * The i2m display has no writeback: MI_DISP_GetScreenFrame is in the API
+ * but the SDK's mi_disp.ko answers it with an error without looking (its
+ * MI_DISP_IMPL_GetScreenFrame is "return 31"), and the display HAL the
+ * boot release has the source of reads nothing back. So each tile is read
+ * from its decoder's output, the picture the display shows, through a
+ * user queue of one on the decoder's output port (MI_SYS keeps the newest
+ * picture there while hal_display_grab_keep is on), and drawn where the
+ * port's window is. A copy of each tile's last picture stays here, at the
+ * window's size on the screen, for a decoder with nothing new (a still
+ * camera) and as the place the scaling happens in cached memory: the
+ * decoder's buffers are read a whole row at a time.
+ */
+static int g_grab;                  /* grab_keep: on */
+static struct {
+    unsigned char *pix;             /* y (w x h), then u and v ((w/2) x (h/2)) */
+    unsigned       w, h;            /* 0: no picture yet */
+    int            vdec;
+} g_gc[MAX_CH];
+static pthread_mutex_t g_grab_lock = PTHREAD_MUTEX_INITIALIZER;     /* g_gc, the grab itself */
+
+/* Locked (g_lock). */
+static void grab_depth(int vdec)
+{
+    MI_SYS_ChnPort_t p = vdec_port(vdec);
+    MI_SYS_SetChnOutputPortDepth(&p, g_grab ? 1 : 0, 4);
+}
+
+void hal_display_grab_keep(int on)
+{
+    pthread_mutex_lock(&g_grab_lock);
+    pthread_mutex_lock(&g_lock);
+    g_grab = on != 0;
+    for (int ch = 0; ch < MAX_CH; ++ch) {
+        if (g_ch[ch].codec != VG_CODEC_NONE) grab_depth(g_ch[ch].vdec);
+        if (g_ch[ch].nx.on) grab_depth(g_ch[ch].nx.vdec);
+    }
+    pthread_mutex_unlock(&g_lock);
+    if (!on)
+        for (int ch = 0; ch < MAX_CH; ++ch) {
+            free(g_gc[ch].pix);
+            memset(&g_gc[ch], 0, sizeof g_gc[ch]);
+        }
+    pthread_mutex_unlock(&g_grab_lock);
+}
+
+/* The decoder's newest picture into the channel's copy, scaled to w x h
+ * (nearest pixel). 1 copied, 0 nothing new. */
+static int grab_read(int ch, int vdec, unsigned w, unsigned h)
+{
+    MI_SYS_ChnPort_t port = vdec_port(vdec);
+    MI_SYS_BufInfo_t bi, last;
+    MI_SYS_BUF_HANDLE hb, held = 0;
+    int have = 0;
+    /* The queue is one deep; whatever else came, the newest. */
+    for (int i = 0; i < 4; ++i) {
+        memset(&bi, 0, sizeof bi);
+        if (MI_SYS_ChnOutputPortGetBuf(&port, &bi, &hb) != MI_SUCCESS) break;
+        if (have) MI_SYS_ChnOutputPortPutBuf(held);
+        held = hb;
+        last = bi;
+        have = 1;
+    }
+    if (!have) return 0;
+    const MI_SYS_FrameData_t *f = &last.stFrameData;
+    int rc = 0;
+    static int told;
+    if (last.eBufType != E_MI_SYS_BUFDATA_FRAME || f->ePixelFormat != E_MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420 ||
+        f->eTileMode != E_MI_SYS_FRAME_TILE_MODE_NONE || f->eCompressMode != E_MI_SYS_COMPRESS_MODE_NONE ||
+        !f->pVirAddr[0] || !f->pVirAddr[1] || f->u16Width < 2 || f->u16Height < 2) {
+        if (!told++)
+            fprintf(stderr, "sigmastar: zero channel: decoder %d gives format %d tile %d compress %d, "
+                    "not linear NV12: its tile stays black\n", ch, f->ePixelFormat, f->eTileMode, f->eCompressMode);
+        MI_SYS_ChnOutputPortPutBuf(held);
+        return 0;
+    }
+    if (g_gc[ch].w != w || g_gc[ch].h != h || !g_gc[ch].pix) {
+        free(g_gc[ch].pix);
+        g_gc[ch].pix = malloc((size_t)w * h * 3 / 2);
+        g_gc[ch].w = g_gc[ch].pix ? w : 0;
+        g_gc[ch].h = g_gc[ch].pix ? h : 0;
+    }
+    unsigned sw = f->u16Width & ~1u, sh = f->u16Height & ~1u;
+    unsigned char *row = g_gc[ch].pix ? malloc(f->u32Stride[0] > f->u32Stride[1] ? f->u32Stride[0] : f->u32Stride[1]) : NULL;
+    unsigned *xm = row ? malloc(sizeof *xm * w) : NULL;
+    if (xm) {
+        /* The VPU writes these buffers behind the CPU's cache. */
+        MI_SYS_FlushInvCache(f->pVirAddr[0], f->u32Stride[0] * sh);
+        MI_SYS_FlushInvCache(f->pVirAddr[1], f->u32Stride[1] * (sh / 2));
+        for (unsigned x = 0; x < w; ++x) xm[x] = (unsigned)((unsigned long long)x * sw / w);
+        unsigned char *dy = g_gc[ch].pix, *du = dy + (size_t)w * h, *dv = du + (size_t)(w / 2) * (h / 2);
+        unsigned last_sy = ~0u;
+        for (unsigned y = 0; y < h; ++y) {
+            unsigned sy = (unsigned)((unsigned long long)y * sh / h);
+            if (sy != last_sy) memcpy(row, (unsigned char *)f->pVirAddr[0] + (size_t)sy * f->u32Stride[0], sw);
+            last_sy = sy;
+            for (unsigned x = 0; x < w; ++x) dy[(size_t)y * w + x] = row[xm[x]];
+        }
+        last_sy = ~0u;
+        for (unsigned y = 0; y < h / 2; ++y) {
+            unsigned sy = (unsigned)((unsigned long long)y * (sh / 2) / (h / 2));
+            if (sy != last_sy) memcpy(row, (unsigned char *)f->pVirAddr[1] + (size_t)sy * f->u32Stride[1], sw);
+            last_sy = sy;
+            for (unsigned x = 0; x < w / 2; ++x) {
+                unsigned sx = xm[2 * x] & ~1u;
+                du[(size_t)y * (w / 2) + x] = row[sx];
+                dv[(size_t)y * (w / 2) + x] = row[sx + 1];
+            }
+        }
+        g_gc[ch].vdec = vdec;
+        rc = 1;
+    }
+    free(xm);
+    free(row);
+    MI_SYS_ChnOutputPortPutBuf(held);
+    return rc;
+}
+
+int hal_display_grab(const hal_pic_t *pic)
+{
+    struct { int on, vdec; vg_rect_t r; } t[MAX_CH];
+    pthread_mutex_lock(&g_lock);
+    int grab = g_grab;
+    for (int ch = 0; ch < MAX_CH; ++ch) {
+        vg_rect_t w = g_ch[ch].win;
+        t[ch].on = g_ch[ch].codec != VG_CODEC_NONE && g_ch[ch].scr.w && w.w > 0 && w.h > 0 && g_w && g_h;
+        t[ch].vdec = g_ch[ch].vdec;
+        if (!t[ch].on) continue;
+        /* the window on the output, as screen pixels of pic, even */
+        int x0 = (int)((long long)w.x * pic->w / g_w), x1 = (int)((long long)(w.x + w.w) * pic->w / g_w);
+        int y0 = (int)((long long)w.y * pic->h / g_h), y1 = (int)((long long)(w.y + w.h) * pic->h / g_h);
+        x0 &= ~1;
+        y0 &= ~1;
+        x1 = x1 > (int)pic->w ? (int)pic->w : x1 & ~1;
+        y1 = y1 > (int)pic->h ? (int)pic->h : y1 & ~1;
+        t[ch].r = (vg_rect_t){ x0, y0, x1 - x0, y1 - y0 };
+        t[ch].on = t[ch].r.w >= 2 && t[ch].r.h >= 2;
+    }
+    pthread_mutex_unlock(&g_lock);
+    if (!grab) return -1;
+
+    pthread_mutex_lock(&g_grab_lock);
+    for (int ch = 0; ch < MAX_CH; ++ch) {
+        if (!t[ch].on) continue;
+        unsigned w = (unsigned)t[ch].r.w, h = (unsigned)t[ch].r.h;
+        grab_read(ch, t[ch].vdec, w, h);
+        /* A picture of another decoder, or of another size: not this one's. */
+        if (!g_gc[ch].pix || g_gc[ch].w != w || g_gc[ch].h != h || g_gc[ch].vdec != t[ch].vdec) continue;
+        const unsigned char *sy = g_gc[ch].pix, *su = sy + (size_t)w * h, *sv = su + (size_t)(w / 2) * (h / 2);
+        unsigned x = (unsigned)t[ch].r.x, y = (unsigned)t[ch].r.y;
+        for (unsigned r = 0; r < h; ++r) memcpy(pic->y + (size_t)(y + r) * pic->ys + x, sy + (size_t)r * w, w);
+        for (unsigned r = 0; r < h / 2; ++r) {
+            memcpy(pic->u + (size_t)(y / 2 + r) * pic->cs + x / 2, su + (size_t)r * (w / 2), w / 2);
+            memcpy(pic->v + (size_t)(y / 2 + r) * pic->cs + x / 2, sv + (size_t)r * (w / 2), w / 2);
+        }
+    }
+    pthread_mutex_unlock(&g_grab_lock);
+    return 0;
+}
