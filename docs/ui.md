@@ -354,7 +354,7 @@ src/ui/ui_system.c      System page
 src/ui/ui_set_display.c Display: the output resolution (with its keep-or-undo question), clock, names, icons
 src/ui/ui_layout.c      tile geometry (plain C, shared with frontend_tiles)
 src/ui/ui_theme.c       LVGL styles from the design tokens
-src/ui/ui_cursor.c      the software mouse pointer
+src/ui/ui_cursor.c      the mouse pointer's arrow
 ```
 
 The layering rule holds: `src/ui` includes LVGL and `hal_ui.h` only. All
@@ -632,13 +632,23 @@ button clicks; the **right button** calls `ui_app_back`.
 LVGL's own evdev driver (`LV_USE_EVDEV`) is not used: it opens one device
 and reports only `BTN_MOUSE`/`BTN_TOUCH`, so the right button and the keys
 would be lost. Button changes are queued, so a click shorter than LVGL's
-input poll (33 ms) still counts. The reader is in `src/app` rather than
+input poll (16 ms) still counts. The reader is in `src/app` rather than
 `src/core` (it needs Linux headers, which the core must not depend on) or
 `src/ui` (LVGL only); it is plain Linux, so every platform with a display
 uses it.
 
-The pointer is drawn by LVGL (`ui_cursor.c`, an arrow with only opaque and
-fully transparent pixels), shown while a pointer device is present.
+The pointer (`ui_cursor.c`, an arrow with only opaque and fully
+transparent pixels) is shown while a pointer device is present. Where the
+platform has a cursor plane (`hal_ui_cursor_create`; SigmaStar's GOP 0,
+fbdev.ko's hardware cursor), the display draws it: a thread of the reader's
+own wakes on each mouse event and hands the new position to the platform,
+which moves the plane at the next frame, without LVGL redrawing anything.
+So the pointer follows the mouse at the output's refresh rate (60 or 50
+Hz) even while the UI is busy drawing a page; LVGL's pointer reads the same
+position, under a lock, for clicks and hovering. Elsewhere LVGL draws it,
+moving it at its frame rate: LVGL draws and polls the input every 16 ms
+(`LV_DEF_REFR_PERIOD`), redrawing only the arrow's old and new places, and
+the UI loop sleeps no longer than until LVGL's next timer.
 
 ### Keyboard
 

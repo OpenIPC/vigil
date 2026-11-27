@@ -32,6 +32,7 @@
 #include "input_evdev.h"
 #include "ui_app.h"
 #include "ui_bridge.h"
+#include "ui_cursor.h"
 #include "ui_layout.h"
 #include "ui_osk.h"
 #include "theme_tokens.h"
@@ -88,6 +89,34 @@ void hal_ui_hole(lv_color_t *c, lv_opa_t *o)
 {
     *c = lv_color_hex(g_shots ? KEY : 0x000000);
     *o = LV_OPA_COVER;
+}
+
+/* A cursor plane, when a test asks for one (g_plane): where the pointer was
+ * put and whether it is shown. Moves come from the reader thread too. */
+static int g_plane, g_plane_made, g_plane_arrow;
+static int g_plane_x = -1, g_plane_y = -1, g_plane_shown = -1;
+
+int hal_ui_cursor_create(const uint32_t *argb, int w, int h)
+{
+    if (!g_plane) return -1;
+    /* The hot spot is the top-left pixel, opaque; the top-right one is not. */
+    g_plane_arrow = w == UI_CURSOR_WIDTH && h == UI_CURSOR_HEIGHT && argb[0] >> 24 == 0xFF && !(argb[w - 1] >> 24);
+    g_plane_made = 1;
+    return 0;
+}
+
+void hal_ui_cursor_move(int x, int y)
+{
+    __atomic_store_n(&g_plane_x, x, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&g_plane_y, y, __ATOMIC_SEQ_CST);
+}
+
+void hal_ui_cursor_show(int on) { __atomic_store_n(&g_plane_shown, on, __ATOMIC_SEQ_CST); }
+
+void hal_ui_cursor_delete(void)
+{
+    g_plane_made = 0;
+    g_plane_shown = 0;
 }
 
 /* ---- the model: the real bridge, fake channels -------------------------------------- */
@@ -2550,6 +2579,56 @@ static int put_display(const char *json)
     return rc;
 }
 
+/* A platform with a cursor plane: the pointer is put there instead of
+ * drawn by LVGL, shown while a mouse is plugged in, kept on the screen, and
+ * clicks still land where it is. Returns the new pointer. */
+static lv_indev_t *test_cursor_plane(lv_display_t *disp)
+{
+    static const input_hooks_t hooks = { ui_app_back, ui_app_key, ui_app_keyboards, ui_app_wheel };
+    uint32_t drawn = lv_obj_get_child_count(lv_layer_sys());
+    input_evdev_delete();                       /* closes the test mouse's end */
+    close(g_mouse[1]);
+    CHECK(lv_obj_get_child_count(lv_layer_sys()) == drawn - 1, "LVGL's arrow gone with its reader");
+    g_plane = 1;
+    lv_indev_t *ptr = input_evdev_create(disp, &hooks, 0);
+    ui_app_set_pointer(ptr);
+    ui_app_set_keypad(input_evdev_keypad());
+    CHECK(g_plane_made && g_plane_arrow, "the arrow handed to the cursor plane");
+    CHECK(lv_obj_get_child_count(lv_layer_sys()) == drawn - 1, "and not drawn by LVGL");
+    CHECK(__atomic_load_n(&g_plane_shown, __ATOMIC_SEQ_CST) == 0 &&
+              __atomic_load_n(&g_plane_x, __ATOMIC_SEQ_CST) == W / 2 &&
+              __atomic_load_n(&g_plane_y, __ATOMIC_SEQ_CST) == H / 2,
+          "hidden at the centre with no mouse");
+    if (pipe(g_mouse) < 0) return ptr;
+    fcntl(g_mouse[0], F_SETFL, O_NONBLOCK);
+    input_evdev_attach(g_mouse[0], "test mouse", 0, 0, 0, 0, 0);
+    run(50);
+    CHECK(__atomic_load_n(&g_plane_shown, __ATOMIC_SEQ_CST) == 1, "shown with a mouse");
+    g_px = W / 2;
+    g_py = H / 2;
+    move_to(100, 200);
+    CHECK(__atomic_load_n(&g_plane_x, __ATOMIC_SEQ_CST) == 100 &&
+              __atomic_load_n(&g_plane_y, __ATOMIC_SEQ_CST) == 200,
+          "the plane follows the mouse");
+    move_to(W + 50, -20);
+    CHECK(__atomic_load_n(&g_plane_x, __ATOMIC_SEQ_CST) == W - 1 &&
+              __atomic_load_n(&g_plane_y, __ATOMIC_SEQ_CST) == 0,
+          "kept on the screen");
+    button(BTN_RIGHT);
+    click_text("Display");
+    CHECK(ui_page_top() && find("Resolution", 0), "a click lands where the plane shows the pointer");
+    button(BTN_RIGHT);
+    CHECK(!ui_page_top(), "back on the live view");
+    close(g_mouse[1]);
+    run(100);
+    CHECK(__atomic_load_n(&g_plane_shown, __ATOMIC_SEQ_CST) == 0, "hidden when the mouse is gone");
+    if (pipe(g_mouse) == 0) {
+        fcntl(g_mouse[0], F_SETFL, O_NONBLOCK);
+        input_evdev_attach(g_mouse[0], "test mouse", 0, 0, 0, 0, 0);
+    }
+    return ptr;
+}
+
 static void test_display_pages(void)
 {
     run(VG_DURATION_TOAST);
@@ -4174,6 +4253,7 @@ int main(int argc, char **argv)
     test_system_pages();
     test_account_pages();
     test_display_pages();
+    test_cursor_plane(disp);
 
     lv_mem_monitor_t mon;
     lv_mem_monitor(&mon);
