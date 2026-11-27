@@ -144,6 +144,24 @@ A decoder the platform cannot give (out of media memory or decoder
 channels) is retried after 10 s, or as soon as another channel closes its
 decoder.
 
+### The picture's shape
+
+A picture is shown at its camera's display aspect ratio, fitted inside its
+tile (or the full screen) and centred, with black bars where the shapes
+differ (`aspect.c`, the same geometry on every platform). The ratio is not
+the coded size's: D1 and CIF sub-streams (704x576, 720x576, 704x480,
+352x288) are anamorphic, so a sub-stream is shown at its **main stream's**
+ratio, which the main session (always running) knows from its SPS; then
+the sub-stream and the main stream look the same, and full screen and back
+do not change the picture's shape. Before the main stream's SPS has been
+seen, or for the main stream itself, the stream's own size times the
+sample aspect ratio its SPS's VUI gives (1:1 when it gives none). A ratio
+within 2 % of a common one (16:9, 4:3, 16:10, 5:4, 3:2, 1:1, 2:1, 32:9) is
+taken as that one: 800x448 or an uncropped 1920x1088 is 16:9. The core
+tells the platform the ratio before a decoder opens and whenever it
+changes (`hal_display_set_aspect`); `display.video_aspect: stretch` makes
+it 0:0, the picture filling the tile.
+
 ### Recording
 
 `seg_writer.c` writes the compressed elementary stream (no re-encoding,
@@ -278,7 +296,7 @@ read their state. Formats, sources and the protocol matrix are in
 |---|---|
 | `hal.h` | `hal_init(w, h, out)` brings up the media system and the output (a w x h screen sent out at mode `out` where the platform can); `hal_caps()` says what is there (display, decoder and its maximum size, number of channels, capture inputs); `hal_shutdown()`. |
 | `hal_decoder.h` | One hardware decoder per channel: open for a codec, size and reference count; send an AU; reset after a reconnect; close. Decoded pictures go to that channel's tile without passing through the core. |
-| `hal_display.h` | Where each channel's tile is on the screen. The platform keeps the picture's aspect ratio inside it. The output modes it can switch to, the one in force, and a switch while running (the screen keeps its size, scaled to the mode). |
+| `hal_display.h` | Where each channel's tile is on the screen, and the display aspect ratio its picture is fitted inside it at (`aspect_fit`), or stretched. The output modes it can switch to, the one in force, and a switch while running (the screen keeps its size, scaled to the mode). |
 | `hal_capture.h` | Local inputs: start input N in tile `ch` (the platform shows it itself) and deliver its *encoded* AUs to a callback for recording. |
 | `hal_ui.h` | Create the LVGL display on the graphics layer above the video, and say how the UI makes a tile transparent (a colour key, or alpha). |
 

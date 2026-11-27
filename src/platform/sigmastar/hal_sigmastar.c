@@ -19,10 +19,11 @@
  * output's own size, each tile scaled to it, so the video is not scaled
  * twice.
  *
- * The picture goes into a window fitted inside the tile at its aspect ratio
- * (the rest of the tile shows the layer's black background). The decoder
- * outputs it at the window's size and follows the tile when it changes:
- * the display enlarges pictures but does not shrink them (out_size).
+ * The picture goes into a window fitted inside the tile at the display
+ * aspect ratio the core gives (hal_display_set_aspect, aspect_fit; the rest
+ * of the tile shows the layer's black background). The decoder outputs it
+ * at about the window's size and follows the tile when it changes: the
+ * display enlarges pictures but does not shrink them (out_size).
  *
  * mi_disp needs the panel timings, PQ tables and memory map from /config,
  * and mi_vdec its firmware from /config/vdec_fw (paths built into the
@@ -39,6 +40,7 @@
 #include "mi_vdec.h"
 #include "mi_disp.h"
 
+#include "aspect.h"
 #include "hal.h"
 #include "hal_capture.h"
 #include "hal_decoder.h"
@@ -109,6 +111,8 @@ static struct {
     unsigned         buf_size;      /* its bitstream buffer */
     vg_rect_t        scr;           /* the tile as given, on the screen; w == 0: not placed */
     vg_rect_t        tile;          /* ... on the output (the video layer); w == 0: not placed */
+    int              asp_set;       /* hal_display_set_aspect was called: */
+    vg_ratio_t       asp;           /* the picture's shape (0:0 fill the tile) */
     unsigned         src_w, src_h;  /* what the decoder outputs */
     int              out_small;     /* the tile wants more: a new decoder at a keyframe */
     /* After a takeover the port keeps the old decoder's picture, and its
@@ -147,10 +151,7 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 const hal_caps_t *hal_caps(void) { return &g_caps; }
 static void mem_baseline(void);
 
-static unsigned align_down(unsigned v, unsigned a) { return v / a * a; }
 static unsigned align_up(unsigned v, unsigned a) { return (v + a - 1) / a * a; }
-static unsigned umin(unsigned a, unsigned b) { return a < b ? a : b; }
-static unsigned umax(unsigned a, unsigned b) { return a > b ? a : b; }
 
 /* The transmitter at the timing the display scans out. Without open_hdmi
  * only VGA has a picture, so this warns but does not fail. */
@@ -307,67 +308,57 @@ static vg_rect_t tile_or_default(int ch)
     return (vg_rect_t){ 0, 0, (int)g_w / 2, (int)g_h / 2 };
 }
 
-/* The window for a picture: fitted inside the tile at its aspect ratio. */
-static void fit(int ch, const vg_stream_info_t *si, unsigned *ww, unsigned *wh)
+/* The window for a picture on the output: fitted inside the tile at the
+ * shape the core gave, centred (aspect_fit), or the whole tile. Before the
+ * core says, the decoded picture's own shape. Sizes and offsets even, as
+ * the SDK's display sample has them. */
+static vg_rect_t win_of(int ch, const vg_stream_info_t *si)
 {
     vg_rect_t t = tile_or_default(ch);
-    unsigned pw = si->width, ph = si->height;
-    *ww = (unsigned)t.w;
-    *wh = (unsigned)t.h;
-    if (pw && ph) {
-        if ((unsigned long long)pw * t.h > (unsigned long long)ph * t.w)
-            *wh = (unsigned)((unsigned long long)t.w * ph / pw);   /* bars above and below */
-        else
-            *ww = (unsigned)((unsigned long long)t.h * pw / ph);   /* bars at the sides */
-    }
-    *ww = umax(align_down(*ww, 2), 2);
-    *wh = umax(align_down(*wh, 2), 2);
+    vg_ratio_t a = g_ch[ch].asp_set ? g_ch[ch].asp : (vg_ratio_t){ si->width, si->height };
+    return aspect_fit(&t, a, 2);
 }
 
 /*
- * The size the decoder outputs: the window's. mi_disp does not shrink a
- * picture across: a source wider than its window lost its right part (in
- * emulation the driver set the window's ratio to 1:1), so the decoder
- * shrinks it, as the SDK's decoder sample does on every layout change, and
- * the display only enlarges a picture smaller than its window. The
- * decoder's scaler shrinks at most 8 times (the sample puts DIVP behind it
- * beyond that).
+ * The size the decoder outputs: about the window's. mi_disp does not shrink
+ * a picture: where the window is smaller than the picture, it shows the
+ * picture's top left part (open_mhal's _HalDispIfSetInputPortAttr sets the
+ * MOP ratio to 1:1 unless the window is larger), so the decoder shrinks it,
+ * as the SDK's decoder sample does on every layout change, and the display
+ * enlarges what is left to the window. The decoder's scaler shrinks at most
+ * 8 times (the sample puts DIVP behind it beyond that), and mi_vdec rounds
+ * a shrunk size up to a multiple of 8 (CalcScaleDown, which sizes the
+ * scaler's frames): a multiple of 8 is asked for, rounded down, so it
+ * never comes out larger than the window, and the display enlarges it by
+ * the few pixels left. mi_vdec itself only checks that the size is even,
+ * 8..8192 and no larger than the picture (_MI_VDEC_ChkOutputPortAttr).
  */
+#define VDEC_SCALE_ALIGN  8
+#define VDEC_SCALE_MAX    8
 static void out_size(int ch, const vg_stream_info_t *si, unsigned *ow, unsigned *oh)
 {
-    unsigned ww, wh;
-    fit(ch, si, &ww, &wh);
-    unsigned minw = align_up((si->width + 7) / 8, 16), minh = align_up((si->height + 7) / 8, 2);
-    *ow = umin(umax(align_down(umin(ww, si->width), 16), minw), si->width);
-    *oh = umin(umax(align_down(umin(wh, si->height), 2), minh), si->height);
+    vg_rect_t w = win_of(ch, si);
+    aspect_scaled_size(si->width, si->height, (unsigned)w.w, (unsigned)w.h, VDEC_SCALE_ALIGN, VDEC_SCALE_MAX,
+                       ow, oh);
 }
 
-/* Channel ch's input port: the decoder's output in a window fitted inside
- * the tile and centred; where the decoder shrank the picture to the
- * window, the window is the output's size (rounded to 16 pixels across).
- * Locked. */
+/* Channel ch's input port: the decoder's output in the window win_of,
+ * which the display enlarges it to. Locked. */
 static int port_place(int ch)
 {
-    vg_rect_t t = tile_or_default(ch);
-    unsigned ww, wh, ow, oh;
-    fit(ch, &g_ch[ch].si, &ww, &wh);
-    out_size(ch, &g_ch[ch].si, &ow, &oh);
+    vg_rect_t w = win_of(ch, &g_ch[ch].si);
     /* the picture on the port: the old decoder's, until the new one's */
     unsigned sw = g_ch[ch].port_wait ? g_ch[ch].port_w : g_ch[ch].src_w;
     unsigned sh = g_ch[ch].port_wait ? g_ch[ch].port_h : g_ch[ch].src_h;
-    if (sw == ow && sh == oh) {
-        if (g_ch[ch].si.width >= ww) ww = umin(ww, ow);
-        if (g_ch[ch].si.height >= wh) wh = umin(wh, oh);
-    }
 
     MI_DISP_InputPortAttr_t pa;
     memset(&pa, 0, sizeof pa);
     pa.u16SrcWidth = sw;
     pa.u16SrcHeight = sh;
-    pa.stDispWin.u16X = t.x + (int)align_down(((unsigned)t.w - ww) / 2, 2);
-    pa.stDispWin.u16Y = t.y + (int)align_down(((unsigned)t.h - wh) / 2, 2);
-    pa.stDispWin.u16Width = ww;
-    pa.stDispWin.u16Height = wh;
+    pa.stDispWin.u16X = w.x;
+    pa.stDispWin.u16Y = w.y;
+    pa.stDispWin.u16Width = w.w;
+    pa.stDispWin.u16Height = w.h;
     MI_S32 rc = MI_DISP_SetInputPortAttr(DISP_LAYER, ch, &pa);
     if (rc != MI_SUCCESS) {
         fprintf(stderr, "sigmastar: MI_DISP_SetInputPortAttr(%d) 0x%x\n", ch, rc);
@@ -408,13 +399,13 @@ static void out_follow(int ch)
     g_ch[ch].src_h = oh;
 }
 
-/* A tile on the screen as a window on the output: scaled, then x on 16
- * pixels and the sizes even, as the display's windows want. */
+/* A tile on the screen (the UI's coordinates) as a tile on the output,
+ * the video layer: each edge scaled, even. On a 5:4 or 16:10 output the
+ * UI is stretched, the tile with it; the picture is fitted inside the
+ * stretched tile at its own shape (win_of), so it is not. */
 static vg_rect_t to_output(const vg_rect_t *r)
 {
-    int x0 = (int)((long long)r->x * g_w / g_sw), x1 = (int)((long long)(r->x + r->w) * g_w / g_sw);
-    int y0 = (int)((long long)r->y * g_h / g_sh), y1 = (int)((long long)(r->y + r->h) * g_h / g_sh);
-    return (vg_rect_t){ x0 & ~15, y0 & ~1, (x1 - x0 + (x0 & 15)) & ~15, (y1 - y0) & ~1 };
+    return aspect_map(r, g_sw, g_sh, g_w, g_h, 2);
 }
 
 int hal_display_set_tile(int ch, const vg_rect_t *r)
@@ -439,6 +430,24 @@ int hal_display_set_tile(int ch, const vg_rect_t *r)
     }
     pthread_mutex_unlock(&g_lock);
     return rc;
+}
+
+void hal_display_set_aspect(int ch, unsigned w, unsigned h)
+{
+    if (ch < 0 || ch >= MAX_CH) return;
+    pthread_mutex_lock(&g_lock);
+    vg_ratio_t a = w && h ? (vg_ratio_t){ w, h } : (vg_ratio_t){ 0, 0 };
+    if (!g_ch[ch].asp_set || a.w != g_ch[ch].asp.w || a.h != g_ch[ch].asp.h) {
+        g_ch[ch].asp_set = 1;
+        g_ch[ch].asp = a;
+        /* a decoder feeding the port: its output and window follow (a
+         * larger output from its next keyframe, as for a larger tile) */
+        if (g_ch[ch].codec != VG_CODEC_NONE && g_ch[ch].tile.w) {
+            out_follow(ch);
+            port_place(ch);
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
 }
 
 void hal_display_clear_tile(int ch)

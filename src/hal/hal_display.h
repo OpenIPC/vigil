@@ -10,10 +10,18 @@
 
 #include "vg_types.h"
 
-/* Place channel `ch`'s video at `r` (screen pixels). The platform keeps
- * the source's aspect ratio inside it. Returns 0 or -1. */
+/* Place channel `ch`'s video at `r` (screen pixels): the picture fitted
+ * inside it at the ratio hal_display_set_aspect gave (aspect_fit), on the
+ * output. Returns 0 or -1. */
 int  hal_display_set_tile(int ch, const vg_rect_t *r);
 void hal_display_clear_tile(int ch);
+/* The display aspect ratio channel `ch`'s picture is shown at, w:h (the
+ * core's choice, aspect_of_camera: a sub-stream at its main stream's), the
+ * rest of the tile black; 0:0: the picture fills the tile (stretched).
+ * Until it is first called, the decoded picture's own size. Applies at
+ * once, to the picture on screen and the decoders that follow. From any
+ * thread (a channel's, before hal_dec_open; the main thread). */
+void hal_display_set_aspect(int ch, unsigned w, unsigned h);
 
 /* The modes the output can run at, at most `max` (none: no display);
  * a platform that cannot change its output lists the one it runs. */

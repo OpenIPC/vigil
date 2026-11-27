@@ -149,6 +149,12 @@ void channels_set_tiles(const vg_rect_t *tiles);
  * Unset (0), the main stream everywhere. Before channels_start. */
 void channels_set_screen(unsigned w, unsigned h);
 
+/* How pictures fill their tiles (display.video_aspect): 0 fitted at the
+ * camera's display aspect ratio, black bars around (aspect.h), 1 stretched
+ * over the whole tile. From the thread that calls channels_apply; applies
+ * at once. */
+void channels_set_stretch(int stretch);
+
 /* Stop recording into `dir` and everything under it (a disk about to be
  * unmounted or formatted): the channels recording there close their
  * segments and open none until channels_rec_release. Waits up to

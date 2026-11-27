@@ -5,8 +5,10 @@
  *   channel thread:  hal_dec_send -> MPP decode -> newest frame into the
  *                    channel's slot (older ones are released)
  *   compositor:      ~30 times a second, RGA scales each slot's frame into
- *                    its tile of the back NV12 mosaic (aspect kept, black
- *                    bars), then flips the mosaic onto the video plane
+ *                    its tile of the back NV12 mosaic (at the display
+ *                    aspect ratio hal_display_set_aspect gave, black
+ *                    bars; aspect_fit), then flips the mosaic onto the
+ *                    video plane
  *
  * Libraries: rockchip-linux/mpp and librga, built from source by
  * scripts/rockchip/build-deps.sh.
@@ -28,6 +30,7 @@
 #include <rga/im2d.h>
 #include <rga/rga.h>
 
+#include "aspect.h"
 #include "hal.h"
 #include "hal_capture.h"
 #include "hal_decoder.h"
@@ -57,6 +60,8 @@ typedef struct {
     int              tile_set;
     int              clear;             /* tile background needs repainting */
     unsigned         last_w, last_h;
+    int              asp_set;           /* hal_display_set_aspect said: */
+    vg_ratio_t       asp;               /* the picture's shape; 0:0 fill the tile */
 } chan_t;
 
 static chan_t          g_ch[MAX_CH];
@@ -85,21 +90,6 @@ static void tile_clear(rk_buf_t *b, const vg_rect_t *r)
         memset(uv + (size_t)(r->y / 2 + y) * b->pitch + r->x, 128, (size_t)r->w);
 }
 
-/* The largest rectangle with the picture's aspect inside the tile, centred,
- * even-aligned for NV12. */
-static vg_rect_t fit(const vg_rect_t *t, unsigned w, unsigned h)
-{
-    vg_rect_t r = *t;
-    if ((uint64_t)w * (unsigned)t->h > (uint64_t)h * (unsigned)t->w) {
-        r.h = (int)((uint64_t)t->w * h / w) & ~1;
-        r.y = t->y + ((t->h - r.h) / 2 & ~1);
-    } else {
-        r.w = (int)((uint64_t)t->h * w / h) & ~1;
-        r.x = t->x + ((t->w - r.w) / 2 & ~1);
-    }
-    return r;
-}
-
 static void compose_one(chan_t *c, rk_buf_t *dst)
 {
     MppFrame f = c->frame;
@@ -117,7 +107,8 @@ static void compose_one(chan_t *c, rk_buf_t *dst)
         tile_clear(dst, &c->tile);
         --c->clear;
     }
-    vg_rect_t d = fit(&c->tile, w, h);
+    /* even for NV12; before the core says, the picture's own shape */
+    vg_rect_t d = aspect_fit(&c->tile, c->asp_set ? c->asp : (vg_ratio_t){ w, h }, 2);
     rga_buffer_t src = wrapbuffer_fd_t(fd, (int)w, (int)h, (int)hs, (int)vs, RK_FORMAT_YCbCr_420_SP);
     rga_buffer_t out = wrapbuffer_fd_t(dst->fd, (int)dst->width, (int)dst->height,
                                        (int)dst->pitch, (int)dst->height, RK_FORMAT_YCbCr_420_SP);
@@ -222,6 +213,17 @@ int hal_display_set_tile(int ch, const vg_rect_t *r)
     pthread_mutex_unlock(&g_ch[ch].lock);
     __atomic_store_n(&g_repaint, 2, __ATOMIC_RELEASE);
     return 0;
+}
+
+void hal_display_set_aspect(int ch, unsigned w, unsigned h)
+{
+    if (ch < 0 || ch >= MAX_CH) return;
+    pthread_mutex_lock(&g_ch[ch].lock);
+    g_ch[ch].asp_set = 1;
+    g_ch[ch].asp = w && h ? (vg_ratio_t){ w, h } : (vg_ratio_t){ 0, 0 };
+    g_ch[ch].clear = 2;                 /* other bars: both mosaic buffers */
+    pthread_mutex_unlock(&g_ch[ch].lock);
+    __atomic_store_n(&g_repaint, 2, __ATOMIC_RELEASE);
 }
 
 void hal_display_clear_tile(int ch)

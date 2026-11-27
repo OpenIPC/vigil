@@ -14,11 +14,11 @@ Up to 16 channels. Channel *i* is shown through input port *i* of
 `MI_DISP` video layer 0, which the display scans out on HDMI and VGA at the
 same timing; its decoder is whichever `MI_VDEC` channel is free when it
 opens (see below). The picture goes into a window fitted inside the tile at
-its aspect ratio, centred, with black bars in the rest of the tile, and the
-decoder outputs it at the window's size: mi_disp enlarges a picture but does
-not shrink it across (a wider source lost its right part), and the decoder's
-scaler shrinks at most 8 times (the SDK's decoder sample puts DIVP behind it
-beyond that).
+the camera's display aspect ratio (a sub-stream at its main stream's; see
+[architecture](../architecture.md), "The picture's shape"), centred, with
+black bars in the rest of the tile (`display.video_aspect: stretch`: the
+whole tile), and the decoder shrinks it to about the window's size (below,
+"Picture geometry").
 
 The UI is drawn on the GOP framebuffer `/dev/fb0` above the video layer.
 fbdev.ko sets its size and format from `fbdev.ini` (1280x720, ARGB8888 on
@@ -41,6 +41,40 @@ reached it (`RecvBuf_W/H` in `/proc/mi_modules/mi_disp/mi_disp0`; set at
 once, the display read the old picture at the wrong size). In emulation
 the new decoder's first picture comes about 5 s after the switch; an
 `MI_VDEC` channel bound to nothing decodes nothing there.
+
+## Picture geometry
+
+Each tile is mapped from the UI's 1280x720 to the output's own size, edge by
+edge (`aspect_map`, even pixels), and the picture's window is fitted inside
+the mapped tile (`aspect_fit`), so on a 5:4 or 16:10 output, where the UI is
+stretched, the picture keeps its shape: a 16:9 camera full screen at
+1280x1024 is 1280x720 with bars above and below. What the SDK's modules do,
+read off them:
+
+- **mi_disp** (open_mhal's `_HalDispIfSetInputPortAttr`, the MOP windows)
+  only enlarges: a window larger than the port's source size gets the ratio
+  source / window, a smaller one 1:1, so the picture's top left part shows
+  and the rest is cut. In emulation (the SDK's modules on the emulated
+  hardware) it shows the frame's content size, not the buffer's: for a
+  1080-line stream scaled to 720 lines mi_vdec marks 714 of them as content
+  (below) and mi_disp spreads those over the window.
+- **mi_vdec**'s output port size (`MI_VDEC_SetOutputPortAttr`) is checked
+  for 8..8192, even, and no larger than the channel's picture
+  (`_MI_VDEC_ChkOutputPortAttr`); nothing about 16. The scaler's frames are
+  sized by `CalcScaleDown`: the size asked for rounded **up** to a multiple
+  of 8, and no less than an eighth of the picture (rounded up to 8). The
+  scaler takes the whole decoded frame, the lines below the crop included:
+  a 1920x1080 stream (1088 coded) scaled to 1280x720 has content 1280x714
+  (`Content_W/H` in `/proc/mi_modules/mi_disp/mi_disp0`).
+
+So vigild asks the decoder for the window's size rounded **down** to a
+multiple of 8 (never larger than the window, which would be cut) and no
+smaller than an eighth of the picture (`aspect_scaled_size`); the display
+enlarges that by the few pixels left. Where the window is smaller than an
+eighth of the picture (a 5 MP main stream in a 4x4 tile at 720p, 240x180
+for 2592x1944: the decoder gives 328x248 at least) the picture is cut, not
+squeezed: give such cameras a sub-stream. The SDK's decoder sample uses DIVP
+behind the decoder there.
 
 ## Channels, decoders and memory
 
@@ -214,6 +248,22 @@ fresh `MI_VDEC` channel shows it within about 5 s, the old picture staying
 up meanwhile. An `MI_VDEC` channel reused right after another camera gave
 it up showed a few of that camera's pictures first (only 4 numbers, none
 free for longer).
+
+The picture's shape, also only in emulation (OpenIPC firmware image, four
+NETIP cameras with a circle-and-grid test picture: 2592x1944 4:3 with a
+704x576 sub-stream drawn at 4:3, 2560x1440 with 800x448, 1920x1080 with a
+704x576 sub-stream drawn at 16:9, 2560x1440 H.265 with a 704x576 H.265 one
+at 16:9): the circle's width over its height measured in screendumps of
+2x2 and each camera full screen at 1280x720, 1920x1080, 1280x1024 and
+1440x900, and of 3x3 and 4x4 at 1280x720, was 1.00 within 1 % in fit (the
+two nearest-neighbour scalers' rounding of a thick line), and the tile's
+own shape in stretch. Full screen and back switched between the
+sub-stream and the main stream without the picture changing shape. That
+took a fix to qemu-bench's VPU model, which scaled the cropped picture
+where mi_vdec's content size says the firmware scales the whole decoded
+frame: with the stock model a 1080-line stream came out 0.8 % too tall.
+Whether mi_disp on a board crops to the content as it does in emulation is
+unverified.
 
 The HDMI and VGA signals, hot-plug and decoder limits are unverified on
 hardware.

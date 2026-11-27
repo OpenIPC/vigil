@@ -23,6 +23,9 @@ typedef struct {
 typedef struct {
     unsigned width, height;     /* displayed size, cropping applied */
     unsigned refs;              /* reference frames the decoder must keep */
+    /* The sample (pixel) aspect ratio from the SPS's VUI, sar_w:sar_h;
+     * 0:0 when the stream does not say (square pixels, or unknown). */
+    unsigned sar_w, sar_h;
 } vg_stream_info_t;
 
 typedef struct { int x, y, w, h; } vg_rect_t;

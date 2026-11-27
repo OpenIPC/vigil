@@ -27,6 +27,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "aspect.h"
 #include "au_norm.h"
 #include "channel.h"
 #include "events.h"
@@ -49,6 +50,9 @@
 /* A sub-stream no longer shown keeps its connection this long: layouts
  * switched back and forth do not reconnect. */
 #define SUB_LINGER_SECS    5
+/* A sub-stream waits this long for its main stream's first SPS before its
+ * decoder opens at its own shape (aspect_of_camera). */
+#define MAIN_SPS_WAIT_SECS 3
 
 enum { S_MAIN, S_SUB, S_N };
 #define VIEW_NONE (-1)
@@ -71,6 +75,7 @@ typedef struct {
     unsigned        frames_total;   /* video AUs on this connection, for the log */
     int             title_taken;    /* the source's title went to the channel */
     time_t          last_video;     /* last access unit from the source */
+    time_t          info_at;        /* sub: its first SPS came then */
     /* Status, under c->lock. */
     ch_state_t      status;
     char            state[48];
@@ -114,6 +119,14 @@ struct channel {
     atomic_int      dec_holder;
     vg_codec_t      dec_codec;
     unsigned        dec_gen;        /* the holder's au_norm info_gen */
+    vg_stream_info_t dec_info;      /* the stream it was opened for */
+    /* The main stream's SPS, for the picture's shape (aspect_of_camera):
+     * copied by the main session's thread, its only writer, when it
+     * changes. */
+    vg_stream_info_t main_info;
+    int             main_known;
+    vg_ratio_t      aspect;         /* what the platform was told ... */
+    int             aspect_told;    /* ... if anything yet */
     time_t          dec_failed_at;
     unsigned        dec_failed_frees; /* g_dec_frees when it failed */
     atomic_int      dec_told;       /* the failure was reported (status: no_decoder) */
@@ -139,6 +152,7 @@ static vg_rect_t       g_tiles[CHANNEL_MAX];
 static int             g_have_tiles;
 static int             g_shown_only;   /* hal_caps()->dec_shown_only with a display */
 static unsigned long long g_screen_area; /* 0: unknown, the main stream everywhere */
+static atomic_int      g_stretch;   /* display.video_aspect stretch */
 /* Decoders closed so far: a channel that could not get one (memory, the
  * decoder's channels) tries again as soon as another lets its go. */
 static atomic_uint     g_dec_frees;
@@ -277,6 +291,29 @@ int channels_count(void)
 
 /* ---- decoding (under c->dec_lock) ------------------------------------------- */
 
+/* Tell the platform the shape of the picture for `si` (`id` the session
+ * whose stream it is), if that changed: the camera's display aspect ratio,
+ * or 0:0 to stretch it over the tile. */
+static void aspect_tell(channel_t *c, const vg_stream_info_t *si, int id)
+{
+    if (!hal_caps()->display || c->self_displayed) return;
+    vg_ratio_t a = { 0, 0 };
+    if (!atomic_load(&g_stretch))
+        a = aspect_of_camera(si, id == S_SUB, c->main_known ? &c->main_info : NULL);
+    if (c->aspect_told && a.w == c->aspect.w && a.h == c->aspect.h) return;
+    hal_display_set_aspect(c->idx, a.w, a.h);
+    c->aspect = a;
+    c->aspect_told = 1;
+}
+
+/* The decoder's picture, as it is now: again after the main stream's SPS
+ * or the setting changed. */
+static void aspect_update(channel_t *c)
+{
+    int holder = atomic_load(&c->dec_holder);
+    if (holder != VIEW_NONE) aspect_tell(c, &c->dec_info, holder);
+}
+
 static void decoder_close(channel_t *c)
 {
     if (atomic_load(&c->dec_holder) == VIEW_NONE) return;
@@ -293,6 +330,15 @@ static int decoder_ensure(channel_t *c, sess_t *s, vg_codec_t codec)
     int mine = atomic_load(&c->dec_holder) == s->id;
     if (!s->norm.info_gen) return mine;                 /* no SPS seen yet */
     if (mine && c->dec_codec == codec && c->dec_gen == s->norm.info_gen) return 1;
+    /* A sub-stream is shown at its main stream's shape, which the main
+     * stream's SPS tells: at the start give it a moment, rather than show
+     * the (often anamorphic) picture at its own shape first and make the
+     * decoder again for the right one a second later. */
+    if (s->id == S_SUB && !c->main_known && !atomic_load(&g_stretch)) {
+        time_t now = time(NULL);
+        if (!s->info_at) s->info_at = now;
+        if (now - s->info_at < MAIN_SPS_WAIT_SECS) return 0;
+    }
     if (c->dec_failed_at && time(NULL) - c->dec_failed_at < DEC_RETRY_SECS &&
         atomic_load(&g_dec_frees) == c->dec_failed_frees)
         return 0;
@@ -301,6 +347,8 @@ static int decoder_ensure(channel_t *c, sess_t *s, vg_codec_t codec)
     const char *tag = s->id == S_SUB ? " sub" : "";
     /* Before the attempt: a decoder freed while it runs counts as news. */
     unsigned frees = atomic_load(&g_dec_frees);
+    /* The shape first: the platform sizes the decoder's output for it. */
+    aspect_tell(c, si, s->id);
     /* hal_dec_open replaces a decoder the channel has (the other session's,
      * or this one's for an older stream) without a close first: the
      * platform may keep its picture up until the new one has one. */
@@ -321,6 +369,7 @@ static int decoder_ensure(channel_t *c, sess_t *s, vg_codec_t codec)
     vg_log("CAM%d%s: decoder %s %ux%u, %u refs", c->idx + 1, tag, vg_codec_name(codec), si->width,
            si->height, si->refs);
     atomic_store(&c->dec_holder, s->id);
+    c->dec_info = *si;
     c->dec_codec = codec;
     c->dec_gen = s->norm.info_gen;
     c->dec_failed_at = 0;
@@ -335,6 +384,16 @@ static int decoder_ensure(channel_t *c, sess_t *s, vg_codec_t codec)
 static void dec_feed(sess_t *s, const vg_au_t *au)
 {
     channel_t *c = s->c;
+    /* The main stream's size is the camera's shape, also while the
+     * sub-stream is on screen. */
+    if (s->id == S_MAIN && s->norm.info_gen &&
+        (!c->main_known || memcmp(&c->main_info, &s->norm.info, sizeof c->main_info))) {
+        pthread_mutex_lock(c->dec_lock);
+        c->main_info = s->norm.info;
+        c->main_known = 1;
+        aspect_update(c);
+        pthread_mutex_unlock(c->dec_lock);
+    }
     int view = atomic_load(&c->view), viewed = view == s->id;
     if (!viewed && atomic_load(&c->dec_holder) != s->id) {
         s->dec_ok = 0;
@@ -768,6 +827,7 @@ static int sess_start(channel_t *c, int id, const char *url)
     s->src->stop = &s->stop;
     s->dec_ok = s->was_viewed = s->title_taken = 0;
     s->frames = 0;
+    s->info_at = 0;
     au_norm_init(&s->norm, VG_CODEC_NONE);
     pthread_mutex_lock(c->lock);
     s->done = 0;
@@ -1027,6 +1087,20 @@ int channels_start(const channels_config_t *cfg, const vg_rect_t *tiles)
 void channels_set_screen(unsigned w, unsigned h)
 {
     g_screen_area = (unsigned long long)w * h;
+}
+
+void channels_set_stretch(int stretch)
+{
+    pthread_once(&g_once, locks_init);
+    if (atomic_exchange(&g_stretch, !!stretch) == !!stretch) return;
+    for (int i = 0; i < CHANNEL_MAX; ++i) {
+        channel_t *c = &g_ch[i];
+        /* Only this thread starts and stops channels: active is stable. */
+        if (!c->active) continue;
+        pthread_mutex_lock(c->dec_lock);
+        aspect_update(c);
+        pthread_mutex_unlock(c->dec_lock);
+    }
 }
 
 void channels_set_tiles(const vg_rect_t *tiles)

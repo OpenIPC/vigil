@@ -300,7 +300,12 @@ with one mode says so. *Clock*: position (off, a corner, the middle of the
 top or bottom edge), size, background, and the date and time formats (the
 same settings as System, General). *Camera names*: position (off or a
 tile corner), size (a step smaller in tiles under 400 pixels wide),
-background. *Status icons*: the corner, background. Sizes are Small,
+background. *Status icons*: the corner, background. *Video*:
+`display.video_aspect`, Fit (the default: each picture at its camera's
+shape inside its tile or the full screen, black bars where the shapes
+differ, a sub-stream at its main stream's shape; see
+[architecture](architecture.md)) or Stretch (the picture fills the tile).
+Sizes are Small,
 Medium, Large and Extra large (Montserrat 14, 16, 20, 24: the only font
 built in; another family would cost the firmware's flash). Backgrounds are
 **Outline** (the default: hard-edged text with a black outline straight on
@@ -383,7 +388,9 @@ screen computes the cells (`ui_layout_cells`) and hands one rectangle per
 channel to `model->show_tiles`, which calls `channels_set_tiles()` in the
 core. That moves each running channel's picture with the existing HAL calls
 (`hal_display_set_tile`, or `hal_display_clear_tile` for a channel not on
-the page) and remembers the tiles for channels that start later. The same
+the page) and remembers the tiles for channels that start later; the
+platform fits the picture inside its tile at the shape the core gives it
+(`hal_display_set_aspect`, below). The same
 `ui_layout_cells` gives `frontend_tiles()` the start-up 2x2 tiles, so the
 holes and the video cannot disagree.
 

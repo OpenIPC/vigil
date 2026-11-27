@@ -18,6 +18,7 @@
 
 #include <pthread.h>
 
+#include "aspect.h"
 #include "au_norm.h"
 #include "channel.h"
 #include "cJSON.h"
@@ -78,11 +79,19 @@ static const uint8_t *find_nal(const uint8_t *b, size_t len, vg_codec_t c, int t
 
 static void test_sps(void)
 {
-    static const struct { const char *file; vg_codec_t c; int sps; unsigned w, h, refs; } T[] = {
-        { "testsrc_640x360.h264", VG_CODEC_H264, 7, 640, 360, 2 },
+    static const struct { const char *file; vg_codec_t c; int sps; unsigned w, h, refs, sar_w, sar_h; } T[] = {
+        /* x264 and x265 say 1:1 */
+        { "testsrc_640x360.h264", VG_CODEC_H264, 7, 640, 360, 2, 1, 1 },
         /* x265 ref=1 still signals a DPB of 3 (max_dec_pic_buffering_minus1 = 2) */
-        { "testsrc_640x360.h265", VG_CODEC_H265, 33, 640, 360, 2 },
-        { "majestic_1080p.h265", VG_CODEC_H265, 33, 1920, 1080, 1 },
+        { "testsrc_640x360.h265", VG_CODEC_H265, 33, 640, 360, 2, 1, 1 },
+        { "majestic_1080p.h265", VG_CODEC_H265, 33, 1920, 1080, 1, 0, 0 },   /* no VUI SAR */
+        /* anamorphic D1 and CIF: a 16:9 D1 (aspect_ratio_idc 4), a 4:3 CIF
+         * in H.265 (idc 2) after scaling lists and predicted short-term
+         * reference picture sets */
+        { "testsrc_704x576_sar16x11.h264", VG_CODEC_H264, 7, 704, 576, 1, 16, 11 },
+        { "testsrc_352x288_sar12x11.h265", VG_CODEC_H265, 33, 352, 288, 3, 12, 11 },
+        /* square pixels, as many D1 cameras claim */
+        { "testsrc_704x576.h264", VG_CODEC_H264, 7, 704, 576, 1, 1, 1 },
     };
     for (size_t i = 0; i < sizeof T / sizeof T[0]; ++i) {
         size_t len, nl;
@@ -92,7 +101,183 @@ static void test_sps(void)
         CHECK(sps && sps_parse(T[i].c, sps, nl, &si) == 0, "%s: no SPS", T[i].file);
         CHECK(si.width == T[i].w && si.height == T[i].h && si.refs == T[i].refs,
               "%s: %ux%u refs %u", T[i].file, si.width, si.height, si.refs);
+        CHECK(si.sar_w == T[i].sar_w && si.sar_h == T[i].sar_h, "%s: SAR %u:%u", T[i].file, si.sar_w, si.sar_h);
+        /* a VUI cut short leaves the SAR unknown, never the size */
+        vg_stream_info_t cut;
+        CHECK(sps_parse(T[i].c, sps, nl - 2 > 12 ? 12 : nl - 2, &cut) < 0 ||
+              (cut.width == T[i].w && cut.height == T[i].h), "%s: cut short", T[i].file);
         free(b);
+    }
+}
+
+/* ---- the picture's shape and place (aspect.c) ------------------------------------ */
+
+static int rect_eq(vg_rect_t a, vg_rect_t b) { return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h; }
+
+static vg_stream_info_t SI(unsigned w, unsigned h, unsigned sw, unsigned sh)
+{
+    return (vg_stream_info_t){ .width = w, .height = h, .refs = 1, .sar_w = sw, .sar_h = sh };
+}
+
+static int ratio_is(vg_ratio_t r, unsigned w, unsigned h) { return r.w == w && r.h == h; }
+
+static void test_aspect_ratio(void)
+{
+    static const struct { unsigned w, h, sw, sh, aw, ah; } T[] = {
+        { 2592, 1944, 0, 0, 4, 3 },     /* 5 MP */
+        { 2560, 1440, 0, 0, 16, 9 },    /* 4 MP */
+        { 1920, 1080, 0, 0, 16, 9 },
+        { 1920, 1088, 0, 0, 16, 9 },    /* the crop left out: within 2 % */
+        { 800, 448, 0, 0, 16, 9 },      /* 450 rounded to 16 */
+        { 640, 360, 1, 1, 16, 9 },
+        { 2048, 1536, 0, 0, 4, 3 },
+        { 1280, 1024, 0, 0, 5, 4 },
+        { 3840, 1080, 0, 0, 32, 9 },
+        { 704, 576, 0, 0, 11, 9 },      /* not 5:4: 2.2 % off */
+        { 704, 480, 0, 0, 22, 15 },     /* not 3:2 either */
+        { 352, 288, 0, 0, 11, 9 },
+        { 720, 576, 0, 0, 5, 4 },
+        { 704, 576, 16, 11, 16, 9 },    /* PAL 16:9 */
+        { 704, 576, 12, 11, 4, 3 },     /* PAL 4:3 */
+        { 352, 288, 12, 11, 4, 3 },
+        { 720, 576, 64, 45, 16, 9 },
+        { 704, 480, 10, 11, 4, 3 },     /* NTSC 4:3 */
+        { 704, 480, 40, 33, 16, 9 },    /* NTSC 16:9 */
+        { 1000, 300, 0, 0, 10, 3 },
+        { 0, 0, 0, 0, 0, 0 },
+    };
+    for (size_t i = 0; i < sizeof T / sizeof T[0]; ++i) {
+        vg_stream_info_t si = SI(T[i].w, T[i].h, T[i].sw, T[i].sh);
+        vg_ratio_t r = aspect_of_stream(&si);
+        CHECK(ratio_is(r, T[i].aw, T[i].ah), "%ux%u SAR %u:%u: %u:%u, not %u:%u", T[i].w, T[i].h, T[i].sw, T[i].sh,
+              r.w, r.h, T[i].aw, T[i].ah);
+    }
+
+    /* A sub-stream at its main stream's shape, whatever its own. */
+    static const struct { unsigned mw, mh, sw, sh, aw, ah; } C[] = {
+        { 2592, 1944, 704, 576, 4, 3 },
+        { 2592, 1944, 352, 288, 4, 3 },
+        { 2560, 1440, 704, 576, 16, 9 },
+        { 2560, 1440, 800, 448, 16, 9 },
+        { 1920, 1080, 704, 576, 16, 9 },
+        { 1920, 1080, 800, 448, 16, 9 },
+        { 1920, 1080, 640, 480, 16, 9 },
+        { 2592, 1944, 800, 448, 4, 3 },
+    };
+    for (size_t i = 0; i < sizeof C / sizeof C[0]; ++i) {
+        vg_stream_info_t m = SI(C[i].mw, C[i].mh, 0, 0), sub = SI(C[i].sw, C[i].sh, 0, 0);
+        vg_ratio_t r = aspect_of_camera(&sub, 1, &m), rm = aspect_of_camera(&m, 0, &m);
+        CHECK(ratio_is(r, C[i].aw, C[i].ah) && ratio_is(rm, C[i].aw, C[i].ah),
+              "sub %ux%u of %ux%u: %u:%u, main %u:%u", C[i].sw, C[i].sh, C[i].mw, C[i].mh, r.w, r.h, rm.w, rm.h);
+    }
+    vg_stream_info_t d1 = SI(704, 576, 0, 0), d1sar = SI(704, 576, 16, 11), fhd = SI(1920, 1080, 0, 0);
+    CHECK(ratio_is(aspect_of_camera(&d1, 1, NULL), 11, 9), "main not known yet: the sub's own size");
+    CHECK(ratio_is(aspect_of_camera(&d1sar, 1, NULL), 16, 9), "main not known yet: the sub's SAR");
+    CHECK(ratio_is(aspect_of_camera(&d1, 0, &fhd), 11, 9), "a main stream keeps its own shape");
+}
+
+/* The UI's cells for an n x n layout on a w x h screen: edges at i * w / n. */
+static vg_rect_t cell(int n, int i, unsigned w, unsigned h)
+{
+    int c = i % n, r = i / n;
+    int x0 = (int)(c * w / n), x1 = (int)((c + 1) * w / n), y0 = (int)(r * h / n), y1 = (int)((r + 1) * h / n);
+    return (vg_rect_t){ x0, y0, x1 - x0, y1 - y0 };
+}
+
+static void test_aspect_fit(void)
+{
+    /* Known places: full screen and 2x2 on each output. */
+    static const struct { unsigned ow, oh; vg_rect_t tile; unsigned aw, ah; vg_rect_t want; } K[] = {
+        { 1280, 720, { 0, 0, 1280, 720 }, 4, 3, { 160, 0, 960, 720 } },
+        { 1280, 720, { 0, 0, 1280, 720 }, 16, 9, { 0, 0, 1280, 720 } },
+        { 1920, 1080, { 0, 0, 1280, 720 }, 4, 3, { 240, 0, 1440, 1080 } },
+        { 1280, 1024, { 0, 0, 1280, 720 }, 16, 9, { 0, 152, 1280, 720 } },
+        { 1280, 1024, { 0, 0, 1280, 720 }, 4, 3, { 0, 32, 1280, 960 } },
+        { 1440, 900, { 0, 0, 1280, 720 }, 16, 9, { 0, 44, 1440, 810 } },
+        { 1440, 900, { 0, 0, 1280, 720 }, 4, 3, { 120, 0, 1200, 900 } },
+        { 1280, 720, { 640, 360, 640, 360 }, 4, 3, { 720, 360, 480, 360 } },
+        { 1920, 1080, { 640, 360, 640, 360 }, 4, 3, { 1080, 540, 720, 540 } },
+        { 1280, 1024, { 640, 360, 640, 360 }, 16, 9, { 640, 588, 640, 360 } },
+        { 1280, 720, { 0, 0, 1280, 720 }, 0, 0, { 0, 0, 1280, 720 } },
+        { 1280, 1024, { 0, 0, 1280, 720 }, 0, 0, { 0, 0, 1280, 1024 } },
+    };
+    for (size_t i = 0; i < sizeof K / sizeof K[0]; ++i) {
+        vg_rect_t t = aspect_map(&K[i].tile, 1280, 720, K[i].ow, K[i].oh, 2);
+        vg_rect_t r = aspect_fit(&t, (vg_ratio_t){ K[i].aw, K[i].ah }, 2);
+        CHECK(rect_eq(r, K[i].want), "%u:%u in %dx%d at %ux%u: %d,%d %dx%d", K[i].aw, K[i].ah, K[i].tile.w,
+              K[i].tile.h, K[i].ow, K[i].oh, r.x, r.y, r.w, r.h);
+    }
+
+    /* Every camera size, every layout, every output, fit and stretch: the
+     * picture inside its tile, centred, filling it one way, at its shape
+     * to a pixel; stretched, the whole tile; neighbouring tiles meet. */
+    static const unsigned sizes[][2] = { { 2592, 1944 }, { 2560, 1440 }, { 1920, 1080 }, { 800, 448 }, { 704, 576 } };
+    static const unsigned outs[][2] = { { 1280, 720 }, { 1920, 1080 }, { 1280, 1024 }, { 1440, 900 } };
+    /* the 704x576 sub-stream of a 5 MP camera and of a 16:9 one */
+    static const unsigned mains[][2] = { { 0, 0 }, { 2592, 1944 }, { 1920, 1080 } };
+    int bad = 0, cases = 0;
+    for (size_t o = 0; o < 4; ++o)
+        for (int n = 1; n <= 4; ++n)
+            for (int i = 0; i < n * n; ++i) {
+                vg_rect_t ui = cell(n, i, 1280, 720), t = aspect_map(&ui, 1280, 720, outs[o][0], outs[o][1], 2);
+                if (i % n) {
+                    vg_rect_t lc = cell(n, i - 1, 1280, 720);
+                    vg_rect_t left = aspect_map(&lc, 1280, 720, outs[o][0], outs[o][1], 2);
+                    bad += left.x + left.w != t.x;
+                }
+                for (size_t z = 0; z < 5; ++z)
+                    for (size_t m = 0; m < 3; ++m)
+                        for (int stretch = 0; stretch < 2; ++stretch) {
+                            if (m && sizes[z][0] != 704) continue;
+                            vg_stream_info_t si = SI(sizes[z][0], sizes[z][1], 0, 0);
+                            vg_stream_info_t mi = SI(mains[m][0], mains[m][1], 0, 0);
+                            vg_ratio_t a = stretch ? (vg_ratio_t){ 0, 0 } : aspect_of_camera(&si, m != 0, m ? &mi : NULL);
+                            vg_rect_t r = aspect_fit(&t, a, 2);
+                            ++cases;
+                            int in = r.x >= t.x && r.y >= t.y && r.x + r.w <= t.x + t.w && r.y + r.h <= t.y + t.h &&
+                                     r.w > 0 && r.h > 0 && !(r.x & 1) && !(r.y & 1) && !(r.w & 1) && !(r.h & 1);
+                            int lm = r.x - t.x, rm = t.x + t.w - r.x - r.w, tm = r.y - t.y, bm = t.y + t.h - r.y - r.h;
+                            int centred = abs(lm - rm) <= 2 && abs(tm - bm) <= 2;
+                            int full = stretch ? r.w >= t.w - 1 && r.h >= t.h - 1 : r.w >= t.w - 1 || r.h >= t.h - 1;
+                            /* the shape: w:h against a, to within the rounding of one side to 2 px */
+                            long long d = stretch ? 0 : (long long)r.w * a.h - (long long)r.h * a.w;
+                            int shape = stretch || llabs(d) <= (long long)(a.w > a.h ? a.w : a.h) * 2;
+                            if (!(in && centred && full && shape)) {
+                                if (bad < 10)
+                                    fprintf(stderr, "  %ux%u%s %dx%d #%d out %ux%u %s: %d,%d %dx%d in %d,%d %dx%d\n",
+                                            sizes[z][0], sizes[z][1], m ? " (sub)" : "", n, n, i, outs[o][0],
+                                            outs[o][1], stretch ? "stretch" : "fit", r.x, r.y, r.w, r.h, t.x, t.y,
+                                            t.w, t.h);
+                                ++bad;
+                            }
+                        }
+            }
+    CHECK(bad == 0, "%d of %d placements wrong", bad, cases);
+}
+
+static void test_aspect_scaled(void)
+{
+    /* The SigmaStar decoder: shrinks only, to multiples of 8, at most 8x. */
+    static const struct { unsigned sw, sh, ww, wh, ow, oh; } T[] = {
+        { 2592, 1944, 960, 720, 960, 720 },     /* full screen at 720p */
+        { 2592, 1944, 1440, 1080, 1440, 1080 }, /* ... at 1080p */
+        { 2592, 1944, 480, 360, 480, 360 },     /* 2x2 */
+        { 2592, 1944, 240, 180, 328, 248 },     /* 4x4: 8x is the most, the display crops */
+        { 2560, 1440, 320, 180, 320, 184 },     /* 1440 / 8 = 180, a multiple of 8 up: 184 */
+        { 1920, 1080, 960, 540, 960, 536 },     /* rounded down to 8: the display enlarges 4 lines */
+        { 1920, 1080, 1920, 1080, 1920, 1080 }, /* as decoded: no scaler */
+        { 704, 576, 640, 360, 640, 360 },       /* anamorphic, at 16:9 */
+        { 704, 576, 480, 360, 480, 360 },       /* ... at 4:3 */
+        { 704, 576, 1280, 720, 704, 576 },      /* larger: the display enlarges */
+        { 704, 576, 960, 540, 704, 536 },       /* one way each */
+        { 800, 448, 426, 240, 424, 240 },
+        { 800, 448, 1440, 810, 800, 448 },
+    };
+    for (size_t i = 0; i < sizeof T / sizeof T[0]; ++i) {
+        unsigned ow, oh;
+        aspect_scaled_size(T[i].sw, T[i].sh, T[i].ww, T[i].wh, 8, 8, &ow, &oh);
+        CHECK(ow == T[i].ow && oh == T[i].oh, "%ux%u for %ux%u: %ux%u, not %ux%u", T[i].sw, T[i].sh, T[i].ww, T[i].wh,
+              ow, oh, T[i].ow, T[i].oh);
     }
 }
 
@@ -1435,6 +1620,24 @@ void hal_dec_close(int ch)
     pthread_mutex_unlock(&g_dec_lock);
 }
 
+static vg_ratio_t g_aspect_at[CHANNEL_MAX]; /* hal_display_set_aspect, last */
+static int        g_aspect_sets[CHANNEL_MAX];
+void hal_display_set_aspect(int ch, unsigned w, unsigned h)
+{
+    pthread_mutex_lock(&g_dec_lock);
+    g_aspect_at[ch] = (vg_ratio_t){ w, h };
+    ++g_aspect_sets[ch];
+    pthread_mutex_unlock(&g_dec_lock);
+}
+
+static int aspect_now(int ch, unsigned w, unsigned h)
+{
+    pthread_mutex_lock(&g_dec_lock);
+    int v = g_aspect_sets[ch] && g_aspect_at[ch].w == w && g_aspect_at[ch].h == h;
+    pthread_mutex_unlock(&g_dec_lock);
+    return v;
+}
+
 static vg_rect_t g_tile_at[CHANNEL_MAX];    /* w == 0: cleared */
 static int       g_tile_sets[CHANNEL_MAX], g_tile_clears[CHANNEL_MAX];
 int hal_display_set_tile(int ch, const vg_rect_t *r)
@@ -1449,7 +1652,6 @@ void hal_display_clear_tile(int ch)
     ++g_tile_clears[ch];
 }
 
-static int rect_eq(vg_rect_t a, vg_rect_t b) { return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h; }
 
 static void test_channel_tiles(void)
 {
@@ -1849,6 +2051,42 @@ static void test_channel_substream(void)
     g_fake_caps.dec_shown_only = 0;
     g_dec_slots = 0;
     if (system(cmd)) {}
+}
+
+/* A 16:9 camera whose sub-stream is anamorphic D1 (704x576, claiming square
+ * pixels): the sub-stream is shown at the main stream's 16:9, before and
+ * after a switch to full screen; stretch, at once 0:0. */
+static void test_channel_aspect(void)
+{
+    int port = cam_start("majestic_1080p.h265", "testsrc_704x576.h264");
+    if (!port) return;
+    char url[64];
+    snprintf(url, sizeof url, "netip://127.0.0.1:%d/?ch=0&stream=main", port);
+    g_fake_caps.dec_shown_only = 1;
+    g_dec_slots = 2;
+    channels_set_screen(1280, 720);
+    vg_rect_t quad[CHANNEL_MAX] = { { 0, 40, 640, 300 } };
+    vg_rect_t full[CHANNEL_MAX] = { { 0, 40, 1280, 600 } };
+    channels_config_t cc = { .urls = { url }, .n = 1, .seg_secs = 60 };
+    CHECK(channels_start(&cc, quad) == 0, "start");
+    WAIT_FOR(view_is(0, "sub", 704) && aspect_now(0, 16, 9), 6000);
+    CHECK(view_is(0, "sub", 704) && aspect_now(0, 16, 9), "the D1 sub-stream at the main stream's 16:9 (%u:%u)",
+          g_aspect_at[0].w, g_aspect_at[0].h);
+    channels_set_stretch(1);
+    CHECK(aspect_now(0, 0, 0), "stretch: at once");
+    channels_set_stretch(0);
+    CHECK(aspect_now(0, 16, 9), "fit again");
+    channels_set_tiles(full);
+    WAIT_FOR(view_is(0, "main", 1920), 5000);
+    CHECK(view_is(0, "main", 1920) && aspect_now(0, 16, 9), "full screen: the main stream, the same shape");
+    channels_set_tiles(quad);
+    WAIT_FOR(view_is(0, "sub", 704), 5000);
+    CHECK(view_is(0, "sub", 704) && aspect_now(0, 16, 9), "and back: the same shape");
+    channels_stop();
+    cam_stop();
+    channels_set_screen(0, 0);
+    g_fake_caps.dec_shown_only = 0;
+    g_dec_slots = 0;
 }
 
 /* ---- NETIP: the camera's quirks, the stream on screen -------------------------------- */
@@ -2469,10 +2707,14 @@ int main(int argc, char **argv)
     test_config_file();
     test_config_store();
     test_events();
+    test_aspect_ratio();
+    test_aspect_fit();
+    test_aspect_scaled();
     test_channel_tiles();
     test_channel_decode();
     test_sub_url();
     test_channel_substream();
+    test_channel_aspect();
     test_netip_title_parse();
     test_channel_stream_states();
     test_camera_slots();
