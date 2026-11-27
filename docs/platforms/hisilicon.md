@@ -31,6 +31,18 @@ the video wherever it sees that colour.
 - **A cross toolchain** for `arm-openipc-linux-gnueabi` (glibc), e.g. the
   one an OpenIPC firmware build for hi3536dv100 produces in
   `output-hi3536dv100/host/`.
+- **libyaml for the target** (`yaml.h`, `libyaml.so`): the configuration
+  file is YAML. `cmake/toolchains/cross.cmake` looks in the toolchain's
+  sysroot (OpenIPC firmware builds with `yaml-cli` have it); otherwise add a
+  firmware build's staging directory with `-DCMAKE_FIND_ROOT_PATH=<firmware>/output/staging`,
+  or give `-DLIBYAML_INCLUDE_DIR=… -DLIBYAML_LIBRARY=…`.
+- **libmbedcrypto for the target** (`mbedtls/gcm.h`, `libmbedcrypto.so`,
+  mbedTLS 2.28 or 3.x): it seals the passwords vigild keeps
+  ([security.md](../security.md)). OpenIPC images carry it
+  (`mbedtls-openipc`); found the same way as libyaml (the staging
+  directory, or `-DMBEDCRYPTO_INCLUDE_DIR=… -DMBEDCRYPTO_LIBRARY=…`). The
+  toolchain's sysroot may hold an mbedTLS of its own: put the firmware's
+  staging first so the headers match the library on the image.
 - **Kernel modules**: the OpenIPC lite image ships none. Build them with
   [openhisilicon](https://github.com/OpenIPC/openhisilicon) for this SoC
   (`open_*.ko`: OSAL from source, the MPP modules relinked from the SDK).
@@ -127,7 +139,12 @@ capture input and showed live video in all four tiles with the UI on top.
 Not verified yet: the mouse-driven UI's layouts ([ui.md](../ui.md)). A
 channel shown full screen (1280x600) needs VPSS output pictures larger
 than the common pool's 640x320 blocks, which `hal_init` sizes for the 2x2
-tiles; full screen may stay black until that pool is sized for it.
+tiles; full screen may stay black until that pool is sized for it. Nor
+`display.video_aspect: fill`: the VPSS group crops the decoded picture to
+the middle the tile shows (`HI_MPI_VPSS_SetGrpCrop`, offsets and sizes
+multiples of 4) and the VO channel stretches that over the tile; it has
+only been compiled. The hi3520dv200 does not place pictures by their shape
+at all.
 
 ## hi3520dv200 (DVR) — experimental
 

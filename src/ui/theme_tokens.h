@@ -16,6 +16,25 @@
 #define VG_COLOR_TEXT                0xE8EAED
 #define VG_COLOR_TEXT2               0x9AA3AF
 #define VG_COLOR_CHIP                0x0B0D11
+#define VG_COLOR_FOCUS               0xFFFFFF
+#define VG_COLOR_OUTLINE             0x000000
+#define VG_COLOR_MENU_TOP            0x16233A
+#define VG_COLOR_MENU_BOTTOM         0x0A0F18
+#define VG_COLOR_CARD                0x1A263A
+#define VG_COLOR_CARD_HOVER          0x233550
+#define VG_COLOR_ICON_PLAYBACK       0x4FA3F7
+#define VG_COLOR_ICON_AI             0xB07CF7
+#define VG_COLOR_ICON_ALARM          0xF25C3B
+#define VG_COLOR_ICON_OPERATION      0x2FC98A
+#define VG_COLOR_ICON_BACKUP         0xF5A623
+#define VG_COLOR_ICON_DISPLAY        0x3BC4D8
+#define VG_COLOR_SCAN_5              0x3A414D
+#define VG_COLOR_SCAN_20             0x5C6573
+#define VG_COLOR_SCAN_50             0x8E98A6
+#define VG_COLOR_SCAN_150            0x19BE6B
+#define VG_COLOR_SCAN_500            0xFF9900
+#define VG_COLOR_SCAN_SLOW           0xED4014
+#define VG_COLOR_SCAN_ERR            0x4C6FFF
 
 #define VG_SPACE_XS                  4
 #define VG_SPACE_SM                  8
@@ -36,9 +55,18 @@
 #define VG_FONT_XL                   24
 #define VG_FONT_XL_LV                (&lv_font_montserrat_24)
 
-#define VG_SIZE_HEADER               40
-#define VG_SIZE_STRIP                80
 #define VG_SIZE_NAVBAR               64
+#define VG_SIZE_ICON_DOT             10
+#define VG_SIZE_FOCUS_RING           3
+#define VG_SIZE_FOCUS_GAP            2
+#define VG_SIZE_CARD_W               376
+#define VG_SIZE_CARD_H               208
+#define VG_SIZE_ICON_CARD            96
+#define VG_SIZE_ICON_ROW             28
+#define VG_SIZE_PAGE_ARROW           48
+#define VG_SIZE_OSK_W                560
+#define VG_SIZE_ADD_DISC             36
+#define VG_SIZE_OSK_H                190
 #define VG_SIZE_PAGE_HEADER          56
 #define VG_SIZE_BUTTON               40
 #define VG_SIZE_CURSOR               19

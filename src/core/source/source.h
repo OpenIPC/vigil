@@ -22,6 +22,14 @@
 
 typedef struct source source_t;
 
+/* Why a source failed, as far as the protocol tells: what the tile says. */
+typedef enum {
+    SRC_FAIL_OTHER = 0,
+    SRC_FAIL_UNREACHABLE,           /* refused, timed out, no route, no such host, lost */
+    SRC_FAIL_AUTH,                  /* the camera refused the user or the password */
+    SRC_FAIL_CODEC,                 /* video, but not H.264 or H.265 */
+} src_fail_t;
+
 typedef struct {
     const char *scheme;
     /* Parse s->url and set up s->priv. Returns 0, or -1 (bad URL). */
@@ -37,6 +45,13 @@ typedef struct {
     /* The platform shows this source itself (local capture): the channel
      * records it but does not decode it. */
     int  self_displayed;
+    /* Optional: the camera's sub-stream for a main-stream URL. Returns 0
+     * with `out` set, or -1 (none, or the URL is the sub-stream already). */
+    int  (*sub_url)(const char *url, char *out, size_t cap);
+    /* Optional: connect, ask the camera what it calls this channel, hang
+     * up (s->title set, "" when it does not say). Returns 0, or -1 with
+     * s->err set. */
+    int  (*title)(source_t *s);
 } source_ops_t;
 
 #define SOURCE_PS_MAX  3
@@ -46,11 +61,16 @@ struct source {
     char        url[512];
     char        host[128];          /* for status lines */
     char        err[160];           /* last error */
+    src_fail_t  fail;               /* ... and what kind it is */
     vg_codec_t  codec;
     /* Out-of-band parameter sets (e.g. from the SDP), valid after open. */
     const uint8_t *ps[SOURCE_PS_MAX];
     size_t      ps_len[SOURCE_PS_MAX];
     int         ps_n;
+    /* The camera's own name for the channel, where the protocol has one
+     * (NETIP ChannelTitle): set by open (or title) when the camera says;
+     * "" until then. */
+    char        title[32];
     int         index;              /* channel index (capture sources use it) */
     /* Set by the channel: drivers abandon connects and waits when *stop is
      * set, so a stop never waits for a slow camera. */
@@ -61,6 +81,25 @@ struct source {
 /* NULL if the scheme is unknown or the URL is malformed. */
 source_t *source_create(const char *url, int index);
 void      source_destroy(source_t *s);
+
+/* The sub-stream of a camera given by its main-stream URL, where the
+ * protocol has a fixed way to name it (NETIP: stream=extra); RTSP paths
+ * are the vendor's own, so none there. 0 with `out` set, or -1. */
+int source_sub_url(const char *url, char *out, size_t cap);
+
+/* The camera's own name for the channel of `url` (ops->title): 0 with
+ * `out` set (maybe ""), or -1 (the protocol has none, or the camera could
+ * not be asked). `stop` (may be NULL) abandons the attempt. */
+int source_title(const char *url, char *out, size_t cap, const volatile int *stop);
+
+/* NETIP: channel `ch`'s name from a ChannelTitle reply (a list of names,
+ * or of objects with a "Name"). 0 with `out` set, or -1. */
+int netip_title_parse(const char *reply, int ch, char *out, size_t cap);
+
+/* The body of one NETIP media message (msgid 1412) into the frames it
+ * completes, as the source reads them; `s` made by the netip ops' create.
+ * For tests: what vigild's NETIP server sends must play here. */
+void netip_media_feed(source_t *s, const uint8_t *body, size_t len, au_emit_fn emit, void *user);
 
 /* "rtsp, netip, capture" — for usage text. */
 const char *source_schemes(void);

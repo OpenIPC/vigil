@@ -12,4 +12,8 @@ void md5_raw(const void *data, size_t len, uint8_t out[16]);
 /* Lower-case hex digest of `len` bytes at `data` into `hex` (33 bytes). */
 void md5_hex(const void *data, size_t len, char hex[33]);
 
+/* Xiongmai's "sofia" password hash (NETIP login, the broadcast network
+ * set): MD5, then each pair of bytes -> one of 62 characters. */
+void md5_sofia(const char *pass, char out[9]);
+
 #endif /* MD5_H */

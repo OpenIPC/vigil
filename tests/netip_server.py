@@ -4,18 +4,23 @@
 
 Serves an Annex-B H.264/H.265 file in a loop as live video:
 login (msgid 1000, "sofia" password hash), keepalive (1006 -> 1007),
-OPMonitor Claim (1413 -> 1414) and Start (1410), then media as msgid 1412
-messages carrying 0x1FC (I-frame) / 0x1FD (P-frame) frames, split over
-several messages like real devices do.
+the channel's name (ChannelTitle, 1048 -> 1049), OPMonitor Claim
+(1413 -> 1414) and Start (1410), then media as msgid 1412 messages
+carrying 0x1FC (I-frame) / 0x1FD (P-frame) frames, split over several
+messages like real devices do. The I-frame header says --width and
+--height the way XM cameras do: width/8 and height/8 in a byte each, their
+bits 8-9 in the codec byte's high nibble (0x13: H.265, 2048 or more wide).
 
     netip_server.py FILE [--port 34567] [--user admin] [--password ''] [--fps 25]
-                    [--chatty] [--stall] [--video-frames N]
+                    [--width 640 --height 360] [--title NAME] [--title-objects]
+                    [--chatty] [--stall] [--video-frames N] [--no-title]
 
 Fault modes for tests:
   --chatty          never answer the login; send unrelated messages instead
   --stall           after Start, send one media header and part of its body,
                     then nothing
   --video-frames N  after N video frames, send only audio (0x1FA) chunks
+  --no-title        never answer ChannelTitle (firmwares that do not know it)
 """
 import argparse
 import hashlib
@@ -93,6 +98,7 @@ class Client(threading.Thread):
     def stream(self):
         fps = self.args.fps
         w, h = self.args.width // 8, self.args.height // 8
+        codec = (3 if self.h265 else 2) | (w >> 8 & 3) << 4 | (h >> 8 & 3) << 6
         if self.args.stall:
             with self.lock:
                 self.s.sendall(HDR.pack(0xFF, 1, self.session, 0, 1412, 1000) + b"\0" * 10)
@@ -112,7 +118,7 @@ class Client(threading.Thread):
                     continue
                 sent += 1
                 if key:
-                    head = struct.pack(">I", 0x1FC) + struct.pack("<BBBBII", 3 if self.h265 else 2, fps, w, h, 0, len(au))
+                    head = struct.pack(">I", 0x1FC) + struct.pack("<BBBBII", codec, fps, w & 255, h & 255, 0, len(au))
                 else:
                     head = struct.pack(">I", 0x1FD) + struct.pack("<I", len(au))
                 payload = head + au
@@ -139,6 +145,11 @@ class Client(threading.Thread):
                         return
                 elif msgid == 1006:
                     self.send(1007, {"Ret": 100, "SessionID": "0x%08X" % self.session})
+                elif msgid == 1048 and not self.args.no_title:
+                    t = self.args.title
+                    titles = [{"Name": t, "SetOSD": True}] if self.args.title_objects else [t]
+                    self.send(1049, {"Name": "ChannelTitle", "ChannelTitle": titles, "Ret": 100,
+                                     "SessionID": "0x%08X" % self.session})
                 elif msgid == 1413:
                     self.send(1414, {"Ret": 100, "SessionID": "0x%08X" % self.session})
                 elif msgid == 1410 and not self.streaming:
@@ -163,6 +174,9 @@ def main():
     ap.add_argument("--chatty", action="store_true")
     ap.add_argument("--stall", action="store_true")
     ap.add_argument("--video-frames", type=int, default=0)
+    ap.add_argument("--title", default="")
+    ap.add_argument("--title-objects", action="store_true")
+    ap.add_argument("--no-title", action="store_true")
     args = ap.parse_args()
     h265 = args.file.endswith((".h265", ".hevc", ".265"))
     aus = access_units(open(args.file, "rb").read(), h265)

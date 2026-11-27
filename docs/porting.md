@@ -82,8 +82,10 @@ from 5, 4x4 from 10). Set `.fixed_tiles` when the platform places the
 tiles itself and `hal_display_set_tile` cannot move them: the UI then
 offers only the 2x2 view.
 
-`hal_init(w, h, fps)` brings up the vendor media system and the display
-output at w×h (1280×720 today). If it fails, it must undo what it already
+`hal_init(w, h, out)` brings up the vendor media system and the display:
+a w×h screen (1280×720), the UI's and the tiles' coordinates, sent out at
+mode `out` (`display.output`) if the platform has it, else at its own
+mode. If it fails, it must undo what it already
 brought up itself: vigild then exits without calling `hal_shutdown()`.
 `hal_shutdown()` undoes a successful `hal_init` in reverse order.
 
@@ -118,13 +120,42 @@ MI_DISP, linked with MI_SYS_BindChnPort).
 ## 4. Display: `hal_display.h`
 
 `hal_display_set_tile(ch, r)` puts channel `ch`'s video into rectangle `r`
-(screen pixels). Keep the source's aspect ratio inside it, with black bars.
-It is called when a channel starts (the 2x2 tiles of `frontend_tiles()`)
+(screen pixels). `hal_display_set_aspect(ch, w, h, how)` gives the shape to
+show the picture at (the camera's display aspect ratio, which for an
+anamorphic sub-stream is not its coded size's; 0:0 the decoded picture's
+own) and how it fills the tile: `VG_ASPECT_FIT`, placed with `aspect_fit`
+(`src/core/aspect.h`), black around it; `VG_ASPECT_STRETCH`, the whole
+tile; `VG_ASPECT_FILL`, the whole tile at that shape, the middle of the
+picture `aspect_crop` gives (a crop in the decoder's, the scaler's or the
+display's path) scaled over it, or, on a platform that cannot crop, fitted.
+All on the output's own pixels (`aspect_map` when the output's size differs
+from the screen's). Until the first call, the decoded picture's own shape; it comes
+from a channel's thread (before `hal_dec_open`, and when the main stream's
+SPS arrives) or the main thread (the setting), while tiles move. `set_tile`
+is called when a channel starts (the 2x2 tiles of `frontend_tiles()`)
 and again, from the main thread while the decoders run, whenever the UI
 changes the layout or shows a channel full screen: the tile may move and
 grow. `hal_display_clear_tile(ch)` hides the channel until it is placed
 again; nothing of its picture may stay on screen, including in parts of
 the screen no other tile covers now.
+
+`hal_display_modes()` lists the output modes the board can run at,
+`hal_display_mode()` the one in force, and `hal_display_set_mode()` switches
+while running (the Display page tries a mode before saving it, and puts
+the old one back unless the user keeps it). The screen stays w×h: the
+platform scales the UI layer and the tiles to the mode (SigmaStar: the
+GOP's stretch and a video layer at the output's size). A platform that
+cannot switch lists the mode it runs and refuses any other.
+
+The output's adjustments are optional, each announced by a `hal_caps_t`
+flag (0: the call returns -1 and the Display page hides the control):
+`hal_display_set_margins()` (`margins`) draws everything (tiles, UI layer,
+pointer) inside the rectangle `overscan_inner()` leaves of the output,
+black around, the screen's coordinates and `hal_display_grab()`'s picture
+unchanged; `hal_display_set_picture()` (`picture`) applies a preset's
+colour controls and gamma (`picture.h`) to HDMI/VGA; and
+`hal_audio_set_volume()` (`audio_out`, `hal_audio.h`) sets the HDMI sound's
+volume and mute, also before anything plays.
 
 ## 5. UI: `hal_ui.h`
 

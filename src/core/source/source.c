@@ -43,6 +43,34 @@ source_t *source_create(const char *url, int index)
     return NULL;
 }
 
+int source_sub_url(const char *url, char *out, size_t cap)
+{
+    const char *colon = strchr(url, ':');
+    if (!colon) return -1;
+    size_t sl = (size_t)(colon - url);
+    for (size_t i = 0; i < sizeof g_sources / sizeof g_sources[0]; ++i) {
+        const source_ops_t *ops = g_sources[i];
+        if (strlen(ops->scheme) == sl && strncmp(url, ops->scheme, sl) == 0)
+            return ops->sub_url ? ops->sub_url(url, out, cap) : -1;
+    }
+    return -1;
+}
+
+int source_title(const char *url, char *out, size_t cap, const volatile int *stop)
+{
+    if (cap) out[0] = 0;
+    source_t *s = source_create(url, 0);
+    if (!s) return -1;
+    int rc = -1;
+    if (s->ops->title) {
+        s->stop = stop;
+        rc = s->ops->title(s);
+        if (rc == 0) snprintf(out, cap, "%s", s->title);
+    }
+    source_destroy(s);
+    return rc;
+}
+
 void source_destroy(source_t *s)
 {
     if (!s) return;

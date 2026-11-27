@@ -22,11 +22,14 @@ cmake -B build && cmake --build build -j
 (cd build && ctest --output-on-failure)
 ```
 
-The end-to-end tests need Python 3 and ffmpeg. The RTSP tests also need
+Building needs CMake, libyaml (`libyaml-dev`) and mbedTLS's libmbedcrypto
+(`libmbedtls-dev`, 2.28 or 3.x). The end-to-end tests need Python 3 and
+ffmpeg (and `python3-cryptography` to open the sealed passwords they check;
+without it those checks are skipped). The RTSP tests also need
 the GStreamer RTSP server. On Debian/Ubuntu:
 
 ```sh
-apt install cmake ffmpeg python3-gi gir1.2-gst-rtsp-server-1.0 \
+apt install cmake libyaml-dev libmbedtls-dev ffmpeg python3-cryptography python3-gi gir1.2-gst-rtsp-server-1.0 \
     gstreamer1.0-plugins-ugly gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
 ```
 
@@ -43,13 +46,14 @@ mkdir -p ~/rec
 
 | Option | Meaning |
 |---|---|
-| `-f FILE` | The configuration file (default `/etc/vigil.json`; see [api.md](../api.md)) |
+| `-f FILE` | The configuration file (default `/etc/vigil.yaml`; JSON when the name ends in `.json`; see [api.md](../api.md)) |
 | `-c URL` | A camera, repeated for each one, in tile order (formats in [architecture.md](../architecture.md#sources-camera-protocols)); replaces the file's cameras |
 | `-o DIR` | Where to record; `none` disables recording (default: `record.path` from the file, which is empty — no recording — unless set) |
 | `-S SECS` | Segment length, 10..3600 (default 60) |
 | `-K N` | Segments kept per camera, 0..64 (default 3; 0 keeps all, limited only by the free-space reserve) |
 | `-t SECS` | Exit after SECS seconds (default: run until SIGINT/SIGTERM) |
 | `-s` | Log to syslog (tag `vigil`, facility daemon) instead of stderr, including what the platform and vendor libraries print |
+| `-w OUT` | Write the configuration (the file with the options applied) to OUT and exit: YAML, or JSON when OUT ends in `.json`; `-` prints it |
 
 Options override the configuration file for that run. The same settings,
 and the HTTP API that reads and changes them while `vigild` runs (on port

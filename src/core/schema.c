@@ -73,6 +73,26 @@ void schema_defaults(const schema_t *s, void *root)
 
 /* ---- checks shared by JSON input and schema_validate ------------------------ */
 
+int schema_utf8_char(const char *s, unsigned *cp)
+{
+    const unsigned char *u = (const unsigned char *)s;
+    if (u[0] < 0x80) {
+        *cp = u[0];
+        return 1;
+    }
+    int n = u[0] >= 0xf0 ? 4 : u[0] >= 0xe0 ? 3 : u[0] >= 0xc2 ? 2 : 0;
+    if (!n || u[0] > 0xf4) return 0;
+    unsigned c = u[0] & (0x7fu >> n);
+    for (int i = 1; i < n; ++i) {
+        if ((u[i] & 0xc0) != 0x80) return 0;
+        c = c << 6 | (u[i] & 0x3f);
+    }
+    static const unsigned min[] = { 0, 0, 0x80, 0x800, 0x10000 };
+    if (c < min[n] || c > 0x10ffff || (c >= 0xd800 && c <= 0xdfff)) return 0;
+    *cp = c;
+    return n;
+}
+
 static int check_string(const schema_field_t *f, const char *v, const char *path,
                         schema_errors_t *errs)
 {
@@ -306,6 +326,45 @@ int schema_validate(const schema_t *s, const void *root, schema_errors_t *errs)
     return rc;
 }
 
+static int object_utf8(const schema_section_t *sec, int item, const void *base, schema_errors_t *errs)
+{
+    char path[64];
+    int rc = 0;
+    for (int i = 0; i < sec->n_fields; ++i) {
+        const schema_field_t *f = &sec->fields[i];
+        if (f->type != SCHEMA_STRING && f->type != SCHEMA_ENUM) continue;
+        const char *v = cstr_at(base, f);
+        unsigned c;
+        for (int n; *v; v += n)
+            if (!(n = schema_utf8_char(v, &c))) {
+                field_path(path, sizeof path, sec, item, f->key);
+                schema_error(errs, path, "not valid UTF-8 text");
+                rc = -1;
+                break;
+            }
+    }
+    return rc;
+}
+
+int schema_check_utf8(const schema_t *s, const schema_section_t *only, const void *root,
+                      schema_errors_t *errs)
+{
+    int rc = 0;
+    for (int i = 0; i < s->n_sections; ++i) {
+        const schema_section_t *sec = &s->sections[i];
+        if (only && only != sec) continue;
+        if (!sec->is_array) {
+            if (object_utf8(sec, -1, (const char *)root + sec->off, errs) < 0) rc = -1;
+            continue;
+        }
+        int n = *(const int *)(const void *)((const char *)root + sec->count_off);
+        for (int k = 0; k < n && k < sec->max_items; ++k)
+            if (object_utf8(sec, k, (const char *)root + sec->off + sec->item_size * (size_t)k, errs) < 0)
+                rc = -1;
+    }
+    return rc;
+}
+
 /* ---- C -> JSON ----------------------------------------------------------------------- */
 
 void schema_redact_url(const char *url, char *out, size_t cap)
@@ -329,6 +388,36 @@ void schema_redact_url(const char *url, char *out, size_t cap)
     snprintf(out, cap, "%.*s***%s", (int)(colon + 1 - url), url, at);
 }
 
+void schema_redact_field(const schema_field_t *f, const void *base, char *out, size_t cap)
+{
+    const char *v = cstr_at(base, f);
+    if (f->secret == SCHEMA_SECRET_URL) schema_redact_url(v, out, cap);
+    else if (f->secret == SCHEMA_SECRET) snprintf(out, cap, "%s", *v ? SCHEMA_REDACTED : "");
+    else snprintf(out, cap, "%s", v);
+}
+
+static void object_keep_secrets(const schema_section_t *sec, void *base, const void *old)
+{
+    for (int i = 0; i < sec->n_fields; ++i) {
+        const schema_field_t *f = &sec->fields[i];
+        if (f->secret != SCHEMA_SECRET || strcmp(str_at(base, f), SCHEMA_REDACTED) != 0) continue;
+        snprintf(str_at(base, f), f->size, "%s", cstr_at(old, f));
+    }
+}
+
+void schema_keep_secrets(const schema_section_t *sec, void *root, const void *old)
+{
+    if (!sec->is_array) {
+        object_keep_secrets(sec, (char *)root + sec->off, (const char *)old + sec->off);
+        return;
+    }
+    int n = *(const int *)(const void *)((const char *)root + sec->count_off);
+    int on = *(const int *)(const void *)((const char *)old + sec->count_off);
+    for (int k = 0; k < n && k < on && k < sec->max_items; ++k)
+        object_keep_secrets(sec, (char *)root + sec->off + sec->item_size * (size_t)k,
+                            (const char *)old + sec->off + sec->item_size * (size_t)k);
+}
+
 static cJSON *object_to_json(const schema_section_t *sec, const void *base, int redact)
 {
     cJSON *o = cJSON_CreateObject();
@@ -339,8 +428,8 @@ static cJSON *object_to_json(const schema_section_t *sec, const void *base, int 
         if (f->type == SCHEMA_STRING || f->type == SCHEMA_ENUM) {
             const char *s = cstr_at(base, f);
             char red[1024];
-            if (redact && f->secret == SCHEMA_SECRET_URL) {
-                schema_redact_url(s, red, sizeof red);
+            if (redact && f->secret != SCHEMA_PLAIN) {
+                schema_redact_field(f, base, red, sizeof red);
                 s = red;
             }
             v = cJSON_CreateString(s);
@@ -422,6 +511,7 @@ static cJSON *field_describe(const schema_section_t *sec, const schema_field_t *
         cJSON_AddStringToObject(o, "default", f->def_str ? f->def_str : "");
         cJSON_AddNumberToObject(o, "max_length", (double)(f->size - 1));
         if (f->secret == SCHEMA_SECRET_URL) cJSON_AddStringToObject(o, "secret", "url-password");
+        if (f->secret == SCHEMA_SECRET) cJSON_AddStringToObject(o, "secret", "password");
         break;
     case SCHEMA_ENUM: {
         cJSON_AddStringToObject(o, "default", f->def_str ? f->def_str : "");

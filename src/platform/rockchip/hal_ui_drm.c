@@ -116,3 +116,22 @@ void hal_ui_hole(lv_color_t *color, lv_opa_t *opa)
     *color = lv_color_black();
     *opa = LV_OPA_TRANSP;
 }
+
+/* No cursor plane used here: LVGL draws the pointer. */
+int hal_ui_cursor_create(const uint32_t *argb, int w, int h)
+{
+    (void)argb;
+    (void)w;
+    (void)h;
+    return -1;
+}
+
+void hal_ui_cursor_move(int x, int y)
+{
+    (void)x;
+    (void)y;
+}
+
+void hal_ui_cursor_show(int on) { (void)on; }
+
+void hal_ui_cursor_delete(void) {}

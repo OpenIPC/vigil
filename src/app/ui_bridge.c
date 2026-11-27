@@ -8,6 +8,7 @@
  * so the on-screen UI and the HTTP API validate, save and apply a change
  * the same way, and the schema (config_schema.c) drives both. */
 #define _DEFAULT_SOURCE
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,8 +18,11 @@
 #include "cJSON.h"
 #include "channel.h"
 #include "config.h"
+#include "discovery.h"
 #include "events.h"
 #include "hal.h"
+#include "hal_display.h"
+#include "hal_audio.h"
 #include "ui_bridge.h"
 
 #ifndef VIGIL_VERSION
@@ -43,6 +47,15 @@ static const vigil_config_t *cfg(void)
 
 /* ---- live view -------------------------------------------------------------------- */
 
+/* The UI's copies of the core's states and event bits. */
+_Static_assert((int)UI_CH_EMPTY == (int)CH_EMPTY && (int)UI_CH_DISABLED == (int)CH_DISABLED &&
+                   (int)UI_CH_LIVE == (int)CH_LIVE && (int)UI_CH_AUTH == (int)CH_AUTH &&
+                   (int)UI_CH_ERROR == (int)CH_ERROR,
+               "ui_ch_status_t follows ch_state_t");
+_Static_assert((unsigned)UI_EV_MOTION == (unsigned)CH_EV_MOTION && (unsigned)UI_EV_HUMAN == (unsigned)CH_EV_HUMAN &&
+                   (unsigned)UI_EV_FACE == (unsigned)CH_EV_FACE && (unsigned)UI_EV_VEHICLE == (unsigned)CH_EV_VEHICLE,
+               "UI_EV_* are CH_EV_*");
+
 static void chan_status(int idx, ui_chan_t *st)
 {
     channel_status_t cs;
@@ -50,6 +63,15 @@ static void chan_status(int idx, ui_chan_t *st)
     st->configured = cs.configured;
     st->live = cs.live;
     st->recording = cs.recording;
+    st->status = (ui_ch_status_t)cs.status;         /* the same order (ui_model.h) */
+    st->main_status = (ui_ch_status_t)cs.main_status;
+    st->sub_status = (ui_ch_status_t)cs.sub_status;
+    snprintf(st->main_state, sizeof st->main_state, "%s", cs.main_state);
+    snprintf(st->sub_state, sizeof st->sub_state, "%s", cs.sub_state);
+    snprintf(st->title, sizeof st->title, "%s", cs.title);
+    st->events = cs.events;                         /* the same bits */
+    snprintf(st->view, sizeof st->view, "%s", cs.view);
+    snprintf(st->rec_state, sizeof st->rec_state, "%s", cs.rec_state);
     st->rec_bytes = cs.rec_bytes;
     snprintf(st->name, sizeof st->name, "%s", cs.name);
     snprintf(st->state, sizeof st->state, "%s", cs.state);
@@ -57,6 +79,9 @@ static void chan_status(int idx, ui_chan_t *st)
     st->width = cs.width;
     st->height = cs.height;
     st->fps = cs.fps;
+    st->main_kbps = cs.main_kbps;
+    st->sub_kbps = cs.sub_kbps;
+    st->no_decoder = cs.no_decoder;
 }
 
 static int next_event(ui_event_t *ev)
@@ -108,8 +133,7 @@ static void get_value(int sec, int item, int field, char *buf, size_t cap)
     const schema_field_t *f = &s->fields[field];
     const char *p = field_at(sec, item, f);
     if (f->type == SCHEMA_STRING || f->type == SCHEMA_ENUM) {
-        if (f->secret == SCHEMA_SECRET_URL) schema_redact_url(p, buf, cap);
-        else snprintf(buf, cap, "%s", p);
+        schema_redact_field(f, p - f->off, buf, cap);
     } else {
         int v = *(const int *)(const void *)p;
         snprintf(buf, cap, "%d", f->type == SCHEMA_BOOL ? !!v : v);
@@ -288,6 +312,8 @@ static int sections_build(void)
         }
         g_sections[i] = (ui_section_t){ .key = s->key, .label = s->label ? s->label : s->key,
                                         .help = s->help ? s->help : "", .is_array = s->is_array,
+                                        /* cameras[i] is channel i + 1 (config_to_channels) */
+                                        .slots = !strcmp(s->key, "cameras"),
                                         .max_items = s->max_items, .fields = fs,
                                         .n_fields = s->n_fields };
     }
@@ -375,6 +401,227 @@ static int system_info(ui_info_t *info, int max)
     return n;
 }
 
+/* ---- camera discovery --------------------------------------------------------------- */
+
+_Static_assert(UI_DISC_NETIP == DISC_NETIP && UI_DISC_ONVIF == DISC_ONVIF && UI_DISC_DHIP == DISC_DHIP,
+               "UI_DISC_* are DISC_*");
+_Static_assert(UI_DISC_MAX >= DISC_JOB_MAX && UI_DISC_MAX >= DISC_MAX, "the UI holds every result");
+_Static_assert((int)UI_JOB_SCAN == (int)DISC_JOB_SCAN && (int)UI_JOB_AUTOADD == (int)DISC_JOB_AUTOADD &&
+                   (int)UI_JOB_TEST == (int)DISC_JOB_TEST && (int)UI_MANUAL_RTSP == (int)DISC_MANUAL_RTSP &&
+                   (int)UI_MANUAL_DAHUA == (int)DISC_MANUAL_DAHUA,
+               "ui_job_kind_t follows disc_job_kind_t");
+
+static void job_err(char *err, size_t cap)
+{
+    if (errno == EBUSY) snprintf(err, cap, "Another search or change is running");
+    else if (errno == EAGAIN && disc_auth_wait() > 0)
+        snprintf(err, cap, "Too many refused passwords: try again in %d s", disc_auth_wait());
+    else if (errno == EINVAL) snprintf(err, cap, "Check the values");
+    else snprintf(err, cap, "Cannot start");
+}
+
+static int disc_scan_ui(unsigned protos, char *err, size_t cap)
+{
+    disc_scan_opts_t o;
+    memset(&o, 0, sizeof o);
+    o.protos = protos;
+    o.seconds = 4;
+    int id = disc_scan(&o);
+    if (id < 0) job_err(err, cap);
+    return id;
+}
+
+static int disc_devices_ui(ui_disc_dev_t *out, int max)
+{
+    disc_device_t *d = malloc(DISC_MAX * sizeof *d);
+    if (!d) return 0;
+    /* The settings' snapshot for every device's "on channel N", not a copy
+     * per device: the screen asks again each time a scan hears news. */
+    const vigil_config_t *c = cfg();
+    unsigned last = disc_last_scan();
+    int n = disc_devices(d, DISC_MAX);
+    if (n > max) n = max;
+    for (int i = 0; i < n; ++i) {
+        ui_disc_dev_t *u = &out[i];
+        memset(u, 0, sizeof *u);
+        snprintf(u->key, sizeof u->key, "%s", d[i].mac[0] ? d[i].mac : d[i].ip);
+        snprintf(u->ip, sizeof u->ip, "%s", d[i].ip);
+        snprintf(u->mac, sizeof u->mac, "%s", d[i].mac);
+        snprintf(u->mask, sizeof u->mask, "%s", d[i].mask);
+        snprintf(u->gateway, sizeof u->gateway, "%s", d[i].gateway);
+        snprintf(u->vendor, sizeof u->vendor, "%s", d[i].vendor);
+        snprintf(u->model, sizeof u->model, "%s", d[i].model);
+        snprintf(u->name, sizeof u->name, "%s", d[i].name);
+        u->protos = d[i].protos;
+        u->port = d[i].protos & DISC_NETIP ? d[i].netip_port : d[i].http_port;
+        for (int k = 0; k < c->n_cameras && d[i].ip[0] && !u->channel; ++k) {
+            char host[128];
+            disc_url_host(c->cameras[k].url, host, sizeof host);
+            if (!strcmp(host, d[i].ip)) u->channel = k + 1;
+        }
+        u->stale = last && d[i].scan != last;
+    }
+    free(d);
+    return n;
+}
+
+static unsigned disc_gen_ui(void) { return disc_generation(); }
+
+static int disc_stop_ui(void) { return disc_scan_stop(); }
+
+static void disc_job_ui(ui_disc_job_t *out)
+{
+    disc_job_t *j = malloc(sizeof *j);
+    memset(out, 0, sizeof *out);
+    if (!j) return;
+    disc_job_get(j);
+    out->id = j->id;
+    out->kind = (ui_job_kind_t)j->kind;
+    out->running = j->running;
+    out->dry_run = j->dry_run;
+    out->progress = j->progress;
+    out->found = j->found;
+    snprintf(out->msg, sizeof out->msg, "%s", j->msg);
+    out->n = j->n;
+    for (int i = 0; i < j->n; ++i) {
+        const disc_result_t *r = &j->r[i];
+        ui_disc_res_t *u = &out->r[i];
+        snprintf(u->key, sizeof u->key, "%s", r->key);
+        snprintf(u->ip, sizeof u->ip, "%s", r->ip);
+        snprintf(u->new_ip, sizeof u->new_ip, "%s", r->new_ip);
+        u->proto = r->proto;
+        u->channel = r->channel;
+        u->done = r->done;
+        u->ok = r->done && r->rc == DISC_OK;
+        u->reprobed = r->reprobed;
+        snprintf(u->msg, sizeof u->msg, "%s", r->msg);
+        if (r->done && r->rc != DISC_OK) snprintf(u->error, sizeof u->error, "%s", disc_rc_name(r->rc));
+        snprintf(u->codec, sizeof u->codec, "%s", r->codec);
+        u->width = r->width;
+        u->height = r->height;
+    }
+    free(j);
+}
+
+static int disc_ip_ui(const ui_disc_ip_t *items, int n, const char *start, const char *mask, const char *gw,
+                      const char *user, const char *pass, int dry_run, char *err, size_t cap)
+{
+    disc_ip_item_t *it = calloc((size_t)(n > 0 ? n : 1), sizeof *it);
+    if (!it) return -1;
+    for (int i = 0; i < n; ++i) {
+        snprintf(it[i].key, sizeof it[i].key, "%s", items[i].key);
+        snprintf(it[i].ip, sizeof it[i].ip, "%s", items[i].ip);
+    }
+    int id = disc_ip_job(it, n, start, mask, gw, user, pass, dry_run);
+    if (id < 0) job_err(err, cap);
+    free(it);
+    return id;
+}
+
+static int disc_assign_ui(const char *key, int channel, const char *user, const char *pass, int replace,
+                          char *err, size_t cap)
+{
+    int id = disc_assign_job(key, channel, 0, user, pass, "", replace);
+    if (id < 0) job_err(err, cap);
+    return id;
+}
+
+static int disc_autoadd_ui(const char *user, const char *pass, char *err, size_t cap)
+{
+    int id = disc_autoadd_job(user, pass);
+    if (id < 0) job_err(err, cap);
+    return id;
+}
+
+static void manual_to_core(const ui_manual_t *u, disc_manual_t *m)
+{
+    memset(m, 0, sizeof *m);
+    m->kind = (disc_manual_kind_t)u->kind;
+    snprintf(m->host, sizeof m->host, "%s", u->host);
+    m->port = u->port;
+    snprintf(m->user, sizeof m->user, "%s", u->user);
+    snprintf(m->pass, sizeof m->pass, "%s", u->pass);
+    m->dev_channel = u->dev_channel;
+    snprintf(m->main_path, sizeof m->main_path, "%s", u->main_path);
+    snprintf(m->sub_path, sizeof m->sub_path, "%s", u->sub_path);
+}
+
+static int disc_test_ui(const ui_manual_t *u, char *err, size_t cap)
+{
+    disc_manual_t m;
+    manual_to_core(u, &m);
+    int id = disc_test_job(&m);
+    if (id < 0) job_err(err, cap);
+    volatile char *w = (volatile char *)&m;
+    for (size_t i = 0; i < sizeof m; ++i) w[i] = 0;
+    return id;
+}
+
+static int disc_assign_manual_ui(const ui_manual_t *u, int channel, const char *name, int replace, char *err,
+                                 size_t cap)
+{
+    disc_manual_t m;
+    manual_to_core(u, &m);
+    int id = disc_assign_manual_job(&m, channel, name, replace);
+    if (id < 0) job_err(err, cap);
+    volatile char *w = (volatile char *)&m;
+    for (size_t i = 0; i < sizeof m; ++i) w[i] = 0;
+    return id;
+}
+
+/* ---- the output ------------------------------------------------------------------- */
+
+static int out_modes(ui_mode_t *out, int max)
+{
+    vg_mode_t v[UI_MODES_MAX];
+    int n = hal_display_modes(v, max < UI_MODES_MAX ? max : UI_MODES_MAX);
+    for (int i = 0; i < n; ++i) out[i] = (ui_mode_t){ (int)v[i].w, (int)v[i].h, (int)v[i].hz };
+    return n;
+}
+
+static void out_mode(ui_mode_t *cur)
+{
+    vg_mode_t v;
+    hal_display_mode(&v);
+    *cur = (ui_mode_t){ (int)v.w, (int)v.h, (int)v.hz };
+}
+
+static int out_set(const ui_mode_t *m)
+{
+    if (m->w <= 0 || m->h <= 0 || m->hz <= 0) return -1;
+    vg_mode_t v = { (unsigned)m->w, (unsigned)m->h, (unsigned)m->hz };
+    return hal_display_set_mode(&v);
+}
+
+/* ---- the output's adjustments: previews, the same calls main.c makes on a save ------- */
+
+static unsigned out_adj_caps(void)
+{
+    const hal_caps_t *c = hal_caps();
+    return (c->margins ? UI_OUT_MARGINS : 0u) | (c->picture ? UI_OUT_PICTURE : 0u) |
+           (c->audio_out ? UI_OUT_AUDIO : 0u);
+}
+
+static unsigned pct(int v) { return v < 0 ? 0u : v > OVERSCAN_MAX_PCT ? OVERSCAN_MAX_PCT : (unsigned)v; }
+
+static int out_margins(int top, int bottom, int left, int right)
+{
+    vg_margins_t m = { pct(top), pct(bottom), pct(left), pct(right) };
+    return hal_display_set_margins(&m);
+}
+
+static int out_picture(const char *preset)
+{
+    vg_picture_t p;
+    if (picture_preset(preset, &p) < 0) return -1;
+    return hal_display_set_picture(&p);
+}
+
+static int out_volume(int volume, int mute)
+{
+    return hal_audio_set_volume(volume < 0 ? 0u : volume > 100 ? 100u : (unsigned)volume, mute);
+}
+
 int ui_bridge_init(ui_model_t *m)
 {
     if (!g_sections && sections_build() < 0) return -1;
@@ -384,6 +631,7 @@ int ui_bridge_init(ui_model_t *m)
     m->channels = c->max_channels > 0 && c->max_channels < CHANNEL_MAX ? c->max_channels : CHANNEL_MAX;
     if (m->channels > UI_MAX_CHANNELS) m->channels = UI_MAX_CHANNELS;
     m->fixed_tiles = c->fixed_tiles;
+    m->max_in_kbps = c->max_in_kbps;
     m->chan_status = chan_status;
     m->next_event = next_event;
     m->show_tiles = show_tiles;
@@ -395,6 +643,24 @@ int ui_bridge_init(ui_model_t *m)
     m->get_value = get_value;
     m->save = save;
     m->system_info = system_info;
+    m->out_modes = out_modes;
+    m->out_mode = out_mode;
+    m->out_set = out_set;
+    m->disc_scan = disc_scan_ui;
+    m->disc_devices = disc_devices_ui;
+    m->disc_gen = disc_gen_ui;
+    m->disc_stop = disc_stop_ui;
+    m->disc_job = disc_job_ui;
+    m->disc_ip = disc_ip_ui;
+    m->disc_assign = disc_assign_ui;
+    m->disc_autoadd = disc_autoadd_ui;
+    m->disc_test = disc_test_ui;
+    m->disc_assign_manual = disc_assign_manual_ui;
     g_ev_cursor = 0;                    /* every event still kept, the start-up ones too */
+    m->mgmt = ui_mgmt_model();
+    m->out_adj_caps = out_adj_caps;
+    m->out_margins = out_margins;
+    m->out_picture = out_picture;
+    m->out_volume = out_volume;
     return 0;
 }

@@ -5,8 +5,11 @@
  *   channel thread:  hal_dec_send -> MPP decode -> newest frame into the
  *                    channel's slot (older ones are released)
  *   compositor:      ~30 times a second, RGA scales each slot's frame into
- *                    its tile of the back NV12 mosaic (aspect kept, black
- *                    bars), then flips the mosaic onto the video plane
+ *                    its tile of the back NV12 mosaic (at the display
+ *                    aspect ratio hal_display_set_aspect gave, black
+ *                    bars, aspect_fit; stretched; or the middle of the
+ *                    frame over the whole tile, aspect_crop), then flips
+ *                    the mosaic onto the video plane
  *
  * Libraries: rockchip-linux/mpp and librga, built from source by
  * scripts/rockchip/build-deps.sh.
@@ -28,10 +31,12 @@
 #include <rga/im2d.h>
 #include <rga/rga.h>
 
+#include "aspect.h"
 #include "hal.h"
 #include "hal_capture.h"
 #include "hal_decoder.h"
 #include "hal_display.h"
+#include "hal_audio.h"
 #include "rk_display.h"
 
 #define MAX_CH        4                 /* quad view */
@@ -57,6 +62,9 @@ typedef struct {
     int              tile_set;
     int              clear;             /* tile background needs repainting */
     unsigned         last_w, last_h;
+    int              asp_set;           /* hal_display_set_aspect said: */
+    vg_ratio_t       asp;               /* the picture's shape; 0:0 the frame's own */
+    vg_aspect_t      how;               /* ... and how it fills the tile */
 } chan_t;
 
 static chan_t          g_ch[MAX_CH];
@@ -85,21 +93,6 @@ static void tile_clear(rk_buf_t *b, const vg_rect_t *r)
         memset(uv + (size_t)(r->y / 2 + y) * b->pitch + r->x, 128, (size_t)r->w);
 }
 
-/* The largest rectangle with the picture's aspect inside the tile, centred,
- * even-aligned for NV12. */
-static vg_rect_t fit(const vg_rect_t *t, unsigned w, unsigned h)
-{
-    vg_rect_t r = *t;
-    if ((uint64_t)w * (unsigned)t->h > (uint64_t)h * (unsigned)t->w) {
-        r.h = (int)((uint64_t)t->w * h / w) & ~1;
-        r.y = t->y + ((t->h - r.h) / 2 & ~1);
-    } else {
-        r.w = (int)((uint64_t)t->h * w / h) & ~1;
-        r.x = t->x + ((t->w - r.w) / 2 & ~1);
-    }
-    return r;
-}
-
 static void compose_one(chan_t *c, rk_buf_t *dst)
 {
     MppFrame f = c->frame;
@@ -117,13 +110,18 @@ static void compose_one(chan_t *c, rk_buf_t *dst)
         tile_clear(dst, &c->tile);
         --c->clear;
     }
-    vg_rect_t d = fit(&c->tile, w, h);
+    /* even for NV12; before the core says, the picture's own shape, fitted */
+    vg_ratio_t a = c->asp_set && c->asp.w ? c->asp : (vg_ratio_t){ w, h };
+    vg_aspect_t how = c->asp_set ? c->how : VG_ASPECT_FIT;
+    vg_rect_t d = aspect_fit(&c->tile, how == VG_ASPECT_FIT ? a : (vg_ratio_t){ 0, 0 }, 2);
+    vg_rect_t s = { 0, 0, (int)w, (int)h };
+    if (how == VG_ASPECT_FILL) s = aspect_crop(w, h, a, (unsigned)d.w, (unsigned)d.h, 2);
     rga_buffer_t src = wrapbuffer_fd_t(fd, (int)w, (int)h, (int)hs, (int)vs, RK_FORMAT_YCbCr_420_SP);
     rga_buffer_t out = wrapbuffer_fd_t(dst->fd, (int)dst->width, (int)dst->height,
                                        (int)dst->pitch, (int)dst->height, RK_FORMAT_YCbCr_420_SP);
     rga_buffer_t pat;
     memset(&pat, 0, sizeof pat);
-    im_rect srect = { 0, 0, (int)w, (int)h }, drect = { d.x, d.y, d.w, d.h }, prect = { 0, 0, 0, 0 };
+    im_rect srect = { s.x, s.y, s.w, s.h }, drect = { d.x, d.y, d.w, d.h }, prect = { 0, 0, 0, 0 };
     IM_STATUS st = improcess(src, out, pat, srect, drect, prect, IM_SYNC);
     if (st != IM_STATUS_SUCCESS && st != IM_STATUS_NOERROR)
         fprintf(stderr, "rockchip: RGA compose failed: %s\n", imStrError_t(st));
@@ -178,11 +176,15 @@ static void *compositor(void *arg)
 
 /* ---- platform ---------------------------------------------------------------- */
 
-int hal_init(unsigned w, unsigned h, unsigned fps)
+/* The screen's size; the connector's mode is DRM's choice (rk_display.c). */
+static vg_mode_t g_mode;
+
+int hal_init(unsigned w, unsigned h, const vg_mode_t *out)
 {
-    (void)fps;
+    (void)out;                                  /* the screen's size */
     for (int i = 0; i < MAX_CH; ++i) pthread_mutex_init(&g_ch[i].lock, NULL);
     if (rk_display_open(w, h) < 0) return -1;
+    g_mode = (vg_mode_t){ w, h, 60 };
     signal(SIGUSR1, on_usr1);
     g_comp_stop = 0;
     if (pthread_create(&g_comp, NULL, compositor, NULL) != 0) {
@@ -218,6 +220,18 @@ int hal_display_set_tile(int ch, const vg_rect_t *r)
     pthread_mutex_unlock(&g_ch[ch].lock);
     __atomic_store_n(&g_repaint, 2, __ATOMIC_RELEASE);
     return 0;
+}
+
+void hal_display_set_aspect(int ch, unsigned w, unsigned h, vg_aspect_t how)
+{
+    if (ch < 0 || ch >= MAX_CH) return;
+    pthread_mutex_lock(&g_ch[ch].lock);
+    g_ch[ch].asp_set = 1;
+    g_ch[ch].asp = w && h ? (vg_ratio_t){ w, h } : (vg_ratio_t){ 0, 0 };
+    g_ch[ch].how = how;
+    g_ch[ch].clear = 2;                 /* other bars: both mosaic buffers */
+    pthread_mutex_unlock(&g_ch[ch].lock);
+    __atomic_store_n(&g_repaint, 2, __ATOMIC_RELEASE);
 }
 
 void hal_display_clear_tile(int ch)
@@ -349,3 +363,28 @@ void hal_dec_reset(int ch)
 int  hal_cap_start(int in, int ch, hal_cap_cb cb, void *user) { (void)in; (void)ch; (void)cb; (void)user; return -1; }
 void hal_cap_stop(int in) { (void)in; }
 int  hal_cap_signal(int in) { (void)in; return 0; }
+
+/* ---- output mode: the one hal_init started; it does not change ---------------- */
+
+int hal_display_modes(vg_mode_t *out, int max)
+{
+    if (max < 1 || !g_mode.w) return 0;
+    *out = g_mode;
+    return 1;
+}
+
+void hal_display_mode(vg_mode_t *cur) { *cur = g_mode; }
+
+int hal_display_set_mode(const vg_mode_t *m)
+{
+    return m->w == g_mode.w && m->h == g_mode.h && m->hz == g_mode.hz ? 0 : -1;
+}
+
+/* No picture to read back: the zero channel shows the UI over black. */
+void hal_display_grab_keep(int on) { (void)on; }
+int  hal_display_grab(const hal_pic_t *pic) { (void)pic; return -1; }
+
+/* No margins, picture controls or HDMI sound here yet (hal_caps: 0). */
+int hal_display_set_margins(const vg_margins_t *m) { (void)m; return -1; }
+int hal_display_set_picture(const vg_picture_t *p) { (void)p; return -1; }
+int hal_audio_set_volume(unsigned volume, int mute) { (void)volume; (void)mute; return -1; }

@@ -21,11 +21,27 @@ typedef struct {
     int      fixed_tiles;       /* the platform places the tiles itself, in the
                                  * quad view: hal_display_set_tile cannot move
                                  * them (no other layouts, no full screen) */
+    int      dec_shown_only;    /* decoders (memory, channel numbers) do not
+                                 * stretch to every channel at once: the core
+                                 * decodes only the channels with a tile on
+                                 * screen, and frees a channel's decoder when
+                                 * its tile goes (recording carries on) */
+    /* The output's adjustments (Display -> Output); 0: the call is a
+     * no-op returning -1, and the UI hides the control. */
+    int      margins;           /* hal_display_set_margins */
+    int      picture;           /* hal_display_set_picture */
+    int      audio_out;         /* hal_audio_set_volume reaches the HDMI sound */
+    unsigned max_in_kbps;       /* the chip's rated incoming bandwidth for
+                                 * network cameras (every stream, main and
+                                 * sub), kbit/s, as its datasheet or product
+                                 * brief gives it; 0: not known */
 } hal_caps_t;
 
-/* Bring up the media system and the display (w x h @ fps when the
- * platform has one). Returns 0 or -1. */
-int  hal_init(unsigned w, unsigned h, unsigned fps);
+/* Bring up the media system and the display: a w x h screen (the UI's
+ * and the tiles' coordinates), sent out at `out` (NULL: w x h at 60 Hz)
+ * where the platform can (hal_display_modes); otherwise at its own mode.
+ * Returns 0 or -1. */
+int  hal_init(unsigned w, unsigned h, const vg_mode_t *out);
 const hal_caps_t *hal_caps(void);
 void hal_shutdown(void);
 

@@ -1,0 +1,2113 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* ui_channels.c — Channels: finding cameras on the network and putting
+ * them on channels, in the two panes of an NVR's camera page.
+ *
+ *   Search    protocol, Search, the devices found (check one or more):
+ *             Add, Change IP..., Mass change..., Auto add all, Manual
+ *             add; Select all (the rows shown), Show: All, Not added,
+ *             Added (on a channel: a camera's address is the device's);
+ *             the user and password Add uses
+ *   Channels  the bandwidth the cameras bring in now, every stream, against
+ *             what the chip is rated for (hal_caps max_in_kbps; amber
+ *             from 80 %, red over it); every channel: a check box, the
+ *             camera's address, X (delete its camera, asked first) or +
+ *             on an empty one (the one device checked above, else Manual
+ *             add for that channel), protocol, state, name. Clear (every
+ *             camera), Delete (the checked channels'), Edit (one checked:
+ *             the camera form) and Title (one checked: its name on the
+ *             screen, in a dialog) act on the channels checked
+ *
+ * A search shows each device the moment it answers: the page polls the
+ * model's generation (disc_gen) and reads the devices only when it moved.
+ * Rows keep their places while the list fills (a device already listed
+ * stays where it is, a new one goes to the end), so nothing moves under
+ * the pointer or the focus; devices an earlier search found are dimmed
+ * until they answer this one. Search turns into Stop while it runs, and
+ * the list stays usable: adding a device, or opening Change IP and the
+ * other pages, ends the search first (one discovery job at a time).
+ *
+ * Opened for a channel (the "+" of an empty tile), that channel's row is
+ * marked and shown, Add puts the first device checked there, and Manual
+ * add offers it first.
+ *
+ * A device row's "Add to..." opens a small menu of the empty channels.
+ * Change IP, Mass change and Auto add are pages of their own with the
+ * credentials and the result of the job. All network work is a discovery
+ * job of the model's (ui_model.h): this page starts one and follows it on
+ * a timer; the screen never waits.
+ *
+ * Keyboard: Tab goes Back, the search row, Select all, Show, the
+ * credentials, the device table, the channel pane's buttons, the channel
+ * table, the header's actions. In the device table the arrows move and
+ * Enter or Space checks a device; in the channel table Enter or Space
+ * checks a channel, E edits it, Delete deletes its camera (X), A or +
+ * puts the device checked above on an empty one (+).
+ */
+#define _DEFAULT_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "icons.h"
+#include "ui_app.h"
+#include "ui_osk.h"
+#include "ui_theme.h"
+
+#define POLL_MS     200
+#define QUEUE_MAX   UI_DISC_MAX
+#define SCROLLBAR_W 12              /* room at the tables' right for their scroll bar */
+
+typedef struct {
+    ui_page_t     *page;
+    int            sec;             /* the cameras section */
+    lv_obj_t      *kb;
+    lv_obj_t      *proto, *search, *status, *user, *pass, *hint;
+    lv_obj_t      *add, *chip, *mass, *autoadd, *manual, *all, *show;
+    lv_obj_t      *devs, *chans, *empty;
+    lv_obj_t      *bw, *chint;      /* the channel pane's bandwidth and hint */
+    lv_obj_t      *clr, *del, *edt, *ttl;
+    lv_obj_t      *state_cell[UI_MAX_CHANNELS];
+    lv_obj_t      *name_cell[UI_MAX_CHANNELS];  /* no name configured: the camera's, when it says */
+    lv_timer_t    *timer;
+    ui_disc_dev_t  dev[UI_DISC_MAX];
+    int            n_dev;
+    unsigned       dev_gen;         /* the model's disc_gen when `dev` was read */
+    int            target;          /* the channel (0-based) the page was opened for; -1 */
+    char           checked[UI_DISC_MAX][24];
+    int            n_checked;
+    int            filter;          /* Show: 0 all, 1 not added, 2 added */
+    int            shown[UI_DISC_MAX];  /* the device table's rows: indexes into dev */
+    int            n_shown;
+    char           ch_checked[UI_MAX_CHANNELS];
+    unsigned       job;             /* the job this page started and waits for */
+    ui_disc_job_t *jb;
+    /* Adding: one assign job after another (one device: a queue of one).
+     * The first goes to q_ch (0: the first empty channel), replacing its
+     * camera with q_replace; q_wait: a search is being stopped first. */
+    char           queue[QUEUE_MAX][24];
+    int            q_n, q_i, q_ok, q_fail, q_ch, q_replace, q_wait;
+    char           q_err[96];
+    int            pick_ch;         /* "Add to..." menu: the device's index */
+    unsigned       gen;
+} chans_t;
+
+static chans_t *g_ch;               /* the open page, for the model's job timer */
+
+static const ui_model_t *M(void) { return ui_model(); }
+
+static const char *proto_word(unsigned p)
+{
+    return p == UI_DISC_NETIP ? "NETIP" : p == UI_DISC_ONVIF ? "ONVIF" : p == UI_DISC_DHIP ? "DHIP" : "-";
+}
+
+static void protos_text(unsigned bits, char *out, size_t cap)
+{
+    out[0] = 0;
+    for (unsigned b = UI_DISC_NETIP; b <= UI_DISC_DHIP; b <<= 1)
+        if (bits & b) {
+            size_t n = strlen(out);
+            snprintf(out + n, cap - n, "%s%s", n ? ", " : "", proto_word(b));
+        }
+}
+
+/* ---- small widgets ------------------------------------------------------------------- */
+
+static lv_obj_t *row_box(lv_obj_t *parent, int gap)
+{
+    lv_obj_t *r = lv_obj_create(parent);
+    ui_plain(r);
+    ui_ring_room(r);
+    lv_obj_set_size(r, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_layout(r, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(r, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(r, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(r, gap, 0);
+    return r;
+}
+
+static lv_obj_t *pane(lv_obj_t *parent)
+{
+    lv_obj_t *p = lv_obj_create(parent);
+    ui_plain(p);
+    lv_obj_add_style(p, &ui_st_panel, 0);
+    lv_obj_set_size(p, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_all(p, VG_SPACE_MD, 0);
+    lv_obj_set_style_pad_row(p, VG_SPACE_SM, 0);
+    lv_obj_set_layout(p, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(p, LV_FLEX_FLOW_COLUMN);
+    return p;
+}
+
+static void pane_title(lv_obj_t *row, const lv_image_dsc_t *icon, const char *title)
+{
+    ui_icon(row, icon, VG_COLOR_ACCENT);
+    ui_label(row, title, VG_FONT_LG_LV, UI_C(TEXT));
+}
+
+/* A table: rows of cells, the header first, the rows scrolled inside. */
+static lv_obj_t *table_rows(lv_obj_t *parent, int h)
+{
+    lv_obj_t *t = lv_obj_create(parent);
+    ui_plain(t);
+    lv_obj_set_width(t, LV_PCT(100));
+    if (h > 0) lv_obj_set_height(t, h);
+    else lv_obj_set_flex_grow(t, 1);
+    lv_obj_add_flag(t, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(t, LV_DIR_VER);
+    lv_obj_set_layout(t, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(t, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_hor(t, VG_SPACE_XS, 0);     /* room for the focus ring */
+    lv_obj_set_style_pad_right(t, SCROLLBAR_W, 0);   /* ... and the scroll bar, beside the rows' buttons */
+    ui_scrollbar(t);
+    return t;
+}
+
+static lv_obj_t *trow(lv_obj_t *table, int header)
+{
+    lv_obj_t *r = lv_obj_create(table);
+    ui_plain(r);
+    lv_obj_set_size(r, LV_PCT(100), header ? LV_SIZE_CONTENT : 36);
+    lv_obj_set_style_pad_ver(r, header ? VG_SPACE_XS : 0, 0);
+    lv_obj_set_style_pad_hor(r, VG_SPACE_SM, 0);
+    lv_obj_set_style_pad_column(r, VG_SPACE_MD, 0);
+    lv_obj_set_style_border_color(r, UI_C(LINE), 0);
+    lv_obj_set_style_border_side(r, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_width(r, 1, 0);
+    lv_obj_set_layout(r, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(r, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(r, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    if (header) ui_inert(r);
+    else {
+        lv_obj_add_style(r, &ui_st_focus_in, LV_STATE_FOCUSED);
+        lv_obj_set_style_bg_color(r, UI_C(HOVER), LV_STATE_HOVERED);
+        lv_obj_set_style_bg_opa(r, LV_OPA_COVER, LV_STATE_HOVERED);
+    }
+    return r;
+}
+
+/* A cell `w` wide (0: takes the rest). */
+static lv_obj_t *tcell(lv_obj_t *row, const char *text, int w, lv_color_t c)
+{
+    lv_obj_t *l = ui_label(row, text, VG_FONT_SM_LV, c);
+    /* One line, cut with "...": a label wraps unless its height is set. */
+    lv_obj_set_height(l, lv_font_get_line_height(VG_FONT_SM_LV));
+    if (w) lv_obj_set_width(l, w);
+    else {
+        lv_obj_set_width(l, 1);
+        lv_obj_set_flex_grow(l, 1);
+    }
+    lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
+    return l;
+}
+
+/* A small button in a table row. */
+static lv_obj_t *tbtn(lv_obj_t *row, const char *sym, const char *text, lv_event_cb_t cb, void *u, int v)
+{
+    lv_obj_t *b = ui_btn(row, sym, text);
+    lv_obj_set_height(b, 30);
+    lv_obj_set_style_pad_hor(b, VG_SPACE_SM, 0);
+    lv_obj_set_style_text_font(b, VG_FONT_SM_LV, 0);
+    lv_obj_set_user_data(b, (void *)(intptr_t)v);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, u);
+    return b;
+}
+
+/* The check box of a device row: a bordered square with a tick. */
+static void tick_set(lv_obj_t *b, int on)
+{
+    lv_obj_set_style_border_color(b, on ? UI_C(ACCENT) : UI_C(TEXT2), 0);
+    lv_obj_set_style_bg_opa(b, on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_obj_t *l = lv_obj_get_child(b, 0);
+    if (on && !l) {
+        l = ui_label(b, LV_SYMBOL_OK, VG_FONT_SM_LV, UI_C(TEXT));
+        lv_obj_center(l);
+    } else if (!on && l) {
+        lv_obj_delete(l);
+    }
+}
+
+static lv_obj_t *tick(lv_obj_t *row)
+{
+    lv_obj_t *b = lv_obj_create(row);
+    ui_plain(b);
+    ui_inert(b);
+    lv_obj_set_size(b, 20, 20);
+    lv_obj_set_style_border_width(b, 2, 0);
+    lv_obj_set_style_radius(b, VG_RADIUS_SM, 0);
+    lv_obj_set_style_bg_color(b, UI_C(ACCENT), 0);
+    tick_set(b, 0);
+    return b;
+}
+
+/* A label's text and colour, each set only when it differs: a row set
+ * again with what it shows already is not redrawn. */
+static void label_set(lv_obj_t *l, const char *text, lv_color_t col)
+{
+    if (strcmp(lv_label_get_text(l), text)) lv_label_set_text(l, text);
+    if (!lv_color_eq(lv_obj_get_style_text_color(l, 0), col)) lv_obj_set_style_text_color(l, col, 0);
+}
+
+/* ---- text fields and the on-screen keyboard -------------------------------------------- */
+
+static void ta_click_cb(lv_event_t *e)
+{
+    lv_obj_t *kb = lv_event_get_user_data(e);
+    if (!ui_keyboard_in_use() && kb) ui_osk_show(kb, lv_event_get_target(e), 0);
+}
+
+static void kb_done_cb(lv_event_t *e)
+{
+    ui_osk_hide(lv_event_get_target(e));
+}
+
+static lv_obj_t *osk_for(ui_page_t *p)
+{
+    lv_obj_t *kb = ui_osk_create(p->scr);
+    if (kb) {
+        lv_obj_add_event_cb(kb, kb_done_cb, LV_EVENT_READY, NULL);
+        lv_obj_add_event_cb(kb, kb_done_cb, LV_EVENT_CANCEL, NULL);
+    }
+    return kb;
+}
+
+static lv_obj_t *field(lv_obj_t *parent, ui_page_t *p, lv_obj_t *kb, const char *text, int w, int secret,
+                       const char *accept, int max)
+{
+    lv_obj_t *ta = lv_textarea_create(parent);
+    lv_textarea_set_one_line(ta, 1);
+    if (accept) lv_textarea_set_accepted_chars(ta, accept);
+    if (max) lv_textarea_set_max_length(ta, (uint32_t)max);
+    lv_textarea_set_text(ta, text);
+    if (secret) lv_textarea_set_password_mode(ta, 1);
+    lv_obj_set_width(ta, w);
+    lv_obj_add_event_cb(ta, ta_click_cb, LV_EVENT_CLICKED, kb);
+    ui_focus_style(ta);
+    lv_group_add_obj(p->group, ta);
+    return ta;
+}
+
+/* A label and a field in a form row. */
+static lv_obj_t *labelled(lv_obj_t *parent, ui_page_t *p, lv_obj_t *kb, const char *label, const char *text,
+                          int secret, const char *accept, int max)
+{
+    lv_obj_t *r = row_box(parent, VG_SPACE_LG);
+    lv_obj_t *l = ui_label(r, label, VG_FONT_MD_LV, UI_C(TEXT));
+    lv_obj_set_width(l, 220);
+    return field(r, p, kb, text, 320, secret, accept, max);
+}
+
+static int osk_back(lv_obj_t *kb)
+{
+    if (kb && ui_osk_shown(kb)) {
+        ui_osk_hide(kb);
+        return 1;
+    }
+    return 0;
+}
+
+#define IP_CHARS "0123456789."
+
+/* ---- jobs ------------------------------------------------------------------------------ */
+
+/* Start and remember a job; -1 with a toast. */
+static int started(chans_t *c, int id, const char *err)
+{
+    if (id < 0) {
+        ui_toast(UI_TOAST_BAD, "%s", err[0] ? err : "Cannot start");
+        return -1;
+    }
+    c->job = (unsigned)id;
+    return 0;
+}
+
+static int device_index(const chans_t *c, const char *key)
+{
+    for (int i = 0; i < c->n_dev; ++i)
+        if (!strcmp(c->dev[i].key, key)) return i;
+    return -1;
+}
+
+static int is_checked(const chans_t *c, const char *key)
+{
+    for (int i = 0; i < c->n_checked; ++i)
+        if (!strcmp(c->checked[i], key)) return 1;
+    return 0;
+}
+
+static void devs_build(chans_t *c);
+static void chans_build(chans_t *c);
+static void buttons_sync(chans_t *c);
+
+/* ---- the device table ----------------------------------------------------------------- */
+
+static void check_toggle(chans_t *c, int i)
+{
+    if (i < 0 || i >= c->n_dev) return;
+    const char *key = c->dev[i].key;
+    for (int k = 0; k < c->n_checked; ++k)
+        if (!strcmp(c->checked[k], key)) {
+            memmove(c->checked[k], c->checked[k + 1], sizeof c->checked[0] * (size_t)(c->n_checked - k - 1));
+            --c->n_checked;
+            devs_build(c);
+            buttons_sync(c);
+            return;
+        }
+    if (c->n_checked < UI_DISC_MAX) memcpy(c->checked[c->n_checked++], key, sizeof c->checked[0]);
+    devs_build(c);
+    buttons_sync(c);
+}
+
+/* Show: All, Not added, Added (a device is added when a channel's camera
+ * has its address: "On channel N"). */
+static int dev_shown(const chans_t *c, int i)
+{
+    return c->filter == 0 || (c->filter == 1 ? !c->dev[i].channel : c->dev[i].channel != 0);
+}
+
+/* After the click's event: the table it came from is built anew. */
+static void toggle_async(void *u)
+{
+    chans_t *c = g_ch;
+    if (c) check_toggle(c, (int)(intptr_t)u);
+}
+
+static void dev_click_cb(lv_event_t *e)
+{
+    lv_async_call(toggle_async, lv_obj_get_user_data(lv_event_get_current_target(e)));
+}
+
+static void dev_key_cb(lv_event_t *e)
+{
+    if (lv_event_get_key(e) != ' ') return;
+    lv_async_call(toggle_async, lv_obj_get_user_data(lv_event_get_target(e)));
+}
+
+static void assign_start(chans_t *c, const char *key, int ch, int replace);
+
+static void pick_cb(lv_event_t *e)
+{
+    chans_t *c = lv_event_get_user_data(e);
+    int ch = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    ui_popup_close();
+    if (c->pick_ch >= 0 && c->pick_ch < c->n_dev) assign_start(c, c->dev[c->pick_ch].key, ch, 0);
+}
+
+/* "Add to...": the empty channels, in a small menu by the button. */
+static void add_to_cb(lv_event_t *e)
+{
+    chans_t *c = lv_event_get_user_data(e);
+    lv_obj_t *btn = lv_event_get_target(e);
+    c->pick_ch = (int)(intptr_t)lv_obj_get_user_data(btn);
+    lv_area_t a;
+    lv_obj_get_coords(btn, &a);
+    lv_point_t at = { a.x1, a.y2 };
+    lv_obj_t *panel = ui_popup_open(&at, 220);
+    lv_obj_set_style_max_height(panel, 360, 0);
+    lv_obj_add_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    int n = M()->item_count(c->sec), shown = 0;
+    lv_obj_t *first = NULL;
+    char buf[1024], t[32];
+    for (int ch = 0; ch < M()->channels && ch < UI_MAX_CHANNELS; ++ch) {
+        if (ch < n) {
+            M()->get_value(c->sec, ch, 0, buf, sizeof buf);
+            if (buf[0]) continue;
+        }
+        snprintf(t, sizeof t, "Add to channel %d", ch + 1);
+        lv_obj_t *b = ui_btn(panel, LV_SYMBOL_PLUS, t);
+        lv_obj_set_width(b, LV_PCT(100));
+        lv_obj_set_user_data(b, (void *)(intptr_t)(ch + 1));
+        lv_obj_add_event_cb(b, pick_cb, LV_EVENT_CLICKED, c);
+        if (!first) first = b;
+        ++shown;
+    }
+    if (!shown) ui_label(panel, "No empty channel", VG_FONT_MD_LV, UI_C(TEXT2));
+    ui_popup_focus(panel, first, LV_GRIDNAV_CTRL_NONE);
+    ui_popup_place(&at);
+}
+
+/* A device row: its cells, empty until dev_row_set fills them. */
+static lv_obj_t *dev_row_new(chans_t *c, int i)
+{
+    lv_obj_t *r = trow(c->devs, 0);
+    lv_obj_set_user_data(r, (void *)(intptr_t)i);
+    lv_obj_add_event_cb(r, dev_click_cb, LV_EVENT_CLICKED, c);
+    lv_obj_add_event_cb(r, dev_key_cb, LV_EVENT_KEY, c);
+    tick(r);
+    static const int w[] = { 130, 56, 150, 0, 150, 140 };
+    for (size_t k = 0; k < sizeof w / sizeof w[0]; ++k) tcell(r, "", w[k], UI_C(TEXT));
+    lv_obj_t *b = tbtn(r, LV_SYMBOL_PLUS, "Add to...", add_to_cb, c, i);
+    lv_obj_set_width(b, 96);
+    return r;
+}
+
+/* Row `r` shows c->dev[i]; only what changed is set. */
+static void dev_row_set(chans_t *c, lv_obj_t *r, int i)
+{
+    const ui_disc_dev_t *d = &c->dev[i];
+    lv_obj_set_user_data(r, (void *)(intptr_t)i);                     /* the filter moves rows */
+    lv_obj_set_user_data(lv_obj_get_child(r, 7), (void *)(intptr_t)i);
+    char port[16], vm[160], pr[48], st[32];
+    snprintf(port, sizeof port, "%d", d->port);
+    const char *who = d->model[0] ? d->model : d->name;
+    snprintf(vm, sizeof vm, "%s%s%s", d->vendor, d->vendor[0] && who[0] ? " / " : "", who);
+    protos_text(d->protos, pr, sizeof pr);
+    if (d->channel) snprintf(st, sizeof st, "On channel %d", d->channel);
+    else snprintf(st, sizeof st, "%s", d->stale ? "No answer" : "New");
+    /* Not heard by the last search: dimmed until it answers. */
+    lv_color_t text = d->stale ? UI_C(TEXT2) : UI_C(TEXT);
+    tick_set(lv_obj_get_child(r, 0), is_checked(c, d->key));
+    label_set(lv_obj_get_child(r, 1), d->ip, text);
+    label_set(lv_obj_get_child(r, 2), d->port ? port : "-", text);
+    label_set(lv_obj_get_child(r, 3), d->mac[0] ? d->mac : "-", text);
+    label_set(lv_obj_get_child(r, 4), vm[0] ? vm : "-", text);
+    label_set(lv_obj_get_child(r, 5), pr, text);
+    label_set(lv_obj_get_child(r, 6), st, d->stale ? UI_C(TEXT2) : d->channel ? UI_C(OK) : UI_C(ACCENT));
+    lv_obj_t *b = lv_obj_get_child(r, 7);
+    if (!!d->channel != lv_obj_has_state(b, LV_STATE_DISABLED)) {
+        if (d->channel) lv_obj_add_state(b, LV_STATE_DISABLED);
+        else lv_obj_remove_state(b, LV_STATE_DISABLED);
+    }
+}
+
+/* The device table shows c->dev: rows set in place, added at the end or
+ * taken from it, never built anew, so the row under the pointer or the
+ * focus, and the scroll position, stay while a search fills the list. */
+static void devs_build(chans_t *c)
+{
+    lv_obj_t *t = c->devs;
+    /* The rows Show lets through; a device it hides is not checked (Add
+     * and the others act on what can be seen). */
+    c->n_shown = 0;
+    for (int i = 0; i < c->n_dev; ++i)
+        if (dev_shown(c, i)) c->shown[c->n_shown++] = i;
+    int m = 0;
+    for (int k = 0; k < c->n_checked; ++k) {
+        int i = device_index(c, c->checked[k]);
+        if (i >= 0 && dev_shown(c, i)) memmove(c->checked[m++], c->checked[k], sizeof c->checked[0]);
+    }
+    c->n_checked = m;
+    if (!c->n_shown) {
+        const char *w = !c->n_dev ? (M()->disc_scan ? "No devices yet: Search finds the cameras on the network."
+                                                    : "This vigild cannot search for cameras.")
+                      : c->filter == 1 ? "Every device found is on a channel."
+                                       : "None of the devices found is on a channel.";
+        if (!c->empty) {
+            lv_obj_clean(t);
+            c->empty = ui_label(t, w, VG_FONT_MD_LV, UI_C(TEXT2));
+            lv_obj_set_style_pad_ver(c->empty, VG_SPACE_LG, 0);
+        } else if (strcmp(lv_label_get_text(c->empty), w)) {
+            lv_label_set_text(c->empty, w);
+        }
+        return;
+    }
+    if (c->empty) {
+        lv_obj_delete(c->empty);
+        c->empty = NULL;
+    }
+    int rows = (int)lv_obj_get_child_count(t);
+    for (int k = rows - 1; k >= c->n_shown; --k) lv_obj_delete(lv_obj_get_child(t, k));
+    for (int k = rows; k < c->n_shown; ++k) dev_row_new(c, c->shown[k]);
+    for (int k = 0; k < c->n_shown; ++k) dev_row_set(c, lv_obj_get_child(t, k), c->shown[k]);
+    /* LVGL redraws only the rows added or taken: the scroll bar, beside
+     * them, would keep its old length (or not appear). */
+    if (rows != c->n_shown) lv_obj_invalidate(t);
+}
+
+typedef struct {
+    const char *t;
+    int         w;
+} col_t;
+
+static const col_t k_dev_cols[] = {
+    { "", 20 }, { "IP address", 130 }, { "Port", 56 }, { "MAC", 150 }, { "Vendor / model", 0 },
+    { "Protocols", 150 }, { "Status", 140 }, { "", 96 },
+};
+static const col_t k_ch_cols[] = {
+    { "#", 28 }, { "", 20 }, { "IP address", 150 }, { "", 34 }, { "Protocol", 70 }, { "State", 150 },
+    { "Channel name", 0 },
+};
+
+/* A table's header, above its scrolled rows (so it stays). */
+static void header(lv_obj_t *parent, const col_t *cols, size_t n)
+{
+    lv_obj_t *h = trow(parent, 1);
+    lv_obj_set_style_pad_hor(h, VG_SPACE_SM + VG_SPACE_XS, 0);  /* the rows' own and their container's */
+    lv_obj_set_style_pad_right(h, VG_SPACE_SM + SCROLLBAR_W, 0);
+    for (size_t i = 0; i < n; ++i) tcell(h, cols[i].t, cols[i].w, UI_C(TEXT2));
+}
+
+/* ---- the channel table ---------------------------------------------------------------- */
+
+static int field_of(int sec, const char *key)
+{
+    const ui_section_t *s = &M()->sections[sec];
+    for (int f = 0; f < s->n_fields; ++f)
+        if (!strcmp(s->fields[f].key, key)) return f;
+    return -1;
+}
+
+static void slot_value(chans_t *c, int ch, const char *key, char *buf, size_t cap)
+{
+    int f = field_of(c->sec, key);
+    buf[0] = 0;
+    if (f >= 0 && ch < M()->item_count(c->sec)) M()->get_value(c->sec, ch, f, buf, cap);
+}
+
+static int slot_empty(chans_t *c, int ch)
+{
+    char buf[1024];
+    slot_value(c, ch, "url", buf, sizeof buf);
+    return !buf[0];
+}
+
+/* The one device checked, or -1. */
+static int one_checked(const chans_t *c)
+{
+    return c->n_checked == 1 ? device_index(c, c->checked[0]) : -1;
+}
+
+static int n_channels(void) { return M()->channels < UI_MAX_CHANNELS ? M()->channels : UI_MAX_CHANNELS; }
+
+/* The channels checked: how many, how many of them have a camera, and the
+ * first one (-1: none). */
+static int chans_checked(const chans_t *c, int *with_camera, int *first)
+{
+    int n = 0, cams = 0;
+    if (first) *first = -1;
+    for (int ch = 0; ch < n_channels(); ++ch)
+        if (c->ch_checked[ch]) {
+            if (first && *first < 0) *first = ch;
+            ++n;
+            cams += !slot_empty((chans_t *)c, ch);
+        }
+    if (with_camera) *with_camera = cams;
+    return n;
+}
+
+/* The camera's address in a source URL: no scheme, user, password, port
+ * or path ("rtsp://admin:pw@192.168.1.10:554/x" -> 192.168.1.10). */
+static void url_host(const char *url, char *out, size_t cap)
+{
+    if (!strncmp(url, "capture:", 8)) {
+        snprintf(out, cap, "Local input %.16s", url + 8);
+        return;
+    }
+    const char *p = strstr(url, "://");
+    p = p ? p + 3 : url;
+    const char *end = p + strcspn(p, "/?#");
+    const char *at = NULL;
+    for (const char *q = p; q < end; ++q)
+        if (*q == '@') at = q;
+    if (at) p = at + 1;
+    if (*p == '[') {                    /* [IPv6]:port */
+        const char *rb = memchr(p, ']', (size_t)(end - p));
+        if (rb) end = rb, ++p;
+    } else {
+        const char *colon = memchr(p, ':', (size_t)(end - p));
+        if (colon) end = colon;
+    }
+    snprintf(out, cap, "%.*s", (int)(end - p), p);
+    if (!out[0]) snprintf(out, cap, "?");
+}
+
+static const char *scheme_word(const char *url)
+{
+    if (!strncmp(url, "netip://", 8)) return "NETIP";
+    if (!strncmp(url, "rtsp://", 7)) return "RTSP";
+    if (!strncmp(url, "capture:", 8)) return "Local";
+    return url[0] ? "?" : "-";
+}
+
+static lv_color_t state_color(const ui_chan_t *st)
+{
+    return st->status == UI_CH_LIVE ? UI_C(OK)
+         : st->status == UI_CH_EMPTY || st->status == UI_CH_DISABLED ? UI_C(TEXT2)
+         : st->status == UI_CH_CONNECTING ? UI_C(WARN) : UI_C(BAD);
+}
+
+static int  scan_out_of_the_way(chans_t *c);
+static void manual_open(chans_t *c, int at);
+
+static void put_here(chans_t *c, int ch)
+{
+    int i = one_checked(c);
+    if (i < 0) {
+        ui_toast(UI_TOAST_WARN, "Check one device above first");
+        return;
+    }
+    assign_start(c, c->dev[i].key, ch + 1, !slot_empty(c, ch));
+}
+
+/* "+" on an empty channel: the device checked above, if one is; else
+ * Manual add, for that channel. */
+static void plus_on(chans_t *c, int ch)
+{
+    if (!slot_empty(c, ch)) {
+        ui_toast(UI_TOAST_WARN, "Channel %d has a camera: delete it first", ch + 1);
+        return;
+    }
+    if (one_checked(c) >= 0) {
+        put_here(c, ch);
+        return;
+    }
+    scan_out_of_the_way(c);
+    manual_open(c, ch);
+}
+
+/* The cameras section saved again, with the channels in `clear` emptied
+ * (their slots stay: the cameras after them keep their channels) and
+ * channel `rename`'s name set to `name` (-1: none). */
+static ui_save_rc_t slots_save(chans_t *c, const char *clear, int rename, const char *name, ui_errors_t *errs)
+{
+    const ui_section_t *s = &M()->sections[c->sec];
+    int n = M()->item_count(c->sec), fname = field_of(c->sec, "name");
+    memset(errs, 0, sizeof *errs);
+    if (n > UI_MAX_ITEMS) return UI_SAVE_FAILED;
+    char **v = calloc((size_t)(n * s->n_fields) + 1, sizeof *v);
+    int origin[UI_MAX_ITEMS];
+    char buf[1024];
+    int ok = v != NULL;
+    for (int i = 0; ok && i < n; ++i) {
+        int gone = clear && i < UI_MAX_CHANNELS && clear[i];
+        origin[i] = gone ? -1 : i;
+        for (int f = 0; f < s->n_fields; ++f) {
+            if (gone) snprintf(buf, sizeof buf, "%s", f == 0 || !s->fields[f].def ? "" : s->fields[f].def);
+            else if (i == rename && f == fname) snprintf(buf, sizeof buf, "%s", name);
+            else M()->get_value(c->sec, i, f, buf, sizeof buf);
+            if (!(v[i * s->n_fields + f] = strdup(buf))) ok = 0;
+        }
+    }
+    ui_save_rc_t rc = ok ? M()->save(c->sec, n, (const char *const *)v, origin, c->gen, errs) : UI_SAVE_FAILED;
+    for (int i = 0; v && i < n * s->n_fields; ++i) free(v[i]);
+    free(v);
+    return rc;
+}
+
+/* Deleting cameras: the channels' (X, Delete) or every one (Clear). */
+typedef struct {
+    chans_t *c;
+    char     ch[UI_MAX_CHANNELS];
+    int      n, first;
+} rm_t;
+
+static rm_t g_rm;
+
+static void rm_now(void *u)
+{
+    rm_t *k = u;
+    chans_t *c = k->c;
+    ui_errors_t errs;
+    ui_save_rc_t rc = slots_save(c, k->ch, -1, NULL, &errs);
+    if (rc == UI_SAVE_OK) {
+        for (int ch = 0; ch < UI_MAX_CHANNELS; ++ch)
+            if (k->ch[ch]) c->ch_checked[ch] = 0;
+        if (k->n == 1) ui_toast(UI_TOAST_OK, "Channel %d cleared", k->first + 1);
+        else ui_toast(UI_TOAST_OK, "%d channels cleared", k->n);
+    } else if (rc == UI_SAVE_STALE) {
+        ui_toast(UI_TOAST_WARN, "Not deleted: the channels changed meanwhile");
+    } else {
+        ui_toast(UI_TOAST_BAD, "Not deleted: %s", errs.n ? errs.e[0].msg : "error");
+    }
+    chans_build(c);
+    buttons_sync(c);
+}
+
+/* Ask before deleting the cameras of the channels in `pick` (NULL: every
+ * channel, Clear); channels without one are left out. */
+static void rm_ask(chans_t *c, const char *pick)
+{
+    memset(&g_rm, 0, sizeof g_rm);
+    g_rm.c = c;
+    g_rm.first = -1;
+    char list[160] = "";
+    for (int ch = 0; ch < n_channels(); ++ch) {
+        if ((pick && !pick[ch]) || slot_empty(c, ch)) continue;
+        g_rm.ch[ch] = 1;
+        if (g_rm.first < 0) g_rm.first = ch;
+        size_t l = strlen(list);
+        if (l < sizeof list - 8) snprintf(list + l, sizeof list - l, "%s%d", g_rm.n ? ", " : "", ch + 1);
+        ++g_rm.n;
+    }
+    if (!g_rm.n) return;
+    char q[256];
+    if (!pick)
+        snprintf(q, sizeof q, "Clear every channel? The %d camera%s removed at once.", g_rm.n,
+                 g_rm.n == 1 ? " is" : "s are");
+    else if (g_rm.n == 1)
+        snprintf(q, sizeof q, "Delete the camera of channel %d? It is removed at once.", g_rm.first + 1);
+    else
+        snprintf(q, sizeof q, "Delete the cameras of channels %s? They are removed at once.", list);
+    ui_confirm(q, pick ? "Delete" : "Clear", rm_now, &g_rm);
+}
+
+static void rm_one(chans_t *c, int ch)
+{
+    char pick[UI_MAX_CHANNELS] = { 0 };
+    pick[ch] = 1;
+    rm_ask(c, pick);
+}
+
+/* A row's X (its camera deleted) and + (one put there). */
+static void x_cb(lv_event_t *e)
+{
+    rm_one(lv_event_get_user_data(e), (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e)));
+}
+
+static void plus_cb(lv_event_t *e)
+{
+    plus_on(lv_event_get_user_data(e), (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e)));
+}
+
+static void chan_toggle(chans_t *c, lv_obj_t *row)
+{
+    int ch = (int)(intptr_t)lv_obj_get_user_data(row);
+    if (ch < 0 || ch >= UI_MAX_CHANNELS) return;
+    c->ch_checked[ch] = !c->ch_checked[ch];
+    tick_set(lv_obj_get_child(row, 1), c->ch_checked[ch]);
+    buttons_sync(c);
+}
+
+/* A click on the row, or Enter or Space on it (the keyboard's Space is
+ * Enter outside a text field): the channel checked or not. */
+static void chan_click_cb(lv_event_t *e)
+{
+    chan_toggle(lv_event_get_user_data(e), lv_event_get_current_target(e));
+}
+
+static void chan_key_cb(lv_event_t *e)
+{
+    chans_t *c = lv_event_get_user_data(e);
+    lv_obj_t *row = lv_event_get_target(e);
+    int ch = (int)(intptr_t)lv_obj_get_user_data(row);
+    uint32_t k = lv_event_get_key(e);
+    if (k == ' ') chan_toggle(c, row);
+    else if (k == 'e' || k == 'E') ui_form_open_slot(c->sec, ch);
+    else if (k == LV_KEY_DEL) rm_one(c, ch);
+    else if (k == 'a' || k == 'A' || k == '+') plus_on(c, ch);
+}
+
+/* A row's X or +: a small square button. */
+static lv_obj_t *icon_btn(lv_obj_t *row, chans_t *c, const char *sym, lv_event_cb_t cb, int ch, lv_color_t col)
+{
+    lv_obj_t *b = tbtn(row, sym, NULL, cb, c, ch);
+    lv_obj_set_width(b, 34);
+    lv_obj_set_style_pad_hor(b, 0, 0);
+    lv_obj_set_style_text_color(b, col, 0);
+    return b;
+}
+
+static void chans_build(chans_t *c)
+{
+    lv_obj_t *t = c->chans;
+    int32_t sy = lv_obj_get_scroll_y(t);
+    /* The keyboard's row stays its row (the table is built anew when the
+     * channels change). */
+    int focus = c->target;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(t); ++i)
+        if (lv_obj_has_state(lv_obj_get_child(t, (int32_t)i), LV_STATE_FOCUSED)) focus = (int)i;
+    lv_obj_clean(t);
+    memset(c->state_cell, 0, sizeof c->state_cell);
+    memset(c->name_cell, 0, sizeof c->name_cell);
+    c->gen = M()->config_generation ? M()->config_generation() : 0;
+    lv_obj_t *first = NULL;
+    char url[1024], name[64], idx[8], host[128];
+    for (int ch = 0; ch < n_channels(); ++ch) {
+        lv_obj_t *r = trow(t, 0);
+        lv_obj_set_user_data(r, (void *)(intptr_t)ch);
+        lv_obj_add_event_cb(r, chan_click_cb, LV_EVENT_CLICKED, c);
+        lv_obj_add_event_cb(r, chan_key_cb, LV_EVENT_KEY, c);
+        if (!first || ch == focus) first = r;
+        if (ch == c->target) {
+            lv_obj_set_style_bg_color(r, UI_C(ACCENT), 0);
+            lv_obj_set_style_bg_opa(r, LV_OPA_20, 0);
+        }
+        snprintf(idx, sizeof idx, "%d", ch + 1);
+        tcell(r, idx, 28, ch == c->target ? UI_C(ACCENT) : UI_C(TEXT));
+        tick_set(tick(r), c->ch_checked[ch]);
+        slot_value(c, ch, "url", url, sizeof url);
+        const ui_chan_t *st = ui_channel(ch);
+        if (!url[0]) {
+            tcell(r, "Empty", 150, UI_C(TEXT2));
+            icon_btn(r, c, LV_SYMBOL_PLUS, plus_cb, ch, UI_C(ACCENT));
+            tcell(r, "-", 70, UI_C(TEXT2));
+            c->state_cell[ch] = tcell(r, "-", 150, UI_C(TEXT2));
+            tcell(r, "-", 0, UI_C(TEXT2));
+            continue;
+        }
+        url_host(url, host, sizeof host);
+        tcell(r, host, 150, UI_C(TEXT));
+        icon_btn(r, c, LV_SYMBOL_CLOSE, x_cb, ch, UI_C(BAD));
+        tcell(r, scheme_word(url), 70, UI_C(TEXT));
+        c->state_cell[ch] = tcell(r, ui_chan_status_word(st), 150, state_color(st));
+        slot_value(c, ch, "name", name, sizeof name);
+        int named = name[0] != 0;
+        if (!named) ui_chan_title(ch, name, sizeof name);
+        lv_obj_t *nc = tcell(r, name, 0, UI_C(TEXT));
+        if (!named) c->name_cell[ch] = nc;
+    }
+    if (first) ui_gridnav_focus(t, first);
+    lv_obj_scroll_to_y(t, sy, LV_ANIM_OFF);
+}
+
+/* The states only, every poll. */
+static void chans_states(chans_t *c)
+{
+    for (int ch = 0; ch < n_channels(); ++ch) {
+        lv_obj_t *l = c->state_cell[ch];
+        if (!l || slot_empty(c, ch)) continue;
+        const ui_chan_t *st = ui_channel(ch);
+        label_set(l, ui_chan_status_word(st), state_color(st));
+        if (c->name_cell[ch]) {
+            char name[64];
+            ui_chan_title(ch, name, sizeof name);
+            if (strcmp(lv_label_get_text(c->name_cell[ch]), name)) lv_label_set_text(c->name_cell[ch], name);
+        }
+    }
+}
+
+/* kbit/s as Mbit/s: one decimal, none for a round number (the maximum). */
+static void mbps(char *out, size_t cap, unsigned kbps, int round)
+{
+    if (round && kbps % 1000 == 0) snprintf(out, cap, "%u", kbps / 1000);
+    else snprintf(out, cap, "%u.%u", (kbps + 50) / 1000, (kbps + 50) % 1000 / 100);
+}
+
+/* What the cameras bring in now, every stream, against what the chip is
+ * rated for: amber from 80 %, red over it. */
+static void bw_sync(chans_t *c)
+{
+    unsigned now = 0, max = M()->max_in_kbps;
+    for (int ch = 0; ch < n_channels(); ++ch) now += ui_channel(ch)->main_kbps + ui_channel(ch)->sub_kbps;
+    char a[16], b[16], t[48];
+    mbps(a, sizeof a, now, 0);
+    if (max) {
+        mbps(b, sizeof b, max, 1);
+        snprintf(t, sizeof t, "%s / %s Mbps", a, b);
+    } else {
+        snprintf(t, sizeof t, "%s Mbps", a);
+    }
+    lv_color_t col = !max ? UI_C(TEXT)
+                   : now > max ? UI_C(BAD)
+                   : (unsigned long long)now * 10 >= (unsigned long long)max * 8 ? UI_C(WARN) : UI_C(TEXT);
+    label_set(c->bw, t, col);
+}
+
+/* ---- the channel pane's buttons --------------------------------------------------------- */
+
+static void clear_all_cb(lv_event_t *e) { rm_ask(lv_event_get_user_data(e), NULL); }
+
+static void delete_cb(lv_event_t *e)
+{
+    chans_t *c = lv_event_get_user_data(e);
+    rm_ask(c, c->ch_checked);
+}
+
+static void edit_ch_cb(lv_event_t *e)
+{
+    chans_t *c = lv_event_get_user_data(e);
+    int ch;
+    if (chans_checked(c, NULL, &ch) == 1) ui_form_open_slot(c->sec, ch);
+}
+
+/* Title: the channel's name on the screen, in a small dialog. */
+static struct {
+    chans_t  *c;
+    int       ch;
+    lv_obj_t *ta, *osk;
+} g_title;
+
+static void title_save(void)
+{
+    chans_t *c = g_title.c;
+    char name[32];
+    snprintf(name, sizeof name, "%s", lv_textarea_get_text(g_title.ta));
+    ui_popup_close();
+    ui_errors_t errs;
+    ui_save_rc_t rc = slots_save(c, NULL, g_title.ch, name, &errs);
+    if (rc == UI_SAVE_OK) ui_toast(UI_TOAST_OK, "Channel %d: %s", g_title.ch + 1, name[0] ? name : "the camera's name");
+    else if (rc == UI_SAVE_STALE) ui_toast(UI_TOAST_WARN, "Not saved: the channels changed meanwhile");
+    else ui_toast(UI_TOAST_BAD, "Not saved: %s", errs.n ? errs.e[0].msg : "error");
+    chans_build(c);
+}
+
+static void title_ok_cb(lv_event_t *e)
+{
+    (void)e;
+    title_save();
+}
+
+static void title_cancel_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_popup_close();
+}
+
+static void title_ready_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_indev_t *in = lv_indev_active();
+    if (in) lv_indev_wait_release(in);
+    title_save();
+}
+
+static void title_click_cb(lv_event_t *e)
+{
+    if (!ui_keyboard_in_use() && g_title.osk) ui_osk_show(g_title.osk, lv_event_get_target(e), 0);
+}
+
+static void title_osk_cb(lv_event_t *e)
+{
+    ui_osk_hide(lv_event_get_target(e));
+    if (lv_event_get_code(e) == LV_EVENT_READY) title_save();
+}
+
+static void title_cb(lv_event_t *e)
+{
+    chans_t *c = lv_event_get_user_data(e);
+    int ch, cams;
+    if (chans_checked(c, &cams, &ch) != 1 || !cams) return;
+    g_title.c = c;
+    g_title.ch = ch;
+    char name[64], q[64];
+    slot_value(c, ch, "name", name, sizeof name);
+    lv_obj_t *panel = ui_popup_open(NULL, 480);
+    lv_obj_set_style_pad_all(panel, VG_SPACE_XL, 0);
+    lv_obj_set_style_pad_row(panel, VG_SPACE_MD, 0);
+    lv_obj_set_style_border_color(panel, UI_C(ACCENT), 0);
+    snprintf(q, sizeof q, "Title of channel %d", ch + 1);
+    ui_label(panel, q, VG_FONT_LG_LV, UI_C(TEXT));
+    lv_obj_t *hl = ui_label(panel, "The name the screen shows. Empty: the camera's own.", VG_FONT_SM_LV, UI_C(TEXT2));
+    lv_label_set_long_mode(hl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(hl, LV_PCT(100));
+    g_title.ta = lv_textarea_create(panel);
+    lv_textarea_set_one_line(g_title.ta, 1);
+    lv_textarea_set_max_length(g_title.ta, 31);
+    lv_textarea_set_text(g_title.ta, name);
+    char cam[32];
+    ui_chan_title(ch, cam, sizeof cam);
+    lv_textarea_set_placeholder_text(g_title.ta, cam);
+    lv_obj_set_width(g_title.ta, LV_PCT(100));
+    lv_obj_add_event_cb(g_title.ta, title_ready_cb, LV_EVENT_READY, NULL);
+    lv_obj_add_event_cb(g_title.ta, title_click_cb, LV_EVENT_CLICKED, NULL);
+    ui_focus_style(g_title.ta);
+    lv_obj_t *row = lv_obj_create(panel);
+    ui_plain(row);
+    ui_ring_room(row);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_layout(row, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, VG_SPACE_MD, 0);
+    lv_obj_t *no = ui_btn(row, NULL, "Cancel");
+    lv_obj_add_event_cb(no, title_cancel_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *ok = ui_btn(row, LV_SYMBOL_OK, "Save");
+    ui_btn_accent(ok);
+    lv_obj_add_event_cb(ok, title_ok_cb, LV_EVENT_CLICKED, NULL);
+    /* The keyboard's order: the name, then the buttons. */
+    ui_popup_focus_add(g_title.ta);
+    ui_popup_focus(row, ok, LV_GRIDNAV_CTRL_ROLLOVER);
+    ui_popup_focus_obj(g_title.ta);
+    /* The on-screen keyboard over the popup, gone with it. */
+    g_title.osk = ui_osk_create(lv_obj_get_parent(panel));
+    if (g_title.osk) {
+        lv_obj_add_event_cb(g_title.osk, title_osk_cb, LV_EVENT_READY, NULL);
+        lv_obj_add_event_cb(g_title.osk, title_osk_cb, LV_EVENT_CANCEL, NULL);
+    }
+    ui_popup_place(NULL);
+}
+
+/* ---- adding ----------------------------------------------------------------------------- */
+
+static void creds(const chans_t *c, const char **user, const char **pass)
+{
+    *user = lv_textarea_get_text(c->user);
+    *pass = lv_textarea_get_text(c->pass);
+    if (!**user) *user = "admin";
+}
+
+/* A search of anyone's runs (and could be stopped). */
+static int scanning(const chans_t *c)
+{
+    return M()->disc_job && c->jb->running && c->jb->kind == UI_JOB_SCAN;
+}
+
+/* A search runs: stop it, and run what waits (q_wait) when it has ended.
+ * 0 if nothing has to wait. */
+static int scan_out_of_the_way(chans_t *c)
+{
+    if (!scanning(c) || !M()->disc_stop) return 0;
+    M()->disc_stop();
+    return 1;
+}
+
+/* The next device of the queue, until one starts: 1, or 0 when none is
+ * left (each that could not start counted as not added). */
+static int add_next(chans_t *c)
+{
+    const char *user, *pass;
+    creds(c, &user, &pass);
+    while (c->q_i < c->q_n) {
+        char err[96] = "";
+        int first = c->q_i == 0;
+        int id = M()->disc_assign(c->queue[c->q_i++], first ? c->q_ch : 0, user, pass, first && c->q_replace, err,
+                                  sizeof err);
+        if (id >= 0) {
+            c->job = (unsigned)id;
+            return 1;
+        }
+        ++c->q_fail;
+        snprintf(c->q_err, sizeof c->q_err, "%s", err[0] ? err : "Cannot start");
+    }
+    return 0;
+}
+
+/* The queue is through: how it went (`r`: the last job's result). */
+static void queue_end(chans_t *c, const ui_disc_res_t *r)
+{
+    if (c->q_n == 1 && c->q_ok && r) ui_toast(UI_TOAST_OK, "%s added to channel %d", r->ip, r->channel);
+    else if (c->q_n == 1) ui_toast(UI_TOAST_BAD, "Not added: %s", c->q_err);
+    else if (c->q_fail) ui_toast(UI_TOAST_BAD, "%d added, %d not: %s", c->q_ok, c->q_fail, c->q_err);
+    else ui_toast(UI_TOAST_OK, "%d added", c->q_ok);
+    c->q_n = 0;
+    c->n_checked = 0;
+}
+
+/* Start adding the `n` devices in c->queue, the first to channel `ch`
+ * (1-based; 0: the first empty one); a search is stopped first. */
+static void queue_start(chans_t *c, int n, int ch, int replace)
+{
+    c->q_n = n;
+    c->q_i = c->q_ok = c->q_fail = 0;
+    c->q_err[0] = 0;
+    c->q_ch = ch;
+    c->q_replace = replace;
+    c->q_wait = scan_out_of_the_way(c);
+    if (!c->q_wait && !add_next(c)) queue_end(c, NULL);
+    buttons_sync(c);
+}
+
+static void assign_start(chans_t *c, const char *key, int ch, int replace)
+{
+    if (!M()->disc_assign) return;
+    snprintf(c->queue[0], sizeof c->queue[0], "%s", key);
+    queue_start(c, 1, ch, replace);
+}
+
+/* Add: the checked devices, each to the next empty channel; the first to
+ * the channel the page was opened for, while it is empty. */
+static void add_cb(lv_event_t *e)
+{
+    chans_t *c = lv_event_get_user_data(e);
+    if (!c->n_checked || !M()->disc_assign) {
+        ui_toast(UI_TOAST_WARN, "Check the devices to add first");
+        return;
+    }
+    int n = 0;
+    for (int k = 0; k < c->n_checked; ++k) {
+        int i = device_index(c, c->checked[k]);
+        if (i >= 0 && !c->dev[i].channel) snprintf(c->queue[n++], sizeof c->queue[0], "%s", c->checked[k]);
+    }
+    if (!n) {
+        ui_toast(UI_TOAST_WARN, "The devices checked are on channels already");
+        return;
+    }
+    queue_start(c, n, c->target >= 0 && slot_empty(c, c->target) ? c->target + 1 : 0, 0);
+}
+
+/* Select all: the rows shown (Show); all of them checked already, none. */
+static void select_all_cb(lv_event_t *e)
+{
+    chans_t *c = lv_event_get_user_data(e);
+    int all = c->n_shown && c->n_checked == c->n_shown;
+    c->n_checked = 0;
+    for (int k = 0; !all && k < c->n_shown; ++k)
+        memcpy(c->checked[c->n_checked++], c->dev[c->shown[k]].key, sizeof c->checked[0]);
+    devs_build(c);
+    buttons_sync(c);
+}
+
+static void show_cb(lv_event_t *e)
+{
+    chans_t *c = lv_event_get_user_data(e);
+    c->filter = (int)lv_dropdown_get_selected(c->show);
+    lv_obj_scroll_to_y(c->devs, 0, LV_ANIM_OFF);
+    devs_build(c);
+    buttons_sync(c);
+}
+
+static void devices_load(chans_t *c, int sorted);
+
+/* Search, or Stop while a search runs. */
+static void search_cb(lv_event_t *e)
+{
+    chans_t *c = lv_event_get_user_data(e);
+    if (scanning(c)) {
+        if (M()->disc_stop) M()->disc_stop();
+        return;
+    }
+    if (!M()->disc_scan) return;
+    static const unsigned bits[] = { UI_DISC_NETIP | UI_DISC_ONVIF | UI_DISC_DHIP, UI_DISC_NETIP, UI_DISC_ONVIF,
+                                     UI_DISC_DHIP };
+    uint32_t sel = lv_dropdown_get_selected(c->proto);
+    char err[96] = "";
+    if (started(c, M()->disc_scan(bits[sel < 4 ? sel : 0], err, sizeof err), err) == 0) {
+        /* A new search starts from the list in address order; what it
+         * finds then goes to the end. */
+        devices_load(c, 1);
+        devs_build(c);
+        if (M()->disc_job) M()->disc_job(c->jb);
+    }
+    buttons_sync(c);
+}
+
+/* Change IP, Mass change, Auto add: pages of their own (below). */
+static void change_ip_open(chans_t *c, int dev);
+static void mass_open(chans_t *c);
+static void autoadd_open(chans_t *c);
+
+static void change_ip_cb(lv_event_t *e)
+{
+    chans_t *c = lv_event_get_user_data(e);
+    int i = c->n_checked == 1 ? device_index(c, c->checked[0]) : -1;
+    if (i < 0) {
+        ui_toast(UI_TOAST_WARN, "Check one device to change its address");
+        return;
+    }
+    scan_out_of_the_way(c);             /* its job starts later, from that page */
+    change_ip_open(c, i);
+}
+
+static void mass_cb(lv_event_t *e)
+{
+    chans_t *c = lv_event_get_user_data(e);
+    scan_out_of_the_way(c);
+    mass_open(c);
+}
+static void manual_cb(lv_event_t *e)
+{
+    chans_t *c = lv_event_get_user_data(e);
+    scan_out_of_the_way(c);
+    manual_open(c, -1);
+}
+static void autoadd_cb(lv_event_t *e)
+{
+    chans_t *c = lv_event_get_user_data(e);
+    scan_out_of_the_way(c);
+    autoadd_open(c);
+}
+
+static void settings_cb(lv_event_t *e)
+{
+    (void)e;
+    for (int s = 0; s < M()->n_sections; ++s)
+        if (!strcmp(M()->sections[s].key, "discovery")) ui_form_open(s, -1);
+}
+
+static void enable(lv_obj_t *o, int on)
+{
+    if (on == lv_obj_has_state(o, LV_STATE_DISABLED)) {
+        if (on) lv_obj_remove_state(o, LV_STATE_DISABLED);
+        else lv_obj_add_state(o, LV_STATE_DISABLED);
+    }
+}
+
+static void buttons_sync(chans_t *c)
+{
+    /* A search does not make the page busy: what needs the job thread
+     * stops it first. Another job (or one about to start) does. */
+    int scan = scanning(c);
+    int busy = 0;
+    if (M()->disc_job && c->jb) busy = (c->jb->running && !scan) || (c->job && c->jb->id != c->job) || c->q_wait;
+    enable(c->add, !busy && c->n_checked);
+    enable(c->chip, !busy && c->n_checked == 1);
+    enable(c->manual, !busy && M()->disc_assign_manual);
+    enable(c->mass, !busy && M()->disc_scan && c->n_dev);
+    enable(c->autoadd, !busy && M()->disc_scan && c->n_dev);
+    enable(c->search, M()->disc_scan && (scan ? M()->disc_stop != NULL : !busy));
+    const char *w = scan ? LV_SYMBOL_STOP "  Stop" : LV_SYMBOL_REFRESH "  Search";
+    lv_obj_t *l = ui_btn_label(c->search);
+    if (strcmp(lv_label_get_text(l), w)) lv_label_set_text(l, w);
+    int stale = 0;
+    for (int i = 0; i < c->n_dev; ++i) stale += c->dev[i].stale;
+    char h[96];
+    if (c->n_checked) snprintf(h, sizeof h, "%d checked", c->n_checked);
+    else if (scan) h[0] = 0;                /* the status says how many so far */
+    else if (stale) snprintf(h, sizeof h, "%d found, %d did not answer", c->n_dev - stale, stale);
+    else snprintf(h, sizeof h, "%d found", c->n_dev);
+    if (!c->n_checked && !scan && c->filter) {
+        size_t l = strlen(h);
+        snprintf(h + l, sizeof h - l, ", %d shown", c->n_shown);
+    }
+    if (strcmp(lv_label_get_text(c->hint), h)) lv_label_set_text(c->hint, h);
+
+    /* The channel pane: its buttons act on the channels checked. */
+    int cams_all = 0, cams, first;
+    for (int ch = 0; ch < n_channels(); ++ch) cams_all += !slot_empty(c, ch);
+    int n = chans_checked(c, &cams, &first);
+    enable(c->clr, cams_all > 0);
+    enable(c->del, cams > 0);
+    enable(c->edt, n == 1);
+    enable(c->ttl, n == 1 && cams == 1);
+    char t[96];
+    if (n) snprintf(t, sizeof t, "%d checked", n);
+    else if (c->target >= 0) snprintf(t, sizeof t, "Channel %d: check a device above, then + on its row.", c->target + 1);
+    else t[0] = 0;
+    label_set(c->chint, t, c->target >= 0 && !n ? UI_C(ACCENT) : UI_C(TEXT2));
+}
+
+/* The same device as `d`, in got[] (not yet `used`): the same key, else,
+ * one of them without a MAC, the same address (its key becomes the MAC
+ * when a protocol that tells it answers). */
+static int same_device(const ui_disc_dev_t *got, int n, const char *used, const ui_disc_dev_t *d)
+{
+    for (int j = 0; j < n; ++j)
+        if (!used[j] && !strcmp(got[j].key, d->key)) return j;
+    for (int j = 0; j < n; ++j)
+        if (!used[j] && (!got[j].mac[0] || !d->mac[0]) && !strcmp(got[j].ip, d->ip)) return j;
+    return -1;
+}
+
+/* The devices again. With `sorted`, in the model's order (by address);
+ * else the rows keep their places: a device listed stays where it is
+ * (merged with what it said since), a new one goes to the end, one gone
+ * is taken out. */
+static void devices_load(chans_t *c, int sorted)
+{
+    static ui_disc_dev_t got[UI_DISC_MAX], out[UI_DISC_MAX];  /* the UI thread's only */
+    if (M()->disc_gen) c->dev_gen = M()->disc_gen();         /* first: news after it shows next time */
+    int n = M()->disc_devices ? M()->disc_devices(got, UI_DISC_MAX) : 0, k = 0;
+    char used[UI_DISC_MAX] = { 0 };
+    for (int i = 0; !sorted && i < c->n_dev; ++i) {
+        int j = same_device(got, n, used, &c->dev[i]);
+        if (j < 0) continue;
+        used[j] = 1;
+        for (int m = 0; m < c->n_checked; ++m)         /* a check follows a key that changed */
+            if (!strcmp(c->checked[m], c->dev[i].key)) snprintf(c->checked[m], sizeof c->checked[0], "%s", got[j].key);
+        out[k++] = got[j];
+    }
+    for (int j = 0; j < n; ++j)
+        if (!used[j]) out[k++] = got[j];
+    memcpy(c->dev, out, (size_t)k * sizeof *out);
+    c->n_dev = k;
+    /* Forget checks of devices no longer there. */
+    int m = 0;
+    for (int i = 0; i < c->n_checked; ++i)
+        if (device_index(c, c->checked[i]) >= 0) memmove(c->checked[m++], c->checked[i], sizeof c->checked[0]);
+    c->n_checked = m;
+}
+
+/* The devices, when the model says they changed (or, without disc_gen,
+ * while a search runs); the channel table too if checks went away. */
+static void devices_poll(chans_t *c)
+{
+    int news = M()->disc_gen ? M()->disc_gen() != c->dev_gen : scanning(c);
+    if (!news) return;
+    int checked = c->n_checked;
+    devices_load(c, 0);
+    devs_build(c);
+    if (checked != c->n_checked) chans_build(c);
+}
+
+/* An assign job of the queue's ended: the next one, or the outcome. */
+static void assign_done(chans_t *c)
+{
+    const ui_disc_job_t *j = c->jb;
+    const ui_disc_res_t *r = j->n ? &j->r[0] : NULL;
+    if (r && r->ok) ++c->q_ok;
+    else {
+        ++c->q_fail;
+        if (c->q_n == 1) snprintf(c->q_err, sizeof c->q_err, "%.90s", r ? r->msg : j->msg);
+        else snprintf(c->q_err, sizeof c->q_err, "%s: %.64s", r ? r->ip : "?", r ? r->msg : j->msg);
+    }
+    if (!add_next(c)) queue_end(c, r);
+}
+
+/* A job of this page's ended. */
+static void job_done(chans_t *c)
+{
+    ui_disc_job_t *j = c->jb;
+    c->job = 0;
+    if (j->kind == UI_JOB_ASSIGN && c->q_n) assign_done(c);
+    devices_load(c, 0);
+    devs_build(c);
+    chans_build(c);
+}
+
+static void poll_cb(lv_timer_t *t)
+{
+    chans_t *c = lv_timer_get_user_data(t);
+    if (M()->disc_job) {
+        M()->disc_job(c->jb);
+        const ui_disc_job_t *j = c->jb;
+        char s[128];
+        if (j->running && j->kind == UI_JOB_SCAN)
+            snprintf(s, sizeof s, LV_SYMBOL_REFRESH " Searching (%d%%)... %d found", j->progress, j->found);
+        else if (j->running) snprintf(s, sizeof s, LV_SYMBOL_REFRESH " %s", j->msg);
+        else s[0] = 0;                  /* the count beside it says how many */
+        if (strcmp(lv_label_get_text(c->status), s)) lv_label_set_text(c->status, s);
+        if (c->job && j->id == c->job && !j->running) job_done(c);
+        if (c->q_wait && !j->running) {     /* the search stopped for an add has ended */
+            c->q_wait = 0;
+            if (!add_next(c)) queue_end(c, NULL);
+        }
+    }
+    devices_poll(c);
+    chans_states(c);
+    bw_sync(c);
+    buttons_sync(c);
+}
+
+static void config_cb(lv_observer_t *o, lv_subject_t *s)
+{
+    (void)s;
+    chans_t *c = lv_observer_get_user_data(o);
+    devices_load(c, 0);             /* "On channel N" follows the cameras */
+    devs_build(c);
+    chans_build(c);
+}
+
+static int chans_back(ui_page_t *p) { return osk_back(((chans_t *)p->user)->kb); }
+
+static void chans_close(ui_page_t *p)
+{
+    chans_t *c = p->user;
+    if (c->timer) lv_timer_delete(c->timer);
+    if (g_ch == c) g_ch = NULL;
+    lv_free(c->jb);
+    lv_free(c);
+}
+
+/* Returning from a sub-page: what it changed shows. */
+static void refresh_async(void *u)
+{
+    chans_t *c = u;
+    if (g_ch != c) return;
+    devices_load(c, 0);
+    devs_build(c);
+    chans_build(c);
+}
+
+static lv_obj_t *toolbar_btn(lv_obj_t *row, chans_t *c, const char *sym, const char *text, lv_event_cb_t cb)
+{
+    lv_obj_t *b = ui_btn(row, sym, text);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, c);
+    lv_group_add_obj(c->page->group, b);
+    return b;
+}
+
+void ui_channels_open(void) { ui_channels_open_at(-1); }
+
+void ui_channels_open_at(int target)
+{
+    int sec = -1;
+    for (int s = 0; s < M()->n_sections; ++s)
+        if (!strcmp(M()->sections[s].key, "cameras")) sec = s;
+    if (sec < 0) return;
+    chans_t *c = lv_malloc_zeroed(sizeof *c);
+    if (!c) return;
+    c->jb = lv_malloc_zeroed(sizeof *c->jb);
+    ui_page_t *p = ui_page_push("Channels");
+    if (!p || !c->jb) {
+        lv_free(c->jb);
+        lv_free(c);
+        return;
+    }
+    g_ch = c;
+    c->page = p;
+    c->sec = sec;
+    c->target = target >= 0 && target < M()->channels && target < UI_MAX_CHANNELS ? target : -1;
+    p->user = c;
+    p->on_back = chans_back;
+    p->on_close = chans_close;
+    lv_obj_remove_flag(p->body, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(p->body, VG_SPACE_LG, 0);
+    lv_obj_set_style_pad_row(p->body, VG_SPACE_MD, 0);
+    c->kb = osk_for(p);
+
+    /* Search, and Channels below, sharing the page 3:2 (the search pane's
+     * two rows of controls take room from its list), both lists scrolled
+     * inside: a search can find dozens of devices, a board has 16 channels. */
+    lv_obj_t *sp = pane(p->body);
+    lv_obj_set_height(sp, 1);
+    lv_obj_set_flex_grow(sp, 3);
+    lv_obj_t *r1 = row_box(sp, VG_SPACE_SM);
+    pane_title(r1, &ui_icon_search, "Search");
+    c->proto = lv_dropdown_create(r1);
+    lv_dropdown_set_options(c->proto, "All protocols\nNETIP\nONVIF\nDHIP");
+    lv_obj_set_width(c->proto, 150);
+    ui_focus_style(c->proto);
+    lv_group_add_obj(p->group, c->proto);
+    c->search = toolbar_btn(r1, c, LV_SYMBOL_REFRESH, "Search", search_cb);
+    ui_btn_accent(c->search);
+    lv_obj_t *gap = lv_obj_create(r1);
+    ui_plain(gap);
+    lv_obj_set_size(gap, 1, 1);
+    lv_obj_set_flex_grow(gap, 1);
+    c->add = toolbar_btn(r1, c, LV_SYMBOL_PLUS, "Add", add_cb);
+    c->chip = toolbar_btn(r1, c, LV_SYMBOL_EDIT, "Change IP...", change_ip_cb);
+    c->mass = toolbar_btn(r1, c, LV_SYMBOL_LIST, "Mass change...", mass_cb);
+    c->autoadd = toolbar_btn(r1, c, LV_SYMBOL_SHUFFLE, "Auto add all", autoadd_cb);
+    c->manual = toolbar_btn(r1, c, LV_SYMBOL_KEYBOARD, "Manual add", manual_cb);
+
+    lv_obj_t *r2 = row_box(sp, VG_SPACE_SM);
+    c->all = toolbar_btn(r2, c, LV_SYMBOL_OK, "Select all", select_all_cb);
+    ui_label(r2, "Show", VG_FONT_SM_LV, UI_C(TEXT2));
+    c->show = lv_dropdown_create(r2);
+    lv_dropdown_set_options(c->show, "All\nNot added\nAdded");
+    lv_obj_set_width(c->show, 140);
+    ui_focus_style(c->show);
+    lv_group_add_obj(p->group, c->show);
+    lv_obj_add_event_cb(c->show, show_cb, LV_EVENT_VALUE_CHANGED, c);
+    c->hint = ui_label(r2, "", VG_FONT_SM_LV, UI_C(TEXT2));
+    /* What the search does, or found, beside the count. */
+    c->status = ui_label(r2, "", VG_FONT_SM_LV, UI_C(TEXT2));
+    lv_obj_set_width(c->status, 1);
+    lv_obj_set_flex_grow(c->status, 1);
+    lv_label_set_long_mode(c->status, LV_LABEL_LONG_DOT);
+    ui_label(r2, "Add with user", VG_FONT_SM_LV, UI_C(TEXT2));
+    c->user = field(r2, p, c->kb, "admin", 150, 0, NULL, 63);
+    ui_label(r2, "password", VG_FONT_SM_LV, UI_C(TEXT2));
+    c->pass = field(r2, p, c->kb, "", 170, 1, NULL, 63);
+
+    header(sp, k_dev_cols, sizeof k_dev_cols / sizeof k_dev_cols[0]);
+    c->devs = table_rows(sp, 0);
+    ui_gridnav(c->devs, LV_GRIDNAV_CTRL_NONE);
+    lv_group_add_obj(p->group, c->devs);
+
+    /* Channels */
+    lv_obj_t *cp = pane(p->body);
+    lv_obj_set_height(cp, 1);
+    lv_obj_set_flex_grow(cp, 2);
+    /* Its title, the bandwidth the cameras take now against the chip's,
+     * a hint, and the buttons for the channels checked. */
+    lv_obj_t *r3 = row_box(cp, VG_SPACE_SM);
+    ui_label(r3, "Channels", VG_FONT_LG_LV, UI_C(TEXT));
+    lv_obj_t *bl = ui_label(r3, "Bandwidth", VG_FONT_SM_LV, UI_C(TEXT2));
+    lv_obj_set_style_margin_left(bl, VG_SPACE_MD, 0);
+    c->bw = ui_label(r3, "", VG_FONT_MD_LV, UI_C(TEXT));
+    c->chint = ui_label(r3, "", VG_FONT_SM_LV, UI_C(TEXT2));
+    lv_obj_set_style_pad_left(c->chint, VG_SPACE_MD, 0);    /* not a margin: flex does not count a
+                                                                 * growing item's (the buttons spill) */
+    lv_obj_set_width(c->chint, 1);
+    lv_obj_set_flex_grow(c->chint, 1);
+    lv_label_set_long_mode(c->chint, LV_LABEL_LONG_DOT);
+    c->clr = toolbar_btn(r3, c, LV_SYMBOL_TRASH, "Clear", clear_all_cb);
+    c->del = toolbar_btn(r3, c, LV_SYMBOL_CLOSE, "Delete", delete_cb);
+    c->edt = toolbar_btn(r3, c, LV_SYMBOL_EDIT, "Edit", edit_ch_cb);
+    c->ttl = toolbar_btn(r3, c, LV_SYMBOL_KEYBOARD, "Title", title_cb);
+    /* A little lower than the search pane's: four channels without scrolling. */
+    lv_obj_t *cb[] = { c->clr, c->del, c->edt, c->ttl };
+    for (int i = 0; i < 4; ++i) lv_obj_set_height(cb[i], 32);
+    header(cp, k_ch_cols, sizeof k_ch_cols / sizeof k_ch_cols[0]);
+    c->chans = table_rows(cp, 0);
+    lv_subject_add_observer_obj(&ui_subj_config, config_cb, c->chans, c);
+    ui_gridnav(c->chans, LV_GRIDNAV_CTRL_NONE);
+    lv_group_add_obj(p->group, c->chans);
+
+    for (int s = 0; s < M()->n_sections; ++s)
+        if (!strcmp(M()->sections[s].key, "discovery")) {
+            lv_obj_t *b = ui_btn(p->actions, LV_SYMBOL_SETTINGS, "Search settings");
+            lv_obj_add_event_cb(b, settings_cb, LV_EVENT_CLICKED, c);
+        }
+
+    devices_load(c, 1);
+    devs_build(c);
+    chans_build(c);
+    if (M()->disc_job) M()->disc_job(c->jb);
+    bw_sync(c);
+    buttons_sync(c);
+    c->timer = lv_timer_create(poll_cb, POLL_MS, c);
+    if (c->kb) lv_obj_move_foreground(c->kb);       /* over the panes */
+    ui_page_ready(p);
+    if (c->target >= 0) {
+        /* The channel it was opened for, in view (and the keyboard's). */
+        lv_obj_update_layout(p->body);
+        lv_obj_t *row = lv_obj_get_child(c->chans, c->target);
+        if (row) lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+        if (ui_keyboard_in_use()) lv_group_focus_obj(c->chans);
+    }
+}
+
+/* ---- Change IP, Mass change, Auto add ------------------------------------------------------ */
+
+typedef enum { SUB_IP, SUB_MASS, SUB_AUTO } sub_kind_t;
+
+typedef struct {
+    chans_t      *c;
+    sub_kind_t    kind;
+    ui_page_t    *page;
+    lv_obj_t     *kb;
+    lv_obj_t     *ip, *mask, *gw, *user, *pass;
+    lv_obj_t     *run, *preview, *status, *table;
+    lv_timer_t   *timer;
+    unsigned      job;
+    ui_disc_job_t *jb;
+    ui_disc_ip_t  items[UI_DISC_MAX];
+    int           n;
+    int           planned;          /* Mass change: a preview to apply */
+} sub_t;
+
+static int sub_back(ui_page_t *p) { return osk_back(((sub_t *)p->user)->kb); }
+
+static void sub_close(ui_page_t *p)
+{
+    sub_t *s = p->user;
+    if (s->timer) lv_timer_delete(s->timer);
+    lv_async_call(refresh_async, s->c);
+    lv_free(s->jb);
+    lv_free(s);
+}
+
+/* The job's results as a table: device, address(es), protocol, outcome. */
+static void sub_results(sub_t *s)
+{
+    lv_obj_t *t = s->table;
+    lv_obj_clean(t);
+    const ui_disc_job_t *j = s->jb;
+    lv_obj_t *h = trow(t, 1);
+    tcell(h, "Device", 150, UI_C(TEXT2));
+    tcell(h, "Address", 130, UI_C(TEXT2));
+    tcell(h, s->kind == SUB_AUTO ? "Channel" : "New address", 130, UI_C(TEXT2));
+    tcell(h, "Protocol", 80, UI_C(TEXT2));
+    tcell(h, "Result", 0, UI_C(TEXT2));
+    for (int i = 0; i < j->n; ++i) {
+        const ui_disc_res_t *r = &j->r[i];
+        lv_obj_t *row = trow(t, 0);
+        ui_inert(row);
+        char ch[16];
+        snprintf(ch, sizeof ch, "%d", r->channel);
+        tcell(row, r->key, 150, UI_C(TEXT));
+        tcell(row, r->ip, 130, UI_C(TEXT));
+        tcell(row, s->kind == SUB_AUTO ? (r->channel ? ch : "-") : r->new_ip, 130, UI_C(TEXT));
+        tcell(row, proto_word(r->proto), 80, UI_C(TEXT));
+        const char *word = !r->done ? "waiting" : r->msg;
+        lv_color_t col = !r->done ? UI_C(TEXT2) : r->ok ? (j->dry_run ? UI_C(TEXT) : UI_C(OK)) : UI_C(BAD);
+        tcell(row, word, 0, col);
+    }
+}
+
+static void sub_poll_cb(lv_timer_t *t)
+{
+    sub_t *s = lv_timer_get_user_data(t);
+    if (!s->job || !M()->disc_job) return;
+    M()->disc_job(s->jb);
+    if (s->jb->id != s->job) return;
+    char m[128];
+    snprintf(m, sizeof m, "%s%s", s->jb->running ? LV_SYMBOL_REFRESH " " : "", s->jb->msg);
+    lv_label_set_text(s->status, m);
+    sub_results(s);
+    if (s->jb->running) return;
+    s->job = 0;
+    lv_obj_remove_state(s->run, LV_STATE_DISABLED);
+    if (s->preview) lv_obj_remove_state(s->preview, LV_STATE_DISABLED);
+    if (s->kind == SUB_MASS && s->jb->dry_run) {
+        /* The plan: applied as it is shown. */
+        s->planned = 0;
+        for (int i = 0; i < s->jb->n && i < s->n; ++i) {
+            snprintf(s->items[i].ip, sizeof s->items[i].ip, "%s", s->jb->r[i].ok ? s->jb->r[i].new_ip : "");
+            s->planned += s->jb->r[i].ok;
+        }
+        if (s->planned) lv_obj_remove_state(s->run, LV_STATE_DISABLED);
+        else lv_obj_add_state(s->run, LV_STATE_DISABLED);
+    } else if (s->kind == SUB_MASS) {
+        s->planned = 0;
+        lv_obj_add_state(s->run, LV_STATE_DISABLED);
+    }
+}
+
+static void sub_run(sub_t *s, int dry)
+{
+    char err[96] = "";
+    const char *user = lv_textarea_get_text(s->user), *pass = lv_textarea_get_text(s->pass);
+    int id = -1;
+    if (s->kind == SUB_AUTO) {
+        id = M()->disc_autoadd ? M()->disc_autoadd(user, pass, err, sizeof err) : -1;
+    } else {
+        const char *start = s->kind == SUB_MASS ? lv_textarea_get_text(s->ip) : "";
+        ui_disc_ip_t items[UI_DISC_MAX];
+        memcpy(items, s->items, sizeof items);
+        if (s->kind == SUB_IP) snprintf(items[0].ip, sizeof items[0].ip, "%s", lv_textarea_get_text(s->ip));
+        if (s->kind == SUB_MASS && dry)
+            for (int i = 0; i < s->n; ++i) items[i].ip[0] = 0;
+        if (s->kind == SUB_MASS && !dry) {
+            /* Only those the plan gave an address. */
+            int k = 0;
+            for (int i = 0; i < s->n; ++i)
+                if (items[i].ip[0]) items[k++] = items[i];
+            if (!k) return;
+            id = M()->disc_ip(items, k, "", lv_textarea_get_text(s->mask), lv_textarea_get_text(s->gw), user,
+                              pass, 0, err, sizeof err);
+        } else {
+            id = M()->disc_ip ? M()->disc_ip(items, s->n, start, lv_textarea_get_text(s->mask),
+                                              lv_textarea_get_text(s->gw), user, pass, dry, err, sizeof err)
+                              : -1;
+        }
+    }
+    if (id < 0) {
+        ui_toast(UI_TOAST_BAD, "%s", err[0] ? err : "Cannot start");
+        return;
+    }
+    s->job = (unsigned)id;
+    lv_obj_add_state(s->run, LV_STATE_DISABLED);
+    if (s->preview) lv_obj_add_state(s->preview, LV_STATE_DISABLED);
+    lv_label_set_text(s->status, LV_SYMBOL_REFRESH " Starting...");
+}
+
+static void run_cb(lv_event_t *e) { sub_run(lv_event_get_user_data(e), 0); }
+static void preview_cb(lv_event_t *e) { sub_run(lv_event_get_user_data(e), 1); }
+
+static sub_t *sub_open(chans_t *c, sub_kind_t kind, const char *title)
+{
+    sub_t *s = lv_malloc_zeroed(sizeof *s);
+    if (!s) return NULL;
+    s->jb = lv_malloc_zeroed(sizeof *s->jb);
+    ui_page_t *p = ui_page_push(title);
+    if (!p || !s->jb) {
+        lv_free(s->jb);
+        lv_free(s);
+        return NULL;
+    }
+    s->c = c;
+    s->kind = kind;
+    s->page = p;
+    p->user = s;
+    p->on_back = sub_back;
+    p->on_close = sub_close;
+    lv_obj_set_style_pad_row(p->body, VG_SPACE_MD, 0);
+    s->kb = osk_for(p);
+    return s;
+}
+
+/* The fields every sub-page has, the table and the timer. */
+static void sub_finish(sub_t *s, const char *run_text)
+{
+    ui_page_t *p = s->page;
+    const char *u, *pw;
+    creds(s->c, &u, &pw);
+    s->user = labelled(p->body, p, s->kb, "User", u, 0, NULL, 63);
+    s->pass = labelled(p->body, p, s->kb, "Password", pw, 1, NULL, 63);
+    lv_obj_t *r = row_box(p->body, VG_SPACE_MD);
+    if (s->kind == SUB_MASS) {
+        s->preview = ui_btn(r, LV_SYMBOL_EYE_OPEN, "Preview");
+        lv_obj_add_event_cb(s->preview, preview_cb, LV_EVENT_CLICKED, s);
+        lv_group_add_obj(p->group, s->preview);
+    }
+    s->run = ui_btn(r, LV_SYMBOL_OK, run_text);
+    ui_btn_accent(s->run);
+    lv_obj_add_event_cb(s->run, run_cb, LV_EVENT_CLICKED, s);
+    lv_group_add_obj(p->group, s->run);
+    if (s->kind == SUB_MASS) lv_obj_add_state(s->run, LV_STATE_DISABLED);
+    s->status = ui_label(r, "", VG_FONT_MD_LV, UI_C(TEXT2));
+    lv_obj_set_flex_grow(s->status, 1);
+    lv_obj_t *panel = lv_obj_create(p->body);
+    ui_plain(panel);
+    lv_obj_add_style(panel, &ui_st_panel, 0);
+    lv_obj_set_size(panel, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_all(panel, VG_SPACE_SM, 0);
+    s->table = table_rows(panel, -1);
+    lv_obj_set_height(s->table, LV_SIZE_CONTENT);
+    s->timer = lv_timer_create(sub_poll_cb, POLL_MS, s);
+    if (s->kb) lv_obj_move_foreground(s->kb);
+    ui_page_ready(p);
+}
+
+static void change_ip_open(chans_t *c, int i)
+{
+    const ui_disc_dev_t *d = &c->dev[i];
+    char title[64];
+    snprintf(title, sizeof title, "Change IP: %s", d->ip);
+    sub_t *s = sub_open(c, SUB_IP, title);
+    if (!s) return;
+    ui_page_t *p = s->page;
+    snprintf(s->items[0].key, sizeof s->items[0].key, "%s", d->key);
+    s->n = 1;
+    char about[200], pr[48];
+    protos_text(d->protos, pr, sizeof pr);
+    snprintf(about, sizeof about, "%s %s  %s  MAC %s  (%s)", d->vendor, d->model, d->ip, d->mac[0] ? d->mac : "-", pr);
+    ui_label(p->body, about, VG_FONT_MD_LV, UI_C(TEXT2));
+    s->ip = labelled(p->body, p, s->kb, "New IP address", d->ip, 0, IP_CHARS, 15);
+    s->mask = labelled(p->body, p, s->kb, "Subnet mask", d->mask[0] ? d->mask : "255.255.255.0", 0, IP_CHARS, 15);
+    s->gw = labelled(p->body, p, s->kb, "Gateway", d->gateway, 0, IP_CHARS, 15);
+    sub_finish(s, "Change");
+}
+
+static void mass_open(chans_t *c)
+{
+    sub_t *s = sub_open(c, SUB_MASS, "Mass change of addresses");
+    if (!s) return;
+    ui_page_t *p = s->page;
+    /* The devices checked, or all of them. */
+    for (int i = 0; i < c->n_dev; ++i)
+        if (!c->n_checked || is_checked(c, c->dev[i].key))
+            snprintf(s->items[s->n++].key, sizeof s->items[0].key, "%s", c->dev[i].key);
+    char about[200];
+    snprintf(about, sizeof about, "%d device%s get addresses one after another from the start address; "
+             "addresses in use are skipped. Preview first, then Apply.", s->n, s->n == 1 ? "" : "s");
+    lv_obj_t *l = ui_label(p->body, about, VG_FONT_MD_LV, UI_C(TEXT2));
+    lv_obj_set_width(l, LV_PCT(100));
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    const ui_disc_dev_t *d0 = s->n ? &c->dev[device_index(c, s->items[0].key)] : NULL;
+    s->ip = labelled(p->body, p, s->kb, "Start address", d0 ? d0->ip : "", 0, IP_CHARS, 15);
+    s->mask = labelled(p->body, p, s->kb, "Subnet mask", d0 && d0->mask[0] ? d0->mask : "255.255.255.0", 0,
+                       IP_CHARS, 15);
+    s->gw = labelled(p->body, p, s->kb, "Gateway", d0 ? d0->gateway : "", 0, IP_CHARS, 15);
+    sub_finish(s, "Apply");
+}
+
+static void autoadd_open(chans_t *c)
+{
+    sub_t *s = sub_open(c, SUB_AUTO, "Auto add all");
+    if (!s) return;
+    int fresh = 0, empty = 0;
+    for (int i = 0; i < c->n_dev; ++i) fresh += !c->dev[i].channel;
+    for (int ch = 0; ch < M()->channels && ch < UI_MAX_CHANNELS; ++ch) empty += slot_empty(c, ch);
+    char about[160];
+    snprintf(about, sizeof about, "%d new device%s go to the %d empty channel%s in address order, with this "
+             "user and password.", fresh, fresh == 1 ? "" : "s", empty, empty == 1 ? "" : "s");
+    lv_obj_t *l = ui_label(s->page->body, about, VG_FONT_MD_LV, UI_C(TEXT2));
+    lv_obj_set_width(l, LV_PCT(100));
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    sub_finish(s, "Add all");
+}
+
+/* ---- Manual add: a camera entered by hand --------------------------------------------------- */
+
+static const char *const k_manual_opts = "NETIP (XMeye)\nONVIF\nDahua (DHIP/RTSP)\nGeneric RTSP";
+
+static int manual_port(int kind) { return kind == UI_MANUAL_NETIP ? 34567 : kind == UI_MANUAL_ONVIF ? 80 : 554; }
+
+typedef struct {
+    chans_t       *c;
+    ui_page_t     *page;
+    lv_obj_t      *kb;
+    lv_obj_t      *proto, *host, *port, *user, *pass, *devch, *mainp, *subp, *target, *name;
+    lv_obj_t      *row_devch, *row_main, *row_sub, *port_hint;
+    lv_obj_t      *test, *save, *result, *detail;
+    lv_timer_t    *timer;
+    unsigned       job;
+    int            saving, kind;
+    int            edited;          /* a field changed since Test was pressed */
+    int            target_ch[UI_MAX_CHANNELS];      /* dropdown index -> channel (1-based) */
+    int            occupied[UI_MAX_CHANNELS];
+    ui_disc_job_t *jb;
+} man_t;
+
+static int man_back(ui_page_t *p) { return osk_back(((man_t *)p->user)->kb); }
+
+static void man_close(ui_page_t *p)
+{
+    man_t *m = p->user;
+    if (m->timer) lv_timer_delete(m->timer);
+    lv_async_call(refresh_async, m->c);
+    lv_free(m->jb);
+    lv_free(m);
+}
+
+/* The rows a protocol has: an NVR's channel except for plain RTSP, the
+ * paths only for it. */
+static void man_rows(man_t *m)
+{
+    int rtsp = m->kind == UI_MANUAL_RTSP;
+    if (rtsp) lv_obj_add_flag(m->row_devch, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_remove_flag(m->row_devch, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t *paths[] = { m->row_main, m->row_sub };
+    for (int i = 0; i < 2; ++i) {
+        if (rtsp) lv_obj_remove_flag(paths[i], LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(paths[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    static const char *const hint[] = {
+        "Main and sub-stream over NETIP (sub-stream: stream=extra).",
+        "The streams are asked from the camera (GetProfiles, GetStreamUri).",
+        "RTSP port; main and sub-stream: /cam/realmonitor?channel=N&subtype=0 and 1.",
+        "A path (/stream1) or a whole rtsp:// URL for each stream.",
+    };
+    lv_label_set_text(m->port_hint, hint[m->kind]);
+}
+
+static void man_show(man_t *m, const char *word, const char *detail, lv_color_t col);
+
+/* A field the connection depends on changed: a result shown is about
+ * other details now, and one still to come will be. */
+static void man_edited_cb(lv_event_t *e)
+{
+    man_t *m = lv_event_get_user_data(e);
+    m->edited = 1;
+    if (!m->saving) man_show(m, "", "", UI_C(TEXT2));
+}
+
+static void man_proto_cb(lv_event_t *e)
+{
+    man_t *m = lv_event_get_user_data(e);
+    int old = m->kind;
+    m->kind = (int)lv_dropdown_get_selected(m->proto);
+    /* A port still at the old protocol's default follows the new one. */
+    const char *t = lv_textarea_get_text(m->port);
+    char buf[8];
+    if (!*t || atoi(t) == manual_port(old)) {
+        snprintf(buf, sizeof buf, "%d", manual_port(m->kind));
+        lv_textarea_set_text(m->port, buf);
+    }
+    man_rows(m);
+}
+
+static void man_read(man_t *m, ui_manual_t *u)
+{
+    memset(u, 0, sizeof *u);
+    u->kind = (ui_manual_kind_t)m->kind;
+    snprintf(u->host, sizeof u->host, "%s", lv_textarea_get_text(m->host));
+    u->port = atoi(lv_textarea_get_text(m->port));
+    snprintf(u->user, sizeof u->user, "%s", lv_textarea_get_text(m->user));
+    snprintf(u->pass, sizeof u->pass, "%s", lv_textarea_get_text(m->pass));
+    u->dev_channel = atoi(lv_textarea_get_text(m->devch));
+    if (u->dev_channel < 1) u->dev_channel = 1;
+    if (m->kind == UI_MANUAL_RTSP) {
+        snprintf(u->main_path, sizeof u->main_path, "%s", lv_textarea_get_text(m->mainp));
+        snprintf(u->sub_path, sizeof u->sub_path, "%s", lv_textarea_get_text(m->subp));
+    }
+}
+
+/* The words for a failure: the tiles' (Authentication error, Offline,
+ * ...), and what the device said underneath. */
+static const char *fail_word(const ui_disc_res_t *r)
+{
+    if (!strcmp(r->error, "auth")) return "Authentication error";
+    if (!strcmp(r->error, "unreachable")) return "Offline";
+    if (!strcmp(r->error, "codec")) return "Unsupported codec";
+    if (!strcmp(r->error, "timeout")) return strstr(r->msg, "no video") ? "No video" : "No answer";
+    if (strstr(r->msg, "not an ONVIF device")) return "Not an ONVIF device";
+    if (!strcmp(r->error, "invalid")) return "Check the values";
+    return "Error";
+}
+
+static void man_show(man_t *m, const char *word, const char *detail, lv_color_t col)
+{
+    lv_label_set_text(m->result, word);
+    lv_obj_set_style_text_color(m->result, col, 0);
+    lv_label_set_text(m->detail, detail);
+}
+
+static void man_busy(man_t *m, int busy)
+{
+    lv_obj_t *b[] = { m->test, m->save };
+    for (int i = 0; i < 2; ++i) {
+        if (busy) lv_obj_add_state(b[i], LV_STATE_DISABLED);
+        else lv_obj_remove_state(b[i], LV_STATE_DISABLED);
+    }
+}
+
+static void man_poll_cb(lv_timer_t *t)
+{
+    man_t *m = lv_timer_get_user_data(t);
+    if (!m->job || !M()->disc_job) return;
+    M()->disc_job(m->jb);
+    const ui_disc_job_t *j = m->jb;
+    if (j->id != m->job) return;
+    if (j->running && !m->saving && m->edited) return;
+    if (j->running) {
+        char s[128];
+        snprintf(s, sizeof s, LV_SYMBOL_REFRESH " %s...", j->msg[0] ? j->msg : "working");
+        man_show(m, s, "", UI_C(TEXT2));
+        return;
+    }
+    m->job = 0;
+    man_busy(m, 0);
+    if (!m->saving && m->edited) return;          /* a test of what was there before */
+    const ui_disc_res_t *r = j->n ? &j->r[0] : NULL;
+    if (!r) {
+        man_show(m, "Error", j->msg, UI_C(BAD));
+        return;
+    }
+    if (m->saving) {
+        m->saving = 0;
+        if (r->ok) {
+            ui_toast(UI_TOAST_OK, "Added to channel %d", r->channel);
+            ui_page_close(m->page);
+        } else {
+            man_show(m, fail_word(r), r->msg, UI_C(BAD));
+        }
+        return;
+    }
+    if (r->ok) {
+        char s[64];
+        if (r->width) snprintf(s, sizeof s, LV_SYMBOL_OK " OK: %s %dx%d", r->codec, r->width, r->height);
+        else snprintf(s, sizeof s, LV_SYMBOL_OK " OK: %s", r->codec);
+        man_show(m, s, "", UI_C(OK));
+    } else {
+        char s[64];
+        snprintf(s, sizeof s, LV_SYMBOL_WARNING " %s", fail_word(r));
+        man_show(m, s, r->msg, UI_C(BAD));
+    }
+}
+
+static void man_test_cb(lv_event_t *e)
+{
+    man_t *m = lv_event_get_user_data(e);
+    ui_manual_t u;
+    char err[96] = "";
+    man_read(m, &u);
+    int id = M()->disc_test ? M()->disc_test(&u, err, sizeof err) : -1;
+    memset(&u, 0, sizeof u);
+    if (id < 0) {
+        man_show(m, "Not tested", err[0] ? err : "cannot start", UI_C(BAD));
+        return;
+    }
+    m->job = (unsigned)id;
+    m->saving = 0;
+    m->edited = 0;
+    man_busy(m, 1);
+    man_show(m, LV_SYMBOL_REFRESH " Connecting...", "", UI_C(TEXT2));
+}
+
+static void man_save(man_t *m, int replace)
+{
+    ui_manual_t u;
+    char err[96] = "";
+    man_read(m, &u);
+    uint32_t sel = lv_dropdown_get_selected(m->target);
+    int ch = sel < UI_MAX_CHANNELS ? m->target_ch[sel] : 0;
+    int id = M()->disc_assign_manual ? M()->disc_assign_manual(&u, ch, lv_textarea_get_text(m->name), replace,
+                                                               err, sizeof err)
+                                     : -1;
+    memset(&u, 0, sizeof u);
+    if (id < 0) {
+        man_show(m, "Not saved", err[0] ? err : "cannot start", UI_C(BAD));
+        return;
+    }
+    m->job = (unsigned)id;
+    m->saving = 1;
+    man_busy(m, 1);
+    man_show(m, LV_SYMBOL_REFRESH " Saving...", "", UI_C(TEXT2));
+}
+
+static void man_replace_yes(void *u) { man_save(u, 1); }
+
+static void man_save_cb(lv_event_t *e)
+{
+    man_t *m = lv_event_get_user_data(e);
+    uint32_t sel = lv_dropdown_get_selected(m->target);
+    if (sel < UI_MAX_CHANNELS && m->occupied[sel]) {
+        char q[96];
+        snprintf(q, sizeof q, "Channel %d has a camera. Replace it?", m->target_ch[sel]);
+        ui_confirm(q, "Replace", man_replace_yes, m);
+        return;
+    }
+    man_save(m, 0);
+}
+
+static lv_obj_t *man_row(man_t *m, const char *label, lv_obj_t **row)
+{
+    lv_obj_t *r = row_box(m->page->body, VG_SPACE_LG);
+    lv_obj_t *l = ui_label(r, label, VG_FONT_MD_LV, UI_C(TEXT));
+    lv_obj_set_width(l, 200);
+    if (row) *row = r;
+    return r;
+}
+
+/* Manual add; the channel `at` (0-based) chosen in it, else the one the
+ * page was opened for, else the first empty one. */
+static void manual_open(chans_t *c, int at)
+{
+    man_t *m = lv_malloc_zeroed(sizeof *m);
+    if (!m) return;
+    m->jb = lv_malloc_zeroed(sizeof *m->jb);
+    ui_page_t *p = ui_page_push("Manual add");
+    if (!p || !m->jb) {
+        lv_free(m->jb);
+        lv_free(m);
+        return;
+    }
+    m->c = c;
+    m->page = p;
+    p->user = m;
+    p->on_back = man_back;
+    p->on_close = man_close;
+    lv_obj_set_style_pad_row(p->body, VG_SPACE_SM, 0);
+    lv_obj_set_style_pad_ver(p->body, VG_SPACE_LG, 0);
+    m->kb = osk_for(p);
+    const char *user, *pass;
+    creds(c, &user, &pass);
+
+    lv_obj_t *r = man_row(m, "Protocol", NULL);
+    m->proto = lv_dropdown_create(r);
+    lv_dropdown_set_options(m->proto, k_manual_opts);
+    lv_obj_set_width(m->proto, 320);
+    ui_focus_style(m->proto);
+    lv_group_add_obj(p->group, m->proto);
+    lv_obj_add_event_cb(m->proto, man_proto_cb, LV_EVENT_VALUE_CHANGED, m);
+    m->host = field(man_row(m, "Address", NULL), p, m->kb, "", 320, 0, NULL, 127);
+    lv_textarea_set_placeholder_text(m->host, "192.168.1.10 or a host name");
+    r = man_row(m, "Port", NULL);
+    m->port = field(r, p, m->kb, "34567", 120, 0, "0123456789", 5);
+    m->port_hint = ui_label(r, "", VG_FONT_SM_LV, UI_C(TEXT2));
+    lv_obj_set_flex_grow(m->port_hint, 1);
+    lv_label_set_long_mode(m->port_hint, LV_LABEL_LONG_WRAP);
+    m->user = field(man_row(m, "User", NULL), p, m->kb, user, 320, 0, NULL, 63);
+    m->pass = field(man_row(m, "Password", NULL), p, m->kb, pass, 320, 1, NULL, 63);
+    r = man_row(m, "Device channel", &m->row_devch);
+    m->devch = field(r, p, m->kb, "1", 120, 0, "0123456789", 3);
+    ui_label(r, "of an NVR or DVR; 1 for a camera", VG_FONT_SM_LV, UI_C(TEXT2));
+    m->mainp = field(man_row(m, "Main stream", &m->row_main), p, m->kb, "", 520, 0, NULL, 255);
+    lv_textarea_set_placeholder_text(m->mainp, "/stream1  or  rtsp://...");
+    m->subp = field(man_row(m, "Sub-stream", &m->row_sub), p, m->kb, "", 520, 0, NULL, 255);
+    lv_textarea_set_placeholder_text(m->subp, "optional");
+
+    /* Every channel; the one the page was opened for chosen, else the
+     * first empty one, a camera's name shown. */
+    r = man_row(m, "Channel", NULL);
+    m->target = lv_dropdown_create(r);
+    char opts[UI_MAX_CHANNELS * 48] = "", url[1024], nm[64];
+    int first = -1, n = 0;
+    for (int ch = 0; ch < M()->channels && ch < UI_MAX_CHANNELS; ++ch) {
+        slot_value(c, ch, "url", url, sizeof url);
+        m->target_ch[n] = ch + 1;
+        m->occupied[n] = url[0] != 0;
+        size_t l = strlen(opts);
+        if (url[0]) {
+            slot_value(c, ch, "name", nm, sizeof nm);
+            if (!nm[0]) ui_chan_title(ch, nm, sizeof nm);
+            snprintf(opts + l, sizeof opts - l, "%s%d  %.24s (replace)", n ? "\n" : "", ch + 1, nm);
+        } else {
+            snprintf(opts + l, sizeof opts - l, "%s%d  empty", n ? "\n" : "", ch + 1);
+            if (first < 0) first = n;
+        }
+        ++n;
+    }
+    lv_dropdown_set_options(m->target, opts);
+    int want = at >= 0 ? at : c->target;
+    if (want >= 0 && want < n) first = want;
+    if (first >= 0) lv_dropdown_set_selected(m->target, (uint32_t)first);
+    lv_obj_set_width(m->target, 320);
+    ui_focus_style(m->target);
+    lv_group_add_obj(p->group, m->target);
+    m->name = field(man_row(m, "Name", NULL), p, m->kb, "", 320, 0, NULL, 31);
+    lv_textarea_set_placeholder_text(m->name, "optional");
+
+    r = row_box(p->body, VG_SPACE_MD);
+    m->test = ui_btn(r, LV_SYMBOL_REFRESH, "Test");
+    lv_obj_add_event_cb(m->test, man_test_cb, LV_EVENT_CLICKED, m);
+    lv_group_add_obj(p->group, m->test);
+    m->save = ui_btn(r, LV_SYMBOL_SAVE, "Save");
+    ui_btn_accent(m->save);
+    lv_obj_add_event_cb(m->save, man_save_cb, LV_EVENT_CLICKED, m);
+    lv_group_add_obj(p->group, m->save);
+    p->save = m->save;
+    lv_obj_t *col = lv_obj_create(r);
+    ui_plain(col);
+    lv_obj_set_height(col, LV_SIZE_CONTENT);
+    lv_obj_set_flex_grow(col, 1);
+    lv_obj_set_layout(col, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    m->result = ui_label(col, "", VG_FONT_MD_LV, UI_C(TEXT2));
+    m->detail = ui_label(col, "", VG_FONT_SM_LV, UI_C(TEXT2));
+    lv_obj_set_width(m->detail, LV_PCT(100));
+    lv_label_set_long_mode(m->detail, LV_LABEL_LONG_WRAP);
+
+    lv_obj_t *conn[] = { m->proto, m->host, m->port, m->user, m->pass, m->devch, m->mainp, m->subp };
+    for (size_t i = 0; i < sizeof conn / sizeof conn[0]; ++i)
+        lv_obj_add_event_cb(conn[i], man_edited_cb, LV_EVENT_VALUE_CHANGED, m);
+    m->kind = UI_MANUAL_NETIP;
+    man_rows(m);
+    m->timer = lv_timer_create(man_poll_cb, POLL_MS, m);
+    if (m->kb) lv_obj_move_foreground(m->kb);
+    ui_page_ready(p);
+}

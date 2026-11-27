@@ -1,13 +1,25 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* config.h — vigild's settings: one JSON file and the store around it.
+/* config.h — vigild's settings: one YAML file and the store around it.
  *
- * The file (default /etc/vigil.json, -f FILE) is
+ * The file (default /etc/vigil.yaml, -f FILE) is YAML, like majestic's:
  *
- *   { "version": 1,
- *     "cameras": [ { "url": "rtsp://...", "name": "Gate", "enabled": true } ],
- *     "record":  { "path": "/mnt/sda1/rec", "segment": 60, "keep": 0 },
- *     "api":     { "listen": "0.0.0.0:8080", "auth": true,
- *                  "user": "root", "shadow": "/etc/shadow" } }
+ *   version: 1
+ *   cameras:
+ *     - url: "rtsp://admin:12345@192.168.1.10/stream=0"
+ *       name: Gate
+ *       enabled: true
+ *   record:
+ *     path: /mnt/sda1/rec
+ *     segment: 60
+ *     keep: 0
+ *   api:
+ *     listen: "0.0.0.0:8080"
+ *     auth: true
+ *
+ * and is written back with each setting's help text as a comment
+ * (schema_yaml.h). A file whose name ends in ".json" is read and written
+ * as JSON instead (the format of earlier versions). Inside vigild, and in
+ * the API, the settings are JSON (cJSON) either way.
  *
  * Every setting is a row of config_schema (config_schema.c): defaults,
  * validation, the API's GET /api/v1/schema and redaction all come from it.
@@ -27,13 +39,16 @@
 #include <stddef.h>
 
 #include "channel.h"
+#include "qos.h"
+#include "rec_sched.h"
 #include "schema.h"
 
 #define CONFIG_VERSION      1
-#define CONFIG_DEFAULT_PATH "/etc/vigil.json"
+#define CONFIG_DEFAULT_PATH "/etc/vigil.yaml"
 
 typedef struct {
     char url[512];                  /* source.h's URL buffer */
+    char sub_url[512];              /* "": derived, or none (channels_config_t) */
     char name[32];
     int  enabled;
 } config_camera_t;
@@ -43,21 +58,178 @@ typedef struct {
     int  segment;                   /* seconds */
     int  keep;                      /* segments per camera, 0 = all */
     int  allow_rootfs;              /* the root filesystem counts as a disk (rec_place.h) */
+    char on_full[12];               /* "overwrite" | "stop" (seg_writer.h) */
 } config_record_t;
+
+/* A camera's week: one letter per half hour, 48 a day (rec_sched.h). */
+#define CONFIG_DAY_SLOTS 48
+typedef struct {
+    int  camera;                    /* 1-based */
+    char day[7][CONFIG_DAY_SLOTS + 1];  /* mon .. sun */
+} config_sched_t;
+
+typedef struct {
+    int camera;                     /* 1-based */
+    int max_gb;                     /* 0: no limit */
+    int max_days;                   /* 0: no limit */
+} config_quota_t;
+
+typedef struct {
+    char type[8];                   /* "none" | "cifs" | "nfs" */
+    char server[64];
+    char share[128];
+    char user[64];
+    char password[64];
+    char options[128];
+} config_nas_t;
+
+typedef struct {
+    int  enabled;
+    char provider[12];              /* "dyndns" | "noip" | "custom" */
+    char host[128];
+    char user[64];
+    char password[64];
+    char url[256];                  /* custom: {host} {ip} {user} {password} */
+    int  interval;                  /* minutes */
+} config_ddns_t;
+
+typedef struct {
+    int enabled;
+    int http_port;                  /* external ports to map; 0: none */
+    int rtsp_port;
+} config_upnp_t;
+
+typedef struct {
+    int  enabled;
+    char server[128];
+    int  port;
+    char security[12];              /* "none" | "starttls" | "tls" */
+    char user[64];
+    char password[64];
+    char from[128];
+    char to[256];                   /* addresses, separated by commas */
+} config_smtp_t;
+
+typedef struct {
+    int  enabled;
+    char protocol[8];               /* "http" (JSON POST) */
+    char host[128];
+    int  port;
+    char path[128];
+    int  interval;                  /* heartbeat, seconds; 0: none */
+} config_alarm_t;
+
+typedef struct {
+    int ntp;                        /* sync the clock from the servers in /etc/ntp.conf */
+    int ntp_interval;               /* minutes between vigild's own checks */
+} config_time_t;
+
+typedef struct {
+    char language[8];
+    char date_format[12];           /* "YYYY-MM-DD" | "DD.MM.YYYY" | "MM/DD/YYYY" */
+    char time_format[4];            /* "24h" | "12h" */
+    int  login;                     /* the menus ask for a user (users.h) */
+    int  idle_logout;               /* minutes without input that log out; 0: never */
+} config_ui_t;
+
+/* The HDMI/VGA output and what the live view draws over the video. */
+typedef struct {
+    char output[16];                /* "1920x1080@60" (config_output_mode) */
+    char video_aspect[8];           /* "fit" | "stretch" | "fill" */
+    char clock_position[16];        /* "off" | "top-left" | "top-center" | ... | "bottom-right" */
+    char clock_size[8];             /* "small" | "medium" | "large" | "xlarge" */
+    char clock_background[8];       /* "outline" | "none" | "box" */
+    char name_position[16];         /* "off" | a tile corner */
+    char name_size[8];
+    char name_background[8];
+    char icons_position[16];        /* a tile corner */
+    char icons_background[8];
+    /* The output's margins (overscan.h), picture preset (picture.h) and
+     * HDMI sound: */
+    int  margin_top, margin_bottom; /* % of the output's height, 0..OVERSCAN_MAX_PCT */
+    int  margin_left, margin_right; /* % of its width */
+    char picture[12];               /* "standard" | "bright" | "soft" | "vivid" */
+    int  hdmi_volume;               /* 0..100 */
+    int  hdmi_mute;
+    /* What the tiles show besides the video (booleans). */
+    int  rec_icon;                  /* REC while the channel records */
+    int  alarm_icons;               /* the camera's events (motion, human, face, vehicle) */
+    int  tile_dividers;             /* a line between the tiles */
+    int  alert_frame;               /* a frame around a tile while its camera reports an event */
+} config_display_t;
 
 typedef struct {
     char listen[64];                /* "addr:port", "port"; "" = no API */
     int  auth;
     char user[32];
     char shadow[192];
+    char users[192];                /* vigil's own accounts (src/api/users.h) */
 } config_api_t;
+
+typedef struct {
+    int  enabled;
+    char listen[64];                /* "addr:port", "port"; "" = off */
+    int  fps;                       /* at most this many pictures a second */
+} config_web_t;
+
+/* vigild's RTSP server: the cameras' streams to other clients (docs/rtsp.md). */
+typedef struct {
+    int enabled;
+    int port;
+    int auth;                       /* Digest against vigil's users (live permission) */
+    int max_clients;                /* streams being sent at once */
+} config_rtsp_server_t;
+
+typedef struct {
+    int  enabled;
+    int  port;                      /* TCP; discovery answers on UDP 34569 */
+} config_netip_server_t;
+
+typedef struct {
+    char interfaces[128];           /* "eth0,eth1"; "" = every IPv4 interface */
+    char targets[256];              /* unicast addresses also searched */
+    char prefer[32];                /* "netip,onvif,dhip" */
+} config_discovery_t;
+
+/* vigild as an ONVIF device (src/api/onvif.c, docs/onvif.md). */
+typedef struct {
+    int  enabled;
+    int  port;                      /* its web service; WS-Discovery is UDP 3702 */
+} config_onvif_server_t;
+
+/* DSCP marking of vigild's packets (qos.h). */
+typedef struct {
+    char type[12];                  /* "off" | "standard" | "custom" */
+    int  video, management, camera, alarm;     /* custom: DSCP 0..63 */
+} config_qos_t;
 
 typedef struct {
     int             n_cameras;
     config_camera_t cameras[CHANNEL_MAX];
     config_record_t record;
+    int             n_schedules;
+    config_sched_t  schedule[CHANNEL_MAX];
+    int             n_quotas;
+    config_quota_t  quota[CHANNEL_MAX];
+    config_nas_t    nas;
+    config_ddns_t   ddns;
+    config_upnp_t   upnp;
+    config_smtp_t   smtp;
+    config_alarm_t  alarm;
+    config_time_t   time;
+    config_ui_t     ui;
+    config_display_t display;
     config_api_t    api;
+    config_web_t    web;
+    config_netip_server_t netip_server;
+    config_discovery_t discovery;
+    config_onvif_server_t onvif_server;
+    config_qos_t    qos;
+    config_rtsp_server_t rtsp_server;
 } vigil_config_t;
+
+/* "mon".."sun" */
+extern const char *const config_day_keys[7];
 
 extern const schema_t config_schema;
 
@@ -65,16 +237,69 @@ void config_defaults(vigil_config_t *c);
 
 /* Pointers into `c` (which must outlive `cc`); a disabled camera keeps its
  * tile, with no source. */
+/* Drop the empty camera slots at the end of the list (the ones between
+ * cameras stay: they keep the later cameras on their channels). Done to
+ * what config_put_json saves. */
+void config_trim(vigil_config_t *c);
+
 void config_to_channels(const vigil_config_t *c, channels_config_t *cc);
 
+/* The cameras' weeks (record schedule) for rec_sched_set; returns the
+ * number of entries (CHANNEL_MAX). A camera listed twice: the last wins. */
+int config_to_schedule(const vigil_config_t *c, rec_week_t weeks[CHANNEL_MAX]);
+
+/* The DSCP of each class (qos_class_t) that `c.qos` sets: 0 for "off",
+ * the fields' defaults for "standard", the fields for "custom". */
+void config_to_qos(const vigil_config_t *c, int dscp[QOS_CLASSES]);
+
+/* The port of a listen setting ("port", "a.b.c.d:port"); 0 for "" (off),
+ * -1 when it has none. */
+int config_listen_port(const char *listen);
+
+/* No two of vigild's servers on one port: web.listen, api.listen,
+ * onvif_server.port, netip_server.port and rtsp_server.port (an empty
+ * listen is none).
+ * 0, or -1 with an error at the later one's path. config_put_json checks
+ * it; a file is loaded anyway (the server that comes second does not
+ * start, logged). */
+int config_check_ports(const vigil_config_t *c, schema_errors_t *errs);
+
+/* Before config_put_json saves a changed api.listen, web.listen, or the
+ * port of ONVIF, RTSP or NETIP while that server is on (`what` "api",
+ * "web", "onvif", "rtsp" or "netip"; for the last three `listen` is the
+ * port alone), whether it can be listened on: 0, or -1 with
+ * `err`. Set by vigild (it knows which ports its own servers hold); NULL
+ * (the default): not asked. */
+typedef int (*config_listen_check_fn)(const char *what, const char *listen, char *err, size_t cap);
+void config_set_listen_check(config_listen_check_fn fn);
+
+/* display.output "1920x1080@60" as numbers; 0, or -1 when it is not one. */
+int config_output_mode(const char *s, unsigned *w, unsigned *h, unsigned *hz);
+
 /* ---- files ---------------------------------------------------------------------- */
+
+typedef enum { CONFIG_YAML, CONFIG_JSON } config_format_t;
+
+/* By the name: ".json" at the end is JSON, anything else YAML. */
+config_format_t config_format(const char *path);
+
+/* Whether `c` can be written in `fmt`: YAML takes UTF-8 text only (a
+ * value loaded from a .json file may be other bytes). 0, or -1 with `err`
+ * naming the setting. */
+int config_check_text(const vigil_config_t *c, config_format_t fmt, char *err, size_t cap);
+
+/* `c` as the text of a file in `fmt` (malloc'd, ends in a newline; NULL
+ * when out of memory). Not redacted: the file holds the passwords. Check
+ * it with config_check_text first. */
+char *config_file_text(const vigil_config_t *c, config_format_t fmt);
 
 /* Read `path` into `c`. Returns 1 if there is no such file (`c` holds the
  * defaults), 0 when loaded, -1 when it cannot be read or is invalid
  * (`c` holds the defaults; `errs` says why). */
 int config_load_file(const char *path, vigil_config_t *c, schema_errors_t *errs);
 
-/* Write `c` to `path` atomically; returns as config_write_atomic. */
+/* Write `c` to `path` atomically, in the format its name says; returns
+ * as config_write_atomic. */
 int config_save_file(const char *path, const vigil_config_t *c, char *err, size_t cap);
 
 /* Replace `path` with `data` so that a crash or power cut at any moment

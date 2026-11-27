@@ -7,7 +7,10 @@
 #include "vg_types.h"
 
 /* (Re)create channel `ch`'s decoder for `codec` at the stream's size and
- * reference count. Returns 0, or -1 (e.g. not enough media memory). */
+ * reference count. A decoder the channel has is replaced (the core does
+ * not close it first): the platform may keep its last picture on screen
+ * until the new one has one. Returns 0, or -1 (e.g. not enough media
+ * memory; the core then closes the channel's decoder). */
 int  hal_dec_open(int ch, vg_codec_t codec, const vg_stream_info_t *si);
 /* One normalized access unit (au_norm.h). Returns 0 or -1 (dropped). */
 int  hal_dec_send(int ch, const vg_au_t *au);

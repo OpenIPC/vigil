@@ -1,12 +1,13 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* sps.c — picture size and reference count from an H.264 (ITU-T H.264
- * 7.3.2.1.1) or H.265 (ITU-T H.265 7.3.2.2) sequence parameter set. */
+/* sps.c — picture size, reference count and sample aspect ratio from an
+ * H.264 (ITU-T H.264 7.3.2.1.1, E.1.1) or H.265 (ITU-T H.265 7.3.2.2,
+ * E.2.1) sequence parameter set. */
 #include <string.h>
 
 #include "sps.h"
 
 typedef struct {
-    uint8_t buf[256];           /* RBSP: emulation prevention removed */
+    uint8_t buf[1024];          /* RBSP: emulation prevention removed */
     size_t  len, bit;
     int     err;
 } bits_t;
@@ -55,6 +56,33 @@ static void skip_scaling_list(bits_t *b, int size)
     }
 }
 
+/* Table E-1, aspect_ratio_idc 1..16 */
+static const uint8_t k_sar[17][2] = {
+    { 0, 0 }, { 1, 1 }, { 12, 11 }, { 10, 11 }, { 16, 11 }, { 40, 33 }, { 24, 11 }, { 20, 11 }, { 32, 11 },
+    { 80, 33 }, { 18, 11 }, { 15, 11 }, { 64, 33 }, { 160, 99 }, { 4, 3 }, { 3, 2 }, { 2, 1 },
+};
+
+/* vui_parameters() up to the sample aspect ratio, the same in both
+ * codecs, after vui_parameters_present_flag. Best effort: a VUI the
+ * parser does not get through leaves the SAR unknown, never the size. */
+static void parse_vui_sar(bits_t *b, vg_stream_info_t *o)
+{
+    unsigned w = 0, h = 0;
+    if (u(b, 1)) {                                      /* aspect_ratio_info_present_flag */
+        unsigned idc = u(b, 8);
+        if (idc == 255) {                               /* Extended_SAR */
+            w = u(b, 16);
+            h = u(b, 16);
+        } else if (idc < 17) {
+            w = k_sar[idc][0];
+            h = k_sar[idc][1];
+        }
+    }
+    if (b->err || !w || !h) return;
+    o->sar_w = w;
+    o->sar_h = h;
+}
+
 static int parse_h264(bits_t *b, vg_stream_info_t *o)
 {
     u(b, 8);                                            /* NAL header */
@@ -98,7 +126,10 @@ static int parse_h264(bits_t *b, vg_stream_info_t *o)
     unsigned cy = (chroma == 1 ? 2 : 1) * (2 - frame_mbs_only);
     o->width  = w_mbs * 16 - cx * (cl + cr);
     o->height = (2 - frame_mbs_only) * h_map * 16 - cy * (ct + cb);
-    return b->err ? -1 : 0;
+    if (b->err) return -1;
+    if (u(b, 1)) parse_vui_sar(b, o);                   /* vui_parameters_present_flag */
+    b->err = 0;
+    return 0;
 }
 
 static void skip_ptl(bits_t *b, int max_sub_layers_minus1)
@@ -121,6 +152,74 @@ static void skip_ptl(bits_t *b, int max_sub_layers_minus1)
     }
 }
 
+/* scaling_list_data() (7.3.4) */
+static void h265_skip_scaling_lists(bits_t *b)
+{
+    for (int size = 0; size < 4 && !b->err; ++size)
+        for (int m = 0; m < 6 && !b->err; m += size == 3 ? 3 : 1) {
+            if (!u(b, 1)) {                             /* scaling_list_pred_mode_flag */
+                ue(b);                                  /* pred_matrix_id_delta */
+                continue;
+            }
+            int coefs = size == 0 ? 16 : 64;
+            if (size > 1) se(b);                        /* dc_coef_minus8 */
+            for (int i = 0; i < coefs && !b->err; ++i) se(b);
+        }
+}
+
+/* The rest of the SPS after the DPB sizes, up to vui_parameters()'s SAR:
+ * coding block sizes, scaling lists, PCM, the short-term reference
+ * picture sets (7.3.7, each may be predicted from the one before it) and
+ * the long-term ones. */
+static void h265_vui_sar(bits_t *b, unsigned poc_lsb_bits, vg_stream_info_t *o)
+{
+    for (int i = 0; i < 6; ++i) ue(b);                  /* block sizes, transform depths */
+    if (u(b, 1) && u(b, 1))                             /* scaling_list_enabled, sps_..._data_present */
+        h265_skip_scaling_lists(b);
+    u(b, 1);                                            /* amp_enabled_flag */
+    u(b, 1);                                            /* sample_adaptive_offset_enabled_flag */
+    if (u(b, 1)) {                                      /* pcm_enabled_flag */
+        u(b, 8);                                        /* pcm bit depths */
+        ue(b);
+        ue(b);
+        u(b, 1);
+    }
+    unsigned sets = ue(b);
+    if (sets > 64) return;
+    unsigned deltas[64];
+    for (unsigned i = 0; i < sets && !b->err; ++i) {
+        if (i && u(b, 1)) {                             /* inter_ref_pic_set_prediction_flag */
+            u(b, 1);                                    /* delta_rps_sign */
+            ue(b);                                      /* abs_delta_rps_minus1 */
+            unsigned n = 0;
+            for (unsigned j = 0; j <= deltas[i - 1] && !b->err; ++j) {
+                int used = (int)u(b, 1);
+                if (used || u(b, 1)) ++n;               /* use_delta_flag */
+            }
+            deltas[i] = n;
+        } else {
+            unsigned neg = ue(b), pos = ue(b);
+            if (neg > 16 || pos > 16) return;
+            for (unsigned j = 0; j < neg + pos && !b->err; ++j) {
+                ue(b);                                  /* delta_poc_minus1 */
+                u(b, 1);                                /* used_by_curr_pic */
+            }
+            deltas[i] = neg + pos;
+        }
+    }
+    if (u(b, 1)) {                                      /* long_term_ref_pics_present_flag */
+        unsigned lt = ue(b);
+        if (lt > 32) return;
+        for (unsigned i = 0; i < lt && !b->err; ++i) {
+            u(b, (int)poc_lsb_bits);
+            u(b, 1);
+        }
+    }
+    u(b, 1);                                            /* sps_temporal_mvp_enabled_flag */
+    u(b, 1);                                            /* strong_intra_smoothing_enabled_flag */
+    if (!b->err && u(b, 1)) parse_vui_sar(b, o);        /* vui_parameters_present_flag */
+}
+
 static int parse_h265(bits_t *b, vg_stream_info_t *o)
 {
     u(b, 16);                                           /* NAL header */
@@ -136,7 +235,7 @@ static int parse_h265(bits_t *b, vg_stream_info_t *o)
     if (u(b, 1)) { cl = ue(b); cr = ue(b); ct = ue(b); cb = ue(b); }
     ue(b);                                              /* bit depth luma */
     ue(b);                                              /* bit depth chroma */
-    ue(b);                                              /* log2 max poc lsb */
+    unsigned poc_lsb_bits = ue(b) + 4;                  /* log2_max_pic_order_cnt_lsb */
     int all = (int)u(b, 1);
     unsigned dpb = 1;
     for (int i = all ? 0 : max_sub; i <= max_sub && !b->err; ++i) {
@@ -149,7 +248,10 @@ static int parse_h265(bits_t *b, vg_stream_info_t *o)
     o->width  = w - cx * (cl + cr);
     o->height = h - cy * (ct + cb);
     o->refs   = dpb > 1 ? dpb - 1 : 1;                  /* DPB holds the current picture too */
-    return b->err ? -1 : 0;
+    if (b->err) return -1;
+    h265_vui_sar(b, poc_lsb_bits, o);
+    b->err = 0;
+    return 0;
 }
 
 int sps_parse(vg_codec_t codec, const uint8_t *nal, size_t len, vg_stream_info_t *out)

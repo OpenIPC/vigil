@@ -11,7 +11,7 @@ before changing anything structural.
 
 `vigil` is the DVR/NVR application for cheap recorder boards running OpenIPC:
 one daemon, `vigild`, that takes cameras over RTSP or NETIP (or local analog
-inputs on DVR boards), shows them on HDMI with a mouse-driven LVGL UI, and
+inputs on DVR boards), shows them on HDMI with an LVGL UI for mouse and keyboard, and
 records the compressed streams without re-encoding. One source tree builds for
 HiSilicon (hi3536dv100, hi3520dv200), Rockchip (RK3588) and a hardware-free
 `generic` platform used by CI and as a plain Linux recorder.
@@ -19,10 +19,11 @@ HiSilicon (hi3536dv100, hi3520dv200), Rockchip (RK3588) and a hardware-free
 On OpenIPC firmware it is meant to ship as the `vigil` package
 (`general/package/vigil` in OpenIPC/firmware, being added for hi3536dv100):
 started at boot by `/etc/init.d/S95vigil`, a copy of majestic's supervisor
-(restart on crash with back-off, give up after a crash loop), configured in
-`/etc/vigil.yaml` (turned into command-line options), and run with `-s` so
-its log goes to syslog. `vigild` itself reads `/etc/vigil.json` (`-f`), which
-its HTTP API (`docs/api.md`) edits; options override the file.
+(restart on crash with back-off, give up after a crash loop), and run with
+`-s` so its log goes to syslog. `vigild` reads `/etc/vigil.yaml` (`-f`; YAML
+like majestic's, or JSON when the name ends in `.json`), which its HTTP API
+(`docs/api.md`) and on-screen settings rewrite with each setting's help as
+comments; options override the file.
 
 ## The layering rule (the one that must not be broken)
 
@@ -35,11 +36,15 @@ its HTTP API (`docs/api.md`) edits; options override the file.
   `events` ring. Everything else comes through `ui_model.h`, filled by
   `src/app/ui_bridge.c`; settings pages save through `config_put_json`,
   like the API.
-- **`src/api` (CivetWeb threads) never drives channels or the UI.** It reads
+- **`src/api` (CivetWeb threads) never drives channels or the UI.** (The
+  zero channel's input goes through `kvm.h` into the evdev reader, as a
+  USB mouse's would.) It reads
   snapshots (`channels_status`, `config_get`, its own `events` cursor) and
   writes the configuration store; the main thread applies a new generation.
   Camera passwords never leave the process: redact URLs
-  (`schema_redact_url`) in API output and logs.
+  (`schema_redact_url`) in API output and logs. In vigil's files every
+  password is sealed (`src/core/secret.h`, `docs/security.md`): a new
+  secret setting is a `SCHEMA_SECRET` field, which `config.c` seals.
 - **Pixels never pass through the core.** Decoded or captured pictures stay
   inside the platform (VDEC→VPSS→VO, MPP→RGA→DRM). The core handles
   compressed access units only.
@@ -51,9 +56,11 @@ its HTTP API (`docs/api.md`) edits; options override the file.
 ## Layout
 
 - `src/core/` — channel threads, the access-unit normalizer (`au_norm`), SPS
-  parsing, the segment writer, events, small net/md5 helpers, and the
+  parsing, the segment writer, events, small net/md5 helpers, the
+  passwords' cipher (`secret.c`, AES-GCM through libmbedcrypto), and the
   configuration: `schema.c` (generic engine), `config_schema.c` (every
-  setting as a table row), `config.c` (the file and the store).
+  setting as a table row), `schema_yaml.c` (the file's YAML, via libyaml,
+  to and from the same cJSON document), `config.c` (the file and the store).
 - `src/core/source/` — camera protocols behind `source_ops_t`: RTSP
   (`rtsp_client`, `rtp_depay`), NETIP, `capture:N`. A new protocol is one
   `source_<name>.c` listed in `source.c`.
@@ -64,20 +71,38 @@ its HTTP API (`docs/api.md`) edits; options override the file.
   built from the schema; `theme.json` is the design tokens' source
   (`scripts/gen-theme.py` generates `theme_tokens.h` and `web/theme.css`).
 - `src/app/` — `main.c`, the UI or headless loop, the UI's model
-  (`ui_bridge.c`) and mouse input (`input_evdev.c`).
-- `src/api/` — the HTTP/WebSocket API (`docs/api.md`) and its password check.
+  (`ui_bridge.c`), mouse and keyboard input (`input_evdev.c`), and the
+  zero channel's picture and input (`kvm.c`: LVGL's flushes over the
+  platform's `hal_display_grab`, changed blocks as JPEGs from its own
+  encoder, `jpeg_enc.c`).
+- `src/api/` — the HTTP/WebSocket API (`docs/api.md`), its password check,
+  vigil's users and groups (`users.c`) and the permission table; the zero
+  channel's web server on port 80 (`web.c`, pages in `src/api/web/`, built
+  in), which reaches the screen only through `kvm.h`; the ONVIF server and
+  WS-Discovery responder (`onvif.c`, `docs/onvif.md`; its wire formats in
+  `src/core/onvif_proto.c`).
+- `src/sys/` — looking after the system vigild runs on (`docs/management.md`):
+  interfaces, time zone and NTP, host name, disks (with SMART and a surface
+  scan), network storage, mail and DDNS through curl, and `mgmt.c`, the jobs and timers both front ends use.
+  Linux, outside the POSIX-only core; every file and command goes through
+  `sys.h` (a root prefix and replaceable actions), so `test_sys` runs it all
+  on a fake system.
 - `cmake/platforms/<name>.cmake` — sources, includes, libraries per platform.
 - `scripts/` — board bring-up (HiSilicon module staging, Rockchip library build).
-- `tests/` — `test_core.c` unit tests, `test_api.c` (password check), a NETIP
+- `tests/` — `test_core.c` unit tests, `test_api.c` (password check),
+  `test_kvm.c` and `web_test.py` (the zero channel), a NETIP
   camera emulator, a GStreamer RTSP server, the scripts that run `vigild`
   against them, `api_test.py` (the API end to end), and `test_ui.c` with
-  `ui_compare.py` (the UI headless, screenshots against `tests/ui/*.png`).
-- `docs/` — architecture, the UI, porting guide, one page per platform.
+  `ui_compare.py` (the UI headless, screenshots against `tests/ui/*.png`;
+  `live_search_shots.sh`: a search on the Channels page filling as fake
+  devices answer, real discovery underneath, for looking at).
+- `docs/` — architecture, the UI, the management pages, porting guide, one
+  page per platform.
 
 ## Build
 
 ```sh
-# host (generic platform) + tests
+# host (generic platform) + tests; needs libyaml-dev and libmbedtls-dev
 cmake -B build && cmake --build build -j && (cd build && ctest --output-on-failure)
 
 # hi3536dv100, against the SDK (static) or the firmware's headers + shared libs
@@ -151,5 +176,9 @@ what the next line does.
 - **LVGL** (`third_party/lvgl`, v9.2.2), **cJSON** (`third_party/cJSON`,
   v1.7.19) and **CivetWeb** (`third_party/civetweb`, a master commit after
   v1.16: v1.16 lacks later security fixes) are submodules; clone with
-  `--recursive`. A new setting is a row in `src/core/config_schema.c`, not
+  `--recursive`. **libyaml** (MIT) comes from the system (`libyaml-dev`; on
+  OpenIPC images with `yaml-cli`), and so does **libmbedcrypto** (mbedTLS,
+  Apache-2.0: `libmbedtls-dev`; on OpenIPC images `mbedtls-openipc`), the
+  AES-GCM that seals the passwords in vigil's files (`src/core/secret.c`,
+  `docs/security.md`). A new setting is a row in `src/core/config_schema.c`, not
   hand-written JSON code.

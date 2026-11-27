@@ -21,14 +21,34 @@ extern lv_style_t ui_st_btn_pressed;
 extern lv_style_t ui_st_btn_checked;
 extern lv_style_t ui_st_btn_disabled;
 extern lv_style_t ui_st_chip;       /* small opaque label background on video */
+/* Keyboard focus, for LV_STATE_FOCUSED: a ring around the widget
+ * (outline), or inside its edge (border) where the outside belongs to a
+ * neighbour (video tiles, list rows). Both draw nothing until
+ * ui_theme_focus_visible(1): a mouse user sees no focus. */
+extern lv_style_t ui_st_focus;
+extern lv_style_t ui_st_focus_in;
 
 /* Once, after the display exists: the tokens' styles and LVGL's default
  * theme (used by the stock widgets: switch, dropdown, keyboard...) in the
  * same colours. */
 void ui_theme_init(lv_display_t *disp);
 
+/* Show (a keyboard is in use) or hide the focus styles. */
+void ui_theme_focus_visible(int on);
+/* Add ui_st_focus to a stock widget (text area, switch, drop-down). */
+void ui_focus_style(lv_obj_t *o);
+
+/* Let the focus ring of `o`'s children show outside `o` (a tight row of
+ * buttons, a field's box): overflow visible, and room for it in what LVGL
+ * redraws when one of them changes. */
+void ui_ring_room(lv_obj_t *o);
+
 /* No padding, border, radius, background or scrolling. */
 void ui_plain(lv_obj_t *o);
+/* A visible scroll bar on `o` (which ui_plain left without one), there
+ * while its content overflows: a list longer than its box shows that it
+ * is, and where the view is. */
+void ui_scrollbar(lv_obj_t *o);
 
 /* A flat button with an optional symbol (LV_SYMBOL_...) and text. */
 lv_obj_t *ui_btn(lv_obj_t *parent, const char *symbol, const char *text);
@@ -36,6 +56,43 @@ lv_obj_t *ui_btn(lv_obj_t *parent, const char *symbol, const char *text);
 void ui_btn_accent(lv_obj_t *btn);
 /* The label inside a ui_btn. */
 lv_obj_t *ui_btn_label(lv_obj_t *btn);
+
+/* An A8 icon (icons.h) in colour `rgb` (0xRRGGBB); not clickable. */
+lv_obj_t *ui_icon(lv_obj_t *parent, const lv_image_dsc_t *img, uint32_t rgb);
+
+/* A round button `d` pixels across for over the video: a disc with hard
+ * edges (no blend with a key colour), accent while hovered. Add its
+ * content as children, centred. */
+lv_obj_t *ui_disc_button(lv_obj_t *parent, int d);
+
+/* `base` (a built-in Montserrat) with hard edges: every glyph pixel fully
+ * opaque or not drawn, for text straight over the video, where a soft
+ * edge would blend with the key colour (a fringe). Made once per font. */
+const lv_font_t *ui_hard_font(const lv_font_t *base);
+
+/* Text straight over the video, without a chip: hard-edged glyphs in
+ * `rgb` with a one-pixel outline of the same glyphs in a dark colour,
+ * readable on any picture. Not clickable. */
+lv_obj_t *ui_outlined(lv_obj_t *parent, const lv_font_t *font, uint32_t rgb);
+void      ui_outlined_set_text(lv_obj_t *o, const char *text);
+void      ui_outlined_set_color(lv_obj_t *o, lv_color_t c);
+/* The text label (for its text, width or long mode). */
+lv_obj_t *ui_outlined_label(lv_obj_t *o);
+
+/* What text and icons over the video stand on (display.*_background). */
+typedef enum {
+    UI_OSD_OUTLINE,             /* hard edges, the dark outline (ui_outlined) */
+    UI_OSD_NONE,                /* hard edges alone */
+    UI_OSD_BOX,                 /* an opaque chip (ui_st_chip), soft text on it */
+} ui_osd_bg_t;
+
+/* A label over the video in that style; set its text and colour with
+ * ui_outlined_set_text / _set_color, whatever the style. */
+lv_obj_t *ui_osd_text(lv_obj_t *parent, const lv_font_t *font, uint32_t rgb, ui_osd_bg_t bg);
+/* An icon (A8, icons.h) over the video: hard-edged, outlined or not, for
+ * OUTLINE and NONE (a copy of `img`, which is then the object's user
+ * data); as ui_icon for BOX, whose chip is the parent's. */
+lv_obj_t *ui_osd_icon(lv_obj_t *parent, const lv_image_dsc_t *img, uint32_t rgb, ui_osd_bg_t bg);
 
 lv_obj_t *ui_label(lv_obj_t *parent, const char *text, const lv_font_t *font, lv_color_t color);
 

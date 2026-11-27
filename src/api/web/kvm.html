@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vigil zero channel</title>
+<style>
+:root { color-scheme: dark; }
+html, body { margin: 0; height: 100%; background: #000; color: #e8eaed; font: 13px/1.3 system-ui, sans-serif; }
+body { display: flex; flex-direction: column; overflow: hidden; }
+#bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 10px;
+       background: #171b22; border-bottom: 1px solid #2e3542; }
+#dot { width: 10px; height: 10px; border-radius: 50%; background: #9aa3af; flex: none; }
+#dot.live { background: #19be6b; } #dot.bad { background: #ed4014; } #dot.wait { background: #ff9900; }
+#state { min-width: 9em; }
+.num { color: #9aa3af; font-variant-numeric: tabular-nums; }
+.sp { flex: 1; }
+button, select { background: #1f242d; color: #e8eaed; border: 1px solid #2e3542; border-radius: 4px;
+                 padding: 3px 8px; font: inherit; cursor: pointer; }
+button:hover, select:hover { background: #2a303b; }
+#wrap { flex: 1; position: relative; min-height: 0; }
+#screen { position: absolute; background: #000; outline: none; touch-action: none; cursor: default;
+          image-rendering: auto; }
+#screen:focus { box-shadow: 0 0 0 2px #2d8cf0; }
+#msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+       color: #9aa3af; pointer-events: none; font-size: 15px; }
+form { margin: 0; }
+</style>
+</head>
+<body>
+<div id="bar">
+<span id="dot"></span><span id="state">connecting</span>
+<span class="num" id="fps"></span><span class="num" id="rtt"></span><span class="num" id="rate"></span>
+<span class="sp"></span>
+<button type="button" data-key="Escape" title="Esc: back">Esc</button>
+<button type="button" data-key="F1" title="F1: help">F1</button>
+<button type="button" data-key="ContextMenu" title="Menu key: the menu">Menu</button>
+<select id="size" title="Picture size"><option value="1">Full size</option><option value="2">Half size</option></select>
+<select id="quality" title="Picture quality"><option value="85">High</option><option value="70" selected>Normal</option><option value="45">Low</option></select>
+<span class="num" id="user"></span>
+<form method="post" action="/logout"><button type="submit">Log out</button></form>
+</div>
+<div id="wrap"><canvas id="screen" tabindex="0" width="1280" height="720"></canvas><div id="msg">Connecting&hellip;</div></div>
+<script src="/kvm.js"></script>
+</body>
+</html>

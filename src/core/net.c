@@ -4,8 +4,10 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <arpa/inet.h>
 #include <poll.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <netinet/in.h>
@@ -14,6 +16,7 @@
 #include <sys/time.h>
 
 #include "net.h"
+#include "qos.h"
 
 /* Slices of the connect wait: a camera that drops SYNs would otherwise
  * hold a channel's stop (a configuration change, a shutdown) for the whole
@@ -36,6 +39,8 @@ int net_connect(const char *host, int port, int timeout_ms, const volatile int *
         snprintf(err, errcap, "socket: %s", strerror(errno));
         return -1;
     }
+    /* Before connect: the SYN already carries the class. */
+    qos_mark(fd, QOS_CAMERA, 0);
     fcntl(fd, F_SETFL, O_NONBLOCK);
     int rc = connect(fd, ai->ai_addr, ai->ai_addrlen);
     freeaddrinfo(ai);
@@ -63,6 +68,9 @@ int net_connect(const char *host, int port, int timeout_ms, const volatile int *
         return -1;
     }
     fcntl(fd, F_SETFL, 0);
+    /* Tracked once connected (by its addresses), so that a camera session
+     * open when the class changes is marked again. */
+    qos_mark(fd, QOS_CAMERA, 1);
 
     struct timeval tv = { .tv_sec = 1 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
@@ -73,4 +81,41 @@ int net_connect(const char *host, int port, int timeout_ms, const volatile int *
     int rcvbuf = 1 << 20;
     setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof rcvbuf);
     return fd;
+}
+
+int net_listen_check(const char *listen, char *err, size_t errcap)
+{
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_ANY) };
+    const char *colon = strrchr(listen, ':');
+    char addr[INET_ADDRSTRLEN] = "", *end;
+    long port = strtol(colon ? colon + 1 : listen, &end, 10);
+    if (*end || port < 1 || port > 65535) {
+        snprintf(err, errcap, "'%s' has no port 1..65535", listen);
+        return -1;
+    }
+    if (colon) {
+        size_t n = (size_t)(colon - listen);
+        snprintf(addr, sizeof addr, "%.*s", (int)(n < sizeof addr ? n : sizeof addr - 1), listen);
+        if (inet_pton(AF_INET, addr, &a.sin_addr) != 1) {
+            snprintf(err, errcap, "'%s' is not an IPv4 address", addr);
+            return -1;
+        }
+    }
+    a.sin_port = htons((uint16_t)port);
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        snprintf(err, errcap, "socket: %s", strerror(errno));
+        return -1;
+    }
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    int rc = bind(fd, (struct sockaddr *)&a, sizeof a);
+    int e = errno;
+    close(fd);
+    if (rc == 0) return 0;
+    if (e == EADDRINUSE) snprintf(err, errcap, "port %ld is in use (another program, or another of vigild's servers)", port);
+    else if (e == EACCES) snprintf(err, errcap, "port %ld: below 1024 needs root", port);
+    else if (e == EADDRNOTAVAIL) snprintf(err, errcap, "%s is not an address of this recorder", addr);
+    else snprintf(err, errcap, "port %ld: %s", port, strerror(e));
+    return -1;
 }

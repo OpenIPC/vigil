@@ -33,7 +33,11 @@
 #define LV_USE_STDLIB_SPRINTF           LV_STDLIB_BUILTIN
 
 /* ----- HAL ------------------------------------------------------------- */
-#define LV_DEF_REFR_PERIOD              33          /* ms — ~30 fps */
+/* A frame (and an input poll) every 16 ms: the pointer LVGL draws moves at
+ * 60 fps, not 30. A frame with nothing to redraw costs next to nothing:
+ * LVGL redraws only what changed, for a moving pointer the arrow's old and
+ * new places. */
+#define LV_DEF_REFR_PERIOD              16          /* ms — ~60 fps */
 #define LV_DPI_DEF                      96
 
 /* ----- Drivers --------------------------------------------------------- */
@@ -111,7 +115,7 @@
 #define LV_USE_LED                      1
 #define LV_USE_LINE                     1
 #define LV_USE_LIST                     0
-#define LV_USE_BAR                      0
+#define LV_USE_BAR                      1
 #define LV_USE_BUTTON                   1
 #define LV_USE_IMAGE                    1
 #define LV_USE_ARC                      0
@@ -126,7 +130,7 @@
 #define LV_USE_MSGBOX                   0
 #define LV_USE_ROLLER                   0
 #define LV_USE_SCALE                    0
-#define LV_USE_SLIDER                   0
+#define LV_USE_SLIDER                   1
 #define LV_USE_SPAN                     0
 #define LV_USE_SPINBOX                  0
 #define LV_USE_SPINNER                  0
@@ -185,7 +189,7 @@
 #define LV_USE_PROFILER                 0
 #define LV_USE_SNAPSHOT                 0
 #define LV_USE_MONKEY                   0
-#define LV_USE_GRIDNAV                  0
+#define LV_USE_GRIDNAV                  1
 #define LV_USE_FRAGMENT                 0
 #define LV_USE_IMGFONT                  0
 #define LV_USE_MSG                      0

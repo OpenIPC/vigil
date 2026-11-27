@@ -23,9 +23,20 @@ typedef struct {
 typedef struct {
     unsigned width, height;     /* displayed size, cropping applied */
     unsigned refs;              /* reference frames the decoder must keep */
+    /* The sample (pixel) aspect ratio from the SPS's VUI, sar_w:sar_h;
+     * 0:0 when the stream does not say (square pixels, or unknown). */
+    unsigned sar_w, sar_h;
 } vg_stream_info_t;
 
 typedef struct { int x, y, w, h; } vg_rect_t;
+
+/* How a picture fills its tile (display.video_aspect): fitted inside it at
+ * its shape, black bars around; stretched over it; or covering it at its
+ * shape, what overflows cut off (centred). */
+typedef enum { VG_ASPECT_FIT = 0, VG_ASPECT_STRETCH, VG_ASPECT_FILL } vg_aspect_t;
+
+/* An output mode: the picture the display sends to HDMI/VGA. */
+typedef struct { unsigned w, h, hz; } vg_mode_t;
 
 static inline const char *vg_codec_name(vg_codec_t c)
 {

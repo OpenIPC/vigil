@@ -25,6 +25,7 @@
 #include "hal_capture.h"
 #include "hal_decoder.h"
 #include "hal_display.h"
+#include "hal_audio.h"
 #include "hi_display.h"
 #include "hi_video_pipe.h"
 #include "venc_reader.h"
@@ -40,10 +41,11 @@ static const hal_caps_t g_caps = {
 };
 
 const hal_caps_t *hal_caps(void) { return &g_caps; }
+static vg_mode_t g_mode;                            /* what hal_init started */
 
-int hal_init(unsigned w, unsigned h, unsigned fps)
+int hal_init(unsigned w, unsigned h, const vg_mode_t *out)
 {
-    (void)fps;
+    (void)out;                                      /* 720P60 */
     /* u32MaxPoolCnt MUST be the vendor's 128: libmpi indexes pool storage
      * past the configured astCommPool[] entries. VI captures 1280x720
      * sp420 (1280 * 720 * 3/2 bytes, already 64-aligned) into this pool. */
@@ -52,6 +54,7 @@ int hal_init(unsigned w, unsigned h, unsigned fps)
         .astCommPool   = { { .u32BlkSize = 1280 * 720 * 3 / 2, .u32BlkCnt = 16, .acMmzName = "" } },
     };
     if (hi_display_start(&vb, VO_INTF_HDMI, VO_OUTPUT_720P60, w, h) < 0) return -1;
+    g_mode = (vg_mode_t){ w, h, 60 };
 
     /* A private pool before any VENC call, as the vendor's sample_venc does;
      * registering it with libmpi is what matters. */
@@ -75,6 +78,7 @@ void hal_shutdown(void)
 /* The VI pipeline places its own tiles. */
 int  hal_display_set_tile(int ch, const vg_rect_t *r) { (void)ch; (void)r; return 0; }
 void hal_display_clear_tile(int ch) { (void)ch; }
+void hal_display_set_aspect(int ch, unsigned w, unsigned h, vg_aspect_t how) { (void)ch; (void)w; (void)h; (void)how; }
 
 int  hal_dec_open(int ch, vg_codec_t codec, const vg_stream_info_t *si) { (void)ch; (void)codec; (void)si; return -1; }
 int  hal_dec_send(int ch, const vg_au_t *au) { (void)ch; (void)au; return -1; }
@@ -84,3 +88,28 @@ void hal_dec_close(int ch) { (void)ch; }
 int  hal_cap_start(int in, int ch, hal_cap_cb cb, void *user) { (void)ch; return venc_reader_start(in, cb, user); }
 void hal_cap_stop(int in) { venc_reader_stop(in); }
 int  hal_cap_signal(int in) { return venc_reader_active(in); }
+
+/* ---- output mode: the one hal_init started; it does not change ---------------- */
+
+int hal_display_modes(vg_mode_t *out, int max)
+{
+    if (max < 1 || !g_mode.w) return 0;
+    *out = g_mode;
+    return 1;
+}
+
+void hal_display_mode(vg_mode_t *cur) { *cur = g_mode; }
+
+int hal_display_set_mode(const vg_mode_t *m)
+{
+    return m->w == g_mode.w && m->h == g_mode.h && m->hz == g_mode.hz ? 0 : -1;
+}
+
+/* No picture to read back: the zero channel shows the UI over black. */
+void hal_display_grab_keep(int on) { (void)on; }
+int  hal_display_grab(const hal_pic_t *pic) { (void)pic; return -1; }
+
+/* No margins, picture controls or HDMI sound here yet (hal_caps: 0). */
+int hal_display_set_margins(const vg_margins_t *m) { (void)m; return -1; }
+int hal_display_set_picture(const vg_picture_t *p) { (void)p; return -1; }
+int hal_audio_set_volume(unsigned volume, int mute) { (void)volume; (void)mute; return -1; }

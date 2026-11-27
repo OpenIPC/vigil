@@ -92,7 +92,8 @@ static void cache_ps(au_norm_t *n, const uint8_t *nal, size_t len, int kind)
         vg_stream_info_t si;
         if (sps_parse(n->codec, nal, len, &si) == 0 &&
             (n->info_gen == 0 || si.width != n->info.width ||
-             si.height != n->info.height || si.refs != n->info.refs)) {
+             si.height != n->info.height || si.refs != n->info.refs ||
+             si.sar_w != n->info.sar_w || si.sar_h != n->info.sar_h)) {
             n->info = si;
             ++n->info_gen;
         }

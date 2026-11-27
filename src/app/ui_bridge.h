@@ -9,4 +9,7 @@
  * (channels_status, events, the configuration store). Returns 0 or -1. */
 int ui_bridge_init(ui_model_t *m);
 
+/* The management pages' part of the model (ui_mgmt.c). */
+const ui_mgmt_t *ui_mgmt_model(void);
+
 #endif /* UI_BRIDGE_H */

@@ -35,8 +35,13 @@ typedef enum {
 } schema_type_t;
 
 /* How a string field is shown outside: SCHEMA_SECRET_URL replaces the
- * password in "scheme://user:pass@host" with "***" (schema_redact_url). */
-enum { SCHEMA_PLAIN = 0, SCHEMA_SECRET_URL = 1 };
+ * password in "scheme://user:pass@host" with "***" (schema_redact_url);
+ * SCHEMA_SECRET is a password of its own, shown as "***" when set and ""
+ * when not. Sent back as "***", either keeps the stored value. */
+enum { SCHEMA_PLAIN = 0, SCHEMA_SECRET_URL = 1, SCHEMA_SECRET = 2 };
+
+/* What a SCHEMA_SECRET field shows instead of its value. */
+#define SCHEMA_REDACTED "***"
 
 /* Extra check for a string value. Returns 0, or -1 with `msg` set. */
 typedef int (*schema_check_fn)(const char *value, char *msg, size_t cap);
@@ -119,12 +124,33 @@ int schema_section_from_json(const schema_t *s, const schema_section_t *sec,
 /* Check limits on a struct (e.g. one changed from C). Returns 0 or -1. */
 int schema_validate(const schema_t *s, const void *root, schema_errors_t *errs);
 
+/* Every string of `root` (of section `only`, unless NULL) is UTF-8.
+ * Not part of schema_validate: a JSON file may hold other bytes and still
+ * load; YAML, which is Unicode text, cannot carry them. Returns 0 or -1. */
+int schema_check_utf8(const schema_t *s, const schema_section_t *only, const void *root,
+                      schema_errors_t *errs);
+
 /* `root` as JSON ({"version": N, sections...}); `redact` hides secrets. */
 cJSON *schema_to_json(const schema_t *s, const void *root, int redact);
 cJSON *schema_section_to_json(const schema_section_t *sec, const void *root, int redact);
 
 /* The schema as JSON, for UIs (see docs/api.md). */
 cJSON *schema_describe(const schema_t *s);
+
+/* One UTF-8 character at `s`: its length in bytes (1..4) and its code
+ * point in `*cp`; 0 when it is not well-formed UTF-8 (a stray or missing
+ * continuation byte, an overlong form, a surrogate, beyond U+10FFFF). */
+int schema_utf8_char(const char *s, unsigned *cp);
+
+/* Field `f` of an object at `base` as text for the outside: a secret
+ * redacted (SCHEMA_SECRET_URL, SCHEMA_SECRET), anything else as it is.
+ * String and enum fields only. */
+void schema_redact_field(const schema_field_t *f, const void *base, char *out, size_t cap);
+
+/* In every object of `nsec` (the section in `root`), a SCHEMA_SECRET field
+ * sent as "***" takes the value of the same field in `old` (object
+ * sections; array items by position). */
+void schema_keep_secrets(const schema_section_t *sec, void *root, const void *old);
 
 /* "scheme://user:pass@host/..." -> "scheme://user:***@host/...". URLs
  * without a password, or with an empty one, are copied as they are. Errs

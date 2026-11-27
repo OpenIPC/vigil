@@ -16,6 +16,8 @@
 #include "cJSON.h"
 
 #include "api.h"
+#include "api_int.h"
+#include "netip_srv.h"
 #include "auth.h"
 #include "channel.h"
 #include "config.h"
@@ -23,6 +25,9 @@
 #include "hal.h"
 #include "log.h"
 #include "md5.h"
+#include "net.h"
+#include "sys_time.h"
+#include "users.h"
 
 #define BODY_MAX        (64u << 10)  /* a full configuration is ~10 KiB */
 #define WS_MAX          4            /* each WebSocket holds a CivetWeb worker and a writer */
@@ -47,7 +52,7 @@ static time_t mono(void)
 
 /* ---- responses ---------------------------------------------------------------- */
 
-static int send_text(struct mg_connection *conn, int status, const char *text, const char *extra_hdr,
+int send_text(struct mg_connection *conn, int status, const char *text, const char *extra_hdr,
                      const char *extra_val)
 {
     size_t len = strlen(text);
@@ -73,7 +78,7 @@ static int send_text(struct mg_connection *conn, int status, const char *text, c
     return status;
 }
 
-static int send_json(struct mg_connection *conn, int status, cJSON *doc)
+int send_json(struct mg_connection *conn, int status, cJSON *doc)
 {
     char *text = doc ? cJSON_Print(doc) : NULL;
     cJSON_Delete(doc);
@@ -83,7 +88,7 @@ static int send_json(struct mg_connection *conn, int status, cJSON *doc)
     return rc;
 }
 
-static int send_error(struct mg_connection *conn, int status, const char *msg,
+int send_error(struct mg_connection *conn, int status, const char *msg,
                       const schema_errors_t *errs)
 {
     cJSON *doc = cJSON_CreateObject();
@@ -115,27 +120,47 @@ typedef struct {
     time_t locked_until, last;              /* monotonic */
 } fail_entry_t;
 
+/* Good logins are remembered (as keyed digests, not passwords) for
+ * CACHE_SECS, a few at once so that clients of different users polling
+ * side by side do not push each other out; each stays valid only while
+ * the shadow file and the users file are the ones it was checked
+ * against, and vigild has changed no user since (users_generation: a
+ * change it made within the file's time resolution, on jffs2 a second). */
+#define CACHE_N 4
+typedef struct {
+    unsigned char d[16];                    /* md5(key, user:password:shadow:users) */
+    time_t        at;                       /* monotonic; 0: empty */
+    struct stat   shadow_st, users_st;      /* st_ino 0: the file was not there */
+    unsigned      users_gen;
+    unsigned      perms;
+} cache_entry_t;
+
 static pthread_mutex_t g_auth_lock = PTHREAD_MUTEX_INITIALIZER;
 static fail_entry_t    g_failed[FAIL_ADDRS];
 static unsigned char   g_cache_key[16];     /* random, so the cache is no password hash */
-static unsigned char   g_cache[16];         /* md5(key, user:password:shadow) of the last good login */
-static time_t          g_cache_at;
-static struct stat     g_cache_st;          /* the shadow file it was checked against */
-static char            g_why_told[160];     /* last "cannot check" reason logged */
+static cache_entry_t   g_cache[CACHE_N];
+static char            g_why_told[200];     /* last "cannot check" reason logged */
 
-static void cache_digest(const char *user, const char *pass, const char *shadow, unsigned char d[16])
+/* The authorization hook and the request handler of one request run on
+ * the same CivetWeb worker thread: the hook leaves who it let in here. */
+static _Thread_local unsigned t_perms;
+static _Thread_local char     t_user[USERS_NAME_MAX + 96];
+
+const char *api_request_user(void) { return t_user; }
+unsigned    api_request_perms(void) { return t_perms; }
+
+static void cache_digest(const char *user, const char *pass, const char *files, unsigned char d[16])
 {
-    char buf[512];
-    int n = snprintf(buf, sizeof buf, "%.16s%s:%s:%s", (const char *)g_cache_key, user, pass, shadow);
+    char buf[768];
+    int n = snprintf(buf, sizeof buf, "%.16s%s:%s:%s", (const char *)g_cache_key, user, pass, files);
     md5_raw(buf, n < 0 ? 0 : (size_t)n >= sizeof buf ? sizeof buf - 1 : (size_t)n, d);
     volatile char *w = buf;
     for (size_t i = 0; i < sizeof buf; ++i) w[i] = 0;
 }
 
-static int same_file(const struct stat *a, const struct stat *b)
+static void stat_or_none(const char *path, struct stat *st)
 {
-    return a->st_ino == b->st_ino && a->st_dev == b->st_dev && a->st_mtime == b->st_mtime &&
-           a->st_size == b->st_size;
+    if (stat(path, st) < 0) memset(st, 0, sizeof *st);
 }
 
 /* The entry for `addr` (caller holds g_auth_lock); with `make`, a new one
@@ -160,71 +185,29 @@ static int send_401(struct mg_connection *conn)
                      "Basic realm=\"vigil\", charset=\"UTF-8\"");
 }
 
-/* CivetWeb's authorization hook for everything under /api: 1 = go on.
- * Failed logins are answered after a delay, and after FAIL_FREE in a row
- * from one address, further attempts from it are refused for a doubling
- * time without looking at the password: crypt() is slow on these CPUs by
- * design, and an attacker must not get to run it at will. */
-static int auth_handler(struct mg_connection *conn, void *cbdata)
+/* One login from `addr`: 1 with *perms, 0 refused (after FAIL_DELAY_S),
+ * -2 while the address is locked out (*retry_after seconds). After
+ * FAIL_FREE failures in a row from one address, further attempts from it
+ * are refused for a doubling time without looking at the password:
+ * crypt() is slow on these CPUs by design, and an attacker must not get to
+ * run it at will. */
+/* Seconds `addr` is still locked out for; 0 when it is not. */
+static long locked_out(const char *addr)
 {
-    (void)cbdata;
-    vigil_config_t *c = malloc(sizeof *c);
-    if (!c) {
-        send_text(conn, 500, "{\"error\":\"out of memory\"}\n", NULL, NULL);
-        return 0;
-    }
-    config_get(c);
-    config_api_t api = c->api;
-    free(c);
-    if (!api.auth) return 1;
-
-    const char *hdr = mg_get_header(conn, "Authorization");
-    if (!hdr) {
-        send_401(conn);
-        return 0;
-    }
-    const char *addr = mg_get_request_info(conn)->remote_addr;
-    time_t now = mono();
     pthread_mutex_lock(&g_auth_lock);
     fail_entry_t *fe = fail_entry(addr, 0);
-    time_t wait = fe ? fe->locked_until - now : 0;
+    time_t wait = fe ? fe->locked_until - mono() : 0;
     pthread_mutex_unlock(&g_auth_lock);
-    if (wait > 0) {
-        char ra[24];
-        snprintf(ra, sizeof ra, "%ld", (long)wait);
-        send_text(conn, 429, "{\"error\":\"too many failed logins; try again later\"}\n", "Retry-After", ra);
-        return 0;
-    }
+    return wait > 0 ? (long)wait : 0;
+}
 
-    char user[128], pass[256], why[160] = "";
-    int ok = 0;
-    if (auth_parse_basic(hdr, user, sizeof user, pass, sizeof pass) == 0 && !strcmp(user, api.user)) {
-        unsigned char d[16];
-        struct stat st;
-        int have_st = stat(api.shadow, &st) == 0;
-        cache_digest(user, pass, api.shadow, d);
-        pthread_mutex_lock(&g_auth_lock);
-        ok = have_st && g_cache_at && now - g_cache_at < CACHE_SECS && same_file(&st, &g_cache_st) &&
-             memcmp(d, g_cache, sizeof d) == 0;
-        pthread_mutex_unlock(&g_auth_lock);
-        if (!ok) {
-            int rc = auth_check_shadow(api.shadow, api.user, pass, why, sizeof why);
-            ok = rc == 1;
-            if (ok && have_st) {
-                pthread_mutex_lock(&g_auth_lock);
-                memcpy(g_cache, d, sizeof d);
-                g_cache_at = now;
-                g_cache_st = st;
-                pthread_mutex_unlock(&g_auth_lock);
-            }
-        }
-    }
-    volatile char *w = pass;
-    for (size_t i = 0; i < sizeof pass; ++i) w[i] = 0;
-
+/* After a login was checked: a success clears the address's failures, a
+ * failure counts (and is answered FAIL_DELAY_S late). Returns 1 or 0. */
+static int login_counted(const char *addr, int ok, const char *why)
+{
     pthread_mutex_lock(&g_auth_lock);
     int fails = 0;
-    fe = fail_entry(addr, !ok);
+    fail_entry_t *fe = fail_entry(addr, !ok);
     if (ok) {
         if (fe) memset(fe, 0, sizeof *fe);
     } else {
@@ -239,10 +222,130 @@ static int auth_handler(struct mg_connection *conn, void *cbdata)
     if (tell) snprintf(g_why_told, sizeof g_why_told, "%s", why);
     pthread_mutex_unlock(&g_auth_lock);
     if (ok) return 1;
-
-    if (tell) vg_log("api: cannot check passwords: %s", why);
-    vg_log("api: login failed from %s (%d in a row)", addr, fails);
+    /* "auth": the API's logins, the zero channel's (web.c) and ONVIF's alike */
+    if (tell) vg_log("auth: cannot check passwords: %s", why);
+    vg_log("auth: login failed from %s (%d in a row)", addr, fails);
     sleep(FAIL_DELAY_S);
+    return 0;
+}
+
+int api_login_with(const char *addr, const char *user, int (*check)(const char *pass, void *ctx), void *ctx,
+                   unsigned *perms, long *retry_after)
+{
+    *perms = 0;
+    *retry_after = locked_out(addr);
+    if (*retry_after) return -2;
+    char why[200] = "";
+    int ok = users_login_with(user, check, ctx, perms, why, sizeof why) == 1;
+    if (!ok) *perms = 0;
+    return login_counted(addr, ok, why);
+}
+
+int api_login(const char *addr, const char *user, const char *pass, unsigned *perms, long *retry_after)
+{
+    vigil_config_t *c = malloc(sizeof *c);
+    if (!c) return 0;
+    config_get(c);
+    config_api_t api = c->api;
+    free(c);
+    *perms = 0;
+    *retry_after = locked_out(addr);
+    if (*retry_after) return -2;
+    time_t now = mono();
+
+    char why[160] = "";
+    int ok = 0;
+    unsigned char d[16];
+    struct stat sh, us;
+    char files[400];
+    stat_or_none(api.shadow, &sh);
+    stat_or_none(api.users, &us);
+    snprintf(files, sizeof files, "%s:%s", api.shadow, api.users);
+    cache_digest(user, pass, files, d);
+    unsigned gen = users_generation();
+    pthread_mutex_lock(&g_auth_lock);
+    for (int i = 0; i < CACHE_N && !ok; ++i) {
+        cache_entry_t *ce = &g_cache[i];
+        if (ce->at && now - ce->at < CACHE_SECS && users_same_file(&sh, &ce->shadow_st) &&
+            users_same_file(&us, &ce->users_st) && ce->users_gen == gen && memcmp(d, ce->d, sizeof d) == 0) {
+            ok = 1;
+            *perms = ce->perms;
+        }
+    }
+    pthread_mutex_unlock(&g_auth_lock);
+    if (!ok) {
+        ok = users_login(user, pass, perms, why, sizeof why) == 1;
+        if (ok) {
+            /* After the login, which may have written the file (sealing
+             * the password at a first login). */
+            gen = users_generation();
+            stat_or_none(api.shadow, &sh);
+            stat_or_none(api.users, &us);
+            pthread_mutex_lock(&g_auth_lock);
+            cache_entry_t *ce = &g_cache[0];
+            for (int i = 1; i < CACHE_N; ++i)
+                if (g_cache[i].at < ce->at) ce = &g_cache[i];
+            memcpy(ce->d, d, sizeof d);
+            ce->at = now;
+            ce->shadow_st = sh;
+            ce->users_st = us;
+            ce->users_gen = gen;
+            ce->perms = *perms;
+            pthread_mutex_unlock(&g_auth_lock);
+        }
+    }
+
+    if (!ok) *perms = 0;
+    return login_counted(addr, ok, why);
+}
+
+/* CivetWeb's authorization hook for everything under /api: 1 = go on. */
+static int auth_handler(struct mg_connection *conn, void *cbdata)
+{
+    (void)cbdata;
+    vigil_config_t *c = malloc(sizeof *c);
+    if (!c) {
+        send_text(conn, 500, "{\"error\":\"out of memory\"}\n", NULL, NULL);
+        return 0;
+    }
+    config_get(c);
+    int auth = c->api.auth;
+    free(c);
+    t_perms = 0;
+    t_user[0] = 0;
+    if (!auth) {
+        t_perms = PERM_ALL;
+        return 1;
+    }
+
+    const char *hdr = mg_get_header(conn, "Authorization");
+    if (!hdr) {
+        send_401(conn);
+        return 0;
+    }
+    char user[128], pass[256];
+    unsigned perms = 0;
+    long retry = 0;
+    int rc = 0;
+    if (auth_parse_basic(hdr, user, sizeof user, pass, sizeof pass) == 0) {
+        rc = api_login(mg_get_request_info(conn)->remote_addr, user, pass, &perms, &retry);
+    } else {
+        /* Not Basic, or not decodable: a failure like a wrong password. */
+        rc = api_login(mg_get_request_info(conn)->remote_addr, "", "", &perms, &retry);
+    }
+    volatile char *w = pass;
+    for (size_t i = 0; i < sizeof pass; ++i) w[i] = 0;
+    if (rc == -2) {
+        char ra[24];
+        snprintf(ra, sizeof ra, "%ld", retry);
+        send_text(conn, 429, "{\"error\":\"too many failed logins; try again later\"}\n", "Retry-After", ra);
+        return 0;
+    }
+    if (rc == 1) {
+        t_perms = perms;
+        snprintf(t_user, sizeof t_user, "%s", user);
+        return 1;
+    }
     send_401(conn);
     return 0;
 }
@@ -262,6 +365,9 @@ static cJSON *status_json(void)
     unsigned gen = config_get(c);
 
     cJSON_AddStringToObject(doc, "version", VIGIL_VERSION);
+    char host[64];
+    host_get(host, sizeof host);
+    cJSON_AddStringToObject(doc, "hostname", host);
     cJSON_AddNumberToObject(doc, "uptime", (double)(mono() - g_t0));
     cJSON_AddNumberToObject(doc, "time", (double)time(NULL));
     cJSON *cfg = cJSON_AddObjectToObject(doc, "config");
@@ -276,6 +382,7 @@ static cJSON *status_json(void)
     cJSON_AddNumberToObject(p, "decoder_max_height", caps->dec_max_h);
     cJSON_AddNumberToObject(p, "max_channels", caps->max_channels);
     cJSON_AddNumberToObject(p, "capture_inputs", caps->capture);
+    cJSON_AddNumberToObject(p, "max_in_kbps", caps->max_in_kbps);
 
     cJSON *chans = cJSON_AddArrayToObject(doc, "channels");
     int n = channels_count();
@@ -299,7 +406,31 @@ static cJSON *status_json(void)
         cJSON_AddBoolToObject(o, "running", st.configured);
         cJSON_AddBoolToObject(o, "live", st.live);
         cJSON_AddStringToObject(o, "state", st.configured ? (st.live ? "live" : st.state) : "off");
+        cJSON_AddStringToObject(o, "status", ch_state_name(st.status));
+        cJSON_AddStringToObject(o, "title", st.title);
+        /* Each stream on its own: `status` above is the one on screen. */
+        if (st.configured) {
+            cJSON *m = cJSON_AddObjectToObject(o, "main");
+            if (m) {
+                cJSON_AddStringToObject(m, "status", ch_state_name(st.main_status));
+                cJSON_AddStringToObject(m, "state", st.main_state);
+            }
+            if (st.sub_status == CH_EMPTY) {
+                cJSON_AddNullToObject(o, "sub");
+            } else {
+                cJSON *sb = cJSON_AddObjectToObject(o, "sub");
+                if (sb) {
+                    cJSON_AddStringToObject(sb, "status", ch_state_name(st.sub_status));
+                    cJSON_AddStringToObject(sb, "state", st.sub_state);
+                }
+            }
+        }
+        cJSON *ev = cJSON_AddArrayToObject(o, "events");
+        for (int b = 0; ev && ch_event_name(b); ++b)
+            if (st.events & (1u << b)) cJSON_AddItemToArray(ev, cJSON_CreateString(ch_event_name(b)));
         cJSON_AddBoolToObject(o, "decoding", st.decoding);
+        cJSON_AddStringToObject(o, "view", st.view);
+        cJSON_AddBoolToObject(o, "no_decoder", st.no_decoder);
         cJSON_AddBoolToObject(o, "recording", st.recording);
         cJSON_AddStringToObject(o, "rec_state", st.rec_state[0] ? st.rec_state : "off");
         cJSON_AddNumberToObject(o, "rec_bytes", (double)st.rec_bytes);
@@ -308,6 +439,8 @@ static cJSON *status_json(void)
         cJSON_AddNumberToObject(o, "width", st.width);
         cJSON_AddNumberToObject(o, "height", st.height);
         cJSON_AddNumberToObject(o, "fps", st.fps);
+        cJSON_AddNumberToObject(o, "main_kbps", st.main_kbps);
+        cJSON_AddNumberToObject(o, "sub_kbps", st.sub_kbps);
         cJSON_AddItemToArray(chans, o);
     }
     free(c);
@@ -323,8 +456,8 @@ static void status_signature(char *out, size_t cap)
     for (int i = 0; i < CHANNEL_MAX && len < cap; ++i) {
         channel_status_t st;
         channels_status(i, &st);
-        int n = snprintf(out + len, cap - len, "%d%d%d%s|%s|", st.configured, st.live, st.recording,
-                         st.live ? "" : st.state, st.rec_state);
+        int n = snprintf(out + len, cap - len, "%d%d%d%d%d%s|%s|%s|", st.configured, st.live, st.recording,
+                         (int)st.status, (int)st.main_status, st.live ? "" : st.state, st.rec_state, st.name);
         if (n < 0) break;
         len += (size_t)n;
     }
@@ -333,7 +466,7 @@ static void status_signature(char *out, size_t cap)
 /* ---- requests ---------------------------------------------------------------------- */
 
 /* The body, NUL-terminated; NULL with *status set on failure. */
-static char *read_body(struct mg_connection *conn, size_t *len, int *status)
+char *read_body(struct mg_connection *conn, size_t *len, int *status)
 {
     const struct mg_request_info *ri = mg_get_request_info(conn);
     if (ri->content_length > (long long)BODY_MAX) {
@@ -361,7 +494,7 @@ static char *read_body(struct mg_connection *conn, size_t *len, int *status)
     return buf;
 }
 
-static int method_not_allowed(struct mg_connection *conn, const char *allow)
+int method_not_allowed(struct mg_connection *conn, const char *allow)
 {
     cJSON *doc = cJSON_CreateObject();
     cJSON_AddStringToObject(doc, "error", "method not allowed");
@@ -398,12 +531,31 @@ static int handle_config(struct mg_connection *conn, const char *section)
     return rc;
 }
 
+/* 403, naming the first permission the user lacks. */
+static int send_denied(struct mg_connection *conn, unsigned missing)
+{
+    const char *name = "";
+    for (int i = 0; i < PERM_N; ++i)
+        if (missing & (1u << i)) {
+            name = users_perm_names[i];
+            break;
+        }
+    vg_log("api: %s %s refused to %s: needs %s", mg_get_request_info(conn)->request_method,
+           mg_get_request_info(conn)->local_uri, t_user[0] ? t_user : "?", name);
+    cJSON *doc = cJSON_CreateObject();
+    cJSON_AddStringToObject(doc, "error", "permission denied");
+    cJSON_AddStringToObject(doc, "needs", name);
+    return send_json(conn, 403, doc);
+}
+
 static int request_handler(struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
     const struct mg_request_info *ri = mg_get_request_info(conn);
     const char *uri = ri->local_uri, *m = ri->request_method;
     int get = !strcmp(m, "GET") || !strcmp(m, "HEAD");
+    unsigned need = api_perm_needed(m, uri);
+    if ((t_perms & need) != need) return send_denied(conn, need & ~t_perms);
 
     if (!strcmp(uri, "/api/v1/status")) {
         if (!get) return method_not_allowed(conn, "GET, HEAD");
@@ -420,6 +572,13 @@ static int request_handler(struct mg_connection *conn, void *cbdata)
     if (!strcmp(uri, "/api/v1/config")) return handle_config(conn, NULL);
     if (!strncmp(uri, "/api/v1/config/", 15)) return handle_config(conn, uri + 15);
     if (!strcmp(uri, "/api/v1/ws")) return send_error(conn, 400, "WebSocket upgrade required", NULL);
+    if (!strcmp(uri, "/api/v1/me") || !strncmp(uri, "/api/v1/users", 13) || !strncmp(uri, "/api/v1/groups", 14))
+        return api_users_request(conn, uri, m);
+    int rc = api_mgmt_request(conn, uri, m);
+    if (rc) return rc;
+    if (!strncmp(uri, "/api/v1/discovery", 17) || !strncmp(uri, "/api/v1/channels/", 17) ||
+        !strncmp(uri, "/api/v1/devices/", 16))
+        return api_disc_request(conn, uri, m);
     return send_error(conn, 404, "not found", NULL);
 }
 
@@ -583,6 +742,10 @@ static int origin_ok(const struct mg_connection *conn)
 static int ws_connect(const struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
+    if (!(t_perms & PERM_LIVE)) {
+        send_denied((struct mg_connection *)conn, PERM_LIVE);
+        return 1;
+    }
     if (!origin_ok(conn)) {
         vg_log("api: WebSocket from %s refused: Origin %s is not this host",
                mg_get_request_info(conn)->remote_addr, mg_get_header(conn, "Origin"));
@@ -606,6 +769,8 @@ static int ws_connect(const struct mg_connection *conn, void *cbdata)
 static void ws_ready(struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
+    /* What this WebSocket carries is events, the alarm class's. */
+    api_qos_conn(conn, QOS_ALARM);
     /* A client starts with the state of things, not a second of silence. */
     char *st = message("status", status_json());
     char *cf = config_message(config_generation());
@@ -668,7 +833,7 @@ static void *pusher(void *arg)
     uint64_t cursor = events_head();
     unsigned gen = config_generation(), applied = config_applied();
     time_t last_status = 0;
-    char sig[CHANNEL_MAX * 64], last_sig[sizeof sig] = "";
+    char sig[CHANNEL_MAX * 160], last_sig[sizeof sig] = "";
 
     while (!g_pusher_stop) {
         usleep(PUSH_MS * 1000);
@@ -715,7 +880,7 @@ static int log_message(const struct mg_connection *conn, const char *msg)
     return 1;
 }
 
-static void random_key(void)
+static void random_key_once(void)
 {
     int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     ssize_t n = fd >= 0 ? read(fd, g_cache_key, sizeof g_cache_key) : -1;
@@ -731,19 +896,108 @@ static void random_key(void)
         g_cache_key[i] = (unsigned char)('!' + g_cache_key[i] % 90);
 }
 
-int api_start(void)
+void api_qos_listeners(const struct mg_context *ctx, qos_class_t c)
 {
-    vigil_config_t *c = malloc(sizeof *c);
-    if (!c) return -1;
-    config_get(c);
-    config_api_t api = c->api;
-    free(c);
+    struct mg_server_port ports[4];
+    int n = mg_get_server_ports(ctx, 4, ports);
+    for (int i = 0; i < n; ++i)
+        if (qos_mark_listeners(ports[i].port, c) <= 0) vg_log("qos: no listener found on port %d", ports[i].port);
+}
+
+void api_qos_conn(const struct mg_connection *conn, qos_class_t c)
+{
+    const struct mg_request_info *ri = mg_get_request_info(conn);
+    if (ri && qos_mark_peer(ri->server_port, ri->remote_addr, ri->remote_port, c) < 0)
+        vg_log("qos: the connection from %s:%d not found", ri->remote_addr, ri->remote_port);
+}
+
+void api_auth_init(void)
+{
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, random_key_once);
+}
+
+/* What each server listens on, for Network -> Ports (api.h, web.h,
+ * onvif.h, netip_srv.h); here for all of them, so that reading it needs none of the
+ * servers linked. */
+static pthread_mutex_t g_listen_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+    char listening[64], why[160];
+    char move_failed[200];          /* the last move that failed, until the next one */
+} g_srv[4];                          /* api, web, onvif, netip */
+
+void api_server_state(int srv, const char *listen, const char *why)
+{
+    pthread_mutex_lock(&g_listen_lock);
+    snprintf(g_srv[srv].listening, sizeof g_srv[0].listening, "%s", listen);
+    snprintf(g_srv[srv].why, sizeof g_srv[0].why, "%s", why);
+    pthread_mutex_unlock(&g_listen_lock);
+}
+
+void api_server_moved(int srv, const char *listen, int failed, int requested, char *err, size_t cap)
+{
+    pthread_mutex_lock(&g_listen_lock);
+    char why[sizeof g_srv[0].why];
+    memcpy(why, g_srv[srv].why, sizeof why);
+    if (failed)
+        snprintf(g_srv[srv].move_failed, sizeof g_srv[0].move_failed, "could not move to '%s': %s", listen, why);
+    else if (requested)
+        g_srv[srv].move_failed[0] = 0;
+    if (failed && err) snprintf(err, cap, "%s", why);
+    pthread_mutex_unlock(&g_listen_lock);
+}
+
+static int server_listening(int srv, char *listen, size_t cap, char *why, size_t wcap)
+{
+    pthread_mutex_lock(&g_listen_lock);
+    int on = g_srv[srv].listening[0] != 0;
+    if (listen) snprintf(listen, cap, "%s", g_srv[srv].listening);
+    if (why) snprintf(why, wcap, "%s", on ? g_srv[srv].move_failed : g_srv[srv].why);
+    pthread_mutex_unlock(&g_listen_lock);
+    return on;
+}
+
+int api_listening(char *listen, size_t cap, char *why, size_t wcap)
+{
+    return server_listening(0, listen, cap, why, wcap);
+}
+
+int web_listening(char *listen, size_t cap, char *why, size_t wcap)
+{
+    return server_listening(1, listen, cap, why, wcap);
+}
+
+int onvif_listening(char *listen, size_t cap, char *why, size_t wcap)
+{
+    return server_listening(2, listen, cap, why, wcap);
+}
+
+int netip_server_listening(char *listen, size_t cap, char *why, size_t wcap)
+{
+    return server_listening(3, listen, cap, why, wcap);
+}
+
+static void set_listening(const char *listen, const char *why) { api_server_state(0, listen, why); }
+
+static int start_at(const char *listen, int auth)
+{
+    config_api_t api;
+    memset(&api, 0, sizeof api);
+    snprintf(api.listen, sizeof api.listen, "%s", listen);
+    api.auth = auth;
     if (!api.listen[0]) {
         vg_log("api: off (api.listen is empty)");
+        set_listening("", "off: api.listen is empty");
         return 0;
     }
+    char why[128];
+    if (net_listen_check(api.listen, why, sizeof why) < 0) {
+        vg_log("api: cannot listen on %s: %s; running without the API", api.listen, why);
+        set_listening("", why);
+        return -1;
+    }
     g_t0 = mono();
-    random_key();
+    api_auth_init();
 
     const char *options[] = {
         "listening_ports", api.listen,
@@ -761,9 +1015,12 @@ int api_start(void)
     g_ctx = mg_start(&cb, NULL, options);
     if (!g_ctx) {
         vg_log("api: cannot listen on %s; running without the API", api.listen);
+        set_listening("", "the web server library could not start there");
         mg_exit_library();
         return -1;
     }
+    set_listening(api.listen, "");
+    api_qos_listeners(g_ctx, QOS_MANAGEMENT);
     mg_set_auth_handler(g_ctx, "/api", auth_handler, NULL);
     mg_set_request_handler(g_ctx, "/api/v1", request_handler, NULL);
     mg_set_websocket_handler(g_ctx, "/api/v1/ws", ws_connect, ws_ready, ws_data, ws_close, NULL);
@@ -780,6 +1037,29 @@ int api_start(void)
     vg_log("api: listening on %s%s", api.listen,
            api.auth ? "" : " WITHOUT authentication (api.auth is off)");
     return 0;
+}
+
+int api_start(void)
+{
+    vigil_config_t *c = malloc(sizeof *c);
+    if (!c) return -1;
+    config_get(c);
+    config_api_t api = c->api;
+    free(c);
+    return start_at(api.listen, api.auth);
+}
+
+int api_restart(const char *listen, char *err, size_t cap)
+{
+    vigil_config_t *c = malloc(sizeof *c);
+    if (!c) return -1;
+    config_get(c);
+    int auth = c->api.auth;
+    free(c);
+    api_stop();
+    int rc = start_at(listen, auth);
+    api_server_moved(0, listen, rc < 0, err != NULL, err, cap);
+    return rc;
 }
 
 void api_stop(void)
@@ -806,4 +1086,5 @@ void api_stop(void)
         pthread_cond_destroy(&c->wake);
     }
     mg_exit_library();
+    set_listening("", "stopped");
 }

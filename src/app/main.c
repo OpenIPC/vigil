@@ -2,9 +2,17 @@
 /* main.c — vigild: open DVR/NVR recorder.
  *
  *   config_init (-f FILE) + command-line overrides
- *   -> hal_init (media system + HDMI on platforms that have it)
+ *   -> -w OUT: write that configuration to OUT and exit
+ *   -> hal_init (media system + HDMI on platforms that have it, at
+ *      display.output)
  *   -> channels_start (one thread per camera: source -> decode + record)
- *   -> api_start (HTTP/WebSocket API on its own threads, if configured)
+ *   -> mgmt_start (the management pages' jobs and timers: network
+ *      rollback, NTP, DDNS, network storage, alarm center, mail)
+ *   -> api_start (HTTP/WebSocket API on its own threads, if configured),
+ *      web_start (the zero channel), onvif_start (the ONVIF server and
+ *      WS-Discovery, while onvif_server.enabled), netip_server_start (the
+ *      cameras for XM's clients, netip_srv.h), rtsp_server_start (the
+ *      cameras' streams to other clients, its own thread)
  *   -> frontend_run (LVGL quad view, or status lines when headless); on
  *      this thread, a configuration the API saved is applied
  *      (channels_apply)
@@ -20,13 +28,24 @@
 #include <unistd.h>
 
 #include "api.h"
+#include "cJSON.h"
+#include "netip_srv.h"
 #include "channel.h"
 #include "config.h"
 #include "events.h"
+#include "discovery.h"
 #include "frontend.h"
 #include "hal.h"
+#include "hal_display.h"
+#include "hal_audio.h"
 #include "log.h"
+#include "mgmt.h"
+#include "net.h"
 #include "source.h"
+#include "onvif.h"
+#include "rtsp_server.h"
+#include "secret.h"
+#include "web.h"
 
 static volatile sig_atomic_t g_stop;
 static void on_signal(int s) { (void)s; g_stop = 1; }
@@ -142,8 +161,9 @@ static void log_to_syslog_stop(void)
 
 static void usage(const char *argv0)
 {
-    printf("usage: %s [-f FILE] [-c URL]... [-o DIR|none] [-S SECS] [-K N] [-t SECS] [-s]\n"
-           "  -f FILE  configuration (default %s; missing = defaults)\n"
+    printf("usage: %s [-f FILE] [-c URL]... [-o DIR|none] [-S SECS] [-K N] [-t SECS] [-s] [-w OUT]\n"
+           "  -f FILE  configuration (default %s; missing = defaults);\n"
+           "           YAML, or JSON when the name ends in .json\n"
            "  -c URL   camera source, in tile order (up to %d); replaces the file's cameras:\n"
            "             rtsp://[user:pass@]host[:554]/path\n"
            "             netip://[user:pass@]host[:34567]/[?ch=N&stream=main|extra]\n"
@@ -153,6 +173,8 @@ static void usage(const char *argv0)
            "  -K N     segments kept per camera (default 3; 0 = keep all)\n"
            "  -t SECS  exit after SECS seconds (default: run until SIGINT)\n"
            "  -s       log to syslog (tag vigil) instead of stderr\n"
+           "  -w OUT   write the configuration (the file with the options applied) to\n"
+           "           OUT and exit: YAML, or JSON when OUT ends in .json; - = stdout\n"
            "Options override the file for this run; the API saves what is in force.\n",
            argv0, CONFIG_DEFAULT_PATH, CHANNEL_MAX);
 }
@@ -168,19 +190,181 @@ static int int_option(const char *opt, const char *v, const char *section, const
     return c;
 }
 
+/* -w: the configuration in force, as a file (converting one from JSON to
+ * YAML, making a commented default one). Not over a file that failed to
+ * load: that would write the defaults in its place. */
+static int write_config(const char *out, const char *in, int loaded, const vigil_config_t *c)
+{
+    if (loaded < 0) {
+        vg_log("%s is invalid; not writing %s", in, out);
+        return 1;
+    }
+    if (!strcmp(out, "-")) {
+        /* The caller's stdout, also under -s: the descriptor 1 then leads
+         * to syslog, and the text holds the cameras' passwords. */
+        int fd = g_saved_out >= 0 ? g_saved_out : STDOUT_FILENO;
+        char err[200];
+        if (config_check_text(c, CONFIG_YAML, err, sizeof err) < 0) {
+            vg_log("%s", err);
+            return 1;
+        }
+        char *text = config_file_text(c, CONFIG_YAML);
+        int ok = text != NULL;
+        fflush(stdout);
+        for (size_t len = ok ? strlen(text) : 0, done = 0; ok && done < len;) {
+            ssize_t n = write(fd, text + done, len - done);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) ok = 0;
+            else done += (size_t)n;
+        }
+        free(text);
+        if (!ok) vg_log("cannot write the configuration to stdout");
+        return ok ? 0 : 1;
+    }
+    char err[700];
+    int rc = config_save_file(out, c, err, sizeof err);
+    if (rc != 0) {
+        /* rc > 0: in place, but its directory was not synced; a caller
+         * that removes the original next must not take it as done. */
+        vg_log("%s", err);
+        return 1;
+    }
+    vg_log("%s written", out);
+    return 0;
+}
+
 /* ---- applying a new configuration (main thread) ------------------------------------ */
 
 static unsigned g_applied_gen;
 static char     g_api_listen[64];
+static char     g_web_listen[64];
+static char     g_output[16];           /* display.output last applied */
+
+/* display.video_aspect, as the channels take it */
+static vg_aspect_t video_aspect(const char *v)
+{
+    return !strcmp(v, "stretch") ? VG_ASPECT_STRETCH : !strcmp(v, "fill") ? VG_ASPECT_FILL : VG_ASPECT_FIT;
+}
+
+/* display.output, when it changed in the file (the API, the UI's Keep):
+ * the output follows. The UI tries a mode before it saves it (its "keep
+ * this resolution?"), so a mode the output already runs at is left as
+ * it is. */
+static void apply_output(const char *output)
+{
+    if (!strcmp(output, g_output)) return;
+    snprintf(g_output, sizeof g_output, "%s", output);
+    vg_mode_t m, cur;
+    if (config_output_mode(output, &m.w, &m.h, &m.hz) < 0) return;
+    hal_display_mode(&cur);
+    if (!cur.w || (cur.w == m.w && cur.h == m.h && cur.hz == m.hz)) return;
+    if (hal_display_set_mode(&m) < 0) vg_log("display.output %s: not on this board, or it failed", output);
+    else vg_log("display: %s", output);
+}
+
+/* display.margin_*, picture, hdmi_volume and hdmi_mute, each when it
+ * changed (the Display page previews them through the same calls before
+ * it saves). `force`: all of them (start-up). */
+static void apply_output_adj(const config_display_t *d, int force)
+{
+    static config_display_t last;
+    const hal_caps_t *caps = hal_caps();
+    vg_margins_t m = { (unsigned)d->margin_top, (unsigned)d->margin_bottom, (unsigned)d->margin_left,
+                       (unsigned)d->margin_right };
+    if (force || d->margin_top != last.margin_top || d->margin_bottom != last.margin_bottom ||
+        d->margin_left != last.margin_left || d->margin_right != last.margin_right) {
+        if (hal_display_set_margins(&m) == 0)
+            vg_log("display: margins top %u%% bottom %u%% left %u%% right %u%%", m.top, m.bottom, m.left, m.right);
+        else if (caps->margins || !overscan_none(&m))
+            vg_log("display.margin_*: not on this board, or it failed");
+    }
+    if (force || strcmp(d->picture, last.picture)) {
+        vg_picture_t p;
+        picture_preset(d->picture, &p);
+        if (hal_display_set_picture(&p) == 0) vg_log("display: picture %s", d->picture);
+        else if (caps->picture || strcmp(d->picture, "standard"))
+            vg_log("display.picture %s: not on this board, or it failed", d->picture);
+    }
+    if (force || d->hdmi_volume != last.hdmi_volume || d->hdmi_mute != last.hdmi_mute) {
+        if (hal_audio_set_volume((unsigned)d->hdmi_volume, d->hdmi_mute) == 0)
+            vg_log("display: HDMI volume %d%s", d->hdmi_volume, d->hdmi_mute ? ", muted" : "");
+    }
+    last = *d;
+}
+
+/* qos.h: the values in force, and the open sockets marked again. */
+static void apply_qos(const vigil_config_t *c)
+{
+    static int last[QOS_CLASSES] = { -1 };
+    int dscp[QOS_CLASSES];
+    config_to_qos(c, dscp);
+    if (!memcmp(dscp, last, sizeof dscp)) return;
+    int n = qos_set(dscp);
+    vg_log("qos: %s: DSCP video %d, management %d, camera %d, alarm %d (%d open socket(s) marked)", c->qos.type,
+           dscp[QOS_VIDEO], dscp[QOS_MANAGEMENT], dscp[QOS_CAMERA], dscp[QOS_ALARM], n);
+    memcpy(last, dscp, sizeof dscp);
+}
+
+/* api.listen or web.listen changed: the server moves there now. If it
+ * cannot (the port was taken since the store checked it), it goes back
+ * to `cur` and the setting is put back, so that the file says what runs;
+ * Network -> Ports shows why (api_listening, web_listening). */
+static void relisten(const char *what, const char *want, char *cur, int (*restart)(const char *, char *, size_t))
+{
+    char err[160] = "";
+    if (restart(want, err, sizeof err) == 0) {
+        vg_log("%s: now on '%s' (was '%s')", what, want, cur);
+        snprintf(cur, 64, "%s", want);
+        return;
+    }
+    vg_log("%s.listen '%s': %s; back on '%s'", what, want, err, cur);
+    events_push(0, "%s port: %.24s", what, err);
+    restart(cur, NULL, 0);
+    char *json = config_get_json(what, 0);
+    cJSON *doc = json ? cJSON_Parse(json) : NULL;
+    free(json);
+    if (doc) {
+        cJSON_ReplaceItemInObjectCaseSensitive(doc, "listen", cJSON_CreateString(cur));
+        char *body = cJSON_PrintUnformatted(doc);
+        schema_errors_t errs = { 0 };
+        if (!body || config_put_json(what, body, strlen(body), &errs) != CONFIG_OK)
+            vg_log("%s.listen: cannot put '%s' back: %s", what, cur, errs.n ? errs.e[0].msg : "out of memory");
+        free(body);
+        cJSON_Delete(doc);
+    }
+}
+
+/* config_put_json asks before saving a new api.listen, web.listen, or
+ * ONVIF, RTSP or NETIP port: a port vigild's own server holds now is free
+ * for it (the server moves). */
+static int listen_check(const char *what, const char *listen, char *err, size_t cap)
+{
+    char cur[64] = "";
+    if (!strcmp(what, "api")) api_listening(cur, sizeof cur, NULL, 0);
+    else if (!strcmp(what, "web")) web_listening(cur, sizeof cur, NULL, 0);
+    else if (!strcmp(what, "rtsp")) rtsp_server_listening(cur, sizeof cur, NULL, 0);
+    else if (!strcmp(what, "netip")) netip_server_listening(cur, sizeof cur, NULL, 0);
+    else onvif_listening(cur, sizeof cur, NULL, 0);
+    if (cur[0] && config_listen_port(cur) == config_listen_port(listen)) return 0;
+    return net_listen_check(listen, err, cap);
+}
 
 static void apply_config(void)
 {
+    if (mgmt_power_pending() != MGMT_POWER_NONE) g_stop = 1;    /* reboot or shutdown: stop first */
     if (config_generation() == g_applied_gen) return;
     static vigil_config_t c;            /* channels_config_t points into it */
     unsigned gen = config_get(&c);
     channels_config_t cc;
     config_to_channels(&c, &cc);
+    rec_week_t weeks[CHANNEL_MAX];
+    rec_sched_set(weeks, config_to_schedule(&c, weeks));
+    apply_qos(&c);
     int failed = channels_apply(&cc);
+    apply_output(c.display.output);
+    apply_output_adj(&c.display, 0);
+    channels_set_aspect(video_aspect(c.display.video_aspect));
+    rtsp_server_apply();
     g_applied_gen = gen;
     config_mark_applied(gen);
     if (failed) {
@@ -190,13 +374,15 @@ static void apply_config(void)
         vg_log("configuration %u applied", gen);
         events_push(0, "config applied");
     }
-    if (strcmp(c.api.listen, g_api_listen) != 0)
-        vg_log("api.listen is now '%s'; it takes effect when vigild starts again", c.api.listen);
+    if (strcmp(c.api.listen, g_api_listen) != 0) relisten("api", c.api.listen, g_api_listen, api_restart);
+    if (strcmp(c.web.listen, g_web_listen) != 0) relisten("web", c.web.listen, g_web_listen, web_restart);
+    netip_server_apply(&c.netip_server);
 }
 
 int main(int argc, char **argv)
 {
     const char *cfg_path = CONFIG_DEFAULT_PATH, *rec_dir = NULL, *seg = NULL, *keep = NULL;
+    const char *write_path = NULL;
     const char *urls[CHANNEL_MAX];
     int n_urls = 0, run_secs = 0, use_syslog = 0;
 
@@ -206,7 +392,7 @@ int main(int argc, char **argv)
         const char *a = argv[i];
         if (!strcmp(a, "-s"))
             use_syslog = 1;
-        else if (a[0] == '-' && a[1] && !a[2] && strchr("fcoSKt", a[1]))
+        else if (a[0] == '-' && a[1] && !a[2] && strchr("fcoSKtw", a[1]))
             ++i;                                    /* skip the option's value */
     }
 
@@ -238,6 +424,8 @@ int main(int argc, char **argv)
             keep = v;
         } else if (!strcmp(a, "-t") && v) {
             run_secs = atoi(v);
+        } else if (!strcmp(a, "-w") && v) {
+            write_path = v;
         } else {
             usage(argv[0]);
             log_to_syslog_stop();
@@ -247,7 +435,8 @@ int main(int argc, char **argv)
     }
 
     /* defaults < the file < the options */
-    if (config_init(cfg_path) == -2) {
+    int loaded = config_init(cfg_path);
+    if (loaded == -2) {
         log_to_syslog_stop();
         return 2;
     }
@@ -302,33 +491,67 @@ int main(int argc, char **argv)
     }
     config_override(&cfg);
     snprintf(g_api_listen, sizeof g_api_listen, "%s", cfg.api.listen);
+    config_set_listen_check(listen_check);
+    snprintf(g_web_listen, sizeof g_web_listen, "%s", cfg.web.listen);
+    if (write_path) {
+        int wrc = write_config(write_path, cfg_path, loaded, &cfg);
+        log_to_syslog_stop();
+        return wrc;
+    }
+    /* The passwords' key (secret.h), made now if there is none, so that
+     * it exists before the first password is set. Not for -w, which may
+     * run on a build host (-f /dev/null). */
+    secret_ensure_key();
 
-    if (hal_init(SCREEN_W, SCREEN_H, 60) < 0) {
+    vg_mode_t out = { SCREEN_W, SCREEN_H, 60 };
+    if (config_output_mode(cfg.display.output, &out.w, &out.h, &out.hz) < 0) vg_log("display.output: bad");
+    snprintf(g_output, sizeof g_output, "%s", cfg.display.output);
+    if (hal_init(SCREEN_W, SCREEN_H, &out) < 0) {
         vg_log("platform init failed");
         log_to_syslog_stop();
         return 1;
     }
     const hal_caps_t *caps = hal_caps();
+    apply_output_adj(&cfg.display, 1);
     vg_log("platform %s: display %s, decoder %s, capture inputs %d; %d camera(s)",
            caps->name, caps->display ? "yes" : "no", caps->decoder ? "yes" : "no",
            caps->capture, cfg.n_cameras);
 
     vg_rect_t tiles[CHANNEL_MAX];
     frontend_tiles(tiles, CHANNEL_MAX);
+    channels_set_screen(SCREEN_W, SCREEN_H);
+    channels_set_aspect(video_aspect(cfg.display.video_aspect));
     int rc = 1;
     static vigil_config_t running;      /* channels_config_t points into it */
     g_applied_gen = config_get(&running);
     channels_config_t cc;
     config_to_channels(&running, &cc);
+    rec_week_t weeks[CHANNEL_MAX];
+    rec_sched_set(weeks, config_to_schedule(&running, weeks));
+    apply_qos(&running);
     if (channels_start(&cc, caps->display ? tiles : NULL) == 0) {
         config_mark_applied(g_applied_gen);
+        if (mgmt_start() < 0) vg_log("mgmt: cannot start its threads; the management pages will not act");
+        disc_set_max_channels(caps->max_channels);
         api_start();                    /* failing to start it is logged, not fatal */
+        web_start();                    /* the same */
+        onvif_start();                  /* the same */
+        netip_server_start(&running.netip_server, caps->name);     /* the same */
+        rtsp_server_start();            /* the same */
         rc = frontend_run(run_secs, &g_stop, apply_config) < 0 ? 1 : 0;
+        rtsp_server_stop();
+        netip_server_stop();
+        onvif_stop();
+        web_stop();
         api_stop();
+        disc_shutdown();
+        mgmt_stop();
         channels_stop();
     }
     hal_shutdown();
     vg_log("stopped");
+    /* Reboot or shutdown asked for (UI, API): after the clean stop. */
+    if (mgmt_power_pending() != MGMT_POWER_NONE) mgmt_power_run(mgmt_power_pending());
     log_to_syslog_stop();
     return rc;
 }

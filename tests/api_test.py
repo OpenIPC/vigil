@@ -26,6 +26,8 @@ import time
 import urllib.error
 import urllib.request
 
+import vigil_secret
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 # openssl passwd -6 -salt vigiltestsalt secret
 HASH = ("$6$vigiltestsalt$YNf0cVVTPqcmB27N7LaoJSiqJTsS7DvT6GejoILXrgfuBwdj8rCp9"
@@ -182,13 +184,32 @@ def main():
     shadow = os.path.join(tmp, "shadow")
     with open(shadow, "w") as f:
         f.write("root:%s:19000:0:99999:7:::\n" % HASH)
-    cfg_path = os.path.join(tmp, "vigil.json")
+    cfg_path = os.path.join(tmp, "vigil.yaml")
+    users_path = os.path.join(tmp, "vigil.users.yaml")
     rec = os.path.join(tmp, "rec")
+    # Written as a person would (a JSON string is a double-quoted YAML one).
     with open(cfg_path, "w") as f:
-        json.dump({"version": 1, "cameras": [],
-                   "record": {"path": rec, "segment": 60, "keep": 3, "allow_rootfs": True},
-                   "api": {"listen": "127.0.0.1:%d" % api_port, "auth": True,
-                           "user": "root", "shadow": shadow}}, f)
+        f.write("# a comment of my own\n"
+                "cameras: []\n"
+                "record:\n"
+                "  path: %s\n"
+                "  segment: 60\n"
+                "  keep: 3\n"
+                "  allow_rootfs: yes\n"
+                "api:\n"
+                "  listen: 127.0.0.1:%d\n"
+                "  auth: on\n"
+                "  user: root\n"
+                "  shadow: %s\n"
+                "  users: %s\n" % (json.dumps(rec), api_port, json.dumps(shadow), json.dumps(users_path)))
+
+    def file_config():
+        """The file as vigild reads it, through vigild -w into JSON."""
+        out = os.path.join(tmp, "check.json")
+        subprocess.run([vigild, "-f", cfg_path, "-w", out], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with open(out) as f:
+            return json.load(f)
 
     srv = subprocess.Popen([sys.executable, os.path.join(HERE, "netip_server.py"), clip,
                             "--port", str(cam_port), "--password", CAM_PASS],
@@ -210,8 +231,11 @@ def main():
         t0 = time.time()
         st, _, _ = Api(api_port, password="wrong").call("GET", "/api/v1/status")
         check(st == 401 and time.time() - t0 >= 0.9, "wrong password: 401, answered late (%s)" % st)
-        st, _, _ = Api(api_port, user="admin").call("GET", "/api/v1/status")
+        st, _, _ = Api(api_port, user="nobody").call("GET", "/api/v1/status")
         check(st == 401, "other account: 401 (%s)" % st)
+        st, _, me = Api(api_port, user="admin").json("GET", "/api/v1/me")
+        check(st == 200 and me["user"] == "admin" and len(me["permissions"]) == 9,
+              "admin is root's other name while no user admin exists (%s)" % st)
 
         # ---- the three documents
         st, hdr, status = api.json("GET", "/api/v1/status")
@@ -219,11 +243,15 @@ def main():
         check(status and status["platform"]["name"] == "generic" and status["channels"] == [],
               "status: generic platform, no channels")
         st, _, cfg = api.json("GET", "/api/v1/config")
-        check(st == 200 and cfg["version"] == 1 and cfg["record"]["path"] == rec, "config: as in the file")
+        check(st == 200 and cfg["version"] == 1 and cfg["record"]["path"] == rec and
+              cfg["record"]["allow_rootfs"] is True and cfg["api"]["auth"] is True,
+              "config: as in the YAML file")
         st, _, schema = api.json("GET", "/api/v1/schema")
         secs = {s["key"]: s for s in schema["sections"]} if st == 200 else {}
         seg = [f for f in secs.get("record", {}).get("fields", []) if f["key"] == "segment"]
-        check(set(secs) == {"cameras", "record", "api"} and seg and seg[0]["min"] == 10 and
+        check(set(secs) == {"cameras", "record", "schedule", "quota", "nas", "ddns", "upnp", "smtp",
+                              "alarm", "time", "ui", "display", "api", "web", "discovery", "onvif_server",
+                              "qos", "rtsp_server", "netip_server"} and seg and seg[0]["min"] == 10 and
               seg[0]["max"] == 3600 and seg[0]["live"], "schema: sections and limits")
         st, _, _ = api.json("GET", "/api/v1/nothing")
         check(st == 404, "unknown endpoint: 404")
@@ -231,6 +259,77 @@ def main():
         check(st == 405 and "PUT" in hdr.get("Allow", ""), "DELETE config: 405 with Allow")
         st, _, _ = api.json("PUT", "/api/v1/config/nope", {})
         check(st == 404, "unknown section: 404")
+
+        # ---- QoS: a section like the others, 0..63
+        st, _, q = api.json("GET", "/api/v1/config/qos")
+        check(st == 200 and q == {"type": "off", "video": 34, "management": 16, "camera": 34, "alarm": 18},
+              "qos: off by default (%s %s)" % (st, q))
+        st, _, err = api.json("PUT", "/api/v1/config/qos", {"type": "custom", "video": 64})
+        check(st == 400 and err["errors"][0]["path"] == "qos.video", "qos: DSCP 64 refused (%s)" % st)
+        st, _, _ = api.json("PUT", "/api/v1/config/qos", {"type": "custom", "video": 46, "camera": 26})
+        st2, _, q = api.json("GET", "/api/v1/config/qos")
+        check(st == 200 and q["type"] == "custom" and q["video"] == 46 and q["camera"] == 26 and q["alarm"] == 18,
+              "qos: custom saved (%s %s)" % (st, q))
+        st, _, _ = api.json("PUT", "/api/v1/config/qos", {"type": "off"})
+        check(st == 200, "qos: back off (%s)" % st)
+
+        # ---- management: on a host vigild does not manage, it shows and refuses
+        st, _, eth = api.json("GET", "/api/v1/network/ethernet")
+        check(st == 200 and eth["managed"] is False and "config" in eth and "status" in eth and
+              eth["pending"] is None, "ethernet: shown, not managed (%s)" % st)
+        st, _, err = api.json("PUT", "/api/v1/network/ethernet", {"dhcp": False, "address": "10.0.0.2",
+                                                                  "netmask": "255.255.255.0"})
+        check(st == 409 and "does not manage" in err["error"], "ethernet: PUT refused here (%s)" % st)
+        st, _, _ = api.json("POST", "/api/v1/network/ethernet/confirm")
+        check(st == 409, "confirm without a change: 409 (%s)" % st)
+        st, _, z = api.json("GET", "/api/v1/system/zones")
+        check(st == 200 and {"name": "Europe/Berlin", "tz": "CET-1CEST,M3.5.0,M10.5.0/3"} in z, "zones")
+        st, _, t = api.json("GET", "/api/v1/system/time")
+        check(st == 200 and "ntp" in t and t["ntp"]["enabled"] is True and isinstance(t["time"], (int, float)),
+              "time (%s)" % st)
+        st, _, _ = api.json("PUT", "/api/v1/system/time", {"zone": "Europe/Berlin"})
+        check(st == 409, "time zone: refused here (%s)" % st)
+        # not a system vigild manages (the host): no reboot, and only POST
+        st, _, _ = api.json("POST", "/api/v1/system/reboot", {})
+        check(st == 409, "reboot: refused on a system vigild does not manage (%s)" % st)
+        st, _, _ = api.json("GET", "/api/v1/system/shutdown")
+        check(st == 405, "shutdown: POST only (%s)" % st)
+        st, _, h = api.json("GET", "/api/v1/system/hostname")
+        st2, _, status2 = api.json("GET", "/api/v1/status")
+        check(st == 200 and h["hostname"] and status2["hostname"] == h["hostname"], "hostname, also in status")
+        st, _, d = api.json("GET", "/api/v1/disks")
+        check(st == 200 and isinstance(d["disks"], list) and isinstance(d["formats"], list), "disks (%s)" % st)
+        st, _, _ = api.json("POST", "/api/v1/disks/sda/format", {"fs": "vfat", "confirm": "sda"})
+        check(st == 409, "format: refused here (%s)" % st)
+        # Disk maintenance: nothing is read from or written to this host's disks.
+        st, _, _ = api.json("GET", "/api/v1/disks/sda/smart")
+        check(st == 409, "SMART: refused here (%s)" % st)
+        st, _, _ = api.json("POST", "/api/v1/disks/sda/selftest", {"type": "short"})
+        check(st == 409, "self-test: refused here (%s)" % st)
+        st, _, err = api.json("POST", "/api/v1/disks/sda/selftest", {"type": "long"})
+        check(st == 400 and err["errors"][0]["path"] == "type", "self-test: an unknown type (%s)" % st)
+        st, _, sc = api.json("GET", "/api/v1/storage/scan")
+        check(st == 200 and sc == {"state": "idle"}, "scan: idle (%s)" % sc)
+        st, _, _ = api.json("POST", "/api/v1/storage/scan", {"disk": "sda", "mode": "read"})
+        check(st == 409, "scan: refused here (%s)" % st)
+        st, _, err = api.json("POST", "/api/v1/storage/scan", {"disk": "sda", "mode": "erase"})
+        check(st == 400 and err["errors"][0]["path"] == "mode", "scan: an unknown mode (%s)" % st)
+        st, _, _ = api.json("POST", "/api/v1/storage/scan/stop", {})
+        check(st == 409, "scan: nothing to stop (%s)" % st)
+        st, _, sv = api.json("GET", "/api/v1/network/services")
+        check(st == 200 and sv["upnp"]["active"] is False and sv["p2p"]["available"] is False,
+              "services: UPnP not active, no P2P")
+        st, _, n = api.json("GET", "/api/v1/storage/nas")
+        check(st == 200 and n["mount"] == "/mnt/nas" and "cifs" in n["support"], "network storage (%s)" % st)
+        st, _, _ = api.json("GET", "/api/v1/jobs/999")
+        check(st == 404, "unknown job: 404")
+        st, _, _ = api.json("GET", "/api/v1/network/wifi/scan")
+        check(st == 409, "Wi-Fi scan without an adapter: 409 (%s)" % st)
+        st, _, j = api.json("POST", "/api/v1/network/smtp/test")
+        check(st == 202 and j["job"] > 0, "test mail: a job (%s)" % st)
+        st, _, job = api.json("GET", "/api/v1/jobs/%d" % j["job"])
+        check(st == 200 and job["kind"] == "smtp-test" and job["state"] in ("queued", "running", "failed", "done"),
+              "the job (%s)" % job)
 
         # ---- WebSocket
         bad = WebSocket(api_port, "Basic " + base64.b64encode(b"root:nope").decode())
@@ -261,6 +360,13 @@ def main():
                   ch["width"] == 640 and CAM_PASS not in json.dumps(status),
                   "status: name, host, codec, size; no password")
             check(status["config"]["applied"] == status["config"]["generation"], "status: config applied")
+            check(status["platform"]["max_in_kbps"] == 0 and "sub_kbps" in ch, "status: no rated bandwidth here; sub_kbps")
+
+        def bitrate():
+            s, _, d = api.json("GET", "/api/v1/status")
+            return s == 200 and d["channels"] and d["channels"][0]["main_kbps"] > 0 and d["channels"][0]["main_kbps"]
+        kbps = wait_for(bitrate, 6, 0.5)
+        check(kbps, "status: the main stream's bitrate (%s kbit/s)" % kbps)
         check(wait_for(lambda: ws.find(lambda m: m["type"] == "event" and m["data"]["camera"] == 1 and
                                        m["data"]["text"] == "online"), 5),
               "WebSocket: event CAM1 online")
@@ -276,14 +382,28 @@ def main():
         st, _, cfg = api.json("GET", "/api/v1/config")
         check(cfg["cameras"][0]["url"].startswith("netip://admin:***@"), "GET config: password redacted")
         disk = open(cfg_path).read()
-        check(CAM_PASS in disk and (os.stat(cfg_path).st_mode & 0o777) == 0o600,
-              "the file keeps the password, mode 0600")
+        key_path = os.path.join(tmp, "vigil.key")
+        check(CAM_PASS not in disk and "netip://admin:enc:v1:" in disk and (os.stat(cfg_path).st_mode & 0o777) == 0o600
+              and (os.stat(key_path).st_mode & 0o777) == 0o600,
+              "the file keeps the password sealed, mode 0600; the key beside it, 0600")
+        check(disk.startswith("# vigild configuration") and "\ncameras:\n  - url: \"netip://admin:" in disk and
+              "    name: Emulator\n" in disk and "\n  # Segment length (s): " in disk and
+              "a comment of my own" not in disk,
+              "the file is saved as YAML, with the settings' help as comments")
+        if vigil_secret.HAVE:
+            key = vigil_secret.read_key(key_path)
+            check(vigil_secret.open_url(key, "config:cameras[0].url", file_config()["cameras"][0]["url"]) == url,
+                  "and reads back as saved")
+        else:
+            print("skip and reads back as saved (no python3-cryptography)")
         gen = status["config"]["generation"] if status else 0
         events_before = len(ws.find(lambda m: m["type"] == "event"))
         cfg["cameras"][0]["name"] = "Gate"
         st, _, _ = api.json("PUT", "/api/v1/config", cfg)
         check(st == 200, "PUT the redacted config back with a new name: 200")
-        check(CAM_PASS in open(cfg_path).read(), "*** kept the stored password")
+        disk = open(cfg_path).read()
+        check(":***@" not in disk and CAM_PASS not in disk and (not vigil_secret.HAVE or vigil_secret.open_url(
+              key, "config:cameras[0].url", file_config()["cameras"][0]["url"]) == url), "*** kept the stored password")
         renamed = wait_for(lambda: api.json("GET", "/api/v1/status")[2]["channels"][0]["name"] == "Gate", 5)
         check(renamed, "the new name shows in the status")
         time.sleep(1)
@@ -292,6 +412,19 @@ def main():
         check(len(ws.find(lambda m: m["type"] == "event")) > events_before, "rename applied (event)")
         st, _, d = api.json("GET", "/api/v1/status")
         check(d["config"]["generation"] > gen and d["channels"][0]["live"], "generation moved, still live")
+
+        # ---- events from outside: held a few seconds, in the status
+        st, _, d = api.json("POST", "/api/v1/channels/1/events", {"events": ["motion", "human"]})
+        check(st == 200 and d == {"channel": 1, "events": ["motion", "human"]},
+              "POST events: motion and human held (%s %s)" % (st, d))
+        check(api.json("GET", "/api/v1/status")[2]["channels"][0]["events"] == ["motion", "human"],
+              "and in the status")
+        st, _, _ = api.json("POST", "/api/v1/channels/1/events", {"events": ["smoke"]})
+        check(st == 400, "an unknown event: 400 (%s)" % st)
+        st, _, _ = api.json("POST", "/api/v1/channels/9/events", {"events": ["motion"]})
+        check(st == 404, "no such channel: 404 (%s)" % st)
+        check(wait_for(lambda: api.json("GET", "/api/v1/status")[2]["channels"][0]["events"] == [], 8),
+              "gone a few seconds later")
 
         # ---- a recording setting restarts the camera, which comes back
         st, _, _ = api.json("PUT", "/api/v1/config/record", {"path": rec, "segment": 120, "allow_rootfs": True})
@@ -334,7 +467,7 @@ def main():
                                        m["data"]["text"] == "REC waiting for disk"), 3),
               "WebSocket: event REC waiting for disk")
         check(api.json("GET", "/api/v1/config/record")[2]["path"] == onroot + "/rec" and
-              json.load(open(cfg_path))["record"]["path"] == onroot + "/rec",
+              file_config()["record"]["path"] == onroot + "/rec",
               "the configured path is kept, in force and in the file")
         if os.path.isdir("/dev/shm") and os.path.exists("/proc/self/mountinfo"):
             shm = "/dev/shm/vigil-test-%d-%d" % (os.getpid(), api_port)
@@ -396,6 +529,101 @@ def main():
         check(busy.returncode == 0 and "running without the API" in busy.stdout,
               "port taken: logged, vigild runs on without the API (rc %s)" % busy.returncode)
 
+        # ---- accounts and permissions
+        st, _, me = api.json("GET", "/api/v1/me")
+        check(st == 200 and me["user"] == "root" and "users" in me["permissions"], "me: root, every permission")
+        st, _, groups = api.json("GET", "/api/v1/groups")
+        check(st == 200 and [g["name"] for g in groups] == ["admin", "user"] and not groups[0]["editable"],
+              "groups: the two built in")
+        st, _, g = api.json("POST", "/api/v1/groups", {"name": "viewer", "permissions": {"live": True}})
+        check(st == 201 and g["permissions"]["live"] and not g["permissions"]["storage"], "viewer group (%s)" % st)
+        st, _, _ = api.json("POST", "/api/v1/groups", {"name": "keeper", "permissions": {"storage": True}})
+        check(st == 201, "storage-only group (%s)" % st)
+        st, _, err = api.json("POST", "/api/v1/groups", {"name": "x", "permissions": {"fly": True}})
+        check(st == 400 and err["errors"][0]["path"] == "group.permissions.fly", "unknown permission: 400")
+        st, _, _ = api.json("PUT", "/api/v1/groups/admin", {"permissions": {"users": False}})
+        check(st == 409, "admin cannot be changed (%s)" % st)
+        st, _, _ = api.json("DELETE", "/api/v1/groups/user")
+        check(st == 409, "the user group cannot be deleted (%s)" % st)
+        st, _, u = api.json("POST", "/api/v1/users", {"name": "vera", "group": "viewer", "password": "verapw"})
+        check(st == 201 and u == {"name": "vera", "group": "viewer", "enabled": True, "password_set": True},
+              "user vera (%s %s)" % (st, u))
+        st, _, _ = api.json("POST", "/api/v1/users", {"name": "kim", "group": "keeper", "password": "kimpw1"})
+        check(st == 201, "user kim (%s)" % st)
+        st, _, err = api.json("POST", "/api/v1/users", {"name": "root", "password": "rootpw"})
+        check(st == 400 and err["errors"][0]["path"] == "user.name", "root is reserved")
+        st, _, err = api.json("POST", "/api/v1/users", {"name": "zed", "password": "x"})
+        check(st == 400 and err["errors"][0]["path"] == "user.password", "short password: 400")
+        st, _, _ = api.json("POST", "/api/v1/users", {"name": "vera", "password": "verapw"})
+        check(st == 409, "a name twice: 409 (%s)" % st)
+        st, _, _ = api.json("DELETE", "/api/v1/groups/viewer")
+        check(st == 409, "a group with users stays (%s)" % st)
+        st, _, raw = api.call("GET", "/api/v1/users")
+        check(st == 200 and b"$6$" not in raw and b"verapw" not in raw and b"password_set" in raw,
+              "the user list has no hashes")
+        text = open(users_path).read()
+        check(oct(os.stat(users_path).st_mode & 0o777) == "0o600" and "name: vera" in text and "verapw" not in text,
+              "the users file: 0600, hashes only")
+
+        vera = Api(api_port, user="vera", password="verapw")
+        st, _, _ = vera.call("GET", "/api/v1/status")
+        check(st == 200, "viewer: status 200 (%s)" % st)
+        st, _, err = vera.json("GET", "/api/v1/config")
+        check(st == 403 and err["needs"] == "system", "viewer: config 403 (%s)" % st)
+        st, _, err = vera.json("PUT", "/api/v1/config/record", {"path": rec, "allow_rootfs": True})
+        check(st == 403 and err["needs"] == "storage", "viewer: PUT record 403 (%s)" % st)
+        st, _, err = vera.json("POST", "/api/v1/channels/1/events", {"events": ["motion"]})
+        check(st == 403 and err["needs"] == "cameras", "viewer: POST events 403 (%s)" % st)
+        st, _, _ = vera.json("GET", "/api/v1/users")
+        check(st == 403, "viewer: users 403 (%s)" % st)
+        st, _, me = vera.json("GET", "/api/v1/me")
+        check(st == 200 and me == {"user": "vera", "permissions": ["live"]}, "viewer: me (%s)" % me)
+        vws = WebSocket(api_port, vera.auth)
+        check(wait_for(lambda: vws.find(lambda m: m["type"] == "status"), 5), "viewer: WebSocket status")
+        vws.close()
+        kim = Api(api_port, user="kim", password="kimpw1")
+        st, _, _ = kim.json("PUT", "/api/v1/config/record", {"path": rec, "segment": 90, "allow_rootfs": True})
+        check(st == 200, "storage user: PUT record 200 (%s)" % st)
+        st, _, _ = kim.json("PUT", "/api/v1/config/api", {"listen": "127.0.0.1:%d" % api_port})
+        check(st == 403, "storage user: PUT api 403 (%s)" % st)
+        st, _, _ = kim.json("PUT", "/api/v1/config", {})
+        check(st == 403, "storage user: PUT whole config 403 (%s)" % st)
+        st, _, _ = kim.json("GET", "/api/v1/disks")
+        check(st == 200, "storage user: disks 200 (%s)" % st)
+        st, _, _ = kim.json("GET", "/api/v1/storage/scan")
+        check(st == 200, "storage user: scan status 200 (%s)" % st)
+        st, _, err = vera.json("GET", "/api/v1/storage/scan")
+        check(st == 403 and err["needs"] == "storage", "viewer: scan status 403 (%s)" % st)
+        st, _, err = vera.json("GET", "/api/v1/disks/sda/smart")
+        check(st == 403 and err["needs"] == "storage", "viewer: SMART 403 (%s)" % st)
+        st, _, _ = kim.json("GET", "/api/v1/network/ethernet")
+        check(st == 403, "storage user: network 403 (%s)" % st)
+        st, _, _ = vera.json("GET", "/api/v1/system/time")
+        check(st == 403, "viewer: system time 403 (%s)" % st)
+        st, _, err = vera.json("POST", "/api/v1/system/reboot", {})
+        check(st == 403 and err["needs"] == "system", "viewer: reboot 403 (%s)" % st)
+        try:
+            kws = WebSocket(api_port, kim.auth)
+            got = wait_for(lambda: kws.find(lambda m: True), 2)
+            kws.close()
+        except (OSError, EOFError, ValueError):
+            got = None
+        check(not got, "no live permission: no WebSocket")
+        st, _, _ = Api(api_port, user="vera", password="wrong").call("GET", "/api/v1/status")
+        check(st == 401, "user, wrong password: 401 (%s)" % st)
+        st, _, u = api.json("PUT", "/api/v1/users/vera", {"enabled": False})
+        check(st == 200 and u["enabled"] is False, "vera disabled")
+        st, _, _ = vera.call("GET", "/api/v1/status")
+        check(st == 401, "a disabled user: 401 (%s)" % st)
+        st, _, _ = api.json("PUT", "/api/v1/users/vera", {"enabled": True, "password": "verapw2"})
+        st2, _, _ = Api(api_port, user="vera", password="verapw2").call("GET", "/api/v1/status")
+        check(st == 200 and st2 == 200, "enabled again, new password (%s %s)" % (st, st2))
+        st, _, _ = api.call("GET", "/api/v1/status")
+        check(st == 200, "root still gets in")
+        st, _, _ = api.json("DELETE", "/api/v1/users/kim")
+        st2, _, _ = kim.call("GET", "/api/v1/config/record")
+        check(st == 200 and st2 == 401, "kim deleted: 401 (%s %s)" % (st, st2))
+
         # ---- guessing: after 5 failures in a row an address is locked out,
         # and only that address: the owner elsewhere still gets in
         def from_addr(src, password):
@@ -419,6 +647,42 @@ def main():
         check(st == 200, "the owner on another address still gets in (%s)" % st)
         st, _, _ = api.call("GET", "/api/v1/status")
         check(st == 200, "and so does the already logged-in client (%s)" % st)
+
+        # ---- Ports: no two of vigild's servers on one port; the API moves at once
+        st, _, srvs = api.json("GET", "/api/v1/config")
+        check(st == 200 and srvs["rtsp_server"]["port"] == 554 and srvs["onvif_server"]["port"] == 8899 and
+              srvs["netip_server"] == {"enabled": True, "port": 34567}, "ports: the defaults (%s)" % st)
+        st, _, err = api.json("PUT", "/api/v1/config/onvif_server", {"port": 80})
+        check(st == 400 and err["errors"][0]["path"] == "onvif_server.port" and
+              "web.listen" in err["errors"][0]["message"], "ONVIF on the web server's port 80: refused (%s %s)" %
+              (st, err))
+        st, _, err = api.json("PUT", "/api/v1/config/rtsp_server", {"port": api_port})
+        check(st == 400 and "api.listen" in err["errors"][0]["message"], "RTSP on the API's port: refused (%s)" % st)
+        st, _, err = api.json("PUT", "/api/v1/config/netip_server", {"port": 0})
+        check(st == 400, "port 0: refused (%s)" % st)
+        st, _, _ = api.json("PUT", "/api/v1/config/rtsp_server", {"port": 8554})
+        check(st == 200, "RTSP on 8554: saved (%s)" % st)
+        api_cfg = {"auth": True, "user": "root", "shadow": shadow, "users": users_path}
+        busy = socket.socket()
+        busy.bind(("127.0.0.1", 0))
+        busy.listen(1)
+        st, _, err = api.json("PUT", "/api/v1/config/api",
+                              dict(api_cfg, listen="127.0.0.1:%d" % busy.getsockname()[1]))
+        busy.close()
+        check(st == 400 and err["errors"][0]["path"] == "api.listen" and "in use" in err["errors"][0]["message"],
+              "the API onto a port in use: refused, said why (%s %s)" % (st, err))
+        new_port = free_port()
+        st, _, _ = api.json("PUT", "/api/v1/config/api", dict(api_cfg, listen="127.0.0.1:%d" % new_port))
+
+        def answers(port):
+            try:
+                return Api(port).call("GET", "/api/v1/status")[0] == 200
+            except OSError:
+                return False
+        check(st == 200 and wait_for(lambda: answers(new_port), 10) and not answers(api_port),
+              "api.listen changed: the API moved to %d at once" % new_port)
+        api_port = new_port
+        api = Api(api_port)
     finally:
         if ws:
             ws.close()

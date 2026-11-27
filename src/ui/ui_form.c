@@ -5,10 +5,16 @@
  * array section (a camera); the list page shows an array section's items
  * with Add, Edit and Remove. Widgets follow the field's kind:
  *
- *   string  text area; the on-screen keyboard opens on it
- *   integer text area for digits with - and + (kept within min..max)
+ *   string  text area; the on-screen keyboard opens on it, unless a
+ *           keyboard is in use
+ *   integer text area for digits with - and + (kept within min..max);
+ *           Up and Down step it
  *   boolean switch
  *   enum    drop-down list of the values
+ *
+ * The page's focus order is Back, the fields, Cancel and Save; Enter in a
+ * text field goes to the next field (from the last one, to Save), and
+ * Ctrl+S saves (ui_page_t.save).
  *
  * with the schema's label and help, and "applies after restart" for fields
  * that are not live. Save sends the whole section to model->save, the path
@@ -17,24 +23,28 @@
  * Secret values (camera URLs) are shown redacted, as the API shows them,
  * and an unchanged one keeps the stored password.
  */
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "ui_app.h"
+#include "ui_osk.h"
 #include "ui_theme.h"
 
 #define FIELDS_MAX 24
 #define LABEL_W    320
-#define KB_H       280
 
 typedef struct {
     int        sec, item;           /* item: -1 for an object section */
     int        is_new;              /* item is being added */
+    int        n_stored;            /* items there were; past them, new (empty slots) */
     int        n_items, n_fields;
     char     **vals;                /* n_items x n_fields, as stored (redacted) */
     unsigned   gen;                 /* the generation `vals` came from */
-    ui_page_t *page;
+    ui_page_t *page;                /* NULL: embedded in a settings pane */
+    lv_group_t *group;              /* the widgets' focus order */
+    lv_obj_t  *save_btn;            /* Enter after the last field goes there */
     lv_obj_t  *w[FIELDS_MAX];       /* the value widget */
     lv_obj_t  *err[FIELDS_MAX];
     lv_obj_t  *general;             /* errors without a field */
@@ -61,12 +71,16 @@ static void vals_free(char **v, int n)
 /* The section as stored, plus a new item with the defaults when adding;
  * `gen`: the generation they were read from (taken first: if it moves
  * while reading, the save is refused as stale, never mixed). */
-static char **vals_load(int sec, int add, int *n_items, unsigned *gen)
+/* The section as stored, padded with items of defaults to `want` items
+ * (adding one at the end, or at a slot past the end); `gen`: the
+ * generation they were read from (taken first: if it moves while reading,
+ * the save is refused as stale, never mixed). */
+static char **vals_load(int sec, int want, int *n_items, unsigned *gen)
 {
     const ui_section_t *s = section(sec);
     *gen = ui_model()->config_generation ? ui_model()->config_generation() : 0;
     int n = s->is_array ? ui_model()->item_count(sec) : 1;
-    int total = n + (add ? 1 : 0);
+    int total = want > n ? want : n;
     char **v = calloc((size_t)(total * s->n_fields + 1), sizeof *v);
     if (!v) return NULL;
     char buf[1024];
@@ -149,29 +163,41 @@ static int form_dirty(const form_t *f)
 
 static void kb_hide(form_t *f)
 {
-    if (!f->kb || lv_obj_has_flag(f->kb, LV_OBJ_FLAG_HIDDEN)) return;
-    lv_keyboard_set_textarea(f->kb, NULL);
-    lv_obj_add_flag(f->kb, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_style_pad_bottom(f->page->body, VG_SPACE_XL, 0);
+    if (ui_osk_shown(f->kb)) ui_osk_hide(f->kb);
 }
 
 static void kb_show(form_t *f, lv_obj_t *ta, int numeric)
 {
-    lv_keyboard_set_mode(f->kb, numeric ? LV_KEYBOARD_MODE_NUMBER : LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_keyboard_set_textarea(f->kb, ta);
-    lv_obj_remove_flag(f->kb, LV_OBJ_FLAG_HIDDEN);
-    /* Room to scroll the field above the keyboard. */
-    lv_obj_set_style_pad_bottom(f->page->body, KB_H + VG_SPACE_XL, 0);
-    lv_obj_update_layout(f->page->body);
-    lv_obj_scroll_to_view_recursive(ta, LV_ANIM_OFF);
+    if (f->kb) ui_osk_show(f->kb, ta, numeric);
 }
 
-static void ta_focus_cb(lv_event_t *e)
+/* Clicked (or Enter): the on-screen keyboard, for a mouse user. Someone
+ * with a keyboard types into the field directly. */
+static void ta_click_cb(lv_event_t *e)
 {
     form_t *f = lv_event_get_user_data(e);
     lv_obj_t *ta = lv_event_get_target(e);
     int i = (int)(intptr_t)lv_obj_get_user_data(ta);
+    if (ui_keyboard_in_use()) return;
     kb_show(f, ta, section(f->sec)->fields[i].kind == UI_FIELD_INT);
+}
+
+/* Enter in a text field: the next field, or Save after the last. */
+static void ta_ready_cb(lv_event_t *e)
+{
+    form_t *f = lv_event_get_user_data(e);
+    lv_indev_t *in = lv_indev_active();
+    if (!in || lv_indev_get_type(in) != LV_INDEV_TYPE_KEYPAD) return;   /* the on-screen keyboard's OK */
+    int i = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    lv_obj_t *next = f->save_btn;
+    for (int k = i + 1; k < f->n_fields; ++k)
+        if (f->w[k]) {
+            next = f->w[k];
+            break;
+        }
+    /* The Enter's release must not click what gets the focus now. */
+    lv_indev_wait_release(in);
+    lv_group_focus_obj(next);
 }
 
 static void kb_cb(lv_event_t *e)
@@ -179,12 +205,8 @@ static void kb_cb(lv_event_t *e)
     kb_hide(lv_event_get_user_data(e));
 }
 
-static void int_step_cb(lv_event_t *e)
+static void int_step(form_t *f, int i, int up)
 {
-    form_t *f = lv_event_get_user_data(e);
-    lv_obj_t *b = lv_event_get_target(e);
-    int code = (int)(intptr_t)lv_obj_get_user_data(b);     /* field * 2 + (1 for +) */
-    int i = code / 2, up = code & 1;
     const ui_field_t *fd = &section(f->sec)->fields[i];
     long v = strtol(lv_textarea_get_text(f->w[i]), NULL, 10) + (up ? 1 : -1);
     if (v < fd->min) v = fd->min;
@@ -192,6 +214,23 @@ static void int_step_cb(lv_event_t *e)
     char buf[16];
     snprintf(buf, sizeof buf, "%ld", v);
     lv_textarea_set_text(f->w[i], buf);
+}
+
+static void int_step_cb(lv_event_t *e)
+{
+    form_t *f = lv_event_get_user_data(e);
+    int code = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));    /* field * 2 + (1 for +) */
+    int_step(f, code / 2, code & 1);
+}
+
+/* Up and Down on a number step it, before the text area moves its cursor. */
+static void int_key_cb(lv_event_t *e)
+{
+    uint32_t k = lv_event_get_key(e);
+    if (k != LV_KEY_UP && k != LV_KEY_DOWN) return;
+    form_t *f = lv_event_get_user_data(e);
+    int_step(f, (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e)), k == LV_KEY_UP);
+    lv_event_stop_processing(e);
 }
 
 static lv_obj_t *step_btn(lv_obj_t *parent, form_t *f, int i, int up)
@@ -210,8 +249,8 @@ static lv_obj_t *text_area(lv_obj_t *parent, form_t *f, int i, const char *value
     lv_textarea_set_one_line(ta, 1);
     lv_textarea_set_text(ta, value);
     lv_obj_set_user_data(ta, (void *)(intptr_t)i);
-    lv_obj_add_event_cb(ta, ta_focus_cb, LV_EVENT_FOCUSED, f);
-    lv_obj_add_event_cb(ta, ta_focus_cb, LV_EVENT_CLICKED, f);
+    lv_obj_add_event_cb(ta, ta_click_cb, LV_EVENT_CLICKED, f);
+    lv_obj_add_event_cb(ta, ta_ready_cb, LV_EVENT_READY, f);
     lv_obj_set_style_border_color(ta, UI_C(BAD), LV_PART_MAIN | LV_STATE_USER_1);
     lv_obj_set_style_border_width(ta, 2, LV_PART_MAIN | LV_STATE_USER_1);
     return ta;
@@ -229,6 +268,7 @@ static void field_row(lv_obj_t *list, form_t *f, int i)
     lv_obj_set_style_border_color(row, UI_C(LINE), 0);
     lv_obj_set_style_border_side(row, LV_BORDER_SIDE_TOP, 0);
     lv_obj_set_style_border_width(row, i ? 1 : 0, 0);
+    ui_ring_room(row);                  /* the focus ring */
     lv_obj_set_layout(row, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_column(row, VG_SPACE_XL, 0);
@@ -249,6 +289,7 @@ static void field_row(lv_obj_t *list, form_t *f, int i)
     ui_plain(right);
     lv_obj_set_height(right, LV_SIZE_CONTENT);
     lv_obj_set_flex_grow(right, 1);
+    ui_ring_room(right);
     lv_obj_set_layout(right, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(right, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(right, VG_SPACE_XS, 0);
@@ -264,6 +305,7 @@ static void field_row(lv_obj_t *list, form_t *f, int i)
         lv_obj_t *box = lv_obj_create(right);
         ui_plain(box);
         lv_obj_set_size(box, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+        ui_ring_room(box);
         lv_obj_set_layout(box, LV_LAYOUT_FLEX);
         lv_obj_set_flex_flow(box, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(box, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -274,6 +316,8 @@ static void field_row(lv_obj_t *list, form_t *f, int i)
         lv_textarea_set_max_length(f->w[i], 11);
         lv_obj_set_width(f->w[i], 140);
         lv_obj_set_style_text_align(f->w[i], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_add_flag(f->w[i], UI_FLAG_ARROWS);
+        lv_obj_add_event_cb(f->w[i], int_key_cb, LV_EVENT_KEY | LV_EVENT_PREPROCESS, f);
         step_btn(box, f, i, 1);
         snprintf(range, sizeof range, "%d ... %d", fd->min, fd->max);
         ui_label(box, range, VG_FONT_SM_LV, UI_C(TEXT2));
@@ -298,6 +342,8 @@ static void field_row(lv_obj_t *list, form_t *f, int i)
         break;
     }
     }
+    ui_focus_style(f->w[i]);
+    lv_group_add_obj(f->group, f->w[i]);
     if (fd->help && *fd->help) {
         lv_obj_t *h = ui_label(right, fd->help, VG_FONT_SM_LV, UI_C(TEXT2));
         lv_obj_set_width(h, LV_PCT(100));
@@ -350,7 +396,9 @@ static void errors_show(form_t *f, const ui_errors_t *errs)
 static void form_title(form_t *f)
 {
     const ui_section_t *s = section(f->sec);
+    if (!f->page) return;
     if (!s->is_array) lv_label_set_text(f->page->title, s->label);
+    else if (f->is_new && s->slots) lv_label_set_text_fmt(f->page->title, "%s %d: new", s->label, f->item + 1);
     else if (f->is_new) lv_label_set_text_fmt(f->page->title, "%s: new", s->label);
     else lv_label_set_text_fmt(f->page->title, "%s: %d", s->label, f->item + 1);
 }
@@ -378,9 +426,9 @@ static void widgets_from_vals(form_t *f)
     }
 }
 
-static void save_cb(lv_event_t *e)
+/* Save the form; the result as a toast, errors under their fields. */
+static ui_save_rc_t form_save(form_t *f)
 {
-    form_t *f = lv_event_get_user_data(e);
     const ui_section_t *s = section(f->sec);
     kb_hide(f);
     errors_clear(f);
@@ -388,7 +436,7 @@ static void save_cb(lv_event_t *e)
     /* The section as stored, with this form's fields in their row. */
     int total = f->n_items * f->n_fields;
     char **v = calloc((size_t)total + 1, sizeof *v);
-    if (!v) return;
+    if (!v) return UI_SAVE_FAILED;
     int restart = 0, ok = 1;
     for (int k = 0; k < total && ok; ++k) {
         int r = k / f->n_fields, i = k % f->n_fields;
@@ -405,7 +453,7 @@ static void save_cb(lv_event_t *e)
     /* Item k was read from stored item k; a new one from none. */
     int origin[UI_MAX_ITEMS];
     for (int k = 0; k < f->n_items && k < UI_MAX_ITEMS; ++k)
-        origin[k] = f->is_new && k == f->n_items - 1 ? -1 : k;
+        origin[k] = k >= f->n_stored || (f->is_new && k == f->item) ? -1 : k;
     ui_errors_t errs;
     ui_save_rc_t rc = ok && f->n_items <= UI_MAX_ITEMS
                           ? save_section(f->sec, f->n_items, v, s->is_array ? origin : NULL, f->gen, &errs)
@@ -419,30 +467,36 @@ static void save_cb(lv_event_t *e)
     report(rc, &errs, restart);
     if (rc == UI_SAVE_INVALID) {
         errors_show(f, &errs);
-        return;
+        return rc;
     }
-    if (rc == UI_SAVE_STALE && s->is_array) {
+    if (rc == UI_SAVE_STALE && s->is_array && f->page) {
         /* The list may have been reordered: which camera this form edits
          * is no longer known. Back to the list, which shows it now. */
         ui_page_close(f->page);
-        return;
+        return rc;
     }
-    if (rc != UI_SAVE_OK && rc != UI_SAVE_UNSYNCED && rc != UI_SAVE_STALE) return;
+    if (rc != UI_SAVE_OK && rc != UI_SAVE_UNSYNCED && rc != UI_SAVE_STALE) return rc;
     /* What is stored now (secrets redacted again) is the new baseline. */
     int n;
     unsigned gen;
-    char **nv = vals_load(f->sec, 0, &n, &gen);
-    if (!nv) return;
+    char **nv = vals_load(f->sec, f->item + 1, &n, &gen);
+    if (!nv) return rc;
     vals_free(f->vals, f->n_items * f->n_fields);
     f->vals = nv;
     f->n_items = n;
     f->gen = gen;
+    f->n_stored = n;
     if (f->is_new) {
         f->is_new = 0;
-        f->item = n - 1;
         form_title(f);
     }
     widgets_from_vals(f);
+    return rc;
+}
+
+static void save_cb(lv_event_t *e)
+{
+    form_save(lv_event_get_user_data(e));
 }
 
 static void discard_cb(void *user)
@@ -454,7 +508,7 @@ static void discard_cb(void *user)
 static int form_back(ui_page_t *p)
 {
     form_t *f = p->user;
-    if (f->kb && !lv_obj_has_flag(f->kb, LV_OBJ_FLAG_HIDDEN)) {
+    if (ui_osk_shown(f->kb)) {
         kb_hide(f);
         return 1;
     }
@@ -480,7 +534,36 @@ static void form_close(ui_page_t *p)
     free(f);
 }
 
-void ui_form_open(int sec, int item)
+/* Storage: what the recording does now, from the channels' states
+ * ("Recording: 2 cameras. Waiting for disk: 2 cameras."). */
+static void storage_state(lv_obj_t *parent)
+{
+    const char *states[UI_MAX_CHANNELS];
+    int counts[UI_MAX_CHANNELS], n = 0;
+    for (int ch = 0; ch < ui_model()->channels && ch < UI_MAX_CHANNELS; ++ch) {
+        const ui_chan_t *st = ui_channel(ch);
+        if (!st->configured || !st->rec_state[0]) continue;
+        int k = 0;
+        while (k < n && strcmp(states[k], st->rec_state)) ++k;
+        if (k == n) {
+            states[n] = st->rec_state;
+            counts[n++] = 0;
+        }
+        ++counts[k];
+    }
+    char text[256] = "";
+    for (int k = 0; k < n; ++k) {
+        size_t len = strlen(text);
+        snprintf(text + len, sizeof text - len, "%s%c%s: %d camera%s.", k ? "  " : "", toupper((unsigned char)states[k][0]),
+                 states[k] + 1, counts[k], counts[k] == 1 ? "" : "s");
+    }
+    lv_obj_t *l = ui_label(parent, "", VG_FONT_MD_LV, UI_C(TEXT));
+    lv_label_set_text_fmt(l, LV_SYMBOL_DRIVE "  %s", n ? text : "Not recording: no directory set.");
+    lv_obj_set_width(l, LV_PCT(100));
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+}
+
+static void form_open(int sec, int item, int at_slot)
 {
     const ui_section_t *s = section(sec);
     if (s->n_fields > FIELDS_MAX) return;
@@ -488,11 +571,20 @@ void ui_form_open(int sec, int item)
     if (!f) return;
     f->sec = sec;
     f->n_fields = s->n_fields;
+    f->n_stored = s->is_array ? ui_model()->item_count(sec) : 1;
     if (s->is_array) {
-        int n = ui_model()->item_count(sec);
-        f->is_new = item >= n;
-        f->item = f->is_new ? n : item;
-        if (f->is_new && n >= s->max_items) {
+        int n = f->n_stored;
+        if (at_slot) {
+            /* An empty slot is a new item where it is. */
+            char url[8] = "";
+            if (item < n) ui_model()->get_value(sec, item, 0, url, sizeof url);
+            f->is_new = item >= n || !url[0];
+            f->item = item;
+        } else {
+            f->is_new = item >= n;
+            f->item = f->is_new ? n : item;
+        }
+        if (f->is_new && f->item >= s->max_items) {
             free(f);
             ui_toast(UI_TOAST_BAD, "At most %d", s->max_items);
             return;
@@ -500,7 +592,7 @@ void ui_form_open(int sec, int item)
     } else {
         f->item = -1;
     }
-    f->vals = vals_load(sec, f->is_new, &f->n_items, &f->gen);
+    f->vals = vals_load(sec, f->item + 1, &f->n_items, &f->gen);
     ui_page_t *p = f->vals ? ui_page_push(s->label) : NULL;
     if (!p) {
         vals_free(f->vals, f->n_items * f->n_fields);
@@ -508,6 +600,7 @@ void ui_form_open(int sec, int item)
         return;
     }
     f->page = p;
+    f->group = p->group;
     p->user = f;
     p->on_back = form_back;
     p->on_close = form_close;
@@ -518,12 +611,15 @@ void ui_form_open(int sec, int item)
     lv_obj_t *save = ui_btn(p->actions, LV_SYMBOL_SAVE, "Save");
     ui_btn_accent(save);
     lv_obj_add_event_cb(save, save_cb, LV_EVENT_CLICKED, f);
+    p->save = save;
+    f->save_btn = save;
 
     if (s->help && *s->help) {
         lv_obj_t *h = ui_label(p->body, s->help, VG_FONT_SM_LV, UI_C(TEXT2));
         lv_obj_set_width(h, LV_PCT(100));
         lv_label_set_long_mode(h, LV_LABEL_LONG_WRAP);
     }
+    if (!strcmp(s->key, "record")) storage_state(p->body);
     f->general = ui_label(p->body, "", VG_FONT_MD_LV, UI_C(BAD));
     lv_obj_set_width(f->general, LV_PCT(100));
     lv_label_set_long_mode(f->general, LV_LABEL_LONG_WRAP);
@@ -538,12 +634,88 @@ void ui_form_open(int sec, int item)
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
     for (int i = 0; i < f->n_fields; ++i) field_row(list, f, i);
 
-    f->kb = lv_keyboard_create(p->scr);
-    lv_obj_set_size(f->kb, LV_PCT(100), KB_H);
-    lv_obj_align(f->kb, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_add_flag(f->kb, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_event_cb(f->kb, kb_cb, LV_EVENT_READY, f);
+    f->kb = ui_osk_create(p->scr);
+    if (f->kb) lv_obj_add_event_cb(f->kb, kb_cb, LV_EVENT_READY, f);
     lv_obj_add_event_cb(f->kb, kb_cb, LV_EVENT_CANCEL, f);
+    ui_page_ready(p);
+}
+
+void ui_form_open(int sec, int item) { form_open(sec, item, 0); }
+void ui_form_open_slot(int sec, int slot) { form_open(sec, slot, 1); }
+
+/* ---- a form inside a settings pane ------------------------------------------------------------ */
+
+ui_form_t *ui_form_embed(lv_obj_t *parent, lv_group_t *group, lv_obj_t *save_btn, lv_obj_t *kb, int sec)
+{
+    const ui_section_t *s = section(sec);
+    if (s->is_array || s->n_fields > FIELDS_MAX) return NULL;
+    form_t *f = calloc(1, sizeof *f);
+    if (!f) return NULL;
+    f->sec = sec;
+    f->item = -1;
+    f->n_fields = s->n_fields;
+    f->n_stored = 1;
+    f->group = group;
+    f->save_btn = save_btn;
+    f->kb = kb;
+    f->vals = vals_load(sec, 0, &f->n_items, &f->gen);
+    if (!f->vals) {
+        free(f);
+        return NULL;
+    }
+    f->general = ui_label(parent, "", VG_FONT_MD_LV, UI_C(BAD));
+    lv_obj_set_width(f->general, LV_PCT(100));
+    lv_label_set_long_mode(f->general, LV_LABEL_LONG_WRAP);
+    lv_obj_add_flag(f->general, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t *list = lv_obj_create(parent);
+    ui_plain(list);
+    lv_obj_add_style(list, &ui_st_panel, 0);
+    lv_obj_set_style_pad_ver(list, VG_SPACE_SM, 0);
+    lv_obj_set_style_pad_hor(list, VG_SPACE_LG, 0);
+    lv_obj_set_size(list, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_layout(list, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    ui_ring_room(list);
+    for (int i = 0; i < f->n_fields; ++i) field_row(list, f, i);
+    return (ui_form_t *)f;
+}
+
+int ui_form_embed_dirty(ui_form_t *h)
+{
+    form_t *f = (form_t *)h;
+    if (!f) return 0;
+    /* Settings changed elsewhere meanwhile (the API): not this form's
+     * changes, and nothing to lose. */
+    return form_dirty(f);
+}
+
+int ui_form_embed_save(ui_form_t *h)
+{
+    ui_save_rc_t rc = form_save((form_t *)h);
+    return rc == UI_SAVE_OK || rc == UI_SAVE_UNSYNCED ? 0 : -1;
+}
+
+void ui_form_embed_reset(ui_form_t *h)
+{
+    form_t *f = (form_t *)h;
+    errors_clear(f);
+    int n;
+    unsigned gen;
+    char **nv = vals_load(f->sec, 0, &n, &gen);
+    if (!nv) return;
+    vals_free(f->vals, f->n_items * f->n_fields);
+    f->vals = nv;
+    f->n_items = n;
+    f->gen = gen;
+    widgets_from_vals(f);
+}
+
+void ui_form_embed_free(ui_form_t *h)
+{
+    form_t *f = (form_t *)h;
+    if (!f) return;
+    vals_free(f->vals, f->n_items * f->n_fields);
+    free(f);
 }
 
 /* ---- the list of an array section -------------------------------------------------------------- */
@@ -567,6 +739,7 @@ static lv_obj_t *table_row(lv_obj_t *table, int header)
     ui_plain(r);
     lv_obj_set_size(r, LV_PCT(100), LV_SIZE_CONTENT);
     lv_obj_set_style_pad_ver(r, header ? VG_SPACE_SM : VG_SPACE_MD, 0);
+    lv_obj_set_style_pad_hor(r, VG_SPACE_SM, 0);    /* room for the focus ring */
     lv_obj_set_style_pad_column(r, VG_SPACE_LG, 0);
     lv_obj_set_style_border_color(r, UI_C(LINE), 0);
     lv_obj_set_style_border_side(r, LV_BORDER_SIDE_BOTTOM, 0);
@@ -594,7 +767,9 @@ static lv_obj_t *cell(lv_obj_t *row, const ui_field_t *fd, const char *text, lv_
 static void edit_cb(lv_event_t *e)
 {
     list_t *l = lv_event_get_user_data(e);
-    ui_form_open(l->sec, (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e)));
+    int k = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    if (section(l->sec)->slots) ui_form_open_slot(l->sec, k);
+    else ui_form_open(l->sec, k);
 }
 
 static void add_cb(lv_event_t *e)
@@ -614,28 +789,51 @@ static void remove_now(void *user)
         vals_free(v, v ? n * s->n_fields : 0);
         return;
     }
-    int origin[UI_MAX_ITEMS];
-    for (int k = 0; k < n - 1; ++k) origin[k] = k < l->remove_item ? k : k + 1;
-    /* Close the gap: every later item moves up a tile. */
-    for (int f = 0; f < s->n_fields; ++f) free(v[l->remove_item * s->n_fields + f]);
-    memmove(&v[l->remove_item * s->n_fields], &v[(l->remove_item + 1) * s->n_fields],
-            sizeof *v * (size_t)((n - l->remove_item - 1) * s->n_fields));
+    int origin[UI_MAX_ITEMS], m = n;
+    if (s->slots) {
+        /* Positions: the slot empties (its defaults, first field empty),
+         * the items after it stay where they are. */
+        for (int k = 0; k < n; ++k) origin[k] = k == l->remove_item ? -1 : k;
+        for (int f = 0; f < s->n_fields; ++f) {
+            char **p = &v[l->remove_item * s->n_fields + f];
+            free(*p);
+            *p = dup(f == 0 || !s->fields[f].def ? "" : s->fields[f].def);
+        }
+    } else {
+        m = n - 1;
+        for (int k = 0; k < m; ++k) origin[k] = k < l->remove_item ? k : k + 1;
+        /* Close the gap: every later item moves up a tile. */
+        for (int f = 0; f < s->n_fields; ++f) free(v[l->remove_item * s->n_fields + f]);
+        memmove(&v[l->remove_item * s->n_fields], &v[(l->remove_item + 1) * s->n_fields],
+                sizeof *v * (size_t)((n - l->remove_item - 1) * s->n_fields));
+    }
     ui_errors_t errs;
     /* Refused if the list changed after it was shown: the row the user
      * picked may be another camera now. */
-    ui_save_rc_t rc = save_section(l->sec, n - 1, v, origin, l->gen, &errs);
-    vals_free(v, (n - 1) * s->n_fields);
+    ui_save_rc_t rc = save_section(l->sec, m, v, origin, l->gen, &errs);
+    vals_free(v, m * s->n_fields);
     report(rc, &errs, 0);
 }
 
-static void remove_cb(lv_event_t *e)
+static void remove_ask(list_t *l, int item)
 {
-    list_t *l = lv_event_get_user_data(e);
-    l->remove_item = (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    l->remove_item = item;
     char q[160];
     snprintf(q, sizeof q, "Remove item %d from %s? It is saved at once.", l->remove_item + 1,
              section(l->sec)->label);
     ui_confirm(q, "Remove", remove_now, l);
+}
+
+static void remove_cb(lv_event_t *e)
+{
+    remove_ask(lv_event_get_user_data(e), (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e)));
+}
+
+/* A row is the keyboard's item: Enter (a click) edits, Delete removes. */
+static void row_key_cb(lv_event_t *e)
+{
+    if (lv_event_get_key(e) == LV_KEY_DEL)
+        remove_ask(lv_event_get_user_data(e), (int)(intptr_t)lv_obj_get_user_data(lv_event_get_target(e)));
 }
 
 static void list_build(list_t *l)
@@ -649,6 +847,7 @@ static void list_build(list_t *l)
     else lv_obj_remove_state(l->add, LV_STATE_DISABLED);
 
     lv_obj_t *r = table_row(l->table, 1);
+    ui_inert(r);
     cell(r, NULL, "#", UI_C(TEXT2));
     for (int f = 0; f < s->n_fields; ++f) cell(r, &s->fields[f], s->fields[f].label, UI_C(TEXT2));
     lv_obj_t *pad = lv_obj_create(r);
@@ -661,10 +860,27 @@ static void list_build(list_t *l)
         lv_obj_set_style_pad_ver(e, VG_SPACE_XL, 0);
     }
     char buf[1024], idx[16];
+    lv_obj_t *first = NULL;
     for (int k = 0; k < n; ++k) {
         r = table_row(l->table, 0);
+        lv_obj_set_user_data(r, (void *)(intptr_t)k);
+        lv_obj_add_style(r, &ui_st_focus_in, LV_STATE_FOCUSED);
+        lv_obj_add_event_cb(r, edit_cb, LV_EVENT_CLICKED, l);
+        lv_obj_add_event_cb(r, row_key_cb, LV_EVENT_KEY, l);
+        if (!first) first = r;
         snprintf(idx, sizeof idx, "%d", k + 1);
         cell(r, NULL, idx, UI_C(TEXT));
+        if (s->slots) {
+            m->get_value(l->sec, k, 0, buf, sizeof buf);
+            if (!buf[0]) {                  /* an empty slot: offered for a camera */
+                lv_obj_t *e = cell(r, &s->fields[0], "Empty", UI_C(TEXT2));
+                lv_obj_set_flex_grow(e, 100);
+                lv_obj_t *add = ui_btn(r, LV_SYMBOL_PLUS, "Add here");
+                lv_obj_set_user_data(add, (void *)(intptr_t)k);
+                lv_obj_add_event_cb(add, edit_cb, LV_EVENT_CLICKED, l);
+                continue;
+            }
+        }
         for (int f = 0; f < s->n_fields; ++f) {
             const ui_field_t *fd = &s->fields[f];
             m->get_value(l->sec, k, f, buf, sizeof buf);
@@ -682,6 +898,7 @@ static void list_build(list_t *l)
         lv_obj_set_user_data(rm, (void *)(intptr_t)k);
         lv_obj_add_event_cb(rm, remove_cb, LV_EVENT_CLICKED, l);
     }
+    if (first) ui_gridnav_focus(l->table, first);   /* not the header */
 }
 
 /* A new configuration (saved here, by the API or by a form above). */
@@ -719,4 +936,10 @@ void ui_list_open(int sec)
     lv_obj_set_layout(l->table, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(l->table, LV_FLEX_FLOW_COLUMN);
     lv_subject_add_observer_obj(&ui_subj_config, list_config_cb, l->table, l);
+    /* Up and Down go through the rows, and past the ends to Back and Add. */
+    ui_gridnav(l->table, LV_GRIDNAV_CTRL_NONE);
+    if (lv_obj_get_child_count(l->table) > 1 && lv_obj_has_flag(lv_obj_get_child(l->table, 1), LV_OBJ_FLAG_CLICKABLE))
+        ui_gridnav_focus(l->table, lv_obj_get_child(l->table, 1));     /* the first row, not the header */
+    lv_group_add_obj(p->group, l->table);
+    ui_page_ready(p);
 }

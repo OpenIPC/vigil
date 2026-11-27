@@ -13,8 +13,13 @@
  * sized per camera, 1080p + 2 x 5 MP + 2 x H.264 took 87 MiB on the lab NVR.
  *
  * VPSS runs one channel in auto mode, which scales to the size of the VO
- * channel it is bound to; the VO channel keeps the aspect ratio
- * (letterbox/pillarbox in black).
+ * channel it is bound to; the VO channel places the picture inside its
+ * rectangle at the display aspect ratio the core gives
+ * (hal_display_set_aspect: ASPECT_RATIO_MANUAL with aspect_fit's
+ * rectangle, black around it; NONE to stretch), or, before the core says,
+ * at the picture's own (ASPECT_RATIO_AUTO). In fill the VPSS group crops
+ * the decoded picture to its middle at the tile's shape (aspect_crop) and
+ * the VO channel stretches that over the tile.
  *
  * Revision-2 Hi3536DV100 chips (SC_SYSID0 0x12050EE0 bits 31:24 = 2) need a
  * vdec.ko whose chip-revision check is bypassed: the stock SDK module reads
@@ -37,10 +42,12 @@
 #include "mpi_vpss.h"
 #include "mpi_vo.h"
 
+#include "aspect.h"
 #include "hal.h"
 #include "hal_capture.h"
 #include "hal_decoder.h"
 #include "hal_display.h"
+#include "hal_audio.h"
 #include "hi_display.h"
 
 #define MAX_CH             4        /* quad view */
@@ -58,21 +65,29 @@ static const hal_caps_t g_caps = {
 static struct {
     int        vo_up, vpss_up;
     vg_codec_t codec;                               /* VG_CODEC_NONE: no VDEC */
+    vg_rect_t  tile;                                /* the VO channel's rectangle */
+    int        asp_set;                             /* hal_display_set_aspect said: */
+    vg_ratio_t asp;                                 /* 0:0 the picture's own size */
+    vg_aspect_t how;
+    unsigned   pic_w, pic_h;                        /* the decoder's picture (0: none yet) */
 } g_ch[MAX_CH];
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
 const hal_caps_t *hal_caps(void) { return &g_caps; }
+static vg_mode_t g_mode;                            /* what hal_init started */
 
-int hal_init(unsigned w, unsigned h, unsigned fps)
+int hal_init(unsigned w, unsigned h, const vg_mode_t *out)
 {
-    (void)fps;                                      /* 720P60 / 1080P60 by size */
+    (void)out;                                      /* 720P60 / 1080P60 by the screen's size */
     /* The common pool only carries VPSS output at tile size (640x300
      * sp420); decoded pictures live in each decoder's private pool. */
     VB_CONF_S vb = {
         .u32MaxPoolCnt = 16,
         .astCommPool   = { { .u32BlkSize = 640 * 320 * 3 / 2, .u32BlkCnt = 24, .acMmzName = "" } },
     };
-    return hi_display_start(&vb, VO_INTF_HDMI, h >= 1080 ? VO_OUTPUT_1080P60 : VO_OUTPUT_720P60, w, h);
+    if (hi_display_start(&vb, VO_INTF_HDMI, h >= 1080 ? VO_OUTPUT_1080P60 : VO_OUTPUT_720P60, w, h) < 0) return -1;
+    g_mode = (vg_mode_t){ w, h, 60 };
+    return 0;
 }
 
 void hal_shutdown(void)
@@ -85,6 +100,61 @@ void hal_shutdown(void)
 }
 
 /* ---- display ------------------------------------------------------------- */
+
+/* The picture's place in VO channel ch: stVideoRect is relative to the
+ * channel's rectangle. */
+static void chn_aspect(int ch)
+{
+    VO_CHN_PARAM_S vp;
+    if (HI_MPI_VO_GetChnParam(HI_DISPLAY_VO_LAYER, ch, &vp) != HI_SUCCESS) return;
+    vp.stAspectRatio.u32BgColor = 0x000000;
+    vg_ratio_t a = g_ch[ch].asp.w ? g_ch[ch].asp : (vg_ratio_t){ g_ch[ch].pic_w, g_ch[ch].pic_h };
+    if (!g_ch[ch].asp_set || (g_ch[ch].how == VG_ASPECT_FIT && !a.w)) {
+        vp.stAspectRatio.enMode = ASPECT_RATIO_AUTO;
+    } else if (g_ch[ch].how != VG_ASPECT_FIT) {
+        vp.stAspectRatio.enMode = ASPECT_RATIO_NONE;  /* stretched, or the crop over the tile */
+    } else {
+        vg_rect_t w = aspect_fit(&g_ch[ch].tile, a, 2);
+        vp.stAspectRatio.enMode = ASPECT_RATIO_MANUAL;
+        vp.stAspectRatio.stVideoRect.s32X = w.x;
+        vp.stAspectRatio.stVideoRect.s32Y = w.y;
+        vp.stAspectRatio.stVideoRect.u32Width = (HI_U32)w.w;
+        vp.stAspectRatio.stVideoRect.u32Height = (HI_U32)w.h;
+    }
+    HI_S32 rc = HI_MPI_VO_SetChnParam(HI_DISPLAY_VO_LAYER, ch, &vp);
+    if (rc != HI_SUCCESS) fprintf(stderr, "hi3536dv100: VO_SetChnParam(%d) aspect 0x%x\n", ch, rc);
+}
+
+/* In fill, the VPSS group's crop: the middle of the decoded picture at the
+ * tile's shape, in the picture's pixels, multiples of 4 (the coarser of
+ * what the SDK's VPSS takes for an offset); off otherwise. Locked. */
+static void grp_crop(int ch)
+{
+    if (!g_ch[ch].vpss_up || !g_ch[ch].pic_w) return;
+    VPSS_CROP_INFO_S ci;
+    memset(&ci, 0, sizeof ci);
+    ci.enCropCoordinate = VPSS_CROP_ABS_COOR;
+    if (g_ch[ch].asp_set && g_ch[ch].how == VG_ASPECT_FILL && g_ch[ch].tile.w) {
+        vg_rect_t c = aspect_crop(g_ch[ch].pic_w, g_ch[ch].pic_h, g_ch[ch].asp, (unsigned)g_ch[ch].tile.w,
+                                  (unsigned)g_ch[ch].tile.h, 4);
+        ci.bEnable = c.w != (int)g_ch[ch].pic_w || c.h != (int)g_ch[ch].pic_h ? HI_TRUE : HI_FALSE;
+        ci.stCropRect = (RECT_S){ c.x, c.y, (HI_U32)c.w, (HI_U32)c.h };
+    }
+    HI_S32 rc = HI_MPI_VPSS_SetGrpCrop(ch, &ci);
+    if (rc != HI_SUCCESS) fprintf(stderr, "hi3536dv100: VPSS_SetGrpCrop(%d) 0x%x\n", ch, rc);
+}
+
+void hal_display_set_aspect(int ch, unsigned w, unsigned h, vg_aspect_t how)
+{
+    if (ch < 0 || ch >= MAX_CH) return;
+    pthread_mutex_lock(&g_lock);                    /* a channel's thread, while tiles move */
+    g_ch[ch].asp_set = 1;
+    g_ch[ch].asp = w && h ? (vg_ratio_t){ w, h } : (vg_ratio_t){ 0, 0 };
+    g_ch[ch].how = how;
+    if (g_ch[ch].tile.w) chn_aspect(ch);
+    grp_crop(ch);
+    pthread_mutex_unlock(&g_lock);
+}
 
 int hal_display_set_tile(int ch, const vg_rect_t *r)
 {
@@ -100,12 +170,11 @@ int hal_display_set_tile(int ch, const vg_rect_t *r)
         fprintf(stderr, "hi3536dv100: VO_SetChnAttr(%d) 0x%x\n", ch, rc);
         return -1;
     }
-    VO_CHN_PARAM_S vp;
-    if (HI_MPI_VO_GetChnParam(HI_DISPLAY_VO_LAYER, ch, &vp) == HI_SUCCESS) {
-        vp.stAspectRatio.enMode = ASPECT_RATIO_AUTO;
-        vp.stAspectRatio.u32BgColor = 0x000000;
-        HI_MPI_VO_SetChnParam(HI_DISPLAY_VO_LAYER, ch, &vp);
-    }
+    pthread_mutex_lock(&g_lock);
+    g_ch[ch].tile = (vg_rect_t){ 0, 0, (int)va.stRect.u32Width, (int)va.stRect.u32Height };
+    chn_aspect(ch);
+    grp_crop(ch);
+    pthread_mutex_unlock(&g_lock);
     /* A move (another layout, full screen) changes the attributes of a
      * channel that is already enabled. */
     if (!g_ch[ch].vo_up && (rc = HI_MPI_VO_EnableChn(HI_DISPLAY_VO_LAYER, ch)) != HI_SUCCESS) {
@@ -176,6 +245,10 @@ int hal_dec_open(int ch, vg_codec_t codec, const vg_stream_info_t *si)
         goto fail;
     }
     g_ch[ch].vpss_up = 1;
+    g_ch[ch].pic_w = si->width;
+    g_ch[ch].pic_h = si->height;
+    grp_crop(ch);
+    if (g_ch[ch].tile.w) chn_aspect(ch);            /* 0:0 is the new picture's own shape */
     MPP_CHN_S vpss = { .enModId = HI_ID_VPSS, .s32DevId = ch, .s32ChnId = 0 };
     MPP_CHN_S vo   = { .enModId = HI_ID_VOU, .s32DevId = HI_DISPLAY_VO_LAYER, .s32ChnId = ch };
     if ((rc = HI_MPI_VPSS_SetChnAttr(ch, 0, &ca)) != HI_SUCCESS ||
@@ -272,3 +345,28 @@ void hal_dec_reset(int ch)
 int  hal_cap_start(int in, int ch, hal_cap_cb cb, void *user) { (void)in; (void)ch; (void)cb; (void)user; return -1; }
 void hal_cap_stop(int in) { (void)in; }
 int  hal_cap_signal(int in) { (void)in; return 0; }
+
+/* ---- output mode: the one hal_init started; it does not change ---------------- */
+
+int hal_display_modes(vg_mode_t *out, int max)
+{
+    if (max < 1 || !g_mode.w) return 0;
+    *out = g_mode;
+    return 1;
+}
+
+void hal_display_mode(vg_mode_t *cur) { *cur = g_mode; }
+
+int hal_display_set_mode(const vg_mode_t *m)
+{
+    return m->w == g_mode.w && m->h == g_mode.h && m->hz == g_mode.hz ? 0 : -1;
+}
+
+/* No picture to read back: the zero channel shows the UI over black. */
+void hal_display_grab_keep(int on) { (void)on; }
+int  hal_display_grab(const hal_pic_t *pic) { (void)pic; return -1; }
+
+/* No margins, picture controls or HDMI sound here yet (hal_caps: 0). */
+int hal_display_set_margins(const vg_margins_t *m) { (void)m; return -1; }
+int hal_display_set_picture(const vg_picture_t *p) { (void)p; return -1; }
+int hal_audio_set_volume(unsigned volume, int mute) { (void)volume; (void)mute; return -1; }

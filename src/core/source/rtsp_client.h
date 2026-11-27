@@ -49,6 +49,7 @@ typedef struct {
     size_t   buf_off, buf_len, buf_cap;   /* unread data is [buf_off, buf_len) */
     size_t   handed_out;            /* bytes of the packet rtsp_read returned */
     char     err[160];              /* last error, for the UI/log */
+    int      fail;                  /* its kind: src_fail_t (source.h) */
 } rtsp_t;
 
 /* Parse rtsp://[user[:pass]@]host[:port]/path into `r`. Returns 0 or -1. */
