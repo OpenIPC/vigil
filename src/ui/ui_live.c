@@ -1051,10 +1051,6 @@ static void split_pick_cb(lv_event_t *e)
 
 static void split_open(lv_obj_t *item)
 {
-    if (ui_popup_sub_is_open()) {
-        ui_popup_sub_close();
-        return;
-    }
     lv_obj_t *sub = ui_popup_sub(item, 220), *cur = NULL;
     for (int i = 0; i < ui_n_layouts; ++i) {
         int n = ui_layouts[i];
@@ -1073,13 +1069,6 @@ static void split_open(lv_obj_t *item)
     ui_popup_sub_place(cur);
 }
 
-static void split_click_cb(lv_event_t *e) { split_open(lv_event_get_target(e)); }
-
-static void split_key_cb(lv_event_t *e)
-{
-    if (lv_event_get_key(e) == LV_KEY_RIGHT && !ui_popup_sub_is_open()) split_open(lv_event_get_target(e));
-}
-
 /* Main menu, Channels, Playback, Record, PTZ, Display, Split, Exit:
  * nothing else (full screen is a double click or Enter, pages the edge arrows or
  * PgUp/PgDn, pinning the bar its own button). */
@@ -1096,8 +1085,7 @@ void ui_live_context_menu(const lv_point_t *at)
         lv_obj_t *split = menu_item(panel, LV_SYMBOL_BARS, "Split", 0, -1);
         lv_obj_set_flex_grow(ui_btn_label(split), 1);
         ui_label(split, LV_SYMBOL_RIGHT, VG_FONT_SM_LV, UI_C(TEXT2));
-        lv_obj_add_event_cb(split, split_click_cb, LV_EVENT_CLICKED, NULL);
-        lv_obj_add_event_cb(split, split_key_cb, LV_EVENT_KEY, NULL);
+        ui_popup_sub_item(split, split_open);
     }
     menu_item(panel, LV_SYMBOL_POWER, TR(S_EXIT), ACT_EXIT, -1);
     /* Left and Right go to the item (Right opens Split). */
