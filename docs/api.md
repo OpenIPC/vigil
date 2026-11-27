@@ -504,9 +504,9 @@ the user or the password: RTSP 401 or 403, NETIP login 203, 205, 206),
 the text). `live`, `state` and `status` are those of the stream on screen
 (`view`; the main stream when none is): a small tile showing the
 sub-stream is `live` while the sub-stream plays, whatever the main stream
-does. `main` and `sub` are each stream's own `status` and `state` (`sub`
-is `null` while no sub-stream runs; both are absent when the channel does
-not run): a main stream that fails while the sub-stream is shown is said
+does. `main` and `sub` are each stream's own `status` and `state` (both
+streams are connected all the time; `sub` is `null` when the camera has no
+sub-stream; both are absent when the channel does not run): a main stream that fails while the sub-stream is shown is said
 in `main` (and `rec_state` says nothing is recorded). `title` is what a
 NETIP camera calls the channel (its ChannelTitle, asked at each login),
 `""` when the camera does not say; with no `name` configured the UI shows

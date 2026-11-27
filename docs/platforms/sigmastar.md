@@ -53,7 +53,13 @@ new decoder is made beside the old one when the heap and `mi_vdec` have
 room for both, else the old one goes without the port being cleared, and
 the port keeps the old picture's size until a picture of the new size has
 reached it (`RecvBuf_W/H` in `/proc/mi_modules/mi_disp/mi_disp0`; set at
-once, the display read the old picture at the wrong size). In emulation
+once, the display read the old picture at the wrong size). A decoder made
+beside the old one holds a second `MI_VDEC` channel number until it goes
+on screen; when another channel needs a number and none is free, that
+takeover is finished at once (its port keeps the old picture until the
+new decoder's first), rather than the other channel saying "no decoder"
+until the core asks again 10 s later: with 4 numbers, a 2x2 page coming
+back from full screen ran into it every time. In emulation
 the new decoder's first picture comes about 5 s after the switch; an
 `MI_VDEC` channel bound to nothing decodes nothing there.
 
@@ -156,7 +162,19 @@ larger tile and full screen its main stream, and recording always takes
 the main stream ([architecture](../architecture.md)). Give RTSP cameras a
 `sub_url` (the vendor's second stream, e.g. `.../stream2` or
 `.../h264Preview_01_sub`): without one they decode their main stream in
-every tile.
+every tile. Both streams of every camera stay connected, and a switch
+between them (full screen and back, another page) opens the decoder at
+once from the GOP the stream kept, the whole GOP so far sent in one go
+([architecture](../architecture.md), "Main stream and sub-stream").
+`MI_VDEC_SendStream` takes it into the bitstream buffer in a few
+milliseconds (a 720p GOP of 500 KiB in a 1 MiB buffer); the decoder is in
+`E_MI_VDEC_DISPLAY_MODE_PREVIEW` and the display port in free-run, so what
+is decoded faster than the display shows is not shown. In emulation the
+first picture after the switch was the live one, without artefacts; what
+the board's VPU makes of a GOP burst (a few pictures shown fast, or only
+the last) is unverified. The caches take about 1 MiB per 720p main stream
+at 1.5 Mbit/s with a 3 s GOP and 128 KiB per sub-stream; all of them at
+most 24 MiB of the about 80 MiB Linux has.
 
 The bitstream buffer is sized as the SDK's decoder sample does (512 KiB up
 to D1, 1 MiB up to 1080p, 2 MiB above) and grows, with a new decoder, at a
@@ -326,6 +344,21 @@ pictures from each decoder with a viewer as without. Emulated cores are
 not a board's: the time a picture takes on a Cortex-A7, whether the
 decoders' pictures are linear NV12 on a board too, and whether keeping
 one of them aside costs a board's decoder anything are unverified.
+
+Both streams connected and the switch from the GOP so far, also only in
+emulation (OpenIPC firmware image, four NETIP cameras with 720p main
+streams and 640x360 sub-streams, 10 pictures a second, a keyframe every
+3 s, three H.264 and one H.265; mi_vdec with 4 channel numbers; each of
+the four tiles of a 2x2 view full screen with Enter and back, twice): the
+eight connections stayed up through every switch (none was made again),
+the main stream's decoder opened 70 to 320 ms after the key (a median of
+1.9 s before, waiting for the keyframe) and back on the grid all four
+tiles had a new picture within 0.24 to 0.4 s (once 1.9 s; before, every
+sub-stream connected again, and the last channel back often had no
+decoder number for 10 s). The full-screen picture itself still came about
+6 s after the key, as before: the emulated machine stops for 4 to 6 s
+whenever a 720p decoder is made. vigild's resident memory went from 3.5
+to 7.8 MiB.
 
 The HDMI and VGA signals, hot-plug and decoder limits are unverified on
 hardware.

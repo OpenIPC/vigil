@@ -125,8 +125,10 @@ pictures after it would refer to a picture the decoder never got.
 
 A camera can have a second session: its **sub-stream** (`sub_url`, or for
 NETIP the same URL with `stream=extra`), a second thread with its own
-source and normalizer. The main session above always runs: the camera's
-events follow it, and it records. Each session keeps its own state; the
+source and normalizer. Both sessions run, and reconnect with the same
+back-off, for as long as the channel does, whatever is on screen: the main
+one carries the camera's events and the recording, the sub-stream is there
+the moment a small tile wants it. Each session keeps its own state; the
 channel's status is the state of the one whose picture is on screen (the
 decoder's holder, else the one the tile waits for), and the status carries
 the main and the sub-stream's states besides, so a main stream that fails
@@ -136,13 +138,26 @@ decoded (`channels_set_tiles`): a tile of a quarter of the screen or less
 shows the sub-stream, a larger one or full screen the main stream; a
 channel off screen, where the platform's decoders are scarce
 (`dec_shown_only`), neither. The channel's one decoder belongs to one
-session at a time: the wanted one takes it over at its first keyframe and
-the other keeps feeding it until then, so the picture stays up through a
-switch. The sub-session starts when its tile becomes small and ends 5 s
-after it no longer is, so layouts flipped back and forth keep the
-connection. A camera has at most two connections; full screen, the display
-and the recording share the main one. A view change never touches the main
-session, so recording goes on in the same segment.
+session at a time, and the wanted one takes it over at once, without
+waiting for its camera's next keyframe (1-4 s on most cameras): each
+session keeps the GOP it is in (`gop_cache.c`: the access units since the
+last keyframe, as `au_norm` hands them out), the sub-stream always and the
+main stream while its tile is on screen (only such a tile can go full
+screen). At its next access unit after the view changes the wanted session
+opens the decoder at the cached keyframe, feeds it the GOP so far and goes
+on live; the platform decodes the cached pictures as fast as it can, so
+the picture runs fast up to the present for a moment. Full screen and
+back, another page or layout all switch that way. Without a GOP to start
+from (dropped, or the stream just connected) the wanted session takes the
+decoder at its keyframe as before, and the other keeps feeding it until
+then, so the picture stays up through a switch; a channel that comes on
+screen full size, whose main stream's GOP was not kept, shows its
+sub-stream's meanwhile. A GOP may take 1 MiB (sub-stream) or 4 MiB (main
+stream), and all of them 24 MiB (`GOP_CACHE_BUDGET`): one that outgrows
+either is dropped until the next keyframe, and a switch to it waits for
+that keyframe. A camera has at most two connections; full screen, the
+display and the recording share the main one. A view change never touches
+the main session, so recording goes on in the same segment.
 
 A decoder the platform cannot give (out of media memory or decoder
 channels) is retried after 10 s, or as soon as another channel closes its
