@@ -36,7 +36,9 @@ comments; options override the file.
   `events` ring. Everything else comes through `ui_model.h`, filled by
   `src/app/ui_bridge.c`; settings pages save through `config_put_json`,
   like the API.
-- **`src/api` (CivetWeb threads) never drives channels or the UI.** It reads
+- **`src/api` (CivetWeb threads) never drives channels or the UI.** (The
+  zero channel's input goes through `kvm.h` into the evdev reader, as a
+  USB mouse's would.) It reads
   snapshots (`channels_status`, `config_get`, its own `events` cursor) and
   writes the configuration store; the main thread applies a new generation.
   Camera passwords never leave the process: redact URLs
@@ -66,9 +68,14 @@ comments; options override the file.
   built from the schema; `theme.json` is the design tokens' source
   (`scripts/gen-theme.py` generates `theme_tokens.h` and `web/theme.css`).
 - `src/app/` — `main.c`, the UI or headless loop, the UI's model
-  (`ui_bridge.c`) and mouse and keyboard input (`input_evdev.c`).
+  (`ui_bridge.c`), mouse and keyboard input (`input_evdev.c`), and the
+  zero channel's picture and input (`kvm.c`: LVGL's flushes over the
+  platform's `hal_display_grab`, changed blocks as JPEGs from its own
+  encoder, `jpeg_enc.c`).
 - `src/api/` — the HTTP/WebSocket API (`docs/api.md`), its password check,
-  vigil's users and groups (`users.c`) and the permission table.
+  vigil's users and groups (`users.c`) and the permission table; the zero
+  channel's web server on port 80 (`web.c`, pages in `src/api/web/`, built
+  in), which reaches the screen only through `kvm.h`.
 - `src/sys/` — looking after the system vigild runs on (`docs/management.md`):
   interfaces, time zone and NTP, host name, disks (with SMART and a surface
   scan), network storage, mail and DDNS through curl, and `mgmt.c`, the jobs and timers both front ends use.
@@ -77,7 +84,8 @@ comments; options override the file.
   on a fake system.
 - `cmake/platforms/<name>.cmake` — sources, includes, libraries per platform.
 - `scripts/` — board bring-up (HiSilicon module staging, Rockchip library build).
-- `tests/` — `test_core.c` unit tests, `test_api.c` (password check), a NETIP
+- `tests/` — `test_core.c` unit tests, `test_api.c` (password check),
+  `test_kvm.c` and `web_test.py` (the zero channel), a NETIP
   camera emulator, a GStreamer RTSP server, the scripts that run `vigild`
   against them, `api_test.py` (the API end to end), and `test_ui.c` with
   `ui_compare.py` (the UI headless, screenshots against `tests/ui/*.png`;

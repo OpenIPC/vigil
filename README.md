@@ -31,6 +31,9 @@ are part of the design.
   to add a camera there; a clock, a context menu, an auto-hiding navigation
   bar, a channel info page, a compact on-screen keyboard, and settings
   pages built from the same schema as the API ([docs/ui.md](docs/ui.md)).
+- **Zero channel**: that screen, live, in a browser at `http://<recorder>/`,
+  with its mouse and keyboard, for users given the `remote` permission
+  ([docs/api.md](docs/api.md#zero-channel)).
 
 ## Platforms
 

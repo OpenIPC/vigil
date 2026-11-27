@@ -34,6 +34,7 @@
 #include "log.h"
 #include "mgmt.h"
 #include "source.h"
+#include "web.h"
 
 static volatile sig_atomic_t g_stop;
 static void on_signal(int s) { (void)s; g_stop = 1; }
@@ -225,6 +226,7 @@ static int write_config(const char *out, const char *in, int loaded, const vigil
 
 static unsigned g_applied_gen;
 static char     g_api_listen[64];
+static char     g_web_listen[64];
 static char     g_output[16];           /* display.output last applied */
 
 /* display.output, when it changed in the file (the API, the UI's Keep):
@@ -267,6 +269,8 @@ static void apply_config(void)
     }
     if (strcmp(c.api.listen, g_api_listen) != 0)
         vg_log("api.listen is now '%s'; it takes effect when vigild starts again", c.api.listen);
+    if (strcmp(c.web.listen, g_web_listen) != 0)
+        vg_log("web.listen is now '%s'; it takes effect when vigild starts again", c.web.listen);
 }
 
 int main(int argc, char **argv)
@@ -381,6 +385,7 @@ int main(int argc, char **argv)
     }
     config_override(&cfg);
     snprintf(g_api_listen, sizeof g_api_listen, "%s", cfg.api.listen);
+    snprintf(g_web_listen, sizeof g_web_listen, "%s", cfg.web.listen);
     if (write_path) {
         int wrc = write_config(write_path, cfg_path, loaded, &cfg);
         log_to_syslog_stop();
@@ -416,7 +421,9 @@ int main(int argc, char **argv)
         if (mgmt_start() < 0) vg_log("mgmt: cannot start its threads; the management pages will not act");
         disc_set_max_channels(caps->max_channels);
         api_start();                    /* failing to start it is logged, not fatal */
+        web_start();                    /* the same */
         rc = frontend_run(run_secs, &g_stop, apply_config) < 0 ? 1 : 0;
+        web_stop();
         api_stop();
         disc_shutdown();
         mgmt_stop();

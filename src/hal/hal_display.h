@@ -33,4 +33,23 @@ void hal_display_mode(vg_mode_t *cur);
  * the platform can tell). */
 int  hal_display_set_mode(const vg_mode_t *m);
 
+/* ---- the picture, for the zero channel (the web server's view of the screen) ---- */
+
+/* Three planes of 4:2:0 YUV: y is w x h, u and v (w/2) x (h/2). */
+typedef struct {
+    unsigned char *y, *u, *v;
+    unsigned       w, h;            /* the screen's size (hal_init) */
+    unsigned       ys, cs;          /* bytes per row of y, and of u and v */
+} hal_pic_t;
+
+/* From on to off: the platform keeps each decoder's newest picture where
+ * hal_display_grab can read it (which may hold a buffer per channel), or
+ * stops. Off costs the video nothing. */
+void hal_display_grab_keep(int on);
+/* Draw what the video layer shows now, each tile's picture where the
+ * output has it, into `pic` (screen coordinates; the rest left as it
+ * is), as the decoders put it out: BT.601 video range (Y 16..235).
+ * 0, or -1 where the platform cannot (nothing drawn). Any thread. */
+int  hal_display_grab(const hal_pic_t *pic);
+
 #endif /* HAL_DISPLAY_H */

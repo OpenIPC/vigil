@@ -65,7 +65,11 @@ Rules that keep the layers apart:
   through `ui_model.h`, which `src/app/ui_bridge.c` fills from the core.
 - `src/api` knows CivetWeb, `crypt(3)` and the core's public headers. It
   reads snapshots and writes the configuration store; it never drives the
-  channels or the UI itself.
+  channels or the UI itself. The zero channel's web server (`web.c`) gets
+  the screen's pictures and hands the browser's input on through `kvm.h`,
+  which the app implements (`src/app/kvm.c`): the pictures are composed
+  from LVGL's flushes and the platform's `hal_display_grab`, the input
+  goes into the evdev reader as one more mouse and keyboard.
 - A platform provides every HAL function. Functions it cannot support
   return an error, and `hal_caps()` reports what it can do. The core reads
   those capabilities at run time and does not assume them.
@@ -265,6 +269,8 @@ saves only a mode the user keeps.
 | CivetWeb master + up to 8 workers (started on demand) | HTTP requests and WebSocket sessions (`src/api`) |
 | API pusher | gathers status, events and configuration changes for the WebSocket clients |
 | API writers (4) | one per WebSocket client: writes its messages, so a stalled client stalls only itself |
+| zero channel: CivetWeb master + up to 6 workers | its page, logins and WebSockets (`src/api/web.c`) |
+| zero channel viewers (2) | one per viewer, at nice 10: composes, encodes and sends its pictures (`kvm_next`) |
 | log reader (`-s`) | turns stdout/stderr lines into syslog messages |
 
 ## Sources (camera protocols)

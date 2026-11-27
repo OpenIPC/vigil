@@ -359,6 +359,7 @@ typedef struct {
 enum {
     UI_PERM_LIVE = 1u << 0, UI_PERM_PLAYBACK = 1u << 1, UI_PERM_PTZ = 1u << 2, UI_PERM_CAMERAS = 1u << 3,
     UI_PERM_STORAGE = 1u << 4, UI_PERM_NETWORK = 1u << 5, UI_PERM_SYSTEM = 1u << 6, UI_PERM_USERS = 1u << 7,
+    UI_PERM_REMOTE = 1u << 8,
 };
 
 typedef struct {

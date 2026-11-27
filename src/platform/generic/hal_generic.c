@@ -29,3 +29,7 @@ void hal_dec_close(int ch) { (void)ch; }
 int  hal_cap_start(int in, int ch, hal_cap_cb cb, void *user) { (void)in; (void)ch; (void)cb; (void)user; return -1; }
 void hal_cap_stop(int in) { (void)in; }
 int  hal_cap_signal(int in) { (void)in; return 0; }
+
+/* No picture to read back: the zero channel shows the UI over black. */
+void hal_display_grab_keep(int on) { (void)on; }
+int  hal_display_grab(const hal_pic_t *pic) { (void)pic; return -1; }

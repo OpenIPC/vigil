@@ -187,90 +187,65 @@ static int send_401(struct mg_connection *conn)
                      "Basic realm=\"vigil\", charset=\"UTF-8\"");
 }
 
-/* CivetWeb's authorization hook for everything under /api: 1 = go on.
- * Failed logins are answered after a delay, and after FAIL_FREE in a row
- * from one address, further attempts from it are refused for a doubling
- * time without looking at the password: crypt() is slow on these CPUs by
- * design, and an attacker must not get to run it at will. */
-static int auth_handler(struct mg_connection *conn, void *cbdata)
+/* One login from `addr`: 1 with *perms, 0 refused (after FAIL_DELAY_S),
+ * -2 while the address is locked out (*retry_after seconds). After
+ * FAIL_FREE failures in a row from one address, further attempts from it
+ * are refused for a doubling time without looking at the password:
+ * crypt() is slow on these CPUs by design, and an attacker must not get to
+ * run it at will. */
+int api_login(const char *addr, const char *user, const char *pass, unsigned *perms, long *retry_after)
 {
-    (void)cbdata;
     vigil_config_t *c = malloc(sizeof *c);
-    if (!c) {
-        send_text(conn, 500, "{\"error\":\"out of memory\"}\n", NULL, NULL);
-        return 0;
-    }
+    if (!c) return 0;
     config_get(c);
     config_api_t api = c->api;
     free(c);
-    t_perms = 0;
-    t_user[0] = 0;
-    if (!api.auth) {
-        t_perms = PERM_ALL;
-        return 1;
-    }
-
-    const char *hdr = mg_get_header(conn, "Authorization");
-    if (!hdr) {
-        send_401(conn);
-        return 0;
-    }
-    const char *addr = mg_get_request_info(conn)->remote_addr;
+    *perms = 0;
+    *retry_after = 0;
     time_t now = mono();
     pthread_mutex_lock(&g_auth_lock);
     fail_entry_t *fe = fail_entry(addr, 0);
     time_t wait = fe ? fe->locked_until - now : 0;
     pthread_mutex_unlock(&g_auth_lock);
     if (wait > 0) {
-        char ra[24];
-        snprintf(ra, sizeof ra, "%ld", (long)wait);
-        send_text(conn, 429, "{\"error\":\"too many failed logins; try again later\"}\n", "Retry-After", ra);
-        return 0;
+        *retry_after = (long)wait;
+        return -2;
     }
 
-    char user[128], pass[256], why[160] = "";
+    char why[160] = "";
     int ok = 0;
-    unsigned perms = 0;
-    if (auth_parse_basic(hdr, user, sizeof user, pass, sizeof pass) == 0) {
-        unsigned char d[16];
-        struct stat sh, us;
-        char files[400];
-        stat_or_none(api.shadow, &sh);
-        stat_or_none(api.users, &us);
-        snprintf(files, sizeof files, "%s:%s", api.shadow, api.users);
-        cache_digest(user, pass, files, d);
-        pthread_mutex_lock(&g_auth_lock);
-        for (int i = 0; i < CACHE_N && !ok; ++i) {
-            cache_entry_t *ce = &g_cache[i];
-            if (ce->at && now - ce->at < CACHE_SECS && same_file(&sh, &ce->shadow_st) &&
-                same_file(&us, &ce->users_st) && memcmp(d, ce->d, sizeof d) == 0) {
-                ok = 1;
-                perms = ce->perms;
-            }
-        }
-        pthread_mutex_unlock(&g_auth_lock);
-        if (!ok) {
-            ok = users_login(user, pass, &perms, why, sizeof why) == 1;
-            if (ok) {
-                pthread_mutex_lock(&g_auth_lock);
-                cache_entry_t *ce = &g_cache[0];
-                for (int i = 1; i < CACHE_N; ++i)
-                    if (g_cache[i].at < ce->at) ce = &g_cache[i];
-                memcpy(ce->d, d, sizeof d);
-                ce->at = now;
-                ce->shadow_st = sh;
-                ce->users_st = us;
-                ce->perms = perms;
-                pthread_mutex_unlock(&g_auth_lock);
-            }
-        }
-        if (ok) {
-            t_perms = perms;
-            snprintf(t_user, sizeof t_user, "%s", user);
+    unsigned char d[16];
+    struct stat sh, us;
+    char files[400];
+    stat_or_none(api.shadow, &sh);
+    stat_or_none(api.users, &us);
+    snprintf(files, sizeof files, "%s:%s", api.shadow, api.users);
+    cache_digest(user, pass, files, d);
+    pthread_mutex_lock(&g_auth_lock);
+    for (int i = 0; i < CACHE_N && !ok; ++i) {
+        cache_entry_t *ce = &g_cache[i];
+        if (ce->at && now - ce->at < CACHE_SECS && same_file(&sh, &ce->shadow_st) &&
+            same_file(&us, &ce->users_st) && memcmp(d, ce->d, sizeof d) == 0) {
+            ok = 1;
+            *perms = ce->perms;
         }
     }
-    volatile char *w = pass;
-    for (size_t i = 0; i < sizeof pass; ++i) w[i] = 0;
+    pthread_mutex_unlock(&g_auth_lock);
+    if (!ok) {
+        ok = users_login(user, pass, perms, why, sizeof why) == 1;
+        if (ok) {
+            pthread_mutex_lock(&g_auth_lock);
+            cache_entry_t *ce = &g_cache[0];
+            for (int i = 1; i < CACHE_N; ++i)
+                if (g_cache[i].at < ce->at) ce = &g_cache[i];
+            memcpy(ce->d, d, sizeof d);
+            ce->at = now;
+            ce->shadow_st = sh;
+            ce->users_st = us;
+            ce->perms = *perms;
+            pthread_mutex_unlock(&g_auth_lock);
+        }
+    }
 
     pthread_mutex_lock(&g_auth_lock);
     int fails = 0;
@@ -290,9 +265,61 @@ static int auth_handler(struct mg_connection *conn, void *cbdata)
     pthread_mutex_unlock(&g_auth_lock);
     if (ok) return 1;
 
-    if (tell) vg_log("api: cannot check passwords: %s", why);
-    vg_log("api: login failed from %s (%d in a row)", addr, fails);
+    *perms = 0;
+    /* "auth": the API's logins and the zero channel's (web.c) alike */
+    if (tell) vg_log("auth: cannot check passwords: %s", why);
+    vg_log("auth: login failed from %s (%d in a row)", addr, fails);
     sleep(FAIL_DELAY_S);
+    return 0;
+}
+
+/* CivetWeb's authorization hook for everything under /api: 1 = go on. */
+static int auth_handler(struct mg_connection *conn, void *cbdata)
+{
+    (void)cbdata;
+    vigil_config_t *c = malloc(sizeof *c);
+    if (!c) {
+        send_text(conn, 500, "{\"error\":\"out of memory\"}\n", NULL, NULL);
+        return 0;
+    }
+    config_get(c);
+    int auth = c->api.auth;
+    free(c);
+    t_perms = 0;
+    t_user[0] = 0;
+    if (!auth) {
+        t_perms = PERM_ALL;
+        return 1;
+    }
+
+    const char *hdr = mg_get_header(conn, "Authorization");
+    if (!hdr) {
+        send_401(conn);
+        return 0;
+    }
+    char user[128], pass[256];
+    unsigned perms = 0;
+    long retry = 0;
+    int rc = 0;
+    if (auth_parse_basic(hdr, user, sizeof user, pass, sizeof pass) == 0) {
+        rc = api_login(mg_get_request_info(conn)->remote_addr, user, pass, &perms, &retry);
+    } else {
+        /* Not Basic, or not decodable: a failure like a wrong password. */
+        rc = api_login(mg_get_request_info(conn)->remote_addr, "", "", &perms, &retry);
+    }
+    volatile char *w = pass;
+    for (size_t i = 0; i < sizeof pass; ++i) w[i] = 0;
+    if (rc == -2) {
+        char ra[24];
+        snprintf(ra, sizeof ra, "%ld", retry);
+        send_text(conn, 429, "{\"error\":\"too many failed logins; try again later\"}\n", "Retry-After", ra);
+        return 0;
+    }
+    if (rc == 1) {
+        t_perms = perms;
+        snprintf(t_user, sizeof t_user, "%s", user);
+        return 1;
+    }
     send_401(conn);
     return 0;
 }
@@ -822,7 +849,7 @@ static int log_message(const struct mg_connection *conn, const char *msg)
     return 1;
 }
 
-static void random_key(void)
+static void random_key_once(void)
 {
     int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     ssize_t n = fd >= 0 ? read(fd, g_cache_key, sizeof g_cache_key) : -1;
@@ -838,6 +865,12 @@ static void random_key(void)
         g_cache_key[i] = (unsigned char)('!' + g_cache_key[i] % 90);
 }
 
+void api_auth_init(void)
+{
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, random_key_once);
+}
+
 int api_start(void)
 {
     vigil_config_t *c = malloc(sizeof *c);
@@ -850,7 +883,7 @@ int api_start(void)
         return 0;
     }
     g_t0 = mono();
-    random_key();
+    api_auth_init();
 
     const char *options[] = {
         "listening_ports", api.listen,

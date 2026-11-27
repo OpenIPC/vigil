@@ -250,6 +250,21 @@ api:
   # /etc/vigil.users.yaml.
   users: /etc/vigil.users.yaml
 
+# Zero channel
+web:
+  # On: This screen, with its mouse and keyboard, in a browser at http://<this
+  # recorder>/ (docs/api.md, Zero channel). Only users whose group has the
+  # remote permission (admin) get in, and nobody until such an account has a
+  # password. Default true.
+  enabled: true
+  # Listen on: IPv4 address and port of its web server, or just the port.
+  # Empty: off. Takes effect when vigild starts. Default 0.0.0.0:80.
+  listen: "0.0.0.0:80"
+  # Pictures a second, at most: Fewer when nothing moves, the network or the
+  # browser is slower, or encoding would take more than half a CPU core.
+  # 1..30, default 15.
+  fps: 15
+
 # Camera search
 discovery:
   # Search on interfaces: Network interfaces to search for cameras on,

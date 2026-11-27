@@ -504,6 +504,20 @@ static const schema_field_t api_fields[] = {
               "permission, so nobody is locked out." },
 };
 
+static const schema_field_t web_fields[] = {
+    { .key = "enabled", BOOL(config_web_t, enabled), .def_int = 1, .live = 1, .label = "On",
+      .help = "This screen, with its mouse and keyboard, in a browser at http://<this recorder>/ "
+              "(docs/api.md, Zero channel). Only users whose group has the remote permission "
+              "(admin) get in, and nobody until such an account has a password." },
+    { .key = "listen", STR(config_web_t, listen), .def_str = "0.0.0.0:80", .check = check_listen,
+      .label = "Listen on", .help = "IPv4 address and port of its web server, or just the port. "
+                                    "Empty: off. Takes effect when vigild starts." },
+    { .key = "fps", INT(config_web_t, fps), .def_int = 15, .min = 1, .max = 30, .live = 1,
+      .label = "Pictures a second, at most",
+      .help = "Fewer when nothing moves, the network or the browser is slower, or encoding would "
+              "take more than half a CPU core." },
+};
+
 static const schema_field_t discovery_fields[] = {
     { .key = "interfaces", STR(config_discovery_t, interfaces), .def_str = "", .live = 1,
       .check = check_ifaces, .label = "Search on interfaces",
@@ -552,6 +566,7 @@ static const schema_section_t sections[] = {
       .help = "The HDMI/VGA output, and the clock, names and icons over the live view." },
     { .key = "api", .off = offsetof(vigil_config_t, api), .fields = api_fields,
       .n_fields = N(api_fields), .label = "HTTP API" },
+    OBJECT("web", web, web_fields, "Zero channel"),
     { .key = "discovery", .off = offsetof(vigil_config_t, discovery), .fields = discovery_fields,
       .n_fields = N(discovery_fields), .label = "Camera search" },
 };

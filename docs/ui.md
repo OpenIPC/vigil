@@ -277,6 +277,8 @@ daylight saving time with how far the clocks go forward and the week,
 weekday, month and time it starts and ends, previewed as its POSIX string),
 and NTP (on or off, servers, how often vigild checks, Sync now and the last
 sync). Save writes only the parts that changed. *HTTP API*: the API's form.
+*Zero channel*: the `web` section's form (on or off, where it listens, the
+most pictures a second): this screen in a browser (below, Input).
 
 ![System, General](../tests/ui/system_general.png)
 
@@ -284,7 +286,8 @@ sync). Save writes only the parts that changed. *HTTP API*: the API's form.
 an editor in the pane (an empty password on Edit keeps it), Remove asks
 first; the list follows changes made through the API. Changes apply at
 once. *Groups*: a row per group with a toggle per permission (Live,
-Playback, PTZ, Cameras, Storage, Network, System, Users), saved with Save;
+Playback, PTZ, Cameras, Storage, Network, System, Users, Remote: the zero
+channel, this screen from a browser), saved with Save;
 `admin` is read-only, `user` cannot be removed. The on-screen UI does not
 ask for a login yet: the accounts are enforced on the HTTP API, where the
 system account (root) always logs in as an administrator.
@@ -656,6 +659,19 @@ position, under a lock, for clicks and hovering. Elsewhere LVGL draws it,
 moving it at its frame rate: LVGL draws and polls the input every 16 ms
 (`LV_DEF_REFR_PERIOD`), redrawing only the arrow's old and new places, and
 the UI loop sleeps no longer than until LVGL's next timer.
+
+**The zero channel** (`docs/api.md`, Zero channel) is this screen in a
+browser at `http://<recorder>/`, for users with the `remote` permission.
+Each viewer plugs one more absolute pointer and keyboard into this reader:
+pipes (`input_evdev_attach`, `input_evdev_attach_keyboard`) that the web
+server's threads write evdev events into (`src/app/kvm.c`), taken on the
+LVGL thread. Its mouse, wheel, right button and keys are therefore those
+of a USB mouse and keyboard, through the same code, and the monitor shows
+its pointer. When a viewer goes, its pipes end and the reader lets go of
+any button or modifier it held, as for a device unplugged. The pictures
+are LVGL's own flushes (`LV_EVENT_FLUSH_START`) over the platform's
+video; with a cursor plane the pointer is not among them (the browser shows
+its own).
 
 ### Keyboard
 

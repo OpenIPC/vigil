@@ -2872,8 +2872,8 @@ static void test_account_pages(void)
 
 static void shots_system(void)
 {
-    static const char *const items[] = { "General", "HTTP API" };
-    shots_settings("SYSTEM", "system", items, 2);
+    static const char *const items[] = { "General", "HTTP API", "Zero channel" };
+    shots_settings("SYSTEM", "system", items, 3);
     click_text("SYSTEM");
     dd_pick(nth_of(&lv_dropdown_class, 3), g_mg.zones());
     lv_obj_t *dst = nth_of(&lv_switch_class, 0);

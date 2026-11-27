@@ -23,7 +23,7 @@
 #define HASH_MAX 128
 
 const char *const users_perm_names[PERM_N] = {
-    "live", "playback", "ptz", "cameras", "storage", "network", "system", "users",
+    "live", "playback", "ptz", "cameras", "storage", "network", "system", "users", "remote",
 };
 
 unsigned users_perm_bit(const char *name)
@@ -94,6 +94,7 @@ static const schema_field_t group_fields[] = {
     PERM_FIELD(5, "network", "Network, DDNS, mail and alarm center"),
     PERM_FIELD(6, "system", "Time, host name, UI and the whole configuration"),
     PERM_FIELD(7, "users", "Users, groups and the API's settings"),
+    PERM_FIELD(8, "remote", "The zero channel: the screen, mouse and keyboard from a browser"),
 };
 
 static const schema_field_t user_fields[] = {

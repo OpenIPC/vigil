@@ -232,7 +232,7 @@ def main():
         st, _, _ = Api(api_port, user="nobody").call("GET", "/api/v1/status")
         check(st == 401, "other account: 401 (%s)" % st)
         st, _, me = Api(api_port, user="admin").json("GET", "/api/v1/me")
-        check(st == 200 and me["user"] == "admin" and len(me["permissions"]) == 8,
+        check(st == 200 and me["user"] == "admin" and len(me["permissions"]) == 9,
               "admin is root's other name while no user admin exists (%s)" % st)
 
         # ---- the three documents
@@ -248,7 +248,7 @@ def main():
         secs = {s["key"]: s for s in schema["sections"]} if st == 200 else {}
         seg = [f for f in secs.get("record", {}).get("fields", []) if f["key"] == "segment"]
         check(set(secs) == {"cameras", "record", "schedule", "quota", "nas", "ddns", "upnp", "smtp",
-                              "alarm", "time", "ui", "display", "api", "discovery"} and seg and seg[0]["min"] == 10 and
+                              "alarm", "time", "ui", "display", "api", "web", "discovery"} and seg and seg[0]["min"] == 10 and
               seg[0]["max"] == 3600 and seg[0]["live"], "schema: sections and limits")
         st, _, _ = api.json("GET", "/api/v1/nothing")
         check(st == 404, "unknown endpoint: 404")

@@ -27,7 +27,16 @@ if(NOT VIGIL_CRYPT_IN_LIBC)
   set(_crypt_lib crypt)
 endif()
 
+# The zero channel's pages, built in (cmake/embed.cmake).
+set(_web_assets ${CMAKE_SOURCE_DIR}/src/api/web/login.html ${CMAKE_SOURCE_DIR}/src/api/web/kvm.html
+                ${CMAKE_SOURCE_DIR}/src/api/web/kvm.js)
+add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/web_assets.c
+                   COMMAND ${CMAKE_COMMAND} -DOUT=${CMAKE_BINARY_DIR}/web_assets.c "-DIN=${_web_assets}"
+                           -P ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
+                   DEPENDS ${_web_assets} ${CMAKE_SOURCE_DIR}/cmake/embed.cmake VERBATIM)
+
 add_library(vigil_api STATIC ${CMAKE_SOURCE_DIR}/src/api/api.c ${CMAKE_SOURCE_DIR}/src/api/api_disc.c
+            ${CMAKE_SOURCE_DIR}/src/api/web.c ${CMAKE_BINARY_DIR}/web_assets.c
             ${CMAKE_SOURCE_DIR}/src/api/api_mgmt.c ${CMAKE_SOURCE_DIR}/src/api/api_perm.c
             ${CMAKE_SOURCE_DIR}/src/api/api_users.c ${CMAKE_SOURCE_DIR}/src/api/auth.c
             ${CMAKE_SOURCE_DIR}/src/api/users.c)

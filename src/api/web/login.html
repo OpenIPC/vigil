@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vigil zero channel: log in</title>
+<style>
+:root { color-scheme: dark; }
+body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+       background: #0e1116; color: #e8eaed; font: 15px/1.4 system-ui, sans-serif; }
+form { background: #171b22; border: 1px solid #2e3542; border-radius: 8px; padding: 24px;
+       width: min(320px, calc(100vw - 32px)); box-sizing: border-box; }
+h1 { font-size: 18px; margin: 0 0 4px; }
+.sub { color: #9aa3af; margin: 0 0 16px; font-size: 13px; }
+label { display: block; color: #9aa3af; font-size: 13px; margin: 12px 0 4px; }
+input { width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 4px;
+        border: 1px solid #2e3542; background: #0b0d11; color: #e8eaed; font: inherit; }
+input:focus { outline: 2px solid #2d8cf0; outline-offset: -1px; }
+button { margin-top: 20px; width: 100%; padding: 9px; border: 0; border-radius: 4px;
+         background: #2d8cf0; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+.err { color: #ed4014; margin: 12px 0 0; }
+</style>
+</head>
+<body>
+<form method="post" action="/login">
+<h1>Zero channel</h1>
+<p class="sub">The recorder's screen, mouse and keyboard</p>
+<label for="user">User</label>
+<input id="user" name="user" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+<label for="password">Password</label>
+<input id="password" name="password" type="password" autocomplete="current-password" required>
+<!--MSG-->
+<button type="submit">Log in</button>
+</form>
+</body>
+</html>

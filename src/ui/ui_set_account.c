@@ -42,6 +42,7 @@ static const char *perm_label(const char *name)
     static const struct { const char *k, *v; } m[] = {
         { "live", "Live" }, { "playback", "Playback" }, { "ptz", "PTZ" }, { "cameras", "Cameras" },
         { "storage", "Storage" }, { "network", "Network" }, { "system", "System" }, { "users", "Users" },
+        { "remote", "Remote" },
     };
     for (size_t i = 0; i < sizeof m / sizeof m[0]; ++i)
         if (!strcmp(m[i].k, name)) return m[i].v;

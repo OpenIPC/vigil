@@ -39,6 +39,18 @@ if(TARGET vigil_ui)
                     DEPENDS test_ui USES_TERMINAL)
   # ... and that it still walks through every screen.
   add_test(NAME ui_screenshots COMMAND test_ui --shots ${CMAKE_CURRENT_BINARY_DIR}/shots)
+
+  # The zero channel: its encoders and input mapping, and src/app/kvm.c on
+  # an in-memory display with the evdev reader; with --serve, the web
+  # server around it for web_test.py.
+  if(TARGET vigil_api)
+    add_executable(test_kvm test_kvm.c ${CMAKE_SOURCE_DIR}/src/app/input_evdev.c
+                   ${CMAKE_SOURCE_DIR}/src/app/kvm.c ${CMAKE_SOURCE_DIR}/src/app/kvm_enc.c
+                   ${CMAKE_SOURCE_DIR}/src/app/kvm_input.c ${CMAKE_SOURCE_DIR}/src/app/jpeg_enc.c)
+    target_include_directories(test_kvm PRIVATE ${CMAKE_SOURCE_DIR}/src/app ${CMAKE_SOURCE_DIR}/src/api)
+    target_link_libraries(test_kvm PRIVATE vigil_api vigil_ui vigil_core)
+    add_test(NAME kvm COMMAND test_kvm)
+  endif()
 endif()
 
 add_test(NAME cli_too_long COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_cli.sh $<TARGET_FILE:vigild>)
@@ -85,6 +97,13 @@ if(Python3_FOUND)
     add_test(NAME discovery_e2e
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/discovery_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
+    if(TARGET test_kvm)
+      # The zero channel's web server end to end: logins, the WebSocket,
+      # pictures (decoded with PIL when it is there) and input.
+      add_test(NAME web_e2e COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/web_test.py
+                                    $<TARGET_FILE:test_kvm>)
+      set_tests_properties(web_e2e PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
     add_test(NAME api_e2e
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/api_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
