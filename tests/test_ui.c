@@ -660,6 +660,7 @@ static int  fm_revert(void) { return fm_confirm(); }
 /* g_mg_wifi: 0 none, 1 wlan0 up (wlandev set), 2 a USB adapter plugged in
  * whose driver is not loaded yet (no wlandev). */
 static char g_mg_wifi_profile[48];
+static int  g_mg_wifi_scan, g_mg_wifi_polls;    /* 0 no iw; > 0 a scan answering after that many polls */
 static void fm_wifi_get(ui_wifi_t *w, ui_net_status_t *st)
 {
     memset(w, 0, sizeof *w);
@@ -677,12 +678,29 @@ static void fm_wifi_get(ui_wifi_t *w, ui_net_status_t *st)
     snprintf(w->ifname, sizeof w->ifname, "wlan0");
     snprintf(w->ssid, sizeof w->ssid, "HomeNet");
     w->password_set = 1;
+    w->can_scan = g_mg_wifi_scan > 0;
+}
+static int  fm_wifi_scan_start(char *err, size_t cap)
+{
+    if (!g_mg_wifi_scan) {
+        snprintf(err, cap, "this firmware has no iw to scan with");
+        return UI_MGMT_EFAIL;
+    }
+    g_mg_wifi_polls = g_mg_wifi_scan;
+    return 0;
 }
 static int  fm_wifi_scan(ui_wifi_net_t *o, int max, char *err, size_t cap)
 {
-    (void)o; (void)max;
-    snprintf(err, cap, "this firmware has no iw to scan with");
-    return -1;
+    (void)err; (void)cap;
+    if (g_mg_wifi_polls-- > 0) return UI_MGMT_EBUSY;
+    if (max < 2) return 0;
+    memset(o, 0, 2 * sizeof *o);
+    snprintf(o[0].ssid, sizeof o[0].ssid, "HomeNet");
+    o[0].signal = -48;
+    o[0].secured = 1;
+    snprintf(o[1].ssid, sizeof o[1].ssid, "Cafe");
+    o[1].signal = -71;
+    return 2;
 }
 static int  fm_wifi_set(const char *ssid, const char *p, const char *profile, char *err, size_t cap)
 {
@@ -1151,6 +1169,7 @@ static void fake_mgmt(ui_model_t *m)
     g_mg.net_confirm = fm_confirm;
     g_mg.net_revert = fm_revert;
     g_mg.wifi_get = fm_wifi_get;
+    g_mg.wifi_scan_start = fm_wifi_scan_start;
     g_mg.wifi_scan = fm_wifi_scan;
     g_mg.wifi_set = fm_wifi_set;
     g_mg.lte_get = fm_lte_get;
@@ -2194,6 +2213,17 @@ static void test_network_pages(void)
     run(800);
     CHECK(!strcmp(g_mg_wifi_profile, "mt7601u-generic"), "joining sets wlandev to the adapter's profile: '%s'",
           g_mg_wifi_profile);
+    /* A scan runs in the background: the page goes on meanwhile. */
+    g_mg_wifi = 1;
+    g_mg_wifi_scan = 4;
+    nav_to("DDNS");
+    nav_to("Wi-Fi");
+    click_text("Scan");
+    run(30);
+    CHECK(find("Scanning...", 1) && !find("Cafe", 0), "Scan: running, the page goes on");
+    run(1500);
+    CHECK(!find("Scanning...", 1) && find("Cafe", 0) && find("-71 dBm", 1), "Scan: the networks once it ends");
+    g_mg_wifi_scan = 0;
     g_mg_wifi = 0;
     g_mg_modem = 1;
     nav_to("LTE");

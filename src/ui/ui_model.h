@@ -383,6 +383,11 @@ typedef struct {
     int  (*net_confirm)(void);
     int  (*net_revert)(void);
     void (*wifi_get)(ui_wifi_t *w, ui_net_status_t *st);
+    /* A scan runs in the background (iw takes up to 20 s): wifi_scan_start
+     * starts one (0, or < 0 with err; one already running is joined), and
+     * wifi_scan says UI_MGMT_EBUSY while it runs, then gives its networks
+     * (>= 0) or < 0 with err. */
+    int  (*wifi_scan_start)(char *err, size_t cap);
     int  (*wifi_scan)(ui_wifi_net_t *out, int max, char *err, size_t cap);
     /* `profile` ("" or NULL: as it is) becomes wlandev; a job id */
     int  (*wifi_set)(const char *ssid, const char *password, const char *profile, char *err, size_t cap);

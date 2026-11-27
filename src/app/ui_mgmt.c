@@ -4,6 +4,7 @@
  * include any of them; this file copies between their structs and the
  * model's plain ones. Everything is quick, or a job the page polls. */
 #define _DEFAULT_SOURCE
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -113,7 +114,7 @@ static void wifi_get(ui_wifi_t *u, ui_net_status_t *st)
     status_copy(w.ifname, st);
 }
 
-static int wifi_scan_(ui_wifi_net_t *out, int max, char *err, size_t cap)
+static int scan_now(ui_wifi_net_t *out, int max, char *err, size_t cap)
 {
     wifi_info_t w;
     wifi_info(&w);
@@ -128,6 +129,69 @@ static int wifi_scan_(ui_wifi_net_t *out, int max, char *err, size_t cap)
         out[i].signal = nets[i].signal;
         out[i].secured = nets[i].secured;
     }
+    return n;
+}
+
+/* The Wi-Fi scan, off the UI thread: iw takes seconds, up to its 20 s
+ * timeout, and the screen must go on meanwhile. */
+#define SCAN_NETS 16
+static pthread_mutex_t g_scan_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+    int           running, n;
+    ui_wifi_net_t nets[SCAN_NETS];
+    char          err[160];
+} g_scan;                           /* under g_scan_lock */
+
+static void *scan_main(void *arg)
+{
+    (void)arg;
+    ui_wifi_net_t nets[SCAN_NETS];
+    char err[160] = "";
+    int n = scan_now(nets, SCAN_NETS, err, sizeof err);
+    pthread_mutex_lock(&g_scan_lock);
+    g_scan.n = n;
+    if (n > 0) memcpy(g_scan.nets, nets, (size_t)n * sizeof nets[0]);
+    snprintf(g_scan.err, sizeof g_scan.err, "%s", err);
+    g_scan.running = 0;
+    pthread_mutex_unlock(&g_scan_lock);
+    return NULL;
+}
+
+static int wifi_scan_start(char *err, size_t cap)
+{
+    if (!sys_have("iw")) {
+        snprintf(err, cap, "this firmware has no iw to scan with");
+        return UI_MGMT_EFAIL;
+    }
+    pthread_mutex_lock(&g_scan_lock);
+    int busy = g_scan.running;
+    g_scan.running = 1;
+    pthread_mutex_unlock(&g_scan_lock);
+    if (busy) return 0;
+    pthread_t th;
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    int rc = pthread_create(&th, &at, scan_main, NULL);
+    pthread_attr_destroy(&at);
+    if (rc != 0) {
+        pthread_mutex_lock(&g_scan_lock);
+        g_scan.running = 0;
+        pthread_mutex_unlock(&g_scan_lock);
+        snprintf(err, cap, "cannot start the scan");
+        return UI_MGMT_EFAIL;
+    }
+    return 0;
+}
+
+static int wifi_scan_(ui_wifi_net_t *out, int max, char *err, size_t cap)
+{
+    pthread_mutex_lock(&g_scan_lock);
+    int n = g_scan.running ? UI_MGMT_EBUSY : g_scan.n;
+    if (n > max) n = max;
+    if (n > 0) memcpy(out, g_scan.nets, (size_t)n * sizeof out[0]);
+    if (n < 0) snprintf(err, cap, "%s", g_scan.err);
+    pthread_mutex_unlock(&g_scan_lock);
     return n;
 }
 
@@ -563,7 +627,7 @@ static void listening(int server, ui_listen_t *out)
 static const ui_mgmt_t g_mgmt = {
     .managed = managed,
     .eth_get = eth_get, .eth_apply = eth_apply, .net_pending = net_pending, .net_confirm = net_confirm,
-    .net_revert = net_revert, .wifi_get = wifi_get, .wifi_scan = wifi_scan_, .wifi_set = wifi_set_,
+    .net_revert = net_revert, .wifi_get = wifi_get, .wifi_scan_start = wifi_scan_start, .wifi_scan = wifi_scan_, .wifi_set = wifi_set_,
     .lte_get = lte_get, .lte_profile = mgmt_lte_profile,
     .services = services, .ddns_update = mgmt_ddns_update, .smtp_test = mgmt_smtp_test,
     .nas_test = mgmt_nas_test, .nas_support = sys_nas_support, .nas_mounted = nas_mounted,

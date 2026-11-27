@@ -292,6 +292,7 @@ typedef struct {
     ui_wifi_t  w;
     status_w_t st;
     lv_obj_t  *ssid, *pass, *list, *job, *scan_note;
+    lv_timer_t *scan_timer;         /* while a scan runs */
     char       profile[48];         /* wlandev to set: the adapter's when none is */
 } wifi_t;
 
@@ -302,12 +303,8 @@ static void net_pick_cb(lv_event_t *ev)
     lv_textarea_set_text(w->ssid, lv_label_get_text(lv_obj_get_child(b, -1)));
 }
 
-static void scan_cb(lv_event_t *ev)
+static void scan_show(wifi_t *w, const ui_wifi_net_t *nets, int n, const char *err)
 {
-    wifi_t *w = lv_event_get_user_data(ev);
-    ui_wifi_net_t nets[16];
-    char err[160] = "";
-    int n = MG()->wifi_scan(nets, 16, err, sizeof err);
     lv_obj_clean(w->list);
     if (n < 0) {
         ui_set_note(w->list, err, UI_C(BAD));
@@ -321,6 +318,38 @@ static void scan_cb(lv_event_t *ev)
         ui_label(b, nets[i].ssid, VG_FONT_MD_LV, UI_C(TEXT));
         lv_obj_add_event_cb(b, net_pick_cb, LV_EVENT_CLICKED, w);
     }
+}
+
+static void scan_tick(lv_timer_t *t)
+{
+    wifi_t *w = lv_timer_get_user_data(t);
+    ui_wifi_net_t nets[16];
+    char err[160] = "";
+    int n = MG()->wifi_scan(nets, 16, err, sizeof err);
+    if (n == UI_MGMT_EBUSY) return;
+    lv_timer_delete(t);
+    w->scan_timer = NULL;
+    scan_show(w, nets, n, err);
+}
+
+static void scan_cb(lv_event_t *ev)
+{
+    wifi_t *w = lv_event_get_user_data(ev);
+    char err[160] = "";
+    if (MG()->wifi_scan_start(err, sizeof err) < 0) {
+        scan_show(w, NULL, -1, err);
+        return;
+    }
+    lv_obj_clean(w->list);
+    ui_set_note(w->list, LV_SYMBOL_REFRESH "  Scanning...", UI_C(TEXT2));
+    if (!w->scan_timer) w->scan_timer = lv_timer_create(scan_tick, 250, w);
+}
+
+static void wifi_close(void *st)
+{
+    wifi_t *w = st;
+    if (w->scan_timer) lv_timer_delete(w->scan_timer);
+    free(w);
 }
 
 /* A USB adapter or modem: what it is, its driver and the firmware profile
@@ -1032,7 +1061,7 @@ void ui_network_open(int first)
 {
     const ui_set_item_t items[] = {
         { TR(S_ETHERNET), &ui_icon_nav_ethernet, eth_open, eth_dirty, eth_save, eth_cancel, eth_close },
-        { TR(S_WIFI), &ui_icon_nav_wifi, wifi_open, wifi_dirty, wifi_save, wifi_cancel, free_st },
+        { TR(S_WIFI), &ui_icon_nav_wifi, wifi_open, wifi_dirty, wifi_save, wifi_cancel, wifi_close },
         { TR(S_LTE), &ui_icon_nav_lte, lte_open, NULL, NULL, NULL, NULL },
         { TR(S_PORTS), &ui_icon_nav_ports, ports_open, ports_dirty, ports_save, ports_cancel, ports_close },
         { TR(S_DDNS), &ui_icon_nav_ddns, ddns_open, svc_dirty, svc_save, svc_cancel, svc_close },
