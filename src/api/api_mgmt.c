@@ -194,29 +194,50 @@ static int ethernet(struct mg_connection *conn, const char *m)
     return answer(conn, rc, path, err);
 }
 
+static cJSON *radios_json(const usb_radio_t *r, int n)
+{
+    cJSON *a = cJSON_CreateArray();
+    for (int i = 0; i < n; ++i) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "usb_id", r[i].id);
+        cJSON_AddStringToObject(o, "name", r[i].name);
+        cJSON_AddStringToObject(o, "driver", r[i].driver);
+        cJSON_AddStringToObject(o, "profile", r[i].profile);
+        cJSON_AddBoolToObject(o, "bound", r[i].bound);
+        cJSON_AddItemToArray(a, o);
+    }
+    return a;
+}
+
 static int wifi(struct mg_connection *conn, const char *m)
 {
     wifi_info_t w;
     wifi_info(&w);
     if (get(m)) {
         cJSON *d = cJSON_CreateObject();
-        cJSON_AddBoolToObject(d, "present", w.ifname[0] != 0);
-        if (w.ifname[0]) {
-            cJSON_AddStringToObject(d, "interface", w.ifname);
+        cJSON_AddBoolToObject(d, "present", w.ifname[0] || w.n_adapters);
+        cJSON_AddStringToObject(d, "interface", w.ifname);
+        cJSON_AddStringToObject(d, "profile", w.profile);
+        cJSON_AddItemToObject(d, "adapters", radios_json(w.adapters, w.n_adapters));
+        if (w.ifname[0] || w.n_adapters) {
             cJSON_AddStringToObject(d, "ssid", w.ssid);
             cJSON_AddBoolToObject(d, "password_set", w.has_password);
-            cJSON_AddBoolToObject(d, "can_scan", w.can_scan);
-            cJSON_AddItemToObject(d, "status", net_status_json(w.ifname));
+            cJSON_AddBoolToObject(d, "can_scan", w.can_scan && w.ifname[0]);
         }
+        if (w.ifname[0]) cJSON_AddItemToObject(d, "status", net_status_json(w.ifname));
         return send_json(conn, 200, d);
     }
     if (!is(m, "PUT")) return method_not_allowed(conn, "GET, HEAD, PUT");
-    if (!w.ifname[0]) return send_error(conn, 409, "no Wi-Fi adapter", NULL);
+    if (!w.ifname[0] && !w.n_adapters) return send_error(conn, 409, "no Wi-Fi adapter", NULL);
     cJSON *b = body_json(conn);
     if (!b) return 400;
     char err[256] = "";
     const char *ssid = jstr(b, "ssid", NULL), *pass = jstr(b, "password", "");
-    int rc = ssid ? mgmt_wifi_set(w.ifname, ssid, pass, err, sizeof err) : MGMT_EINVAL;
+    /* The profile: as asked, else the adapter's own when wlandev does not
+     * name one yet. */
+    const char *profile = jstr(b, "profile", NULL);
+    if (!profile && !w.profile[0] && w.n_adapters) profile = w.adapters[0].profile;
+    int rc = ssid ? mgmt_wifi_set(w.ifname, ssid, pass, profile, err, sizeof err) : MGMT_EINVAL;
     if (!ssid) snprintf(err, sizeof err, "needs an ssid");
     cJSON_Delete(b);
     return answer(conn, rc, "ssid", err);
@@ -245,12 +266,22 @@ static int wifi_scan_req(struct mg_connection *conn, const char *m)
 
 static int lte(struct mg_connection *conn, const char *m)
 {
-    if (!get(m)) return method_not_allowed(conn, "GET, HEAD");
+    if (is(m, "PUT")) {
+        cJSON *b = body_json(conn);
+        if (!b) return 400;
+        char err[256] = "";
+        int rc = mgmt_lte_profile(jstr(b, "profile", ""), err, sizeof err);
+        cJSON_Delete(b);
+        if (rc != MGMT_OK) return answer(conn, rc, "profile", err);
+    } else if (!get(m)) {
+        return method_not_allowed(conn, "GET, HEAD, PUT");
+    }
     lte_info_t l;
     lte_info(&l);
     cJSON *d = cJSON_CreateObject();
     cJSON_AddBoolToObject(d, "present", l.ifname[0] != 0);
     cJSON_AddStringToObject(d, "profile", l.profile);
+    cJSON_AddItemToObject(d, "modems", radios_json(l.modems, l.n_modems));
     if (l.ifname[0]) {
         cJSON_AddStringToObject(d, "interface", l.ifname);
         cJSON_AddStringToObject(d, "driver", l.driver);

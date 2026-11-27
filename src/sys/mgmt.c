@@ -42,7 +42,7 @@ typedef struct {
     int        internal;            /* timers' own: not announced */
     net_cfg_t  net;
     int        confirm, flag;
-    char       a[64], b[96];
+    char       a[64], b[96], c[48];
     char      *payload;             /* mail text, alarm JSON (malloc'd) */
 } slot_t;
 
@@ -237,10 +237,10 @@ static int run_job(slot_t *s, char *msg, size_t cap)
         return 0;
     }
     case J_WIFI:
-        rc = wifi_set(s->a, s->b, s->payload ? s->payload : "", err, sizeof err);
+        rc = wifi_set(s->a, s->b, s->payload ? s->payload : "", s->c, err, sizeof err);
         if (s->payload) memset(s->payload, 0, strlen(s->payload));
         snprintf(msg, cap, "%s", rc ? err : "joining the network");
-        return rc;
+        return rc < 0 ? -1 : 0;
     case J_NTP_SYNC:
     case J_NTP_CHECK: {
         char servers[4][64];
@@ -659,17 +659,25 @@ int mgmt_net_revert(void)
     return a ? 0 : -1;
 }
 
-int mgmt_wifi_set(const char *ifname, const char *ssid, const char *password, char *err, size_t cap)
+int mgmt_wifi_set(const char *ifname, const char *ssid, const char *password, const char *profile, char *err,
+                  size_t cap)
 {
     if (!sys_managed()) return MGMT_EUNMANAGED;
     slot_t j = { .kind = J_WIFI };
     snprintf(j.a, sizeof j.a, "%s", ifname);
+    snprintf(j.c, sizeof j.c, "%s", profile ? profile : "");
     snprintf(j.b, sizeof j.b, "%s", ssid);
     snprintf(j.pub.target, sizeof j.pub.target, "%s", ifname);
     j.payload = strdup(password);
     int id = submit(&j);
     if (id < 0) snprintf(err, cap, "too many changes under way");
     return id < 0 ? MGMT_EBUSY : id;
+}
+
+int mgmt_lte_profile(const char *profile, char *err, size_t cap)
+{
+    if (!sys_managed()) return MGMT_EUNMANAGED;
+    return lte_set_profile(profile, err, cap) < 0 ? MGMT_EINVAL : MGMT_OK;
 }
 
 /* ---- time and name ----------------------------------------------------------------- */

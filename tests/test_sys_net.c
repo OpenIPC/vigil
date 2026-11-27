@@ -169,9 +169,9 @@ void test_sys_net(void)
     int n = wifi_scan("wlan0", nets, 8, err, sizeof err);
     CHECK(n == 2 && !strcmp(nets[0].ssid, "HomeNet") && nets[0].signal == -40 && nets[0].secured &&
           !strcmp(nets[1].ssid, "Cafe") && !nets[1].secured, "scan: %d", n);
-    CHECK(wifi_set("wlan0", "HomeNet", "short", err, sizeof err) < 0, "a 5-character passphrase is refused");
+    CHECK(wifi_set("wlan0", "HomeNet", "short", NULL, err, sizeof err) < 0, "a 5-character passphrase is refused");
     fake_clear_log();
-    CHECK(wifi_set("wlan0", "HomeNet", "longenough", err, sizeof err) == 0 &&
+    CHECK(wifi_set("wlan0", "HomeNet", "longenough", NULL, err, sizeof err) == 0 &&
           fake_ran("fw_setenv wlanssid HomeNet\nfw_setenv wlanpass longenough\nifdown -f wlan0\nifup wlan0"),
           "wifi_set: %s", fake_log);
 
@@ -191,5 +191,69 @@ void test_sys_net(void)
     lte_info(&l);
     CHECK(!strcmp(l.ifname, "usb0") && !strcmp(l.driver, "rndis_host") && !strcmp(l.profile, "rndis-e3372h"),
           "modem: %s %s %s", l.ifname, l.driver, l.profile);
+    fake_done();
+
+    /* USB radios without their driver loaded (no wlandev): found by their
+     * interfaces' modalias in the firmware's modules.alias, given the
+     * profile that loads the driver. */
+    fake_init();
+    fake_file("/lib/modules/4.9.84/modules.alias",
+              "alias usb:v148Fp7601d*dc*dsc*dp*ic*isc*ip*in* mt7601u\n"
+              "alias usb:v148Fp5370d*dc*dsc*dp*ic*isc*ip*in* rt2800usb\n"
+              "alias usb:v2C7Cp0125d*dc*dsc*dp*ic*isc*ip*in04 qmi_wwan\n"
+              "alias usb:v*p*d*dc*dsc*dp*ic08isc06ip50in* usb_storage\n");
+    fake_file("/etc/wireless/usb", "#!/bin/sh\n"
+              "if [ \"$1\" = \"mt7601u-gk7205v200-camhi\" ]; then\n\tset_gpio 7 1\n\tmodprobe mt7601u\n\texit 0\nfi\n"
+              "# Generic MT7601U\nif [ \"$1\" = \"mt7601u-generic\" ]; then\n\tmodprobe mt7601u\n\texit 0\nfi\n"
+              "if [ \"$1\" = \"rt2800usb-generic\" ]; then\n\tmodprobe rt2800usb\n\texit 0\nfi\nexit 1\n");
+    fake_file("/etc/wireless/modem", "#!/bin/sh\n"
+              "if [ \"$1\" = \"rndis-generic\" ]; then\n\tmodprobe rndis_host\n\tsleep 5\n\texit 0\nfi\n"
+              "if [ \"$1\" = \"rndis-e3372h\" ]; then\n"
+              "\tusb_modeswitch -v 0x12d1 -p 0x1f01 -c /usr/share/usb_modeswitch/12d1:1f01\n"
+              "\tmodprobe rndis_host\n\texit 0\nfi\n"
+              "if [ \"$1\" = \"ec200n-gk7205v200-vixand\" ]; then\n\tset_gpio 9 1\n\tmodprobe rndis_host\n"
+              "\tmodprobe usbserial vendor=0x2c7c product=0x0125\n\texit 0\nfi\nexit 1\n");
+    fake_file("/sys/bus/usb/devices/1-1/idVendor", "148f\n");
+    fake_file("/sys/bus/usb/devices/1-1/idProduct", "7601\n");
+    fake_file("/sys/bus/usb/devices/1-1/manufacturer", "MediaTek\n");
+    fake_file("/sys/bus/usb/devices/1-1/product", "802.11 n WLAN\n");
+    fake_file("/sys/bus/usb/devices/1-1:1.0/modalias", "usb:v148Fp7601d0000dc00dsc00dp00icFFiscFFipFFin00\n");
+    fake_file("/sys/bus/usb/devices/1-2/idVendor", "12d1\n");
+    fake_file("/sys/bus/usb/devices/1-2/idProduct", "1f01\n");
+    fake_file("/sys/bus/usb/devices/1-2/product", "HUAWEI_MOBILE\n");
+    fake_file("/sys/bus/usb/devices/1-2:1.0/modalias", "usb:v12D1p1F01d0102dc00dsc00dp00ic08isc06ip50in00\n");
+    fake_file("/sys/bus/usb/devices/1-3/idVendor", "2c7c\n");
+    fake_file("/sys/bus/usb/devices/1-3/idProduct", "0125\n");
+    fake_file("/sys/bus/usb/devices/1-3:1.0/modalias", "usb:v2C7Cp0125d0318dcEFdsc02dp01icFFiscFFipFFin00\n");
+    fake_file("/sys/bus/usb/devices/1-3:1.4/modalias", "usb:v2C7Cp0125d0318dcEFdsc02dp01icFFiscFFipFFin04\n");
+    fake_file("/sys/bus/usb/devices/1-4/idVendor", "0781\n");             /* a USB stick */
+    fake_file("/sys/bus/usb/devices/1-4/idProduct", "5581\n");
+    fake_file("/sys/bus/usb/devices/1-4:1.0/modalias", "usb:v0781p5581d0100dc00dsc00dp00ic08isc06ip50in00\n");
+    fake_answer("fw_printenv", 1, "");
+    wifi_info(&w);
+    CHECK(!w.ifname[0] && w.n_adapters == 1 && !strcmp(w.adapters[0].id, "148f:7601") &&
+          !strcmp(w.adapters[0].driver, "mt7601u") && !strcmp(w.adapters[0].profile, "mt7601u-generic") &&
+          !strcmp(w.adapters[0].name, "MediaTek 802.11 n WLAN") && !w.adapters[0].bound && !w.profile[0],
+          "a plugged MT7601U, no wlan0: %d %s %s %s", w.n_adapters, w.adapters[0].id, w.adapters[0].driver,
+          w.adapters[0].profile);
+    lte_info(&l);
+    CHECK(!l.ifname[0] && l.n_modems == 2, "two modems: %d", l.n_modems);
+    int e3372 = !strcmp(l.modems[0].id, "12d1:1f01") ? 0 : 1;
+    CHECK(!strcmp(l.modems[e3372].profile, "rndis-e3372h") && !strcmp(l.modems[1 - e3372].driver, "qmi_wwan") &&
+          !l.modems[1 - e3372].profile[0],
+          "e3372h (storage mode) by its id; a QMI modem with no profile (a board's GPIO profile naming it skipped)");
+    /* Joining loads the driver the firmware's way, the interface comes up. */
+    fake_answer("fw_printenv", 0, "");
+    fake_clear_log();
+    fake_on_run_mkdir("/etc/wireless/usb", "/sys/class/net/wlan0/wireless");
+    CHECK(wifi_set("", "HomeNet", "longenough", "mt7601u-generic", err, sizeof err) == 0, "joined: %s", err);
+    CHECK(fake_ran("fw_setenv wlandev mt7601u-generic\nfw_setenv wlanssid HomeNet\nfw_setenv wlanpass longenough\n"
+                   "/etc/wireless/usb mt7601u-generic\nifdown -f wlan0\nifup wlan0"), "the firmware's way: %s",
+          fake_log);
+    CHECK(wifi_set("", "HomeNet", "longenough", "nope-generic", err, sizeof err) < 0 && strstr(err, "no Wi-Fi profile"),
+          "an unknown profile is refused: %s", err);
+    CHECK(lte_set_profile("rndis-e3372h", err, sizeof err) == 0 && fake_ran("fw_setenv wlandev rndis-e3372h") &&
+          strstr(err, "next boot"), "modem profile: %s", err);
+    CHECK(lte_set_profile("mt7601u-generic", err, sizeof err) < 0, "a Wi-Fi profile is not a modem's");
     fake_done();
 }

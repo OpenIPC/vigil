@@ -19,6 +19,13 @@ time_t fake_time;
 char   fake_mounted[512];
 char   fake_umounted[256];
 int    fake_mount_errno, fake_umount_errno, fake_mount_errno_once;
+char   fake_klog[4096];
+
+static int f_klog(char *buf, size_t cap)
+{
+    snprintf(buf, cap, "%s", fake_klog);
+    return (int)strlen(buf);
+}
 char   fake_stdin[8192];
 char   fake_snap[4096];
 static char g_snap_prog[64], g_snap_path[256];
@@ -34,6 +41,14 @@ static void logf_(const char *line)
     snprintf(fake_log + n, sizeof fake_log - n, "%s\n", line);
 }
 
+static char g_onrun_prog[128], g_onrun_dir[256];
+
+void fake_on_run_mkdir(const char *prog, const char *path)
+{
+    snprintf(g_onrun_prog, sizeof g_onrun_prog, "%s", prog);
+    snprintf(g_onrun_dir, sizeof g_onrun_dir, "%s", path);
+}
+
 static int f_run(const char *const *argv, const char *input, int timeout_s, char *out, size_t cap)
 {
     (void)timeout_s;
@@ -44,6 +59,10 @@ static int f_run(const char *const *argv, const char *input, int timeout_s, char
     }
     logf_(line);
     snprintf(fake_stdin, sizeof fake_stdin, "%s", input ? input : "");
+    if (g_onrun_prog[0] && !strcmp(argv[0], g_onrun_prog)) {
+        fake_mkdir(g_onrun_dir);
+        g_onrun_prog[0] = 0;
+    }
     const char *base = strrchr(argv[0], '/');
     base = base ? base + 1 : argv[0];
     if (g_snap_prog[0] && !strcmp(base, g_snap_prog)) {
@@ -170,7 +189,7 @@ void fake_init(void)
     sys_set_root(fake_root);
     static const sys_ops_t ops = { .run = f_run, .have = f_have, .sethostname = f_sethostname,
                                    .settime = f_settime, .mount = f_mount, .umount = f_umount,
-                                   .reread_parts = f_reread, .ifaddr = f_ifaddr };
+                                   .reread_parts = f_reread, .ifaddr = f_ifaddr, .klog = f_klog };
     sys_set_ops(&ops);
     memset(g_ans, 0, sizeof g_ans);
     memset(g_have, 0, sizeof g_have);
@@ -178,6 +197,7 @@ void fake_init(void)
     fake_log[0] = fake_hostname[0] = fake_mounted[0] = fake_umounted[0] = fake_stdin[0] = 0;
     fake_time = 0;
     fake_mount_errno = fake_umount_errno = fake_mount_errno_once = 0;
+    fake_klog[0] = 0;
 }
 
 void fake_done(void)

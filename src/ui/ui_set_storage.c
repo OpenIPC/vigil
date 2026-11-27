@@ -934,8 +934,10 @@ static void *disks_open(ui_set_t *s, lv_obj_t *pane)
         snprintf(opts + l, sizeof opts - l, "%s%s", i ? "\n" : "", fss[i]);
     }
     dk->fmt_fs = ui_set_dropdown(s, ui_set_row(dk->fmt, "Filesystem",
-                                               "exFAT for large disks; FAT32 where other devices must read it. "
-                                               "ext4 only where the firmware can make it."),
+                                               "ext4 (the default where the firmware can make it) keeps a "
+                                               "journal: a power cut costs the open segment, not the disk. "
+                                               "exFAT where a computer must read the disk; FAT32 for old "
+                                               "devices."),
                                  nf ? opts : "exfat", 0, 200);
     lv_obj_t *nbox = ui_set_row(dk->fmt, "Type the name to confirm", NULL);
     dk->fmt_name = ui_set_text(s, nbox, "", 31, 200);

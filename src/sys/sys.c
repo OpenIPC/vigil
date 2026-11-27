@@ -20,6 +20,7 @@
 #include <net/if.h>
 #include <netinet/in.h>
 #include <sys/ioctl.h>
+#include <sys/klog.h>
 #include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -326,9 +327,28 @@ static int real_ifaddr(const char *ifname, char *addr, char *mask, size_t cap)
     return rc;
 }
 
+static int real_klog(char *buf, size_t cap)
+{
+    if (cap < 2) return -1;
+    int size = klogctl(10 /* SYSLOG_ACTION_SIZE_BUFFER */, NULL, 0);
+    if (size <= 0) size = 1 << 17;
+    char *all = malloc((size_t)size + 1);
+    if (!all) return -1;
+    int n = klogctl(3 /* SYSLOG_ACTION_READ_ALL */, all, size);
+    if (n < 0) {
+        free(all);
+        return -1;
+    }
+    size_t keep = (size_t)n < cap - 1 ? (size_t)n : cap - 1;
+    memcpy(buf, all + n - keep, keep);
+    buf[keep] = 0;
+    free(all);
+    return (int)keep;
+}
+
 static const sys_ops_t REAL = {
     .run = real_run, .have = real_have, .sethostname = real_sethostname, .settime = real_settime,
-    .mount = real_mount, .umount = real_umount, .reread_parts = real_reread_parts, .ifaddr = real_ifaddr,
+    .mount = real_mount, .umount = real_umount, .reread_parts = real_reread_parts, .ifaddr = real_ifaddr, .klog = real_klog,
 };
 
 static sys_ops_t g_ops = REAL;
@@ -339,7 +359,7 @@ void sys_set_ops(const sys_ops_t *ops)
     if (!ops) return;
 #define TAKE(m) if (ops->m) g_ops.m = ops->m
     TAKE(run); TAKE(have); TAKE(sethostname); TAKE(settime); TAKE(mount); TAKE(umount);
-    TAKE(reread_parts); TAKE(ifaddr);
+    TAKE(reread_parts); TAKE(ifaddr); TAKE(klog);
 #undef TAKE
 }
 

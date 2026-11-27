@@ -49,6 +49,10 @@ typedef struct {
     int (*reread_parts)(const char *dev);
     /* The IPv4 address and netmask of interface `ifname` ("" when none). */
     int (*ifaddr)(const char *ifname, char *addr, char *mask, size_t cap);
+    /* The kernel's log (the newest `cap` - 1 bytes of it), as dmesg shows
+     * it; length or -1. Some refusals (a mount's EINVAL) say why only
+     * there. */
+    int (*klog)(char *buf, size_t cap);
 } sys_ops_t;
 
 /* Replace the actions; NULL members (or a NULL ops) are the real ones. */

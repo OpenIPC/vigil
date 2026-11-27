@@ -82,11 +82,33 @@ int net_restore(const char *ifname, const char *old_text, char *err, size_t cap)
 
 /* ---- Wi-Fi and LTE ---------------------------------------------------------------- */
 
+/* OpenIPC loads a Wi-Fi or modem driver only when the U-Boot environment's
+ * `wlandev` names a profile of /etc/wireless/usb (Wi-Fi: "mt7601u-generic",
+ * "rt2800usb-generic", ...) or /etc/wireless/modem ("rndis-generic",
+ * "ec25", ...); S40network runs it at boot, then brings the interface up.
+ * Without it a plugged adapter has no driver and no interface. So a USB
+ * device is recognised by its interfaces' modalias, matched against the
+ * firmware's modules.alias (only drivers this firmware has), and the
+ * profile is the one that loads that driver (Wi-Fi: the "-generic" one;
+ * modems: one that names the device's USB id, else by its driver). */
 typedef struct {
-    char ifname[16];                /* "" when there is no wireless interface */
-    char ssid[64];                  /* the U-Boot environment's wlanssid */
-    int  has_password;
-    int  can_scan;                  /* iw is there */
+    char id[10];                    /* "148f:7601" */
+    char name[64];                  /* the device's manufacturer and product */
+    char driver[32];                /* the module for it in this firmware; "" none */
+    char profile[48];               /* the firmware's profile that loads it; "" none */
+    int  bound;                     /* a driver has it already */
+} usb_radio_t;
+
+#define USB_RADIOS_MAX 4
+
+typedef struct {
+    char        ifname[16];         /* "" when there is no wireless interface */
+    char        ssid[64];           /* the U-Boot environment's wlanssid */
+    int         has_password;
+    int         can_scan;           /* iw is there */
+    char        profile[48];        /* wlandev, "" unset */
+    usb_radio_t adapters[USB_RADIOS_MAX];   /* USB Wi-Fi adapters plugged in */
+    int         n_adapters;
 } wifi_info_t;
 
 typedef struct {
@@ -95,25 +117,43 @@ typedef struct {
     int  secured;
 } wifi_net_t;
 
-/* The first interface with /sys/class/net/<if>/wireless (wlan0, ...). */
+/* The first interface with /sys/class/net/<if>/wireless (wlan0, ...), and
+ * the USB Wi-Fi adapters, with or without one. */
 void wifi_info(wifi_info_t *w);
 
 /* Networks in range (`iw dev <if> scan`); -1 with `err` without iw. */
 int wifi_scan(const char *ifname, wifi_net_t *out, int max, char *err, size_t cap);
 
 /* Store the network to join (fw_setenv wlanssid / wlanpass, as the
- * firmware's own onboarding does) and restart the interface. An empty
- * password is an open network. */
-int wifi_set(const char *ifname, const char *ssid, const char *password, char *err, size_t cap);
+ * firmware's own onboarding does) and bring the interface up. An empty
+ * password is an open network. `profile` (may be "" or NULL: unchanged)
+ * goes to wlandev; with no wireless interface yet, its driver is loaded
+ * the firmware's way (/etc/wireless/usb <profile>) and the interface
+ * waited for. Returns 0 joined (or joining), 1 saved but the adapter
+ * starts only at the next boot (`err` says so), -1 with `err`. */
+int wifi_set(const char *ifname, const char *ssid, const char *password, const char *profile, char *err,
+             size_t cap);
 
 typedef struct {
-    char ifname[16];                /* "" when no modem interface is there */
-    char driver[32];                /* rndis_host, cdc_ether, qmi_wwan, ... */
-    char profile[48];               /* the U-Boot environment's wlandev, when it names a modem */
+    char        ifname[16];         /* "" when no modem interface is there */
+    char        driver[32];         /* rndis_host, cdc_ether, qmi_wwan, ... */
+    char        profile[48];        /* wlandev, when it names a modem profile */
+    usb_radio_t modems[USB_RADIOS_MAX];     /* USB modems plugged in */
+    int         n_modems;
 } lte_info_t;
 
 /* A modem's network interface: wwan*, or usb0 / eth1 from a USB modem
- * driver (OpenIPC brings modems up as RNDIS/ECM, /etc/wireless/modem). */
+ * driver (OpenIPC brings modems up as RNDIS/ECM, /etc/wireless/modem),
+ * and the USB modems plugged in. */
 void lte_info(lte_info_t *l);
+
+/* wlandev = `profile` (a modem profile of /etc/wireless/modem): the
+ * firmware loads the modem at the next boot. Note that Wi-Fi and modem
+ * share wlandev. 0, or -1 with `err`. */
+int lte_set_profile(const char *profile, char *err, size_t cap);
+
+/* The USB Wi-Fi adapters (`modems` 0) or modems (1) plugged in: wifi_info
+ * and lte_info's lists. */
+int usb_radios(int modems, usb_radio_t *out, int max);
 
 #endif /* SYS_NET_H */

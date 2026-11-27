@@ -503,10 +503,11 @@ and `GET /api/v1/jobs/7` says how it goes:
 | `PUT /api/v1/network/ethernet` | Any of the `config` keys (the others stay) → `202` `{"job", "confirm_within": 60}`. Undone after 60 s unless confirmed; `"confirm": false` skips that. `400` with the field on a bad address, netmask, gateway, DNS or MTU. |
 | `POST /api/v1/network/ethernet/confirm` | Keep the change; `409` when none waits. |
 | `POST /api/v1/network/ethernet/revert` | Undo it now. |
-| `GET /api/v1/network/wifi` | `{"present": false}`, or the interface, `ssid`, `password_set`, `can_scan` and its `status`. |
-| `PUT /api/v1/network/wifi` | `{"ssid", "password"}` → `202`; `409` without an adapter. |
+| `GET /api/v1/network/wifi` | `{"present", "interface", "profile" (wlandev), "adapters": [{"usb_id", "name", "driver", "profile", "bound"}]}`, and with an adapter `ssid`, `password_set`, `can_scan`, and the interface's `status`. |
+| `PUT /api/v1/network/wifi` | `{"ssid", "password", "profile"}` → `202`; `profile` (default: the adapter's, when `wlandev` is unset) becomes `wlandev`, and with no interface yet its driver is loaded the firmware's way. `409` without an adapter. |
 | `GET /api/v1/network/wifi/scan` | `{"networks": [{"ssid", "signal", "secured"}]}`; `501` without `iw`. |
-| `GET /api/v1/network/lte` | `{"present", "interface", "driver", "profile", "status"}` |
+| `GET /api/v1/network/lte` | `{"present", "interface", "driver", "profile", "modems": [{"usb_id", "name", "driver", "profile", "bound"}], "status"}` |
+| `PUT /api/v1/network/lte` | `{"profile"}`: `wlandev` = that modem profile, for the next boot. |
 | `GET /api/v1/network/services` | The last DDNS update, mail and alarm post (`{"enabled", "last", "ok", "result"}`), `upnp` (`"active": false`), `p2p` (`"available": false`), and whether `curl` is there. |
 | `POST /api/v1/network/ddns/update`, `/network/smtp/test` | `202`: an update now, a test mail with the settings in force. |
 | `GET /api/v1/system/time` | `{"time", "local", "zone", "tz", "rule": {"std_offset", "dst", "dst_offset", "start": {"month", "week", "wday", "minute"}, "end": {…}}, "rtc", "ntp": {"enabled", "interval", "servers", "last_try", "last_ok", "result"}}`; offsets in minutes east of UTC. |

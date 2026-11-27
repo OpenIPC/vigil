@@ -33,6 +33,7 @@ extern char   fake_umounted[256];
 extern int    fake_mount_errno;     /* nonzero: mount() fails with it */
 extern int    fake_umount_errno;
 extern int    fake_mount_errno_once; /* the next mount() only fails with it */
+extern char   fake_klog[4096];        /* what the kernel log holds (ops->klog) */
 /* What the last run of each program got on stdin (one buffer, the last). */
 extern char   fake_stdin[8192];
 
@@ -43,6 +44,9 @@ char *fake_read(const char *path);      /* malloc'd, NULL when missing */
 int   fake_exists(const char *path);
 void  fake_mkdir(const char *path);
 void  fake_answer(const char *prog, int status, const char *output);
+/* When `prog` next runs, directory `path` appears under the root (a
+ * driver's interface coming up). */
+void  fake_on_run_mkdir(const char *prog, const char *path);
 /* `prog` is (not) installed (sys_have); every program is by default. */
 void  fake_have(const char *prog, int there);
 int   fake_ran(const char *substr);

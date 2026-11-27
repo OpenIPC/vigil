@@ -183,10 +183,20 @@ typedef struct {
     char address[16], netmask[16], gateway[16], dns1[46], dns2[46];
 } ui_net_status_t;
 
+/* A USB Wi-Fi adapter or modem plugged in, and the firmware's profile
+ * (U-Boot wlandev) that loads its driver. */
 typedef struct {
-    char ifname[16];                /* "": no Wi-Fi adapter */
-    char ssid[64];
-    int  password_set, can_scan;
+    char id[10], name[64], driver[32], profile[48];
+    int  bound;
+} ui_radio_t;
+
+typedef struct {
+    char       ifname[16];          /* "": no wireless interface (yet) */
+    char       ssid[64];
+    int        password_set, can_scan;
+    char       profile[48];         /* wlandev */
+    ui_radio_t adapters[4];
+    int        n_adapters;
 } ui_wifi_t;
 
 typedef struct {
@@ -195,7 +205,9 @@ typedef struct {
 } ui_wifi_net_t;
 
 typedef struct {
-    char ifname[16], driver[32], profile[48];
+    char       ifname[16], driver[32], profile[48];
+    ui_radio_t modems[4];
+    int        n_modems;
 } ui_lte_t;
 
 typedef struct {
@@ -262,8 +274,10 @@ typedef struct {
     int  (*net_revert)(void);
     void (*wifi_get)(ui_wifi_t *w, ui_net_status_t *st);
     int  (*wifi_scan)(ui_wifi_net_t *out, int max, char *err, size_t cap);
-    int  (*wifi_set)(const char *ssid, const char *password, char *err, size_t cap);
+    /* `profile` ("" or NULL: as it is) becomes wlandev; a job id */
+    int  (*wifi_set)(const char *ssid, const char *password, const char *profile, char *err, size_t cap);
     void (*lte_get)(ui_lte_t *l, ui_net_status_t *st);
+    int  (*lte_profile)(const char *profile, char *msg, size_t cap);   /* 0, or < 0 with msg */
 
     /* services: the last DDNS update, mail, alarm post, network storage mount */
     void (*services)(ui_svc_t *ddns, ui_svc_t *smtp, ui_svc_t *alarm, ui_svc_t *nas);
