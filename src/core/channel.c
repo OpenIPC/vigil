@@ -22,6 +22,10 @@
  * the main session, so recording goes on unbroken. Each session keeps its
  * own state; the channel's status is that of the one whose picture is on
  * screen.
+ *
+ * Each session also hands its AUs to the taps open on its stream
+ * (stream_tap.h: vigild's RTSP and NETIP servers), with its GOP so far
+ * for a tap that has just opened; a tap keeps its stream's GOP too.
  */
 #define _DEFAULT_SOURCE
 #include <errno.h>
@@ -48,6 +52,7 @@
 #include "schema.h"
 #include "seg_writer.h"
 #include "source.h"
+#include "stream_tap.h"
 
 #define NO_DATA_SECS       5        /* reconnect after this long without video */
 #define LIVE_SECS          3        /* "live" while video arrived this recently */
@@ -489,31 +494,40 @@ static void dec_feed(sess_t *s, const vg_au_t *au)
     pthread_mutex_unlock(c->dec_lock);
 }
 
-/* Keep AU au in session s's GOP, if its GOP is kept: the sub-stream's
- * always, the main stream's while the tile is on screen. */
-static void gop_keep(sess_t *s, const vg_au_t *au)
+/* Keep AU au in session s's GOP, if its GOP is kept: for the decoder
+ * (`dec`), the sub-stream's always and the main stream's while the tile
+ * is on screen; for a server's taps (stream_tap.h), while one is open, or
+ * while one stands by and the cache has room to spare. Returns whether
+ * the GOP holds au now, as its last AU. */
+static int gop_keep(sess_t *s, const vg_au_t *au, int dec)
 {
     channel_t *c = s->c;
-    if (s->id == S_MAIN && !atomic_load(&c->on_screen)) {
+    int need = dec && (s->id == S_SUB || atomic_load(&c->on_screen));
+    int tap = stream_tap_keep(c->idx, s->id == S_SUB);
+    /* Spare room: a GOP only a server might want waits while the caches
+     * hold half their budget, so it never takes what a decoder needs. */
+    if (!need && tap == TAP_KEEP_SPARE && au->key && gop_cache_used() > gop_cache_budget() / 2) tap = 0;
+    if (!need && !tap) {
         if (s->gop.cap) gop_cache_free(&s->gop);
         atomic_store(&s->gop_ok, 0);
-        return;
+        return 0;
     }
     int whole = gop_cache_ready(&s->gop);          /* the last GOP, until this keyframe */
     int rc = gop_cache_add(&s->gop, au, s->norm.info_gen);
     atomic_store(&s->gop_ok, gop_cache_ready(&s->gop));
     if (rc == GOP_KEPT || rc == GOP_IDLE) {
         if (au->key && whole) s->gop_told = 0;     /* said again once one fitted */
-        return;
+        return rc == GOP_KEPT;
     }
-    if (s->gop_told) return;
+    if (s->gop_told || (!need && tap != TAP_KEEP_MUST)) return 0;
     s->gop_told = 1;
     if (rc == GOP_OVER_CAP)
         vg_log("CAM%d%s: its GOP is over %zu KiB, not kept: a switch to it waits for a keyframe",
                c->idx + 1, s->id == S_SUB ? " sub" : "", s->gop.limit >> 10);
     else
         vg_log("CAM%d%s: the %zu KiB for every channel's GOP are taken: a switch to it waits for a keyframe",
-               c->idx + 1, s->id == S_SUB ? " sub" : "", (size_t)GOP_CACHE_BUDGET >> 10);
+               c->idx + 1, s->id == S_SUB ? " sub" : "", gop_cache_budget() >> 10);
+    return 0;
 }
 
 /* Close the open segment (caller holds c->lock); report a lost tail. */
@@ -677,10 +691,10 @@ static void on_au(void *user, const vg_au_t *au)
     sess_t *s = user;
     channel_t *c = s->c;
 
-    if (g_can_decode && !s->src->ops->self_displayed) {
-        gop_keep(s, au);
-        dec_feed(s, au);
-    }
+    int dec = g_can_decode && !s->src->ops->self_displayed;
+    int in_gop = gop_keep(s, au, dec);
+    if (dec) dec_feed(s, au);
+    stream_tap_feed(c->idx, s->id == S_SUB, au, &s->norm.info, s->norm.info_gen, in_gop ? &s->gop : NULL);
     if (au->key && s->norm.info_gen) {
         pthread_mutex_lock(c->lock);
         s->width = s->norm.info.width;
@@ -924,7 +938,9 @@ static int sess_start(channel_t *c, int id, const char *url)
     s->fps = s->width = s->height = 0;
     s->codec = VG_CODEC_NONE;
     pthread_mutex_unlock(c->lock);
+    stream_tap_present(c->idx, id == S_SUB, 1);
     if (pthread_create(&s->thread, NULL, sess_thread, s) != 0) {
+        stream_tap_present(c->idx, id == S_SUB, 0);
         source_destroy(s->src);
         s->src = NULL;
         au_norm_free(&s->norm);
@@ -942,6 +958,7 @@ static void sess_reap(channel_t *c, int id)
     sess_t *s = &c->s[id];
     if (!s->thread_up) return;
     pthread_join(s->thread, NULL);
+    stream_tap_present(c->idx, id == S_SUB, 0);
     pthread_mutex_lock(c->lock);
     s->thread_up = 0;
     s->live = 0;

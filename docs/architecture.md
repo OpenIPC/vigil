@@ -159,6 +159,17 @@ that keyframe. A camera has at most two connections; full screen, the
 display and the recording share the main one. A view change never touches
 the main session, so recording goes on in the same segment.
 
+The same access units go to vigild's own servers, which pass the cameras
+on to other clients (`stream_tap.c`): a server opens a tap on a channel's
+main or sub-stream and its callback gets each AU on the session thread
+(it copies and returns; it must never block the camera). A tap that opens
+mid-GOP gets the GOP so far first, so a client starts at a keyframe at
+once. An open tap keeps its stream's GOP like a tile on screen does, and
+while a server listens (`stream_tap_standby`) every stream's GOP is kept
+as long as the caches hold less than half their budget, so the decoders'
+GOPs come first. A tap outlives its camera's reconnects and goes on at
+the next keyframe.
+
 A decoder the platform cannot give (out of media memory or decoder
 channels) is retried after 10 s, or as soon as another channel closes its
 decoder.

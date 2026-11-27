@@ -39,6 +39,7 @@
 #include "schema_yaml.h"
 #include "seg_writer.h"
 #include "sps.h"
+#include "stream_tap.h"
 
 static int g_fail, g_checks;
 #define CHECK(cond, ...) do { ++g_checks; if (!(cond)) { ++g_fail; \
@@ -2196,6 +2197,184 @@ static void test_channel_instant_switch(void)
     g_dec_slots = 0;
 }
 
+/* ---- stream taps: a camera's AUs for vigild's own servers ---------------------- */
+
+#define TAP_LOG 512
+typedef struct {
+    pthread_mutex_t lock;
+    int             n, keys;
+    uint64_t        pts[TAP_LOG];
+    int             key[TAP_LOG];
+    vg_codec_t      codec;
+    unsigned        width;
+    atomic_int      calls;
+} tap_log_t;
+
+static void tap_rec(void *user, const vg_au_t *au, const vg_stream_info_t *si, vg_codec_t codec)
+{
+    tap_log_t *l = user;
+    pthread_mutex_lock(&l->lock);
+    if (l->n < TAP_LOG) {
+        l->pts[l->n] = au->pts_us;
+        l->key[l->n] = au->key;
+        ++l->n;
+    }
+    l->keys += au->key;
+    l->codec = codec;
+    l->width = si->width;
+    pthread_mutex_unlock(&l->lock);
+    atomic_fetch_add(&l->calls, 1);
+}
+
+static void tap_log_init(tap_log_t *l)
+{
+    memset(l, 0, sizeof *l);
+    pthread_mutex_init(&l->lock, NULL);
+}
+
+static int tap_count(tap_log_t *l)
+{
+    pthread_mutex_lock(&l->lock);
+    int n = l->n;
+    pthread_mutex_unlock(&l->lock);
+    return n;
+}
+
+typedef struct {
+    volatile int stop;
+    atomic_int   opens;
+} tap_churn_t;
+
+static void tap_nop(void *user, const vg_au_t *au, const vg_stream_info_t *si, vg_codec_t codec)
+{
+    (void)au; (void)si; (void)codec;
+    atomic_fetch_add((atomic_int *)user, 1);
+}
+
+static void *tap_churn(void *arg)
+{
+    tap_churn_t *c = arg;
+    atomic_int calls = 0;
+    while (!c->stop) {
+        stream_tap_t *t = stream_tap_open(0, rand() & 1, tap_nop, &calls);
+        if (t) atomic_fetch_add(&c->opens, 1);
+        usleep((unsigned)(rand() % 3000));
+        stream_tap_close(t);
+    }
+    return NULL;
+}
+
+static void test_stream_tap(void)
+{
+    vg_stream_info_t si;
+    vg_codec_t codec;
+    tap_log_t a, b;
+    tap_log_init(&a);
+    tap_log_init(&b);
+    CHECK(stream_tap_open(0, 0, tap_rec, &a) == NULL && stream_tap_info(0, 0, &si, &codec) < 0,
+          "no channel: no tap, no stream");
+    CHECK(stream_tap_open(CHANNEL_MAX, 0, tap_rec, &a) == NULL && stream_tap_open(0, 2, tap_rec, &a) == NULL,
+          "out of range: no tap");
+
+    int port = cam_start("majestic_1080p.h265", "testsrc_640x360.h264");
+    if (!port) return;
+    char url[64];
+    snprintf(url, sizeof url, "netip://127.0.0.1:%d/?ch=0&stream=main", port);
+    /* Off screen: the decoders keep no main-stream GOP of their own. */
+    vg_rect_t none[CHANNEL_MAX] = { { 0 } };
+    channels_config_t cc = { .urls = { url }, .n = 1, .seg_secs = 60 };
+    CHECK(channels_start(&cc, none) == 0, "start");
+    WAIT_FOR(stream_tap_info(0, 0, &si, &codec) == 0 && stream_tap_info(0, 1, NULL, NULL) == 0, 5000);
+    CHECK(stream_tap_info(0, 0, &si, &codec) == 0 && codec == VG_CODEC_H265 && si.width == 1920,
+          "main stream: H.265 1920 (%s %u)", vg_codec_name(codec), si.width);
+    CHECK(stream_tap_info(0, 1, &si, &codec) == 0 && codec == VG_CODEC_H264 && si.width == 640,
+          "sub-stream: H.264 640 (%s %u)", vg_codec_name(codec), si.width);
+    stream_tap_ps_t ps;
+    CHECK(stream_tap_params(0, 0, &ps) == 3 && (ps.ps[0][0] >> 1 & 0x3f) == 32 && (ps.ps[1][0] >> 1 & 0x3f) == 33 &&
+              (ps.ps[2][0] >> 1 & 0x3f) == 34, "main: VPS, SPS, PPS");
+    CHECK(stream_tap_params(0, 1, &ps) == 2 && (ps.ps[0][0] & 0x1f) == 7 && (ps.ps[1][0] & 0x1f) == 8,
+          "sub: SPS, PPS");
+    CHECK(stream_tap_keep(0, 0) == TAP_KEEP_NONE, "no tap, no standby: nothing kept for one");
+
+    /* The first tap on the main stream: no GOP kept, it starts at the
+     * next keyframe; then its stream's GOP is kept. */
+    stream_tap_t *ta = stream_tap_open(0, 0, tap_rec, &a);
+    CHECK(ta && stream_tap_keep(0, 0) == TAP_KEEP_MUST, "a tap: its GOP kept");
+    WAIT_FOR(a.keys >= 2, 3000);
+    CHECK(a.n > 0 && a.key[0] && a.codec == VG_CODEC_H265 && a.width == 1920,
+          "the first AU a tap gets is a keyframe, with the stream's codec and size");
+    /* A second tap in the middle of a GOP: the GOP so far, at once. */
+    WAIT_FOR(atomic_load(&g_cam_since_key[0]) >= 8, 2000);
+    pthread_mutex_lock(&a.lock);
+    int a_before = a.n;
+    uint64_t last_key = 0;
+    for (int i = 0; i < a.n; ++i)
+        if (a.key[i]) last_key = a.pts[i];
+    pthread_mutex_unlock(&a.lock);
+    stream_tap_t *tb = stream_tap_open(0, 0, tap_rec, &b);
+    WAIT_FOR(tap_count(&b) > 0, 1000);
+    pthread_mutex_lock(&a.lock);
+    pthread_mutex_lock(&b.lock);
+    CHECK(b.n > 1 && b.key[0] && b.pts[0] == last_key,
+          "a tap opened mid-GOP starts with the GOP so far, at its keyframe (%d AUs)", b.n);
+    int same = 0, from = -1;
+    for (int i = 0; i < a.n && from < 0; ++i)
+        if (a.pts[i] == b.pts[0]) from = i;
+    for (int i = 0; from >= 0 && i < b.n && from + i < a.n; ++i) same += a.pts[from + i] == b.pts[i];
+    CHECK(from >= 0 && from < a_before && same == (b.n < a.n - from ? b.n : a.n - from),
+          "in the order the stream had (%d of %d)", same, b.n);
+    pthread_mutex_unlock(&b.lock);
+    pthread_mutex_unlock(&a.lock);
+
+    /* Closed: never called again. */
+    stream_tap_close(tb);
+    int bc = atomic_load(&b.calls);
+    usleep(200 * 1000);
+    CHECK(atomic_load(&b.calls) == bc, "a closed tap is not called (%d, %d)", bc, atomic_load(&b.calls));
+    stream_tap_close(ta);
+    CHECK(stream_tap_keep(0, 0) == TAP_KEEP_NONE, "the last tap closed: its GOP no longer wanted");
+
+    /* Standing by: the main stream's GOP is kept off screen too, so the
+     * first tap of it starts at once. */
+    stream_tap_standby(1);
+    CHECK(stream_tap_keep(0, 0) == TAP_KEEP_SPARE, "standing by");
+    usleep(600 * 1000);
+    tap_log_t c;
+    tap_log_init(&c);
+    WAIT_FOR(atomic_load(&g_cam_since_key[0]) >= 8, 2000);
+    stream_tap_t *tc = stream_tap_open(0, 0, tap_rec, &c);
+    WAIT_FOR(tap_count(&c) > 0, 1000);
+    CHECK(c.n > 1 && c.key[0], "standing by: the first tap gets the GOP so far (%d AUs)", c.n);
+    stream_tap_close(tc);
+    stream_tap_standby(0);
+
+    /* Taps opened and closed from several threads while the stream runs. */
+    tap_churn_t ch = { 0 };
+    pthread_t th[4];
+    for (int i = 0; i < 4; ++i) pthread_create(&th[i], NULL, tap_churn, &ch);
+    usleep(1000 * 1000);
+    ch.stop = 1;
+    for (int i = 0; i < 4; ++i) pthread_join(th[i], NULL);
+    CHECK(atomic_load(&ch.opens) > 100 && stream_tap_keep(0, 0) == TAP_KEEP_NONE &&
+              stream_tap_keep(0, 1) == TAP_KEEP_NONE, "%d taps opened and closed from 4 threads",
+          atomic_load(&ch.opens));
+
+    /* A tap outlives its channel's stop, and gets nothing after it. */
+    tap_log_t d;
+    tap_log_init(&d);
+    stream_tap_t *td = stream_tap_open(0, 1, tap_rec, &d);
+    WAIT_FOR(tap_count(&d) > 0, 1000);
+    channels_stop();
+    CHECK(stream_tap_info(0, 1, NULL, NULL) < 0 && stream_tap_open(0, 1, tap_rec, &d) == NULL,
+          "stopped: the stream is gone");
+    int dc = atomic_load(&d.calls);
+    usleep(100 * 1000);
+    CHECK(dc > 0 && atomic_load(&d.calls) == dc, "nothing after the stop");
+    stream_tap_close(td);
+    CHECK(gop_cache_used() == 0, "every GOP given back (%zu)", gop_cache_used());
+    cam_stop();
+}
+
 /* A 16:9 camera whose sub-stream is anamorphic D1 (704x576, claiming square
  * pixels): the sub-stream is shown at the main stream's 16:9, before and
  * after a switch to full screen; stretch, at once 0:0. */
@@ -2860,6 +3039,7 @@ int main(int argc, char **argv)
     test_sub_url();
     test_channel_substream();
     test_channel_instant_switch();
+    test_stream_tap();
     test_channel_aspect();
     test_netip_title_parse();
     test_channel_stream_states();

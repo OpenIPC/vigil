@@ -71,6 +71,7 @@ void gop_cache_get(const gop_cache_t *g, unsigned i, vg_au_t *au);
 /* Bytes all caches hold now, and their budget. Set the budget before
  * caching starts (tests). */
 size_t gop_cache_used(void);
+size_t gop_cache_budget(void);
 void   gop_cache_set_budget(size_t bytes);
 
 #endif /* GOP_CACHE_H */
