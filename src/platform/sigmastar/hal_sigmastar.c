@@ -19,6 +19,11 @@
  * output's own size, each tile scaled to it, so the video is not scaled
  * twice.
  *
+ * Margins (hal_display_set_margins, overscan.h) put everything inside the
+ * output's inner rectangle: the tiles are mapped into it (to_output), the
+ * UI layer and the pointer follow (sstar_fb_screen), the video layer's
+ * black background shows around it.
+ *
  * The picture goes into a window fitted inside the tile at the display
  * aspect ratio the core gives (hal_display_set_aspect, aspect_fit; the rest
  * of the tile shows the layer's black background), or the whole tile
@@ -46,6 +51,7 @@
 
 #include "aspect.h"
 #include "hal.h"
+#include "hal_audio.h"
 #include "hal_capture.h"
 #include "hal_decoder.h"
 #include "hal_display.h"
@@ -105,6 +111,9 @@ static const hal_caps_t g_caps = {
     /* the heap holds 16 decoders of 720p, fewer of larger pictures, and
      * mi_vdec may take only 4 (above) */
     .dec_shown_only = 1,
+    .margins = 1, .picture = 1,
+    /* HDMI sound: kept for when something plays (hal_audio_set_volume) */
+    .audio_out = 1,
     /* 64 Mbit/s of camera streams coming in. SigmaStar publishes no
      * SSR621Q datasheet or product brief; this is the figure every
      * SSR621Q recorder's spec sheet gives (and so, most likely, the
@@ -158,6 +167,8 @@ static struct {
 static unsigned g_sw, g_sh;         /* the screen: the UI's and the tiles' coordinates */
 static unsigned g_w, g_h;           /* the output: the video layer */
 static int g_mode = -1;             /* k_modes[], in force */
+static vg_margins_t g_margins;      /* hal_display_set_margins */
+static vg_rect_t g_inner;           /* what they leave of the output: the screen goes there */
 static unsigned char g_vdec_busy[VDEC_IDS];
 static unsigned g_vdec_freed[VDEC_IDS], g_vdec_frees;   /* when each was last freed */
 static int g_vdec_ids = VDEC_IDS;   /* lowered to what mi_vdec takes */
@@ -169,6 +180,7 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
 const hal_caps_t *hal_caps(void) { return &g_caps; }
 static void mem_baseline(void);
+static void picture_apply(void);
 
 static unsigned align_up(unsigned v, unsigned a) { return (v + a - 1) / a * a; }
 
@@ -283,9 +295,10 @@ int hal_init(unsigned w, unsigned h, const vg_mode_t *out)
     g_w = k_modes[mode].m.w;
     g_h = k_modes[mode].m.h;
     g_mode = mode;
+    g_inner = overscan_inner(g_w, g_h, &g_margins, 2);
     /* The UI layer to the output, also when that is the screen's size: a
      * stretch set by a vigild that ran before stays in fbdev.ko. */
-    if (sstar_fb_screen(g_w, g_h) < 0 && (g_w != w || g_h != h))
+    if (sstar_fb_screen(g_w, g_h, &g_inner) < 0 && (g_w != w || g_h != h))
         fprintf(stderr, "sigmastar: the UI layer is not scaled to %s\n", k_modes[mode].hdmi);
     hdmi_output(k_modes[mode].hdmi);
     fprintf(stderr, "sigmastar: display %ux%u (%s) on HDMI and VGA, screen %ux%u\n", g_w, g_h,
@@ -488,7 +501,7 @@ static void out_follow(int ch)
  * stretched tile at its own shape (win_of), so it is not. */
 static vg_rect_t to_output(const vg_rect_t *r)
 {
-    return aspect_map(r, g_sw, g_sh, g_w, g_h, 2);
+    return overscan_map(r, g_sw, g_sh, &g_inner, 2);       /* the margins' inner rectangle */
 }
 
 int hal_display_set_tile(int ch, const vg_rect_t *r)
@@ -589,6 +602,7 @@ static int switch_to(int mode)
     g_w = k_modes[mode].m.w;
     g_h = k_modes[mode].m.h;
     g_mode = mode;
+    g_inner = overscan_inner(g_w, g_h, &g_margins, 2);
     for (int ch = 0; ch < MAX_CH; ++ch) {
         if (!g_ch[ch].scr.w) continue;
         g_ch[ch].tile = to_output(&g_ch[ch].scr);
@@ -597,10 +611,11 @@ static int switch_to(int mode)
         if (port_place(ch) == 0) MI_DISP_ShowInputPort(DISP_LAYER, ch);
     }
     /* Without the UI scaled to it the mode is no use: the old one again. */
-    if (sstar_fb_screen(g_w, g_h) < 0) {
+    if (sstar_fb_screen(g_w, g_h, &g_inner) < 0) {
         fprintf(stderr, "sigmastar: the UI layer is not scaled to %s\n", k_modes[mode].hdmi);
         return -1;
     }
+    picture_apply();                            /* the device was off: its picture again */
     hdmi_output(k_modes[mode].hdmi);
     return 0;
 }
@@ -1310,9 +1325,10 @@ int hal_display_grab(const hal_pic_t *pic)
         t[ch].bw = g_ch[ch].crop_bw;
         t[ch].bh = g_ch[ch].crop_bh;
         if (!t[ch].on) continue;
-        /* the window on the output, as screen pixels of pic, even */
-        int x0 = (int)((long long)w.x * pic->w / g_w), x1 = (int)((long long)(w.x + w.w) * pic->w / g_w);
-        int y0 = (int)((long long)w.y * pic->h / g_h), y1 = (int)((long long)(w.y + w.h) * pic->h / g_h);
+        /* the window on the output, as screen pixels of pic (the margins
+         * taken off: the zero channel shows the screen), even */
+        vg_rect_t u = overscan_unmap(&w, &g_inner, pic->w, pic->h);
+        int x0 = u.x, x1 = u.x + u.w, y0 = u.y, y1 = u.y + u.h;
         x0 &= ~1;
         y0 &= ~1;
         x1 = x1 > (int)pic->w ? (int)pic->w : x1 & ~1;
@@ -1343,5 +1359,152 @@ int hal_display_grab(const hal_pic_t *pic)
         }
     }
     pthread_mutex_unlock(&g_grab_lock);
+    return 0;
+}
+
+/* ---- the output's adjustments: margins, picture, HDMI sound ---------------------------- */
+
+int hal_display_set_margins(const vg_margins_t *m)
+{
+    if (g_mode < 0) {                   /* before hal_init: kept for it */
+        g_margins = *m;
+        return 0;
+    }
+    pthread_mutex_lock(&g_lock);
+    if (m->top == g_margins.top && m->bottom == g_margins.bottom && m->left == g_margins.left &&
+        m->right == g_margins.right) {
+        pthread_mutex_unlock(&g_lock);
+        return 0;
+    }
+    g_margins = *m;
+    g_inner = overscan_inner(g_w, g_h, &g_margins, 2);
+    /* each tile's window to its place in the inner rectangle, as for a
+     * new mode (a larger one: a new decoder at a keyframe) */
+    for (int ch = 0; ch < MAX_CH; ++ch) {
+        if (!g_ch[ch].scr.w) continue;
+        g_ch[ch].tile = to_output(&g_ch[ch].scr);
+        if (g_ch[ch].codec == VG_CODEC_NONE) continue;
+        out_follow(ch);
+        if (port_place(ch) == 0) MI_DISP_ShowInputPort(DISP_LAYER, ch);
+    }
+    vg_rect_t in = g_inner;
+    pthread_mutex_unlock(&g_lock);
+    int rc = sstar_fb_screen(g_w, g_h, &in);
+    fprintf(stderr, "sigmastar: margins %u/%u/%u/%u %%: the screen at %d,%d %dx%d of %ux%u%s\n", m->top,
+            m->bottom, m->left, m->right, in.x, in.y, in.w, in.h, g_w, g_h, rc < 0 ? " (the UI layer did not follow)" : "");
+    return rc;
+}
+
+/*
+ * The picture: MI_DISP's HDMI and VGA parameters (open_mhal's
+ * HalDispIfSetDeviceHdmiParam: luma, contrast, hue and saturation through
+ * its non-linear curves to the colour engine, 50 the curves' unity;
+ * sharpness to the peaking filter, which needs the PQ tables: "Peaking is
+ * not set" without them) and the gamma table (33 points per colour,
+ * DISP_TOP's gamma, MI_DISP_DeviceSetGammaParam). The colour controls are
+ * the preset's own (the display starts at 50 each); the sharpness is an
+ * offset from the display's own, read back once (0 here), and the VGA
+ * gain stays as read. The display starts with the BT.709 matrix (HD), though
+ * MI_DISP_GetHdmiParam answers BT.601 (seen in qemu: the colour engine's
+ * registers after a set with BT.709 and the values read back are the ones
+ * it starts with; with BT.601 they differ), so that is the matrix set.
+ * HDMI and VGA share the one colour engine (open_mhal's
+ * HAL_DISP_COLOR_CSC_ID), both get the same.
+ * Locked, or before any other thread runs.
+ */
+static struct {
+    int                 read;           /* 1 the display's own were read, -1 could not be */
+    MI_DISP_HdmiParam_t hdmi0;
+    MI_DISP_VgaParam_t  vga0;
+    int                 set, changed;   /* hal_display_set_picture was called; not standard once */
+    vg_picture_t        p;
+} g_pic;
+
+static MI_U32 pic_adj(MI_U32 base, unsigned v)
+{
+    long r = (long)base + (long)v - 50;
+    return (MI_U32)(r < 0 ? 0 : r > 100 ? 100 : r);
+}
+
+static void csc_adj(MI_DISP_Csc_t *c, const vg_picture_t *p)
+{
+    c->eCscMatrix = E_MI_DISP_CSC_MATRIX_BT709_TO_RGB_PC;   /* as the display starts (above) */
+    c->u32Luma = p->luma;
+    c->u32Contrast = p->contrast;
+    c->u32Hue = p->hue;
+    c->u32Saturation = p->saturation;
+}
+
+static void picture_apply(void)
+{
+    if (!g_pic.set || g_mode < 0) return;
+    if (!g_pic.read) {
+        MI_S32 rh = MI_DISP_GetHdmiParam(DISP_DEV, &g_pic.hdmi0), rv = MI_DISP_GetVgaParam(DISP_DEV, &g_pic.vga0);
+        const MI_DISP_Csc_t *c = &g_pic.hdmi0.stCsc;
+        g_pic.read = rh == MI_SUCCESS && rv == MI_SUCCESS ? 1 : -1;
+        fprintf(stderr, "sigmastar: picture as started: HDMI matrix %d luma %u contrast %u hue %u saturation %u "
+                "sharpness %u gain %u, VGA luma %u contrast %u saturation %u sharpness %u gain %u (0x%x 0x%x)\n",
+                c->eCscMatrix, c->u32Luma, c->u32Contrast, c->u32Hue, c->u32Saturation, g_pic.hdmi0.u32Sharpness,
+                g_pic.hdmi0.u32Gain, g_pic.vga0.stCsc.u32Luma, g_pic.vga0.stCsc.u32Contrast,
+                g_pic.vga0.stCsc.u32Saturation, g_pic.vga0.u32Sharpness, g_pic.vga0.u32Gain, rh, rv);
+    }
+    if (g_pic.read < 0) return;
+    if (!g_pic.changed) return;         /* standard, never left: the display as it is */
+    MI_DISP_HdmiParam_t h = g_pic.hdmi0;
+    MI_DISP_VgaParam_t v = g_pic.vga0;
+    csc_adj(&h.stCsc, &g_pic.p);
+    csc_adj(&v.stCsc, &g_pic.p);
+    h.u32Sharpness = pic_adj(h.u32Sharpness, g_pic.p.sharpness);
+    v.u32Sharpness = pic_adj(v.u32Sharpness, g_pic.p.sharpness);
+    MI_S32 rh = MI_DISP_SetHdmiParam(DISP_DEV, &h), rv = MI_DISP_SetVgaParam(DISP_DEV, &v);
+    /* the gamma: off at 1.0 (as the display starts: pq.ini's gamma_en 0),
+     * a table otherwise */
+    MI_U8 r[33], g[33], b[33];
+    picture_gamma_curve(g_pic.p.gamma, 33, r);
+    memcpy(g, r, sizeof g);
+    memcpy(b, r, sizeof b);
+    MI_DISP_GammaParam_t gp = { .bEn = g_pic.p.gamma != 100, .u16EntryNum = 33,
+                                .pu8ColorR = r, .pu8ColorG = g, .pu8ColorB = b };
+    MI_S32 rg = MI_DISP_DeviceSetGammaParam(DISP_DEV, &gp);
+    if (rh != MI_SUCCESS || rv != MI_SUCCESS || rg != MI_SUCCESS)
+        fprintf(stderr, "sigmastar: picture: HDMI 0x%x VGA 0x%x gamma 0x%x\n", rh, rv, rg);
+}
+
+int hal_display_set_picture(const vg_picture_t *p)
+{
+    pthread_mutex_lock(&g_lock);
+    int standard = p->luma == 50 && p->contrast == 50 && p->hue == 50 && p->saturation == 50 &&
+                   p->sharpness == 50 && p->gamma == 100;
+    g_pic.p = *p;
+    g_pic.set = 1;
+    g_pic.changed |= !standard;
+    picture_apply();
+    int rc = g_pic.read < 0 ? -1 : 0;
+    pthread_mutex_unlock(&g_lock);
+    return rc;
+}
+
+/*
+ * HDMI sound. The i2m's audio block feeds the HDMI transmitter itself
+ * (open_mhal's HalAud2Hdmi): MI_AO device 2 is HDMI, 3 HDMI and the line
+ * out, and MI_AO_SetVolume (whole dB, -60..+30, the shared digital gain)
+ * is the volume. It answers only once the device is enabled
+ * (MI_AO_Enable, "has not been enabled" before), and vigild plays nothing
+ * yet: the volume is kept here for the audio output to set as it starts,
+ * 0 muted, 1..100 as (v - 100) / 2 dB (100: 0 dB, never above: camera
+ * sound would clip). docs/platforms/sigmastar.md has the path.
+ */
+static struct {
+    unsigned volume;
+    int      mute;
+} g_audio = { 80, 0 };
+
+int hal_audio_set_volume(unsigned volume, int mute)
+{
+    g_audio.volume = volume > 100 ? 100 : volume;
+    g_audio.mute = mute;
+    int db = g_audio.volume ? ((int)g_audio.volume - 100) / 2 : -60;
+    fprintf(stderr, "sigmastar: HDMI volume %u (%d dB)%s, kept: nothing plays yet\n", g_audio.volume, db,
+            mute || !g_audio.volume ? ", muted" : "");
     return 0;
 }

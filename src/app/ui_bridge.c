@@ -22,6 +22,7 @@
 #include "events.h"
 #include "hal.h"
 #include "hal_display.h"
+#include "hal_audio.h"
 #include "ui_bridge.h"
 
 #ifndef VIGIL_VERSION
@@ -592,6 +593,35 @@ static int out_set(const ui_mode_t *m)
     return hal_display_set_mode(&v);
 }
 
+/* ---- the output's adjustments: previews, the same calls main.c makes on a save ------- */
+
+static unsigned out_adj_caps(void)
+{
+    const hal_caps_t *c = hal_caps();
+    return (c->margins ? UI_OUT_MARGINS : 0u) | (c->picture ? UI_OUT_PICTURE : 0u) |
+           (c->audio_out ? UI_OUT_AUDIO : 0u);
+}
+
+static unsigned pct(int v) { return v < 0 ? 0u : v > OVERSCAN_MAX_PCT ? OVERSCAN_MAX_PCT : (unsigned)v; }
+
+static int out_margins(int top, int bottom, int left, int right)
+{
+    vg_margins_t m = { pct(top), pct(bottom), pct(left), pct(right) };
+    return hal_display_set_margins(&m);
+}
+
+static int out_picture(const char *preset)
+{
+    vg_picture_t p;
+    if (picture_preset(preset, &p) < 0) return -1;
+    return hal_display_set_picture(&p);
+}
+
+static int out_volume(int volume, int mute)
+{
+    return hal_audio_set_volume(volume < 0 ? 0u : volume > 100 ? 100u : (unsigned)volume, mute);
+}
+
 int ui_bridge_init(ui_model_t *m)
 {
     if (!g_sections && sections_build() < 0) return -1;
@@ -628,5 +658,9 @@ int ui_bridge_init(ui_model_t *m)
     m->disc_assign_manual = disc_assign_manual_ui;
     g_ev_cursor = 0;                    /* every event still kept, the start-up ones too */
     m->mgmt = ui_mgmt_model();
+    m->out_adj_caps = out_adj_caps;
+    m->out_margins = out_margins;
+    m->out_picture = out_picture;
+    m->out_volume = out_volume;
     return 0;
 }

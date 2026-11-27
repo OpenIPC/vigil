@@ -37,6 +37,7 @@
 #include "frontend.h"
 #include "hal.h"
 #include "hal_display.h"
+#include "hal_audio.h"
 #include "log.h"
 #include "mgmt.h"
 #include "net.h"
@@ -260,6 +261,36 @@ static void apply_output(const char *output)
     else vg_log("display: %s", output);
 }
 
+/* display.margin_*, picture, hdmi_volume and hdmi_mute, each when it
+ * changed (the Display page previews them through the same calls before
+ * it saves). `force`: all of them (start-up). */
+static void apply_output_adj(const config_display_t *d, int force)
+{
+    static config_display_t last;
+    const hal_caps_t *caps = hal_caps();
+    vg_margins_t m = { (unsigned)d->margin_top, (unsigned)d->margin_bottom, (unsigned)d->margin_left,
+                       (unsigned)d->margin_right };
+    if (force || d->margin_top != last.margin_top || d->margin_bottom != last.margin_bottom ||
+        d->margin_left != last.margin_left || d->margin_right != last.margin_right) {
+        if (hal_display_set_margins(&m) == 0)
+            vg_log("display: margins top %u%% bottom %u%% left %u%% right %u%%", m.top, m.bottom, m.left, m.right);
+        else if (caps->margins || !overscan_none(&m))
+            vg_log("display.margin_*: not on this board, or it failed");
+    }
+    if (force || strcmp(d->picture, last.picture)) {
+        vg_picture_t p;
+        picture_preset(d->picture, &p);
+        if (hal_display_set_picture(&p) == 0) vg_log("display: picture %s", d->picture);
+        else if (caps->picture || strcmp(d->picture, "standard"))
+            vg_log("display.picture %s: not on this board, or it failed", d->picture);
+    }
+    if (force || d->hdmi_volume != last.hdmi_volume || d->hdmi_mute != last.hdmi_mute) {
+        if (hal_audio_set_volume((unsigned)d->hdmi_volume, d->hdmi_mute) == 0)
+            vg_log("display: HDMI volume %d%s", d->hdmi_volume, d->hdmi_mute ? ", muted" : "");
+    }
+    last = *d;
+}
+
 /* qos.h: the values in force, and the open sockets marked again. */
 static void apply_qos(const vigil_config_t *c)
 {
@@ -330,6 +361,7 @@ static void apply_config(void)
     apply_qos(&c);
     int failed = channels_apply(&cc);
     apply_output(c.display.output);
+    apply_output_adj(&c.display, 0);
     channels_set_aspect(video_aspect(c.display.video_aspect));
     rtsp_server_apply();
     g_applied_gen = gen;
@@ -475,6 +507,7 @@ int main(int argc, char **argv)
         return 1;
     }
     const hal_caps_t *caps = hal_caps();
+    apply_output_adj(&cfg.display, 1);
     vg_log("platform %s: display %s, decoder %s, capture inputs %d; %d camera(s)",
            caps->name, caps->display ? "yes" : "no", caps->decoder ? "yes" : "no",
            caps->capture, cfg.n_cameras);

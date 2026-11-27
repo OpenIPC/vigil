@@ -47,6 +47,7 @@
 #include "hal_capture.h"
 #include "hal_decoder.h"
 #include "hal_display.h"
+#include "hal_audio.h"
 #include "hi_display.h"
 
 #define MAX_CH             4        /* quad view */
@@ -364,3 +365,8 @@ int hal_display_set_mode(const vg_mode_t *m)
 /* No picture to read back: the zero channel shows the UI over black. */
 void hal_display_grab_keep(int on) { (void)on; }
 int  hal_display_grab(const hal_pic_t *pic) { (void)pic; return -1; }
+
+/* No margins, picture controls or HDMI sound here yet (hal_caps: 0). */
+int hal_display_set_margins(const vg_margins_t *m) { (void)m; return -1; }
+int hal_display_set_picture(const vg_picture_t *p) { (void)p; return -1; }
+int hal_audio_set_volume(unsigned volume, int mute) { (void)volume; (void)mute; return -1; }

@@ -282,6 +282,96 @@ resolution?"): with no answer, Undo, Esc or the right button, the old mode
 comes back and nothing is saved. Through the API or the file it applies at
 once, without that question.
 
+## Margins, picture and HDMI sound
+
+**Margins** (`display.margin_*`, `hal_display_set_margins`) put the screen
+into the output's inner rectangle (`overscan_inner`: each margin a
+percentage of the output, even). Each layer follows:
+
+- *Video*: every tile is mapped into the inner rectangle (`to_output`,
+  `overscan_map`) and its input port window placed there, as for a new
+  mode; the video layer stays the whole output, its black background
+  around. The zero channel reads the windows back into screen coordinates
+  (`overscan_unmap`), so its picture is the 1280x720 screen, undistorted.
+  In fill the zoom-in window is cut from the tile's window as placed in
+  the inner rectangle, so the crop shows the same part with margins, and
+  the zero channel's copy follows it (seen in emulation at 720p and
+  1080p, 5 %).
+- *UI layer*: the GOP's stretch window stays the whole output and the UI
+  is shrunk into the buffer as LVGL flushes it (`hal_ui_fbdev.c`,
+  `soft_flush`: nearest pixel, which keeps the colour key exact; the
+  margins black). The GOP cannot do it: GOP 1 never shrinks (open_mhal's
+  `HalGopSetStretchWindowSize`, "GOP1 Not Support H/V scaling down"; any
+  margin at 720p needs that), and a placed destination smaller than the
+  screen (`FBIOSET_DISPLAYLAYER_ATTRIBUTES` with `u32Xpos/u32YPos` and a
+  smaller `u32dstWidth/Height`, which fbdev.ko takes) is undone by fbdev.ko
+  itself: its vsync interrupt (`_sstar_FB_VsyncISR`) compares the
+  destination with the display's timing and queues
+  `GOPTimingSync_WorkHandler`, which sets it back to the whole timing,
+  keeping the position (switched on at open, nothing switches it off; seen
+  in emulation). The UI's coordinates do not change: LVGL, the mouse, the
+  zero channel's input and picture all stay 1280x720.
+- *Pointer*: the hardware cursor's position and arrow are scaled into the
+  inner rectangle (`cursor_output`), so it reaches every UI pixel and
+  nothing outside.
+
+**Picture** (`display.picture`, `hal_display_set_picture`): MI_DISP's HDMI
+and VGA parameters (`MI_DISP_SetHdmiParam`/`SetVgaParam`: luma, contrast,
+hue, saturation 0..100, 50 the non-linear curves' unity in open_mhal, which
+build the colour engine's matrix from them; sharpness to the peaking
+filter, which needs the PQ tables, "Peaking is not set" without them) and
+the gamma table (`MI_DISP_DeviceSetGammaParam`, 33 points a colour, off at
+1.0 as the display starts):
+
+| preset | luma | contrast | hue | saturation | sharpness | gamma |
+|---|---|---|---|---|---|---|
+| standard | 50 | 50 | 50 | 50 | as started | 1.0 (off) |
+| bright | 54 | 52 | 50 | 50 | as started | 0.8 |
+| soft | 50 | 44 | 50 | 45 | -25 | 1.0 (off) |
+| vivid | 50 | 56 | 50 | 64 | +10 | 1.1 |
+
+The display starts with the BT.709 matrix though `MI_DISP_GetHdmiParam`
+answers BT.601: set with BT.709 and 50s, the colour engine's registers are
+the ones it starts with, with BT.601 they differ, so vigild sets BT.709.
+HDMI and VGA share one colour engine (`HAL_DISP_COLOR_CSC_ID`) and get the
+same values. Until a preset other than standard is chosen vigild sets
+nothing. The values show in `/proc/mi_modules/mi_disp/mi_disp0` (the
+`Luma Contrast Hue Saturation Sharpness` columns per interface).
+
+**HDMI sound** (`display.hdmi_volume`, `display.hdmi_mute`,
+`hal_audio_set_volume`): vigild plays no sound yet, the setting is kept
+(and logged with its level, 0 muted, 1..100 as (v - 100) / 2 dB, 100 being
+0 dB) for the audio output to set as it starts. The path, read off the
+sources and binaries (none of it run on a board):
+
+- The i2m's audio block feeds the HDMI transmitter itself; there is no
+  I2S/SPDIF input to choose in open_hdmitx (its audio source and FIFO
+  calls are empty). open_mhal's `HalAud2Hdmi` routes the audio DMA to it
+  when an output device with the HDMI flag opens (`MHAL_AUDIO_OpenPcmOut`).
+- MI_AO devices (the SDK's audio demo, `open_mi_ao.ko`'s strings,
+  `open_mhal.ko`'s device table): 0 line out (DAC), 1 I2S out, 2 HDMI,
+  3 HDMI and line out, all on one DMA channel and one digital gain stage.
+  `MI_AO_Enable` takes 32, 44.1 or 48 kHz on HDMI.
+- The volume is `MI_AO_SetVolume` on that device, whole dB -60..+30 (the
+  shared gain, 0.5 dB steps); `MI_AO_SetMute` zeroes the samples in
+  `SendFrame`. Both answer "has not been enabled" until `MI_AO_Enable`.
+  The HDMI transmitter itself has only a mute, which also stops the audio
+  packets (TVs resynchronise): not for the user's mute.
+- open_hdmi sets `bAudioEn = false` (48 kHz, 2 channels, PCM attributes
+  otherwise). With it on, open_hdmitx writes N/CTS from a fixed table
+  (48 kHz: N 6144, CTS 27000), the channel status and the audio infoframe.
+
+Camera sound to HDMI would take: the audio from RTSP/NETIP (G.711 A/µ-law is
+a table to 16-bit PCM; AAC needs a decoder, none in the rootfs),
+resampling to 48 kHz (`MI_AO_EnableReSmp` or in software), MI_AO device 2
+(or 3) set up, enabled and fed (`SetPubAttr`, `Enable`, `EnableChn`,
+`SetVolume`, `SendFrame`), and open_hdmi switched on with audio at the same
+rate, its attributes set again after an off/on (it clears its audio flag on
+off). Unknown until a board: whether the HDMI tap is after the gain stage,
+whether CTS is measured by the transmitter at 1080p (bank 0x1125 reg 0x30
+bit 0, never written), the audio block's clocks, and whether keeping the
+device open with silence avoids the TV's resync clicks.
+
 ## Verified
 
 Only in emulation: [qemu-bench](https://github.com/OpenIPC/qemu-bench)'s
@@ -396,3 +486,19 @@ to 7.8 MiB.
 
 The HDMI and VGA signals, hot-plug and decoder limits are unverified on
 hardware.
+
+Margins and picture presets, also only in emulation, on that machine with
+the GOP and cursor models plus, for this, the display timing from the OP2
+timing generator (bank 0x1129: the output's size no longer comes from the
+GOP's window), the GOP stretch window's position, and the colour engine
+and gamma applied to the video plane as open_mhal programs them (qemu-bench
+local branch `sigmastar/i2m-gop-offset`): at 720p and 1080p with 0 and 5 %
+margins the video, the UI and the pointer inside the inner rectangle,
+black around, a slider dragged on the Display page moving everything as it
+went and saved when let go, the zero channel's picture the whole screen;
+each preset's values in `/proc/mi_modules/mi_disp/mi_disp0` and in the
+colour engine's and gamma's registers. Whether the GOP is mixed before or
+after the colour engine and gamma on the chip (the model leaves the UI
+alone), how the picture looks on a TV, and anything of the HDMI sound are
+unverified.
+

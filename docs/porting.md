@@ -147,6 +147,16 @@ platform scales the UI layer and the tiles to the mode (SigmaStar: the
 GOP's stretch and a video layer at the output's size). A platform that
 cannot switch lists the mode it runs and refuses any other.
 
+The output's adjustments are optional, each announced by a `hal_caps_t`
+flag (0: the call returns -1 and the Display page hides the control):
+`hal_display_set_margins()` (`margins`) draws everything (tiles, UI layer,
+pointer) inside the rectangle `overscan_inner()` leaves of the output,
+black around, the screen's coordinates and `hal_display_grab()`'s picture
+unchanged; `hal_display_set_picture()` (`picture`) applies a preset's
+colour controls and gamma (`picture.h`) to HDMI/VGA; and
+`hal_audio_set_volume()` (`audio_out`, `hal_audio.h`) sets the HDMI sound's
+volume and mute, also before anything plays.
+
 ## 5. UI: `hal_ui.h`
 
 The UI is an LVGL display on a graphics layer above the video. Two parts:

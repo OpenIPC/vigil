@@ -115,7 +115,7 @@
 #define LV_USE_LED                      1
 #define LV_USE_LINE                     1
 #define LV_USE_LIST                     0
-#define LV_USE_BAR                      0
+#define LV_USE_BAR                      1
 #define LV_USE_BUTTON                   1
 #define LV_USE_IMAGE                    1
 #define LV_USE_ARC                      0
@@ -130,7 +130,7 @@
 #define LV_USE_MSGBOX                   0
 #define LV_USE_ROLLER                   0
 #define LV_USE_SCALE                    0
-#define LV_USE_SLIDER                   0
+#define LV_USE_SLIDER                   1
 #define LV_USE_SPAN                     0
 #define LV_USE_SPINBOX                  0
 #define LV_USE_SPINNER                  0
