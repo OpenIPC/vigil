@@ -12,12 +12,14 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 
+#include "log.h"
 #include "sys.h"
 #include "sys_ata.h"
 #include "sys_scan.h"
 
 #define ATA_READ_VERIFY_EXT 0x42
 #define VERIFY_TIMEOUT_MS   30000   /* a weak sector takes the drive seconds of retries */
+#define SHUTDOWN_WAIT_S     2       /* vigild's exit waits this long for a block under way */
 #define BUF_MAX             (2u * 1024 * 1024)
 #define SPEED_WINDOW_NS     2000000000LL
 #define IOPRIO_CLASS_IDLE   3
@@ -154,8 +156,26 @@ void scan_shutdown(void)
     pthread_cond_broadcast(&g_wake);
     int live = G.live;
     G.live = 0;
+    /* The thread sees the stop between blocks, and a block of a weak
+     * area can take a READ VERIFY's whole timeout, or a read the kernel
+     * retries: wait a little, then leave it to the exit. */
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_sec += SHUTDOWN_WAIT_S;
+    int on = 1;
+    while (live && (on = G.st.state == SCAN_RUNNING || G.st.state == SCAN_PAUSED) &&
+           pthread_cond_timedwait(&g_wake, &g_lock, &until) == 0) {}
+    on = live && (G.st.state == SCAN_RUNNING || G.st.state == SCAN_PAUSED);
+    if (on) G.req.done = NULL;              /* nobody to tell when it ends */
+    char disk[sizeof G.st.disk];
+    snprintf(disk, sizeof disk, "%s", G.st.disk);
     pthread_mutex_unlock(&g_lock);
-    if (live) pthread_join(G.thread, NULL);
+    if (on) {
+        pthread_detach(G.thread);
+        vg_log("surface scan of %s: still in a block after %d s; not waited for", disk, SHUTDOWN_WAIT_S);
+    } else if (live) {
+        pthread_join(G.thread, NULL);
+    }
 }
 
 /* ---- one block ----------------------------------------------------------------------- */
@@ -412,6 +432,7 @@ static void *worker(void *arg)
     else summary(G.st.msg, sizeof G.st.msg, &G.st);
     scan_status_t copy = G.st;
     void (*done)(const scan_status_t *) = G.req.done;
+    pthread_cond_broadcast(&g_wake);       /* scan_shutdown waits for the end */
     pthread_mutex_unlock(&g_lock);
     if (done) done(&copy);
     return NULL;

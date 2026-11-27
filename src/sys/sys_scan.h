@@ -88,7 +88,8 @@ void scan_status(scan_status_t *out);
 int  scan_active(const char *disk);
 int  scan_pause(int on);            /* 0, -1 when none runs */
 int  scan_stop(void);               /* 0, -1 when none runs; it ends shortly */
-/* Stop and wait for the thread (vigild's exit). */
+/* Stop it (vigild's exit): the thread is waited for 2 s at most, then
+ * left to end with the process (a block under way can take 30 s). */
 void scan_shutdown(void);
 
 const char *scan_mode_name(int mode);       /* "read", "verify", "write" */

@@ -317,6 +317,7 @@ static struct {
     int      verify_unsup;
     uint64_t verify_bad;            /* READ VERIFY fails over this LBA (0: never) */
     int      verifies;
+    int      verify_ms;             /* each READ VERIFY takes this long (a weak area) */
 } D;
 
 static int fake_ata(int fd, ata_tf_t *tf, int proto, void *buf, size_t len, int timeout_ms)
@@ -331,6 +332,7 @@ static int fake_ata(int fd, ata_tf_t *tf, int proto, void *buf, size_t len, int 
     if (tf->command == 0x42) {
         if (D.verify_unsup) return ATA_EUNSUP;
         ++D.verifies;
+        if (D.verify_ms) usleep((useconds_t)D.verify_ms * 1000);
         if (D.verify_bad && D.verify_bad >= tf->lba && D.verify_bad < tf->lba + (tf->count ? tf->count : 65536u)) {
             tf->have_regs = 1;
             tf->status = ATA_ST_ERR;
@@ -608,6 +610,20 @@ void test_sys_scan(void)
     scan_shutdown();
     scan_status(st);
     CHECK(st->state == SCAN_STOPPED, "shutdown: stopped (%s)", scan_state_name(st->state));
+
+    /* ... or in a block that takes long (a VERIFY retrying a weak sector):
+     * not waited for beyond a couple of seconds; it stops when it can. */
+    D.verify_ms = 4000;
+    CHECK(mgmt_scan_start("sdz", SCAN_VERIFY, 0, 0, 0, NULL, err, sizeof err) == MGMT_OK, "a slow verify");
+    usleep(50 * 1000);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    scan_shutdown();
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double waited = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
+    CHECK(waited < 3.0, "shutdown in a 4 s block: back after %.1f s", waited);
+    CHECK(wait_scan(st, 10) == SCAN_STOPPED, "and the scan stopped after its block (%s)", scan_state_name(st->state));
+    D.verify_ms = 0;
 
     /* Unplugged under the scan: its reads fail and sysfs has no disk. */
     H.err_from = 2048;
