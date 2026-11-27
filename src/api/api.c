@@ -353,6 +353,24 @@ static cJSON *status_json(void)
         cJSON_AddBoolToObject(o, "live", st.live);
         cJSON_AddStringToObject(o, "state", st.configured ? (st.live ? "live" : st.state) : "off");
         cJSON_AddStringToObject(o, "status", ch_state_name(st.status));
+        cJSON_AddStringToObject(o, "title", st.title);
+        /* Each stream on its own: `status` above is the one on screen. */
+        if (st.configured) {
+            cJSON *m = cJSON_AddObjectToObject(o, "main");
+            if (m) {
+                cJSON_AddStringToObject(m, "status", ch_state_name(st.main_status));
+                cJSON_AddStringToObject(m, "state", st.main_state);
+            }
+            if (st.sub_status == CH_EMPTY) {
+                cJSON_AddNullToObject(o, "sub");
+            } else {
+                cJSON *sb = cJSON_AddObjectToObject(o, "sub");
+                if (sb) {
+                    cJSON_AddStringToObject(sb, "status", ch_state_name(st.sub_status));
+                    cJSON_AddStringToObject(sb, "state", st.sub_state);
+                }
+            }
+        }
         cJSON *ev = cJSON_AddArrayToObject(o, "events");
         for (int b = 0; ev && ch_event_name(b); ++b)
             if (st.events & (1u << b)) cJSON_AddItemToArray(ev, cJSON_CreateString(ch_event_name(b)));
@@ -382,8 +400,8 @@ static void status_signature(char *out, size_t cap)
     for (int i = 0; i < CHANNEL_MAX && len < cap; ++i) {
         channel_status_t st;
         channels_status(i, &st);
-        int n = snprintf(out + len, cap - len, "%d%d%d%s|%s|", st.configured, st.live, st.recording,
-                         st.live ? "" : st.state, st.rec_state);
+        int n = snprintf(out + len, cap - len, "%d%d%d%d%d%s|%s|%s|", st.configured, st.live, st.recording,
+                         (int)st.status, (int)st.main_status, st.live ? "" : st.state, st.rec_state, st.name);
         if (n < 0) break;
         len += (size_t)n;
     }
@@ -757,7 +775,7 @@ static void *pusher(void *arg)
     uint64_t cursor = events_head();
     unsigned gen = config_generation(), applied = config_applied();
     time_t last_status = 0;
-    char sig[CHANNEL_MAX * 64], last_sig[sizeof sig] = "";
+    char sig[CHANNEL_MAX * 160], last_sig[sizeof sig] = "";
 
     while (!g_pusher_stop) {
         usleep(PUSH_MS * 1000);

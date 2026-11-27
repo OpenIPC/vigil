@@ -43,6 +43,7 @@ typedef struct {
     lv_obj_t      *add, *chip, *mass, *autoadd, *manual, *all;
     lv_obj_t      *devs, *chans;
     lv_obj_t      *state_cell[UI_MAX_CHANNELS];
+    lv_obj_t      *name_cell[UI_MAX_CHANNELS];  /* no name configured: the camera's, when it says */
     lv_timer_t    *timer;
     ui_disc_dev_t  dev[UI_DISC_MAX];
     int            n_dev;
@@ -585,6 +586,7 @@ static void chans_build(chans_t *c)
     int32_t sy = lv_obj_get_scroll_y(t);
     lv_obj_clean(t);
     memset(c->state_cell, 0, sizeof c->state_cell);
+    memset(c->name_cell, 0, sizeof c->name_cell);
     c->gen = M()->config_generation ? M()->config_generation() : 0;
     int put = one_checked(c) >= 0;
     lv_obj_t *first = NULL;
@@ -612,8 +614,10 @@ static void chans_build(chans_t *c)
         }
         slot_value(c, ch, "name", name, sizeof name);
         slot_value(c, ch, "enabled", en, sizeof en);
-        if (!name[0]) ui_chan_title(ch, name, sizeof name);
-        tcell(r, name, 150, UI_C(TEXT));
+        int named = name[0] != 0;
+        if (!named) ui_chan_title(ch, name, sizeof name);
+        lv_obj_t *nc = tcell(r, name, 150, UI_C(TEXT));
+        if (!named) c->name_cell[ch] = nc;
         tcell(r, url, 0, UI_C(TEXT));
         tcell(r, scheme_word(url), 70, UI_C(TEXT));
         c->state_cell[ch] = tcell(r, ui_chan_status_word(st), 150, state_color(st));
@@ -639,6 +643,11 @@ static void chans_states(chans_t *c)
         const char *w = ui_chan_status_word(st);
         if (strcmp(lv_label_get_text(l), w)) lv_label_set_text(l, w);
         lv_obj_set_style_text_color(l, state_color(st), 0);
+        if (c->name_cell[ch]) {
+            char name[64];
+            ui_chan_title(ch, name, sizeof name);
+            if (strcmp(lv_label_get_text(c->name_cell[ch]), name)) lv_label_set_text(c->name_cell[ch], name);
+        }
     }
 }
 

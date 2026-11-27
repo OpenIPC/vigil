@@ -1,7 +1,11 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
-# run_netip.sh VIGILD CLIP [badpass]
+# run_netip.sh VIGILD CLIP [badpass|wide|title|notitle]
 # Serve CLIP from netip_server.py, record it with vigild, check the result.
+#   wide     the I-frame headers say 2560x1440, as an XM 4 MP camera's do
+#            (codec byte 0x13 for H.265): still recorded
+#   title    the camera names the channel (ChannelTitle): vigild takes it
+#   notitle  the camera never answers ChannelTitle: recorded all the same
 set -u
 VIGILD=$1 CLIP=$2 MODE=${3:-ok}
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -12,7 +16,14 @@ TMP=$(mktemp -d "$PWD/vigil-test.XXXXXX")
 printf 'record:\n  allow_rootfs: true\n' > "$TMP/vigil.yaml"
 trap 'kill $SRV 2>/dev/null; rm -rf "$TMP"' EXIT
 
-python3 "$HERE/netip_server.py" "$CLIP" --port $PORT --password secret >"$TMP/server.log" 2>&1 &
+ARGS=
+case "$MODE" in
+wide) ARGS="--width 2560 --height 1440" ;;
+title) ARGS="--title-objects --title Front_door" ;;
+notitle) ARGS="--no-title" ;;
+esac
+# shellcheck disable=SC2086
+python3 "$HERE/netip_server.py" "$CLIP" --port $PORT --password secret $ARGS >"$TMP/server.log" 2>&1 &
 SRV=$!
 for i in 1 2 3 4 5 6 7 8 9 10; do grep -q netip_server "$TMP/server.log" && break; sleep 0.3; done
 
@@ -26,6 +37,13 @@ if [ "$MODE" = badpass ]; then
     [ -z "$(ls "$TMP/rec" 2>/dev/null)" ] || { echo "FAIL: recorded with a bad password"; exit 1; }
     echo "PASS: bad password refused"
     exit 0
+fi
+
+if [ "$MODE" = title ]; then
+    grep -q 'CAM1: the camera calls it "Front_door"' "$TMP/vigild.log" || { echo "FAIL: no title"; exit 1; }
+fi
+if [ "$MODE" = wide ]; then
+    grep -q "I-frame, codec byte 0x1[23] " "$TMP/vigild.log" || { echo "FAIL: no wide I-frame header"; exit 1; }
 fi
 
 FILE=$(ls "$TMP"/rec/CAM1_* 2>/dev/null | head -1)

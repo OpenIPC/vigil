@@ -43,7 +43,7 @@ audioonly)
     start_netip --video-frames 50
     "$VIGILD" -t 12 -o none -c "netip://admin:@127.0.0.1:$PORT/" >"$TMP/v.log" 2>&1
     cat "$TMP/v.log"
-    grep -q "no data for" "$TMP/v.log" || { echo "FAIL: audio kept a dead video channel alive"; exit 1; }
+    grep -q "no video for 5 s" "$TMP/v.log" || { echo "FAIL: audio kept a dead video channel alive"; exit 1; }
     ;;
 shutdown)
     python3 -c '

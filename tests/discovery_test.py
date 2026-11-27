@@ -214,6 +214,9 @@ def main():
               urls[3] == "rtsp://admin:***@127.0.0.52:554/main?a=1&b=2" and
               cams[3]["sub_url"] == "rtsp://admin:***@127.0.0.52:554/sub?a=1&b=2" and
               cams[2]["sub_url"].endswith("subtype=1"), "the configuration: %s" % cams)
+        check(cams[1]["name"] == "Porch0" and cams[3]["name"] == "fake2",
+              "names: the NETIP camera's channel title, the ONVIF device's name: %s / %s" %
+              (cams[1]["name"], cams[3]["name"]))
         with open(cfg) as f:
             saved = f.read()
         check(PW in saved and "keep@127.0.0.99" in saved, "the file holds the passwords (and kept the old one)")

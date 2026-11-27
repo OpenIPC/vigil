@@ -65,6 +65,16 @@ if(Python3_FOUND)
   add_test(NAME netip_bad_password
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_netip.sh $<TARGET_FILE:vigild>
                    ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264 badpass)
+  # An XM 4 MP main stream (size bits in the codec byte), the channel's
+  # name from the camera, and a camera that does not answer for it.
+  add_test(NAME netip_wide
+           COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_netip.sh $<TARGET_FILE:vigild>
+                   ${CMAKE_CURRENT_SOURCE_DIR}/data/majestic_1080p.h265 wide)
+  foreach(case title notitle)
+    add_test(NAME netip_${case}
+             COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_netip.sh $<TARGET_FILE:vigild>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264 ${case})
+  endforeach()
   foreach(case chatty stall audioonly shutdown)
     add_test(NAME fault_${case}
              COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_faults.sh $<TARGET_FILE:vigild>

@@ -44,15 +44,20 @@ enum { UI_EV_MOTION = 1u << 0, UI_EV_HUMAN = 1u << 1, UI_EV_FACE = 1u << 2, UI_E
 
 typedef struct {
     int      configured;        /* a camera is set for this channel */
-    ui_ch_status_t status;
-    int      live;              /* video is arriving */
+    ui_ch_status_t status;      /* of the stream on screen (`view`) */
+    int      live;              /* its video is arriving */
+    /* Each stream on its own: the main one (recorded, large tiles) and the
+     * sub-stream (small tiles; UI_CH_EMPTY while none runs). */
+    ui_ch_status_t main_status, sub_status;
+    char     main_state[48], sub_state[48];
     int      recording;
     unsigned events;            /* UI_EV_* */
     char     view[8];           /* the stream on screen: "main", "sub", "" */
     char     rec_state[24];     /* "" (not recording), "recording", "ready", "failed",
                                    "waiting for disk", "not a disk", "read-only", "error" */
     uint64_t rec_bytes;
-    char     name[32];          /* "" : the UI shows "CAM n" */
+    char     name[32];          /* the configured name, else the camera's; "": "CAM n" */
+    char     title[32];         /* what the camera calls it (NETIP ChannelTitle), "" */
     char     state[48];         /* not live: "CONNECTING" or the last error */
     char     codec[8];          /* "H.264", "H.265", "" */
     int      no_decoder;        /* live, but the platform has no decoder for it now */
