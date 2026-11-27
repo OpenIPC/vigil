@@ -159,6 +159,14 @@ typedef struct {
     int  fps;                       /* at most this many pictures a second */
 } config_web_t;
 
+/* vigild's RTSP server: the cameras' streams to other clients (docs/rtsp.md). */
+typedef struct {
+    int enabled;
+    int port;
+    int auth;                       /* Digest against vigil's users (live permission) */
+    int max_clients;                /* streams being sent at once */
+} config_rtsp_server_t;
+
 typedef struct {
     char interfaces[128];           /* "eth0,eth1"; "" = every IPv4 interface */
     char targets[256];              /* unicast addresses also searched */
@@ -183,6 +191,7 @@ typedef struct {
     config_display_t display;
     config_api_t    api;
     config_web_t    web;
+    config_rtsp_server_t rtsp_server;
     config_discovery_t discovery;
 } vigil_config_t;
 

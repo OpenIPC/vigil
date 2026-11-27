@@ -265,6 +265,24 @@ web:
   # 1..30, default 15.
   fps: 15
 
+# RTSP server
+rtsp_server:
+  # On: The cameras' streams to other clients (a VMS, VLC, another recorder)
+  # at rtsp://<this recorder>/ch1/main and /ch1/sub, as the cameras send them
+  # (docs/rtsp.md). Default true.
+  enabled: true
+  # Port: Its TCP port; RTP over UDP goes from a pair of ports from 6970 up.
+  # 1..65535, default 554.
+  port: 554
+  # Require a password: Digest authentication against vigil's users; their
+  # group needs the live permission. Off: anyone on the network can watch
+  # every camera. Default true.
+  auth: true
+  # Clients at once, at most: Clients being sent a stream at the same time.
+  # Clients of one stream share its buffer (2 to 4 MiB for a main stream, less
+  # for a sub-stream). 1..32, default 8.
+  max_clients: 8
+
 # Camera search
 discovery:
   # Search on interfaces: Network interfaces to search for cameras on,

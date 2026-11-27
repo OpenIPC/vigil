@@ -15,6 +15,7 @@
 #include "cJSON.h"
 #include "config.h"
 #include "log.h"
+#include "md5.h"
 #include "schema.h"
 #include "schema_yaml.h"
 #include "users.h"
@@ -45,6 +46,7 @@ typedef struct {
     char group[USERS_NAME_MAX];
     int  enabled;
     char password[HASH_MAX];
+    char digest[33];
 } user_rec_t;
 
 typedef struct {
@@ -107,6 +109,10 @@ static const schema_field_t user_fields[] = {
     { .key = "password", .type = SCHEMA_STRING, .off = offsetof(user_rec_t, password), .size = HASH_MAX,
       .def_str = "", .secret = SCHEMA_SECRET, .label = "Password",
       .help = "A crypt(3) hash, set through the API or the UI; empty: cannot log in." },
+    { .key = "digest", .type = SCHEMA_STRING, .off = offsetof(user_rec_t, digest), .size = 33,
+      .def_str = "", .secret = SCHEMA_SECRET, .label = "RTSP password hash",
+      .help = "md5 of name:vigil:password (Digest's HA1), for logins to the RTSP server; "
+              "written with the password, or at the user's next login when missing." },
 };
 
 #define N(a) (int)(sizeof(a) / sizeof((a)[0]))
@@ -128,7 +134,8 @@ static const schema_t users_schema = { .version = 1, .sections = user_sections,
 static const char file_header[] =
     "vigil's users and groups: https://github.com/OpenIPC/vigil/blob/main/docs/api.md\n"
     "Written by vigild when accounts are changed through its HTTP API or on-screen\n"
-    "UI; comments written by hand are not kept. Passwords are crypt(3) hashes.";
+    "UI; comments written by hand are not kept. Passwords are crypt(3) hashes,\n"
+    "and md5 digests for the RTSP server's Digest logins.";
 
 /* ---- the store --------------------------------------------------------------------- */
 
@@ -373,6 +380,16 @@ int users_hash(const char *pass, char *out, size_t cap)
     return -1;
 }
 
+/* Digest's HA1 for `name` and `pass` in vigil's realm. */
+static void ha1_of(const char *name, const char *pass, char out[33])
+{
+    char buf[USERS_NAME_MAX + sizeof USERS_REALM + 260];
+    int n = snprintf(buf, sizeof buf, "%s:%s:%s", name, USERS_REALM, pass);
+    md5_hex(buf, n < 0 ? 0 : (size_t)n >= sizeof buf ? sizeof buf - 1 : (size_t)n, out);
+    volatile char *w = buf;
+    for (size_t i = 0; i < sizeof buf; ++i) w[i] = 0;
+}
+
 static users_rc_t check_password(const char *pass, users_err_t *e)
 {
     if (strlen(pass) < USERS_PASS_MIN)
@@ -412,6 +429,7 @@ users_rc_t users_add(const char *name, const char *group, const char *password, 
         snprintf(u->group, sizeof u->group, "%s", group);
         u->enabled = !!enabled;
         snprintf(u->password, sizeof u->password, "%s", hash);
+        ha1_of(name, password, u->digest);
         rc = save_locked(&db, e);
         if (!rc) vg_log("users: added %s (group %s%s)", name, group, enabled ? "" : ", disabled");
     }
@@ -440,7 +458,10 @@ users_rc_t users_update(const char *name, const char *group, int enabled, const 
     else {
         if (group) snprintf(u->group, sizeof u->group, "%s", group);
         if (enabled >= 0) u->enabled = !!enabled;
-        if (password) snprintf(u->password, sizeof u->password, "%s", hash);
+        if (password) {
+            snprintf(u->password, sizeof u->password, "%s", hash);
+            ha1_of(name, password, u->digest);
+        }
         rc = save_locked(&db, e);
         if (!rc)
             vg_log("users: changed %s:%s%s%s%s", name, group ? " group " : "", group ? group : "",
@@ -536,6 +557,89 @@ users_rc_t users_group_delete(const char *name, users_err_t *e)
 
 /* ---- logging in ------------------------------------------------------------------------------ */
 
+/* The system account's HA1 (its password is only in the shadow file, as
+ * a one-way hash): learnt when it logs in, under each name it used, and
+ * good while the shadow file is the one it was checked against. */
+typedef struct {
+    char        name[USERS_NAME_MAX];
+    char        ha1[33];
+    struct stat shadow;
+} sys_digest_t;
+static sys_digest_t g_sys[2];
+
+static void sys_digest_keep(const char *name, const char *pass, const char *shadow)
+{
+    struct stat st;
+    if (strlen(name) >= USERS_NAME_MAX || stat(shadow, &st) < 0) return;
+    pthread_mutex_lock(&g_lock);
+    sys_digest_t *d = &g_sys[0];
+    if (!strcmp(g_sys[1].name, name)) d = &g_sys[1];
+    else if (strcmp(g_sys[0].name, name)) g_sys[1] = g_sys[0];     /* a new name: the older goes */
+    snprintf(d->name, sizeof d->name, "%s", name);
+    ha1_of(name, pass, d->ha1);
+    d->shadow = st;
+    pthread_mutex_unlock(&g_lock);
+}
+
+/* After a good login of a user of the file: its HA1 kept with its
+ * password (users made before the RTSP server, or a hash copied in by
+ * hand). Only when that password is still the one checked. */
+static void file_digest_keep(const char *name, const char *pass, const char *hash)
+{
+    char ha1[33];
+    ha1_of(name, pass, ha1);
+    pthread_mutex_lock(&g_lock);
+    load();
+    user_rec_t *u = find_user(&g_db, name);
+    if (u && !strcmp(u->password, hash) && strcmp(u->digest, ha1)) {
+        users_db_t *db = malloc(sizeof *db);
+        if (db) {
+            *db = g_db;
+            snprintf(find_user(db, name)->digest, sizeof u->digest, "%s", ha1);
+            users_err_t e;
+            if (save_locked(db, &e) == USERS_OK) vg_log("users: %s can log in to the RTSP server now", name);
+            free(db);
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+}
+
+int users_digest(const char *name, char ha1[33], unsigned *perms)
+{
+    *perms = 0;
+    ha1[0] = 0;
+    config_api_t api;
+    api_settings(&api);
+    struct stat st;
+    int sh = stat(api.shadow, &st) == 0;
+    int rc = 0;
+    pthread_mutex_lock(&g_lock);
+    load_locked(api.users);
+    user_rec_t *u = find_user(&g_db, name);
+    if (u) {
+        group_rec_t *g = find_group(&g_db, u->group);
+        if (u->enabled && u->password[0] && strlen(u->digest) == 32) {
+            memcpy(ha1, u->digest, 33);
+            *perms = g ? rec_perms(g) : 0;
+            rc = 1;
+        } else if (u->enabled && u->password[0]) {
+            rc = -1;
+        }
+    } else if (!strcmp(name, api.user) || (!strcmp(name, "admin") && !find_user(&g_db, "admin"))) {
+        for (int i = 0; i < 2; ++i) {
+            const sys_digest_t *d = &g_sys[i];
+            if (d->name[0] && !strcmp(d->name, name) && sh && same_stat(&st, &d->shadow)) {
+                memcpy(ha1, d->ha1, 33);
+                *perms = PERM_ALL;
+                rc = 1;
+            }
+        }
+        if (!rc) rc = -1;
+    }
+    pthread_mutex_unlock(&g_lock);
+    return rc;
+}
+
 int users_login(const char *name, const char *pass, unsigned *perms, char *why, size_t cap)
 {
     *perms = 0;
@@ -565,13 +669,17 @@ int users_login(const char *name, const char *pass, unsigned *perms, char *why, 
         int ok = hash[0] && auth_crypt(pass, hash, r, sizeof r) == 0 && auth_equal(r, hash);
         if (!ok || !enabled) return 0;
         *perms = gperms;
+        file_digest_keep(name, pass, hash);
         return 1;
     }
     /* The system account, and "admin" as its other name until a user of
      * that name exists: whatever the file holds, root gets in. */
     if (!strcmp(name, api.user) || (!strcmp(name, "admin") && !has_admin)) {
         int rc = auth_check_shadow(api.shadow, api.user, pass, why, cap);
-        if (rc == 1) *perms = PERM_ALL;
+        if (rc == 1) {
+            *perms = PERM_ALL;
+            sys_digest_keep(name, pass, api.shadow);
+        }
         return rc;
     }
     /* Unknown user: the same crypt() as a known one, so the time does not

@@ -13,6 +13,9 @@
 #include "auth.h"
 #include "config.h"
 #include "hal_capture.h"
+#include "md5.h"
+#include "rtsp_client.h"
+#include "rtsp_server.h"
 #include "users.h"
 
 /* The configuration's URL check links the capture source; it never runs. */
@@ -105,6 +108,16 @@ static char *slurp(const char *path)
     return b;
 }
 
+/* users_digest gives `name` with md5(name:vigil:pass). */
+static int digest_is(const char *name, const char *pass, unsigned want_perms)
+{
+    char ha1[33], buf[160], want[33];
+    unsigned perms;
+    snprintf(buf, sizeof buf, "%s:%s:%s", name, USERS_REALM, pass);
+    md5_hex(buf, strlen(buf), want);
+    return users_digest(name, ha1, &perms) == 1 && !strcmp(ha1, want) && perms == want_perms;
+}
+
 static void test_users(void)
 {
     char dir[] = "/tmp/vigil-users-XXXXXX", cfg[128], shadow[128], users[128], why[160];
@@ -140,6 +153,10 @@ static void test_users(void)
     CHECK(users_login("admin", "secret", &perms, why, sizeof why) == 1 && perms == PERM_ALL,
           "admin is root until there is an admin user");
     CHECK(users_login("anna", "secret", &perms, why, sizeof why) == 0, "unknown user");
+    char ha1[33];
+    CHECK(digest_is("root", "secret", PERM_ALL) && digest_is("admin", "secret", PERM_ALL),
+          "the system account's HA1, learnt at its login, under both names");
+    CHECK(users_digest("anna", ha1, &perms) == 0, "no HA1 for an unknown user");
 
     users_err_t e;
     CHECK(users_group_set("viewer", PERM_LIVE, 1, &e) == USERS_OK, "add viewer: %s", e.msg);
@@ -162,6 +179,9 @@ static void test_users(void)
           "password too short");
     CHECK(users_add("anna", "viewer", "annapw", 1, &e) == USERS_EEXIST, "a user twice");
     CHECK(users_group_delete("viewer", &e) == USERS_EINUSE, "a group with users stays");
+    CHECK(digest_is("anna", "annapw", PERM_LIVE) && digest_is("bob", "bobpw1", PERM_STORAGE | PERM_LIVE),
+          "users' HA1s kept with their passwords");
+    CHECK(users_digest("carl", ha1, &perms) == 0, "none for a disabled user");
 
     CHECK(users_login("anna", "annapw", &perms, why, sizeof why) == 1 && perms == PERM_LIVE, "anna: live");
     CHECK(users_login("anna", "wrong", &perms, why, sizeof why) == 0 && perms == 0, "anna, wrong password");
@@ -174,6 +194,7 @@ static void test_users(void)
     CHECK(users_update("carl", "viewer", -1, "newpw1", &e) == USERS_OK &&
           users_login("carl", "carlpw", &perms, why, sizeof why) == 0 &&
           users_login("carl", "newpw1", &perms, why, sizeof why) == 1, "password changed");
+    CHECK(digest_is("carl", "newpw1", PERM_LIVE), "the HA1 follows the password");
 
     /* The file: 0600, commented YAML, hashes only; read back as it was. */
     struct stat st;
@@ -210,6 +231,26 @@ static void test_users(void)
     CHECK(users_delete("admin", &e) == USERS_OK && users_delete("admin", &e) == USERS_ENOENT, "delete");
     CHECK(users_login("admin", "secret", &perms, why, sizeof why) == 1, "admin is root's again");
 
+    /* A user from before the HA1s (a crypt hash only): none until it logs
+     * in, then kept in the file. */
+    f = fopen(users, "w");
+    fprintf(f, "users:\n  - name: fay\n    password: \"" SHA512_SECRET "\"\n");
+    fclose(f);
+    users_reload();
+    CHECK(users_digest("fay", ha1, &perms) == -1, "a user without an HA1 yet: -1");
+    CHECK(users_login("fay", "secret", &perms, why, sizeof why) == 1 && digest_is("fay", "secret", PERM_LIVE | PERM_PLAYBACK),
+          "its HA1 kept at its login");
+    text = slurp(users);
+    CHECK(text && strstr(text, "digest:"), "and written to the file");
+    free(text);
+    /* The shadow file changed (passwd): root's HA1 is not trusted. */
+    f = fopen(shadow, "a");
+    fprintf(f, "nobody:*:19000:0:99999:7:::\n");
+    fclose(f);
+    CHECK(users_digest("root", ha1, &perms) == -1, "root's HA1 forgotten with a new shadow file");
+    CHECK(users_login("root", "secret", &perms, why, sizeof why) == 1 && digest_is("root", "secret", PERM_ALL),
+          "and learnt again at its login");
+
     /* An invalid file: only root, and nothing is saved over it. */
     f = fopen(users, "w");
     fprintf(f, "users:\n  - name: Bad Name\n");
@@ -224,6 +265,87 @@ static void test_users(void)
     if (system(cmd)) {}
 }
 
+static void test_rtsp_server_paths(void)
+{
+    static const struct { const char *url; int ch, sub; } OK[] = {
+        { "rtsp://nvr:554/ch1/main", 0, 0 },
+        { "rtsp://nvr/ch1/sub", 0, 1 },
+        { "rtsp://nvr/ch16/main/", 15, 0 },
+        { "rtsp://nvr/ch2", 1, 0 },
+        { "rtsp://nvr/ch3/sub/trackID=0", 2, 1 },
+        { "/ch4/main", 3, 0 },
+        { "rtsp://nvr/Streaming/Channels/101", 0, 0 },
+        { "rtsp://nvr/Streaming/Channels/1602?transportmode=unicast", 15, 1 },
+        { "rtsp://nvr/streaming/channels/302/trackID=0", 2, 1 },
+        { "rtsp://nvr/ISAPI/Streaming/Channels/201", 1, 0 },
+        { "rtsp://nvr/h264/ch5/sub/av_stream", 4, 1 },
+        { "rtsp://nvr/cam/realmonitor?channel=2&subtype=1", 1, 1 },
+        { "rtsp://nvr/cam/realmonitor?channel=7&subtype=0/trackID=0", 6, 0 },
+        { "rtsp://nvr/cam/realmonitor?channel=3", 2, 0 },
+    };
+    for (size_t i = 0; i < sizeof OK / sizeof OK[0]; ++i) {
+        int ch = -1, sub = -1;
+        CHECK(rtsp_server_path(OK[i].url, &ch, &sub) == 0 && ch == OK[i].ch && sub == OK[i].sub,
+              "%s -> ch %d sub %d (%d, %d)", OK[i].url, OK[i].ch, OK[i].sub, ch, sub);
+    }
+    static const char *const BAD[] = {
+        "rtsp://nvr/", "rtsp://nvr/ch0/main", "rtsp://nvr/ch17/main", "rtsp://nvr/ch1/third",
+        "rtsp://nvr/Streaming/Channels/103", "rtsp://nvr/Streaming/Channels/1", "rtsp://nvr/Streaming/Channels/x01",
+        "rtsp://nvr/cam/realmonitor?channel=1&subtype=2", "rtsp://nvr/cam/realmonitor?channel=99",
+        "rtsp://nvr/ch1/main/extra", "rtsp://nvr", "rtsp://nvr/../etc/passwd",
+    };
+    for (size_t i = 0; i < sizeof BAD / sizeof BAD[0]; ++i) {
+        int ch, sub;
+        CHECK(rtsp_server_path(BAD[i], &ch, &sub) < 0, "%s refused", BAD[i]);
+    }
+}
+
+static void test_rtsp_server_sdp(void)
+{
+    stream_tap_ps_t ps = { .codec = VG_CODEC_H264, .n = 2 };
+    static const uint8_t sps[] = { 0x67, 0x64, 0x00, 0x1f, 0xac }, pps[] = { 0x68, 0xeb, 0xcc };
+    memcpy(ps.ps[0], sps, sizeof sps);
+    ps.len[0] = sizeof sps;
+    memcpy(ps.ps[1], pps, sizeof pps);
+    ps.len[1] = sizeof pps;
+    char sdp[2048];
+    int n = rtsp_server_sdp(sdp, sizeof sdp, VG_CODEC_H264, &ps, "10.0.0.5", "CAM1 main", 42);
+    CHECK(n > 0 && strstr(sdp, "o=- 42 1 IN IP4 10.0.0.5\r\n") && strstr(sdp, "m=video 0 RTP/AVP 96\r\n") &&
+              strstr(sdp, "a=rtpmap:96 H264/90000\r\n") &&
+              strstr(sdp, "a=fmtp:96 packetization-mode=1;profile-level-id=64001F;sprop-parameter-sets=Z2QAH6w=,aOvM\r\n") &&
+              strstr(sdp, "a=control:trackID=0\r\n"), "H.264 SDP:\n%s", sdp);
+    static const uint8_t vps[] = { 0x40, 0x01, 0x0c }, hsps[] = { 0x42, 0x01, 0x01 }, hpps[] = { 0x44, 0x01, 0xc1 };
+    stream_tap_ps_t h = { .codec = VG_CODEC_H265, .n = 3 };
+    memcpy(h.ps[0], vps, 3);
+    memcpy(h.ps[1], hsps, 3);
+    memcpy(h.ps[2], hpps, 3);
+    h.len[0] = h.len[1] = h.len[2] = 3;
+    n = rtsp_server_sdp(sdp, sizeof sdp, VG_CODEC_H265, &h, "10.0.0.5", "CAM2 sub", 1);
+    CHECK(n > 0 && strstr(sdp, "a=rtpmap:96 H265/90000\r\n") &&
+              strstr(sdp, "a=fmtp:96 sprop-vps=QAEM;sprop-sps=QgEB;sprop-pps=RAHB\r\n"), "H.265 SDP:\n%s", sdp);
+    stream_tap_ps_t none = { 0 };
+    n = rtsp_server_sdp(sdp, sizeof sdp, VG_CODEC_H264, &none, "10.0.0.5", "CAM1 main", 1);
+    CHECK(n > 0 && strstr(sdp, "a=fmtp:96 packetization-mode=1\r\n") && !strstr(sdp, "sprop"),
+          "no parameter sets yet: in-band only");
+    CHECK(rtsp_server_sdp(sdp, 64, VG_CODEC_H264, &ps, "10.0.0.5", "CAM1 main", 1) < 0, "too small");
+}
+
+static void test_rtsp_server_digest(void)
+{
+    /* The server's check from HA1 against the client's from the password. */
+    char ha1[33], buf[128], srv[33], cli[33];
+    snprintf(buf, sizeof buf, "anna:%s:s3cret", USERS_REALM);
+    md5_hex(buf, strlen(buf), ha1);
+    rtsp_server_digest(ha1, "abcdef", "DESCRIBE", "rtsp://nvr/ch1/main", NULL, NULL, NULL, srv);
+    rtsp_digest_response("anna", USERS_REALM, "s3cret", "DESCRIBE", "rtsp://nvr/ch1/main", "abcdef", NULL, NULL,
+                         NULL, cli);
+    CHECK(!strcmp(srv, cli), "Digest without qop: %s %s", srv, cli);
+    rtsp_server_digest(ha1, "abcdef", "SETUP", "rtsp://nvr/ch1/main/trackID=0", "00000001", "xyz", "auth", srv);
+    rtsp_digest_response("anna", USERS_REALM, "s3cret", "SETUP", "rtsp://nvr/ch1/main/trackID=0", "abcdef",
+                         "00000001", "xyz", "auth", cli);
+    CHECK(!strcmp(srv, cli), "Digest with qop=auth: %s %s", srv, cli);
+}
+
 static void test_perm_table(void)
 {
     static const struct { const char *m, *uri; unsigned need; } T[] = {
@@ -235,6 +357,7 @@ static void test_perm_table(void)
         { "GET", "/api/v1/config", PERM_SYSTEM },
         { "PUT", "/api/v1/config", PERM_ALL & ~PERM_REMOTE },
         { "PUT", "/api/v1/config/web", PERM_USERS },
+        { "PUT", "/api/v1/config/rtsp_server", PERM_USERS },
         { "GET", "/api/v1/config/cameras", PERM_CAMERAS },
         { "PUT", "/api/v1/config/record", PERM_STORAGE },
         { "PUT", "/api/v1/config/schedule", PERM_STORAGE },
@@ -273,6 +396,9 @@ int main(void)
     test_shadow();
     test_users();
     test_perm_table();
+    test_rtsp_server_paths();
+    test_rtsp_server_sdp();
+    test_rtsp_server_digest();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

@@ -121,6 +121,19 @@ users_rc_t users_group_delete(const char *name, users_err_t *e);
  * (`why`, for the log: no shadow file, a locked account, ...). */
 int users_login(const char *name, const char *pass, unsigned *perms, char *why, size_t cap);
 
+/* The realm of Digest logins (the RTSP server): a user's HA1 is
+ * md5(name:USERS_REALM:password). */
+#define USERS_REALM "vigil"
+
+/* For a Digest login (RFC 2617): `name`'s HA1 (32 hex digits) and its
+ * permissions. 1 when the user may log in and its HA1 is known; 0 when
+ * not (unknown, disabled, no password); -1 when it may but its HA1 is not
+ * known: a password set before vigild kept HA1s and not used to log in
+ * since (crypt hashes cannot give one). The system account's HA1 is known
+ * once it has logged in (UI, API, web) since vigild started, as long as
+ * the shadow file has not changed. */
+int users_digest(const char *name, char ha1[33], unsigned *perms);
+
 /* A crypt(3) hash of `pass` with a fresh random salt: SHA-512, else
  * SHA-256, else MD5, whichever the C library has. 0, or -1. */
 int users_hash(const char *pass, char *out, size_t cap);

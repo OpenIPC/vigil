@@ -34,6 +34,10 @@ are part of the design.
 - **Zero channel**: that screen, live, in a browser at `http://<recorder>/`,
   with its mouse and keyboard, for users given the `remote` permission
   ([docs/api.md](docs/api.md#zero-channel)).
+- **RTSP server**: every camera's main and sub-stream to a VMS, VLC or
+  another recorder at `rtsp://<recorder>/ch1/main`, as the camera sends it
+  (no re-encoding), over TCP or UDP, starting at once at a keyframe, with
+  Digest logins of vigil's users ([docs/rtsp.md](docs/rtsp.md)).
 
 ## Platforms
 
@@ -66,6 +70,7 @@ For a board, see its page under [docs/platforms](docs/platforms/).
   protocol sources, HAL and platforms, and how a stream flows through it.
 - [Configuration and HTTP API](docs/api.md): the configuration file, the
   endpoints, the WebSocket, authentication and password redaction.
+- [RTSP server](docs/rtsp.md): the cameras' streams to other clients.
 - [On-screen UI](docs/ui.md): screens, data binding, schema-driven
   settings, design tokens, mouse and keyboard input, headless tests.
 - [Adding a platform](docs/porting.md): what a new SoC family has to

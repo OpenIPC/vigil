@@ -168,7 +168,9 @@ once. An open tap keeps its stream's GOP like a tile on screen does, and
 while a server listens (`stream_tap_standby`) every stream's GOP is kept
 as long as the caches hold less than half their budget, so the decoders'
 GOPs come first. A tap outlives its camera's reconnects and goes on at
-the next keyframe.
+the next keyframe. The RTSP server ([rtsp.md](rtsp.md)) is the first such
+server: its tap packetizes each AU once into a ring of RTP packets, which
+its own thread sends to every client of the stream.
 
 A decoder the platform cannot give (out of media memory or decoder
 channels) is retried after 10 s, or as soon as another channel closes its

@@ -100,6 +100,10 @@ defaults, commented.
 | `web.enabled` | boolean | `true` | The [zero channel](#zero-channel): the screen, mouse and keyboard in a browser. Off: its pages answer `503` and its viewers are disconnected. |
 | `web.listen` | `"port"` or `"a.b.c.d:port"` | `"0.0.0.0:80"` | Where its web server listens (IPv4). Empty: none. Read at start only. |
 | `web.fps` | integer 1..30 | 15 | Its pictures a second, at most. |
+| `rtsp_server.enabled` | boolean | `true` | The cameras' streams to other clients over RTSP ([docs/rtsp.md](rtsp.md)). |
+| `rtsp_server.port` | integer 1..65535 | 554 | Its TCP port. |
+| `rtsp_server.auth` | boolean | `true` | Require a Digest login of a user with the `live` permission. |
+| `rtsp_server.max_clients` | integer 1..32 | 8 | Clients being sent a stream at once. |
 | `discovery.interfaces` | string | `""` | Interfaces to search for cameras on, comma separated; empty: every IPv4 interface ([Discovery](#discovery)). |
 | `discovery.targets` | IPv4 addresses, comma separated | `""` | Also searched by unicast: cameras on a routed subnet. |
 | `discovery.prefer` | `netip`, `onvif`, `dhip`, comma separated | `"netip,onvif,dhip"` | The protocol a camera that answers several is added with. |
@@ -232,13 +236,17 @@ that says what its users may do. They are kept in `api.users`
 like `vigil.yaml`; passwords are stored as `crypt(3)` hashes (SHA-512,
 `$6$`, with a random salt; SHA-256 or MD5 where the C library has no
 SHA-512) and never leave `vigild`: the API shows `"password_set": true`.
+Beside each hash the file keeps `md5(name:vigil:password)` (`digest`),
+which the [RTSP server](rtsp.md#logins)'s Digest logins need and a `crypt`
+hash cannot give: written with the password, and for a user from before
+it, at its next login.
 
 Permissions: `live` (live view, status, events), `playback`, `ptz`,
 `cameras` (the camera list, discovery), `storage` (recording, schedule,
 quota, disks, network storage), `network` (network, DDNS, UPnP, mail,
 alarm center), `system` (time, host name, the UI's settings, the whole
-configuration), `users` (accounts, and the `api` and `web` sections,
-which decide who gets in at all), `remote` (the [zero
+configuration), `users` (accounts, and the `api`, `web` and
+`rtsp_server` sections, which decide who gets in at all), `remote` (the [zero
 channel](#zero-channel): the screen, mouse and keyboard from a browser,
 which is the console). Two groups always exist: **admin**, every
 permission, which cannot be changed or deleted, and **user**, live view
@@ -269,7 +277,7 @@ saved over it until it is fixed or removed.
 | `/config/record`, `schedule`, `quota`, `nas` | `storage` |
 | `/config/ddns`, `upnp`, `smtp`, `alarm` | `network` |
 | `/config/time`, `ui`, `display` | `system` |
-| `/config/api`, `web` | `users` |
+| `/config/api`, `web`, `rtsp_server` | `users` |
 | `/network/…` | `network` |
 | `/system/…` | `system` |
 | `/disks…`, `/storage/…` | `storage` |
@@ -831,6 +839,8 @@ say which device went where.
   `cmake/embed.cmake`); `src/app/kvm.c`, `kvm_enc.c`, `kvm_input.c`,
   `jpeg_enc.c`: its pictures, their changed parts as JPEGs (an encoder of
   its own: libjpeg is not on the firmware) and its input.
+  `src/api/rtsp_server.c`: the [RTSP server](rtsp.md), its own thread,
+  fed by `src/core/stream_tap.c`.
   `src/api/api_disc.c`: the discovery endpoints, over
   `src/core/discovery.{h,c}` (the device table and the jobs),
   `src/core/disc_proto.{h,c}` (the searches and their answers, as pure

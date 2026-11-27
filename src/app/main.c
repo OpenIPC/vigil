@@ -9,6 +9,8 @@
  *   -> mgmt_start (the management pages' jobs and timers: network
  *      rollback, NTP, DDNS, network storage, alarm center, mail)
  *   -> api_start (HTTP/WebSocket API on its own threads, if configured)
+ *   -> rtsp_server_start (the cameras' streams to other clients, its own
+ *      thread)
  *   -> frontend_run (LVGL quad view, or status lines when headless); on
  *      this thread, a configuration the API saved is applied
  *      (channels_apply)
@@ -34,6 +36,7 @@
 #include "log.h"
 #include "mgmt.h"
 #include "source.h"
+#include "rtsp_server.h"
 #include "web.h"
 
 static volatile sig_atomic_t g_stop;
@@ -258,6 +261,7 @@ static void apply_config(void)
     int failed = channels_apply(&cc);
     apply_output(c.display.output);
     channels_set_stretch(!strcmp(c.display.video_aspect, "stretch"));
+    rtsp_server_apply();
     g_applied_gen = gen;
     config_mark_applied(gen);
     if (failed) {
@@ -422,7 +426,9 @@ int main(int argc, char **argv)
         disc_set_max_channels(caps->max_channels);
         api_start();                    /* failing to start it is logged, not fatal */
         web_start();                    /* the same */
+        rtsp_server_start();            /* the same */
         rc = frontend_run(run_secs, &g_stop, apply_config) < 0 ? 1 : 0;
+        rtsp_server_stop();
         web_stop();
         api_stop();
         disc_shutdown();

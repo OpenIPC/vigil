@@ -518,6 +518,23 @@ static const schema_field_t web_fields[] = {
               "take more than half a CPU core." },
 };
 
+static const schema_field_t rtsp_server_fields[] = {
+    { .key = "enabled", BOOL(config_rtsp_server_t, enabled), .def_int = 1, .live = 1, .label = "On",
+      .help = "The cameras' streams to other clients (a VMS, VLC, another recorder) at "
+              "rtsp://<this recorder>/ch1/main and /ch1/sub, as the cameras send them "
+              "(docs/rtsp.md)." },
+    { .key = "port", INT(config_rtsp_server_t, port), .def_int = 554, .min = 1, .max = 65535, .live = 1,
+      .label = "Port", .help = "Its TCP port; RTP over UDP goes from a pair of ports from 6970 up." },
+    { .key = "auth", BOOL(config_rtsp_server_t, auth), .def_int = 1, .live = 1,
+      .label = "Require a password",
+      .help = "Digest authentication against vigil's users; their group needs the live permission. "
+              "Off: anyone on the network can watch every camera." },
+    { .key = "max_clients", INT(config_rtsp_server_t, max_clients), .def_int = 8, .min = 1, .max = 32,
+      .live = 1, .label = "Clients at once, at most",
+      .help = "Clients being sent a stream at the same time. Clients of one stream share its "
+              "buffer (2 to 4 MiB for a main stream, less for a sub-stream)." },
+};
+
 static const schema_field_t discovery_fields[] = {
     { .key = "interfaces", STR(config_discovery_t, interfaces), .def_str = "", .live = 1,
       .check = check_ifaces, .label = "Search on interfaces",
@@ -567,6 +584,7 @@ static const schema_section_t sections[] = {
     { .key = "api", .off = offsetof(vigil_config_t, api), .fields = api_fields,
       .n_fields = N(api_fields), .label = "HTTP API" },
     OBJECT("web", web, web_fields, "Zero channel"),
+    OBJECT("rtsp_server", rtsp_server, rtsp_server_fields, "RTSP server"),
     { .key = "discovery", .off = offsetof(vigil_config_t, discovery), .fields = discovery_fields,
       .n_fields = N(discovery_fields), .label = "Camera search" },
 };

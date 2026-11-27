@@ -104,6 +104,11 @@ if(Python3_FOUND)
                                     $<TARGET_FILE:test_kvm>)
       set_tests_properties(web_e2e PROPERTIES SKIP_RETURN_CODE 77)
     endif()
+    # The RTSP server: logins, both codecs over TCP and UDP (ffprobe), and
+    # a second vigild recording the first one's stream.
+    add_test(NAME rtsp_server_e2e
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/rtsp_server_test.py $<TARGET_FILE:vigild>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data)
     add_test(NAME api_e2e
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/api_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
