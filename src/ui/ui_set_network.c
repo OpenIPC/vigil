@@ -292,6 +292,7 @@ typedef struct {
     ui_wifi_t  w;
     status_w_t st;
     lv_obj_t  *ssid, *pass, *list, *job, *scan_note;
+    char       profile[48];         /* wlandev to set: the adapter's when none is */
 } wifi_t;
 
 static void net_pick_cb(lv_event_t *ev)
@@ -322,6 +323,19 @@ static void scan_cb(lv_event_t *ev)
     }
 }
 
+/* A USB adapter or modem: what it is, its driver and the firmware profile
+ * that loads it. */
+static void radio_rows(lv_obj_t *sec, const ui_radio_t *r)
+{
+    char t[96];
+    snprintf(t, sizeof t, "%s (USB %s)", r->name[0] ? r->name : "unnamed", r->id);
+    ui_set_info(sec, "Device", t);
+    if (r->driver[0]) snprintf(t, sizeof t, "%s%s", r->driver, r->bound ? ", loaded" : ", not loaded yet");
+    else snprintf(t, sizeof t, "none in this firmware");
+    ui_set_info(sec, "Driver", t);
+    ui_set_info(sec, "Firmware profile", r->profile[0] ? r->profile : "none for it");
+}
+
 static void *wifi_open(ui_set_t *s, lv_obj_t *pane)
 {
     if (!MG() || !MG()->wifi_get) return NULL;
@@ -330,17 +344,36 @@ static void *wifi_open(ui_set_t *s, lv_obj_t *pane)
     w->s = s;
     ui_net_status_t st;
     MG()->wifi_get(&w->w, &st);
-    if (!w->w.ifname[0]) {
+    if (!w->w.ifname[0] && !w->w.n_adapters) {
         ui_set_hide_actions(s);
         lv_obj_t *sec = ui_set_section(pane, NULL);
         ui_label(sec, "No Wi-Fi adapter", VG_FONT_LG_LV, UI_C(TEXT));
-        ui_set_note(sec, "No wireless network interface is there. A USB Wi-Fi adapter the firmware has a "
-                         "driver for shows up here once it is plugged in.", UI_C(TEXT2));
+        ui_set_note(sec, "No wireless interface and no USB Wi-Fi adapter this firmware has a driver for. "
+                         "Plug one in: it shows up here.", UI_C(TEXT2));
         return w;
     }
     not_managed_note(pane);
-    status_build(pane, &w->st);
-    status_fill(&w->st, &st);
+    const ui_radio_t *ad = w->w.n_adapters ? &w->w.adapters[0] : NULL;
+    if (ad) {
+        lv_obj_t *sec = ui_set_section(pane, "Adapter");
+        radio_rows(sec, ad);
+        snprintf(w->profile, sizeof w->profile, "%s", w->w.profile[0] ? w->w.profile : ad->profile);
+        ui_set_info(sec, "wlandev", w->w.profile[0] ? w->w.profile : "not set");
+        if (!ad->driver[0] || !ad->profile[0]) {
+            ui_set_hide_actions(s);
+            ui_set_note(pane, LV_SYMBOL_WARNING "  This firmware has no driver profile for this adapter "
+                              "(/etc/wireless/usb), so it cannot be used.", UI_C(WARN));
+            return w;
+        }
+        if (!w->w.ifname[0])
+            ui_set_note(pane, "No wireless interface yet: Save sets wlandev to the profile above, loads the "
+                              "driver the firmware's way and joins the network; the firmware starts it by itself "
+                              "at every boot from then on.", UI_C(TEXT2));
+    }
+    if (w->w.ifname[0]) {
+        status_build(pane, &w->st);
+        status_fill(&w->st, &st);
+    }
     lv_obj_t *sec = ui_set_section(pane, "Network to join");
     lv_obj_t *box = ui_set_row(sec, "SSID", NULL);
     w->ssid = ui_set_text(s, box, w->w.ssid, 32, 320);
@@ -348,7 +381,8 @@ static void *wifi_open(ui_set_t *s, lv_obj_t *pane)
     lv_obj_add_event_cb(scan, scan_cb, LV_EVENT_CLICKED, w);
     if (!w->w.can_scan) {
         lv_obj_add_state(scan, LV_STATE_DISABLED);
-        ui_set_note(box, "Scanning needs iw, which this firmware does not have.", UI_C(TEXT2));
+        ui_set_note(box, w->w.ifname[0] ? "Scanning needs iw, which this firmware does not have."
+                                        : "Scanning works once the adapter's interface is up.", UI_C(TEXT2));
     }
     w->list = lv_obj_create(sec);
     ui_plain(w->list);
@@ -383,7 +417,8 @@ static int wifi_save(void *st)
     wifi_t *w = st;
     if (!w->ssid) return 0;
     char err[200] = "";
-    int rc = MG()->wifi_set(lv_textarea_get_text(w->ssid), lv_textarea_get_text(w->pass), err, sizeof err);
+    int rc = MG()->wifi_set(lv_textarea_get_text(w->ssid), lv_textarea_get_text(w->pass), w->profile, err,
+                            sizeof err);
     if (rc <= 0) {
         ui_toast(UI_TOAST_BAD, "Not saved: %s", rc == UI_MGMT_EUNMANAGED ? "vigild does not manage this system"
                                                                          : err);
@@ -405,29 +440,57 @@ static void wifi_cancel(void *st)
 
 /* ---- LTE --------------------------------------------------------------------------- */
 
+static void lte_profile_cb(lv_event_t *ev)
+{
+    const char *profile = lv_event_get_user_data(ev);
+    char msg[200] = "";
+    int rc = MG()->lte_profile ? MG()->lte_profile(profile, msg, sizeof msg) : UI_MGMT_EFAIL;
+    if (rc == UI_MGMT_EUNMANAGED) ui_toast(UI_TOAST_BAD, "Not changed: vigild does not manage this system");
+    else ui_toast(rc < 0 ? UI_TOAST_BAD : UI_TOAST_OK, "%s", msg[0] ? msg : "failed");
+}
+
+static ui_lte_t g_lte;              /* the page's: profile buttons point into it */
+
 static void *lte_open(ui_set_t *s, lv_obj_t *pane)
 {
     ui_set_hide_actions(s);
     if (!MG() || !MG()->lte_get) return NULL;
-    ui_lte_t l;
     ui_net_status_t st;
-    MG()->lte_get(&l, &st);
-    lv_obj_t *sec = ui_set_section(pane, NULL);
-    if (!l.ifname[0]) {
+    MG()->lte_get(&g_lte, &st);
+    ui_lte_t *l = &g_lte;
+    if (!l->ifname[0] && !l->n_modems) {
+        lv_obj_t *sec = ui_set_section(pane, NULL);
         ui_label(sec, "No modem found", VG_FONT_LG_LV, UI_C(TEXT));
-        ui_set_note(sec, "No LTE modem's network interface (RNDIS, ECM, NCM or QMI) is there. The firmware "
-                         "brings a supported USB modem up by itself (its modem profile, the U-Boot "
-                         "environment's wlandev); this page then shows it.", UI_C(TEXT2));
-        if (l.profile[0]) ui_set_info(sec, "Modem profile", l.profile);
+        ui_set_note(sec, "No LTE modem's network interface (RNDIS, ECM, NCM or QMI) and no USB modem this "
+                         "firmware has a driver or a profile for. Plug one in: it shows up here.", UI_C(TEXT2));
+        if (l->profile[0]) ui_set_info(sec, "wlandev", l->profile);
         return NULL;
     }
-    ui_set_info(sec, "Interface", l.ifname);
-    ui_set_info(sec, "Driver", or_dash(l.driver));
-    ui_set_info(sec, "Modem profile", or_dash(l.profile));
-    status_w_t w;
-    status_build(pane, &w);
-    status_fill(&w, &st);
-    ui_set_note(pane, "The modem is set up by the firmware; vigild shows its state.", UI_C(TEXT2));
+    for (int i = 0; i < l->n_modems; ++i) {
+        const ui_radio_t *r = &l->modems[i];
+        lv_obj_t *sec = ui_set_section(pane, i ? NULL : "Modem");
+        radio_rows(sec, r);
+        if (!r->profile[0]) {
+            ui_set_note(sec, "No profile of /etc/wireless/modem names this modem: the firmware loads its "
+                             "driver only if the device's class matches (RNDIS, ECM, NCM).", UI_C(TEXT2));
+        } else if (!strcmp(r->profile, l->profile)) {
+            ui_set_note(sec, "wlandev names this profile: the firmware starts the modem at boot.", UI_C(OK));
+        } else {
+            lv_obj_t *b = ui_set_button(s, sec, LV_SYMBOL_OK, "Use this profile");
+            lv_obj_add_event_cb(b, lte_profile_cb, LV_EVENT_CLICKED, (void *)r->profile);
+            ui_set_note(sec, "Sets wlandev; the modem starts at the next boot. Wi-Fi and the modem share "
+                             "wlandev: a Wi-Fi profile set there is replaced.", UI_C(TEXT2));
+        }
+    }
+    if (l->ifname[0]) {
+        lv_obj_t *sec = ui_set_section(pane, "Interface");
+        ui_set_info(sec, "Interface", l->ifname);
+        ui_set_info(sec, "Driver", or_dash(l->driver));
+        ui_set_info(sec, "wlandev", or_dash(l->profile));
+        status_w_t w;
+        status_build(pane, &w);
+        status_fill(&w, &st);
+    }
     return NULL;
 }
 

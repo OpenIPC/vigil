@@ -82,6 +82,18 @@ static int net_pending(int *secs) { return mgmt_net_pending(NULL, 0, secs); }
 static int net_confirm(void) { return mgmt_net_confirm(); }
 static int net_revert(void) { return mgmt_net_revert(); }
 
+static void radios_copy(ui_radio_t *u, int *nu, const usb_radio_t *r, int n)
+{
+    *nu = n > 4 ? 4 : n;
+    for (int i = 0; i < *nu; ++i) {
+        CP(u[i].id, r[i].id);
+        CP(u[i].name, r[i].name);
+        CP(u[i].driver, r[i].driver);
+        CP(u[i].profile, r[i].profile);
+        u[i].bound = r[i].bound;
+    }
+}
+
 static void wifi_get(ui_wifi_t *u, ui_net_status_t *st)
 {
     wifi_info_t w;
@@ -90,7 +102,9 @@ static void wifi_get(ui_wifi_t *u, ui_net_status_t *st)
     CP(u->ifname, w.ifname);
     CP(u->ssid, w.ssid);
     u->password_set = w.has_password;
-    u->can_scan = w.can_scan;
+    u->can_scan = w.can_scan && w.ifname[0];
+    CP(u->profile, w.profile);
+    radios_copy(u->adapters, &u->n_adapters, w.adapters, w.n_adapters);
     status_copy(w.ifname, st);
 }
 
@@ -112,15 +126,16 @@ static int wifi_scan_(ui_wifi_net_t *out, int max, char *err, size_t cap)
     return n;
 }
 
-static int wifi_set_(const char *ssid, const char *pass, char *err, size_t cap)
+static int wifi_set_(const char *ssid, const char *pass, const char *profile, char *err, size_t cap)
 {
     wifi_info_t w;
     wifi_info(&w);
-    if (!w.ifname[0]) {
+    if (!w.ifname[0] && !w.n_adapters) {
         snprintf(err, cap, "no Wi-Fi adapter");
         return UI_MGMT_EINVAL;
     }
-    return mgmt_wifi_set(w.ifname, ssid, pass, err, cap);
+    if ((!profile || !*profile) && !w.profile[0] && w.n_adapters) profile = w.adapters[0].profile;
+    return mgmt_wifi_set(w.ifname, ssid, pass, profile, err, cap);
 }
 
 static void lte_get(ui_lte_t *u, ui_net_status_t *st)
@@ -131,6 +146,7 @@ static void lte_get(ui_lte_t *u, ui_net_status_t *st)
     CP(u->ifname, l.ifname);
     CP(u->driver, l.driver);
     CP(u->profile, l.profile);
+    radios_copy(u->modems, &u->n_modems, l.modems, l.n_modems);
     status_copy(l.ifname, st);
 }
 
@@ -351,7 +367,7 @@ static const ui_mgmt_t g_mgmt = {
     .managed = managed,
     .eth_get = eth_get, .eth_apply = eth_apply, .net_pending = net_pending, .net_confirm = net_confirm,
     .net_revert = net_revert, .wifi_get = wifi_get, .wifi_scan = wifi_scan_, .wifi_set = wifi_set_,
-    .lte_get = lte_get,
+    .lte_get = lte_get, .lte_profile = mgmt_lte_profile,
     .services = services, .ddns_update = mgmt_ddns_update, .smtp_test = mgmt_smtp_test,
     .nas_test = mgmt_nas_test, .nas_support = sys_nas_support, .nas_mounted = nas_mounted,
     .curl = curl_available, .job = job,

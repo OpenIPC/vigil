@@ -188,11 +188,15 @@ in use, refreshed every 2 s; DHCP, address, netmask, gateway, two DNS
 servers, MTU. A bad value is marked and named in a toast; an applied change
 asks "Keep these network settings?" with the seconds left before it is
 undone (Keep, Undo) — on whatever screen is open by then, since the
-recorder may have been cut off by the change. *Wi-Fi*: with an adapter, its
-state, the network to join (scanning needs `iw`; the button says so when
-the firmware lacks it) and the password; without one, "No Wi-Fi adapter"
-and nothing to fill in. *LTE*: the modem's interface and the firmware's
-modem profile, or "No modem found". *DDNS*, *SMTP*: the form, the last
+recorder may have been cut off by the change. *Wi-Fi*: a USB adapter (its name and USB id,
+its driver and the firmware profile that loads it, `wlandev`), the
+interface's state once it is up, the network to join (Scan once the
+interface is up and `iw` is there) and the password; with an adapter whose
+interface is not up yet, Save also sets `wlandev` and loads the driver;
+without one, "No Wi-Fi adapter" and nothing to fill in. *LTE*: the USB
+modems plugged in, each with its driver and profile and "Use this profile"
+(`wlandev`, for the next boot), and the modem's interface once it is up;
+or "No modem found". *DDNS*, *SMTP*: the form, the last
 update or mail and its result, and "Update now" / "Send test mail" (which
 use the saved settings: with unsaved changes they ask to save first).
 *UPnP*: the form, marked not active. *Alarm center*: the form and the last
@@ -214,7 +218,8 @@ all Continuous writes no entry. Motion only is explained: no camera source
 reports motion yet. *Disk Manager*: disks and their partitions (model or
 filesystem, size, free, mount point, state), refreshed every 2 s so a disk
 plugged in shows up; Format, Mount and Unmount per row (never on a device
-that holds the system); Format opens a panel in the page with the
+that holds the system); Format (ext4 by default where the firmware has
+`mkfs.ext4`, else exFAT) opens a panel in the page with the
 filesystem, a field to type the device's name and a Format button that
 works only when the name matches; it runs as a job. *Disk Quota*: per
 camera, the most gigabytes and days. *Network Storage*: whether SMB and NFS

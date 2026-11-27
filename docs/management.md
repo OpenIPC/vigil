@@ -13,8 +13,8 @@ The same actions are in the HTTP API ([api.md](api.md#management)).
 | Page | Item | State | How |
 |---|---|---|---|
 | Network | Ethernet | works | DHCP or static address, netmask, gateway, two DNS servers, MTU; link, speed, MAC and the addresses in use. A change is undone unless confirmed within 60 s. |
-| | Wi-Fi | partial | With a wireless interface: the network to join (SSID, password) and the interface's state. Scanning needs `iw`, which the firmware lacks. Without an adapter the page says so. |
-| | LTE | detection | A modem's network interface (RNDIS, ECM, NCM, QMI) and the firmware's modem profile; the firmware brings it up. |
+| | Wi-Fi | works | A USB adapter is recognised by its USB id even before its driver is loaded, with the firmware profile that loads it; joining sets `wlandev`, `wlanssid` and `wlanpass`, loads the driver the firmware's way and brings wlan0 up. Scan with `iw`. Without an adapter the page says so. |
+| | LTE | detection | USB modems by their USB id (and the profile of `/etc/wireless/modem` that names them, or by their driver), "Use this profile" sets `wlandev` for the next boot; a modem's network interface and its state once the firmware has brought it up. |
 | | DDNS | works | dyndns2 (Dyn and compatibles), No-IP, or a custom URL, every N minutes, through curl. |
 | | UPnP | stored | The settings are kept; vigild has no UPnP client yet. |
 | | SMTP | works | A test mail; trouble (disk full, recording failed, a camera offline) mailed, at most one mail per 10 minutes, through curl. |
@@ -22,9 +22,9 @@ The same actions are in the HTTP API ([api.md](api.md#management)).
 | | P2P | none | vigil has no P2P service; the page says so. |
 | Storage | Basic | works | When the disk is full: overwrite the oldest recordings, or stop (event `REC disk full`); segment length in minutes; the recording directory. |
 | | Schedule | works | A week per camera in half hours: continuous, motion only, off. Motion only records while the camera reports motion, which no source does yet. |
-| | Disk Manager | works | Disks and partitions with their state; format (exFAT or FAT32 here; ext4 where `mkfs.ext4` exists), mount, unmount. |
+| | Disk Manager | works | Disks and partitions with their state; format (ext4 by default where `mkfs.ext4` exists, else exFAT; FAT32), mount, unmount. |
 | | Disk Quota | works | Per camera: the most space (GB) and the most days its recordings may take. |
-| | Network Storage | partial | SMB (CIFS) works on this firmware; NFS needs a kernel option the ssr621q kernel lacks (below). Test mounts, writes and reads a file. |
+| | Network Storage | works | SMB (CIFS, SMB2/3; SMB1 only where the kernel has nothing else) and NFS v3, mounted at `/mnt/nas`; Test mounts, writes and reads a file. |
 | System | General | works | Device name (host name), language (English for now), date and time, time zone with DST, NTP, date and time format. |
 | Account | Users, Groups | works | vigild's own users in groups with permissions, enforced by the API ([api.md](api.md#accounts-and-permissions)). The on-screen UI does not ask for a login yet. |
 
@@ -42,6 +42,7 @@ the system is written where the firmware keeps it:
 | An interface | `/etc/network/interfaces.d/<if>` | a busybox ifupdown stanza (below) |
 | DNS of a static address | the stanza's `pre-up` | `echo -e "nameserver A\nnameserver B" >/tmp/resolv.conf`, as on the OpenIPC wiki; `/etc/resolv.conf` links to `/tmp/resolv.conf` |
 | Wi-Fi network | U-Boot environment | `fw_setenv wlanssid` / `wlanpass`; the wlan0 stanza turns them into a wpa_supplicant configuration (`wlan_conf`) |
+| Wi-Fi adapter, modem | U-Boot environment | `fw_setenv wlandev <profile>`: `S40network` runs `/etc/wireless/usb` or `/etc/wireless/modem` with it at boot, which loads the driver |
 | Time zone | `/etc/TZ`, `/etc/timezone` | a POSIX TZ string (`CET-1CEST,M3.5.0,M10.5.0/3`) and the zone's name; `/etc/profile`, `rcS` and `S95vigil` export `TZ` from `/etc/TZ` |
 | NTP servers | `/etc/ntp.conf` | `server HOST iburst`, read by the firmware's ntpd (`S49ntpd`) |
 | Clock | the kernel, the RTC | `settimeofday`; `hwclock -w -u` when `/dev/rtc0` is there; `fake-hwclock save` |
@@ -103,8 +104,12 @@ ends), its partitions are unmounted, and then:
   automount also mounts;
 - the start of the partition is zeroed before `mkfs`, so the firmware's
   automount, which reacts to the new partition, finds nothing to mount;
-- `mkfs.exfat` (exfatprogs), `mkfs.vfat -F 32` (busybox) or `mkfs.ext4`,
-  whichever the firmware has, labelled VIGIL;
+- `mkfs.ext4 -F -L vigil` (e2fsprogs; the default where it is there: a
+  journal, so a power cut costs the open segment, not the filesystem),
+  `mkfs.exfat -L VIGIL` (exfatprogs; the default otherwise, readable by any
+  computer) or `mkfs.vfat -F 32` (busybox). e2fsprogs 1.47 turns on
+  `orphan_file` and `metadata_csum_seed`; the ssr621q's 4.9 kernel mounted
+  such a filesystem in QEMU;
 - the result is mounted at `/mnt/<partition>`.
 
 **Unmount** holds recording off the disk and unmounts it; recording then
@@ -160,21 +165,49 @@ All of this runs only on OpenIPC firmware (`/etc/os-release` names an
 `OPENIPC_VERSION`). On a desktop or a Debian board the pages show what
 there is and change nothing; the API answers 409.
 
+## USB Wi-Fi adapters and modems
+
+OpenIPC loads a Wi-Fi or modem driver only when the U-Boot environment's
+`wlandev` names a profile: one of `/etc/wireless/usb` (`mt7601u-generic`,
+`rt2800usb-generic`, ...) or `/etc/wireless/modem` (`rndis-generic`,
+`rndis-e3372h`, `ec25`, ...). `S40network` runs the profile at boot (it
+loads the module, maybe switches the modem's USB mode) and then brings the
+interface up. A plugged adapter without its profile has no driver and no
+interface, so vigild looks at the USB devices themselves: each
+interface's `modalias` (`/sys/bus/usb/devices/*/modalias`) is matched
+against the firmware's `modules.alias`, which names only drivers this
+firmware has. A Wi-Fi adapter's profile is the `-generic` one that loads
+its module (the others are cameras' own radios, powered through their
+GPIOs); a modem's is one that names its USB id (`usb_modeswitch -v -p`,
+`usbserial vendor= product=`, `new_id`), else one that loads its driver.
+Joining a network with a new adapter sets `wlandev` with `wlanssid` and
+`wlanpass`, runs `/etc/wireless/usb <profile>` and waits for the
+interface; from then on the firmware starts it at every boot. Wi-Fi and
+modem share `wlandev`. A QMI modem (`qmi_wwan`) is recognised, but no
+profile of this firmware names one.
+
 ## What the firmware needs
 
-Found on the ssr621q image (`ssr621q_lite`) and its kernel:
+Found on the ssr621q image (`ssr621q_lite`, OpenIPC/firmware branch
+`vigil-yaml` at 932f160) and its kernel:
 
 | Feature | Needs | On ssr621q |
 |---|---|---|
 | Ethernet | busybox `ifup`/`ifdown`, `udhcpc`, `ip` | there |
-| Wi-Fi scan | `iw` (and a Wi-Fi driver: the kernel has cfg80211 but no mac80211 or driver) | missing: `BR2_PACKAGE_IW` and a driver package |
-| Wi-Fi join | `wpa_supplicant`, `wpa_passphrase` (used by `wlan_conf`) | missing: `BR2_PACKAGE_WPA_SUPPLICANT` |
-| LTE | a modem driver (`rndis_host`, `cdc_ether`, `qmi_wwan`) | `CONFIG_USB_NET_DRIVERS` is off |
+| Wi-Fi | mac80211, a driver, `iw`, `wpa_supplicant`, `wpa_passphrase` (used by `wlan_conf`) | there: mac80211, `mt7601u` and `rt2800usb` as modules, `iw`, `wpa_supplicant`, `wpa_passphrase` |
+| LTE | modem drivers (`rndis_host`, `cdc_ether`, `cdc_ncm`, `qmi_wwan`, `option`, `usbserial`) | there, as modules |
 | Mail, DDNS, alarm center | `curl` with TLS and SMTP | there (libcurl-openipc, mbedTLS) |
+| Format ext4 | `mkfs.ext4` (e2fsprogs) | there, with `e2fsck` and `tune2fs`; ext4 is a module |
 | Format exFAT | `mkfs.exfat` | there (exfatprogs) |
 | Format FAT32 | busybox `mkfs.vfat` | there |
-| Format ext4 | `mkfs.ext4` (e2fsprogs, or busybox `CONFIG_MKE2FS`) | missing; the kernel has ext4 as a module |
-| SMB storage | the `cifs` module | there (`CONFIG_CIFS=m`) |
-| NFS storage | NFS v3 in the kernel | missing: `CONFIG_NFS_V3` (only `CONFIG_NFS_V2=m` is set) |
+| SATA disks | the SATA host module | loaded at boot |
+| SMB storage | the `cifs` module with SMB2/3 | there, as a module |
+| NFS storage | NFS v3 (`nfsv3`, loaded by vigild; mounted with `addr=`, `nolock`, `vers=3`) | there, as a module |
 | RTC | `hwclock` and `/dev/rtc0` | `hwclock` there; `CONFIG_MS_RTC=y` |
 | NTP | busybox `ntpd` | there |
+
+Older images (before those firmware changes) lack Wi-Fi, the modem
+drivers, `mkfs.ext4`, NFS v3 and SMB2/3; the pages then say what is
+missing: a kernel without `CONFIG_CIFS_SMB2` answers SMB2's `vers=2.1`
+with "Unknown vers=" in its log, and vigild then mounts with SMB1 and
+says so; without `nfsv3`, the NFS line names `CONFIG_NFS_V3`.

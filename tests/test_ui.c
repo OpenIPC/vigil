@@ -425,11 +425,23 @@ static int  fm_eth_apply(const ui_net_cfg_t *c, char *field, size_t fcap, char *
 static int  fm_pending(int *secs) { if (secs) *secs = 57; return g_mg_pending; }
 static int  fm_confirm(void) { int p = g_mg_pending; g_mg_pending = 0; return p ? 0 : -1; }
 static int  fm_revert(void) { return fm_confirm(); }
+/* g_mg_wifi: 0 none, 1 wlan0 up (wlandev set), 2 a USB adapter plugged in
+ * whose driver is not loaded yet (no wlandev). */
+static char g_mg_wifi_profile[48];
 static void fm_wifi_get(ui_wifi_t *w, ui_net_status_t *st)
 {
     memset(w, 0, sizeof *w);
     fm_status(st, 1);
     if (!g_mg_wifi) return;
+    w->n_adapters = 1;
+    ui_radio_t *a = &w->adapters[0];
+    snprintf(a->id, sizeof a->id, "148f:7601");
+    snprintf(a->name, sizeof a->name, "MediaTek 802.11 n WLAN");
+    snprintf(a->driver, sizeof a->driver, "mt7601u");
+    snprintf(a->profile, sizeof a->profile, "mt7601u-generic");
+    if (g_mg_wifi == 2) return;
+    a->bound = 1;
+    snprintf(w->profile, sizeof w->profile, "mt7601u-generic");
     snprintf(w->ifname, sizeof w->ifname, "wlan0");
     snprintf(w->ssid, sizeof w->ssid, "HomeNet");
     w->password_set = 1;
@@ -440,12 +452,31 @@ static int  fm_wifi_scan(ui_wifi_net_t *o, int max, char *err, size_t cap)
     snprintf(err, cap, "this firmware has no iw to scan with");
     return -1;
 }
-static int  fm_wifi_set(const char *ssid, const char *p, char *err, size_t cap)
+static int  fm_wifi_set(const char *ssid, const char *p, const char *profile, char *err, size_t cap)
 {
     (void)ssid; (void)p; (void)err; (void)cap;
+    snprintf(g_mg_wifi_profile, sizeof g_mg_wifi_profile, "%s", profile ? profile : "");
     return ++g_mg_jobs;
 }
-static void fm_lte_get(ui_lte_t *l, ui_net_status_t *st) { memset(l, 0, sizeof *l); memset(st, 0, sizeof *st); }
+static int  g_mg_modem;             /* a USB modem plugged in */
+static char g_mg_lte_profile[48];
+static void fm_lte_get(ui_lte_t *l, ui_net_status_t *st)
+{
+    memset(l, 0, sizeof *l);
+    memset(st, 0, sizeof *st);
+    snprintf(l->profile, sizeof l->profile, "%s", g_mg_lte_profile);
+    if (!g_mg_modem) return;
+    l->n_modems = 2;
+    l->modems[0] = (ui_radio_t){ .id = "12d1:1f01", .name = "HUAWEI_MOBILE", .driver = "usb_storage",
+                                 .profile = "rndis-e3372h", .bound = 1 };
+    l->modems[1] = (ui_radio_t){ .id = "2c7c:0125", .name = "Quectel EC25", .driver = "qmi_wwan" };
+}
+static int  fm_lte_profile(const char *profile, char *msg, size_t cap)
+{
+    snprintf(g_mg_lte_profile, sizeof g_mg_lte_profile, "%s", profile);
+    snprintf(msg, cap, "wlandev is %s: the modem starts at the next boot", profile);
+    return 0;
+}
 static void fm_services(ui_svc_t *d, ui_svc_t *m, ui_svc_t *a, ui_svc_t *n)
 {
     *d = (ui_svc_t){ .last = 1795702800, .ok = 1, .result = "updated: good 203.0.113.7" };
@@ -486,7 +517,7 @@ static int  fm_disks(ui_disk_t *o, int max)
     if (n > max) n = max;
     memcpy(o, d, (size_t)n * sizeof *o);
     if (g_mg_formatted && n > 3) {
-        snprintf(o[3].fs, sizeof o[3].fs, "exfat");
+        snprintf(o[3].fs, sizeof o[3].fs, "ext4");
         snprintf(o[3].mnt, sizeof o[3].mnt, "/mnt/sdb1");
         snprintf(o[3].state, sizeof o[3].state, "mounted");
         o[3].total = 31900000000ull;
@@ -496,10 +527,11 @@ static int  fm_disks(ui_disk_t *o, int max)
 }
 static int  fm_formats(char out[][8], int max)
 {
-    (void)max;
-    snprintf(out[0], 8, "exfat");
-    snprintf(out[1], 8, "vfat");
-    return 2;
+    (void)max;                          /* the firmware's: e2fsprogs, exfatprogs, busybox */
+    snprintf(out[0], 8, "ext4");
+    snprintf(out[1], 8, "exfat");
+    snprintf(out[2], 8, "vfat");
+    return 3;
 }
 static int  fm_disk_format(const char *name, const char *fs, const char *confirm, char *err, size_t cap)
 {
@@ -676,6 +708,7 @@ static void fake_mgmt(ui_model_t *m)
     g_mg.wifi_scan = fm_wifi_scan;
     g_mg.wifi_set = fm_wifi_set;
     g_mg.lte_get = fm_lte_get;
+    g_mg.lte_profile = fm_lte_profile;
     g_mg.services = fm_services;
     g_mg.ddns_update = fm_job_start;
     g_mg.smtp_test = fm_job_start;
@@ -1405,6 +1438,28 @@ static void test_network_pages(void)
 
     nav_to("Wi-Fi");
     CHECK(find("No Wi-Fi adapter", 0) && !find(SAVE, 0), "Wi-Fi: no adapter, nothing to save");
+    g_mg_wifi = 2;
+    nav_to("DDNS");
+    nav_to("Wi-Fi");
+    CHECK(find("MediaTek 802.11 n WLAN (USB 148f:7601)", 0) && find("mt7601u-generic", 0) &&
+          find("No wireless interface yet", 1) && find(SAVE, 0), "Wi-Fi: a USB adapter without wlan0, its profile");
+    lv_obj_t *ssid = textarea(0), *wpass = textarea(1);
+    if (ssid) lv_textarea_set_text(ssid, "HomeNet");
+    if (wpass) lv_textarea_set_text(wpass, "longenough");
+    click_text(SAVE);
+    run(800);
+    CHECK(!strcmp(g_mg_wifi_profile, "mt7601u-generic"), "joining sets wlandev to the adapter's profile: '%s'",
+          g_mg_wifi_profile);
+    g_mg_wifi = 0;
+    g_mg_modem = 1;
+    nav_to("LTE");
+    CHECK(find("rndis-e3372h", 0) && find("qmi_wwan, not loaded yet", 0) && find("Use this profile", 1),
+          "LTE: modems by USB id, their profiles");
+    click_text("Use this profile");
+    run(100);
+    CHECK(!strcmp(g_mg_lte_profile, "rndis-e3372h") && find("next boot", 1), "Use this profile: wlandev");
+    g_mg_modem = 0;
+    g_mg_lte_profile[0] = 0;
     nav_to("DDNS");
     CHECK(find("Update now", 1) && find("good 203.0.113.7", 1), "DDNS: the form and the last update");
     lv_obj_t *host = textarea(0);
@@ -1468,6 +1523,15 @@ static void shots_network(void)
     shot("network-ethernet-keep");
     click_text(LV_SYMBOL_OK "  Keep");
     quiet();
+    g_mg_wifi = 2;
+    nav_to("Wi-Fi");
+    shot("network-wifi-usb-adapter");
+    g_mg_modem = 1;
+    nav_to("LTE");
+    shot("network-lte-modems");
+    g_mg_modem = 0;
+    g_mg_wifi = 1;
+    nav_to("Ethernet");
     lv_obj_t *dns = textarea(3);
     if (dns) lv_textarea_set_text(dns, "1.1.1.1");
     nav_to("LTE");

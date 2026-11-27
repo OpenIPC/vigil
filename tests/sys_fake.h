@@ -44,6 +44,9 @@ char *fake_read(const char *path);      /* malloc'd, NULL when missing */
 int   fake_exists(const char *path);
 void  fake_mkdir(const char *path);
 void  fake_answer(const char *prog, int status, const char *output);
+/* When `prog` next runs, directory `path` appears under the root (a
+ * driver's interface coming up). */
+void  fake_on_run_mkdir(const char *prog, const char *path);
 /* `prog` is (not) installed (sys_have); every program is by default. */
 void  fake_have(const char *prog, int there);
 int   fake_ran(const char *substr);

@@ -83,8 +83,14 @@ int mgmt_net_confirm(void);         /* 0, or -1 when nothing waits */
 void mgmt_set_confirm_secs(int secs);
 int mgmt_net_revert(void);          /* undo now: the job id, or -1 */
 
-/* Wi-Fi: store the network and restart the interface, as a job. */
-int mgmt_wifi_set(const char *ifname, const char *ssid, const char *password, char *err, size_t cap);
+/* Wi-Fi: store the network (and `profile` as wlandev when given) and
+ * bring the interface up, loading the adapter's driver first when there
+ * is no interface yet; a job. */
+int mgmt_wifi_set(const char *ifname, const char *ssid, const char *password, const char *profile, char *err,
+                  size_t cap);
+/* LTE: wlandev = a modem profile; the firmware loads it at the next boot.
+ * `err` gets the message either way. */
+int mgmt_lte_profile(const char *profile, char *err, size_t cap);
 
 /* ---- time and name ----------------------------------------------------------------- */
 

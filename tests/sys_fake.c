@@ -41,6 +41,14 @@ static void logf_(const char *line)
     snprintf(fake_log + n, sizeof fake_log - n, "%s\n", line);
 }
 
+static char g_onrun_prog[128], g_onrun_dir[256];
+
+void fake_on_run_mkdir(const char *prog, const char *path)
+{
+    snprintf(g_onrun_prog, sizeof g_onrun_prog, "%s", prog);
+    snprintf(g_onrun_dir, sizeof g_onrun_dir, "%s", path);
+}
+
 static int f_run(const char *const *argv, const char *input, int timeout_s, char *out, size_t cap)
 {
     (void)timeout_s;
@@ -51,6 +59,10 @@ static int f_run(const char *const *argv, const char *input, int timeout_s, char
     }
     logf_(line);
     snprintf(fake_stdin, sizeof fake_stdin, "%s", input ? input : "");
+    if (g_onrun_prog[0] && !strcmp(argv[0], g_onrun_prog)) {
+        fake_mkdir(g_onrun_dir);
+        g_onrun_prog[0] = 0;
+    }
     const char *base = strrchr(argv[0], '/');
     base = base ? base + 1 : argv[0];
     if (g_snap_prog[0] && !strcmp(base, g_snap_prog)) {
