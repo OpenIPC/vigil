@@ -253,7 +253,7 @@ static const char *const corners_off[] = { "off", "top-left", "top-right", "bott
 static const char *const corners[] = { "top-left", "top-right", "bottom-left", "bottom-right", NULL };
 static const char *const osd_sizes[] = { "small", "medium", "large", "xlarge", NULL };
 static const char *const osd_backgrounds[] = { "outline", "none", "box", NULL };
-static const char *const video_aspects[] = { "fit", "stretch", NULL };
+static const char *const video_aspects[] = { "fit", "stretch", "fill", NULL };
 
 int config_output_mode(const char *s, unsigned *w, unsigned *h, unsigned *hz)
 {
@@ -460,7 +460,9 @@ static const schema_field_t display_fields[] = {
       .label = "Video aspect",
       .help = "fit: each picture keeps its shape inside its tile or the full screen, with black bars "
               "where the shapes differ; a sub-stream (704x576, 352x288, ...) is shown at its main "
-              "stream's shape. stretch: the picture fills the tile." },
+              "stream's shape. stretch: the picture fills the tile, whatever its shape. fill: the picture "
+              "keeps its shape and covers the whole tile, what overflows cut off (a 4:3 camera in a 16:9 "
+              "tile loses a strip at the top and at the bottom)." },
     { .key = "clock_position", ENUM(config_display_t, clock_position, clock_positions), .def_str = "top-right",
       .live = 1, .label = "Clock",
       .help = "Where the date and time are on the live view; their format is ui.date_format and "

@@ -21,9 +21,12 @@
  *
  * The picture goes into a window fitted inside the tile at the display
  * aspect ratio the core gives (hal_display_set_aspect, aspect_fit; the rest
- * of the tile shows the layer's black background). The decoder outputs it
- * at about the window's size and follows the tile when it changes: the
- * display enlarges pictures but does not shrink them (out_size).
+ * of the tile shows the layer's black background), or the whole tile
+ * (stretch, fill). The decoder outputs it at about the window's size and
+ * follows the tile when it changes: the display enlarges pictures but does
+ * not shrink them (out_size). In fill the decoder outputs the picture at
+ * about the size that covers the tile, and the display's zoom-in window
+ * shows the middle of it (port_zoom).
  *
  * mi_disp needs the panel timings, PQ tables and memory map from /config,
  * and mi_vdec its firmware from /config/vdec_fw (paths built into the
@@ -113,7 +116,12 @@ static struct {
     vg_rect_t        scr;           /* the tile as given, on the screen; w == 0: not placed */
     vg_rect_t        tile;          /* ... on the output (the video layer); w == 0: not placed */
     int              asp_set;       /* hal_display_set_aspect was called: */
-    vg_ratio_t       asp;           /* the picture's shape (0:0 fill the tile) */
+    vg_ratio_t       asp;           /* the picture's shape (0:0 the decoded size's) */
+    vg_aspect_t      how;           /* ... and how it fills the tile */
+    /* The part of the port's picture shown (port_zoom), in the pixels of a
+     * crop_bw x crop_bh picture; w == 0: all of it. */
+    vg_rect_t        crop;
+    unsigned         crop_bw, crop_bh;
     unsigned         src_w, src_h;  /* what the decoder outputs */
     vg_rect_t        win;           /* the port's window on the output (port_place) */
     int              out_small;     /* the tile wants more: a new decoder at a keyframe */
@@ -310,14 +318,23 @@ static vg_rect_t tile_or_default(int ch)
     return (vg_rect_t){ 0, 0, (int)g_w / 2, (int)g_h / 2 };
 }
 
-/* The window for a picture on the output: fitted inside the tile at the
- * shape the core gave, centred (aspect_fit), or the whole tile. Before the
- * core says, the decoded picture's own shape. Sizes and offsets even, as
- * the SDK's display sample has them. */
+/* The shape the picture is shown at: the core's, or before the core says
+ * (or when it does not know), the decoded picture's own. */
+static vg_ratio_t shape_of(int ch, const vg_stream_info_t *si)
+{
+    if (g_ch[ch].asp_set && g_ch[ch].asp.w) return g_ch[ch].asp;
+    return (vg_ratio_t){ si->width, si->height };
+}
+
+static vg_aspect_t how_of(int ch) { return g_ch[ch].asp_set ? g_ch[ch].how : VG_ASPECT_FIT; }
+
+/* The window for a picture on the output: fitted inside the tile at its
+ * shape, centred (aspect_fit), or the whole tile (stretch, fill). Sizes
+ * and offsets even, as the SDK's display sample has them. */
 static vg_rect_t win_of(int ch, const vg_stream_info_t *si)
 {
     vg_rect_t t = tile_or_default(ch);
-    vg_ratio_t a = g_ch[ch].asp_set ? g_ch[ch].asp : (vg_ratio_t){ si->width, si->height };
+    vg_ratio_t a = how_of(ch) == VG_ASPECT_FIT ? shape_of(ch, si) : (vg_ratio_t){ 0, 0 };
     return aspect_fit(&t, a, 2);
 }
 
@@ -334,18 +351,69 @@ static vg_rect_t win_of(int ch, const vg_stream_info_t *si)
  * never comes out larger than the window, and the display enlarges it by
  * the few pixels left. mi_vdec itself only checks that the size is even,
  * 8..8192 and no larger than the picture (_MI_VDEC_ChkOutputPortAttr).
+ * In fill the size wanted is the whole picture's covering the window
+ * (aspect_cover), of which the display shows the window's part.
  */
 #define VDEC_SCALE_ALIGN  8
 #define VDEC_SCALE_MAX    8
 static void out_size(int ch, const vg_stream_info_t *si, unsigned *ow, unsigned *oh)
 {
     vg_rect_t w = win_of(ch, si);
+    if (how_of(ch) == VG_ASPECT_FILL) w = aspect_cover(&w, shape_of(ch, si));
     aspect_scaled_size(si->width, si->height, (unsigned)w.w, (unsigned)w.h, VDEC_SCALE_ALIGN, VDEC_SCALE_MAX,
                        ow, oh);
 }
 
+/*
+ * In fill, the part of the port's sw x sh picture that shows in window
+ * `win`: the middle of it at the window's shape (aspect_crop), given to the
+ * display as the port's zoom-in window, in the port's source pixels (the
+ * SDK's NVR demo zooms that way, against MI_DISP_GetInputPortAttr's
+ * u16SrcWidth). mi_disp keeps it and crops every picture to it on its way
+ * to the MOP (MHAL_DISP_InputPortSetCropAttr: the plane's address moved to
+ * the corner, the source size and the scaling ratios to the part), which
+ * wants every edge even (open_mhal's _HalDispIfGetInfoInputPortCrop). The
+ * display enlarges only, so the part is never larger than the window: the
+ * decoder's 8x limit can leave more picture than that, and then a little
+ * more is cut.
+ *
+ * A zoom-in window, once given, stays on the port: mi_disp crops every
+ * later picture to it, whatever its size, so the top left of a larger
+ * picture showed, enlarged, after fill went back to fit and the tile went
+ * full screen (emulation). No call takes it away, so every placement of
+ * the port sets it, outside fill to all of the picture (as the SDK's NVR
+ * demo ends a zoom). Locked.
+ */
+static void port_zoom(int ch, unsigned sw, unsigned sh, const vg_rect_t *win)
+{
+    vg_rect_t c = { 0, 0, (int)sw, (int)sh };
+    if (how_of(ch) == VG_ASPECT_FILL) {
+        c = aspect_crop(sw, sh, shape_of(ch, &g_ch[ch].si), (unsigned)win->w, (unsigned)win->h, 2);
+        if (c.w > win->w) {
+            c.x += (c.w - win->w) / 2 & ~1;
+            c.w = win->w;
+        }
+        if (c.h > win->h) {
+            c.y += (c.h - win->h) / 2 & ~1;
+            c.h = win->h;
+        }
+    }
+    int all = c.x == 0 && c.y == 0 && c.w == (int)sw && c.h == (int)sh;
+    g_ch[ch].crop = all ? (vg_rect_t){ 0, 0, 0, 0 } : c;
+    g_ch[ch].crop_bw = sw;
+    g_ch[ch].crop_bh = sh;
+    MI_DISP_VidWinRect_t z = { (MI_U16)c.x, (MI_U16)c.y, (MI_U16)c.w, (MI_U16)c.h };
+    MI_S32 rc = MI_DISP_SetZoomInWindow(DISP_LAYER, ch, &z);
+    if (rc != MI_SUCCESS) {
+        fprintf(stderr, "sigmastar: MI_DISP_SetZoomInWindow(%d) %d,%d %dx%d of %ux%u 0x%x\n", ch, c.x, c.y, c.w,
+                c.h, sw, sh, rc);
+        g_ch[ch].crop = (vg_rect_t){ 0, 0, 0, 0 };
+    }
+}
+
 /* Channel ch's input port: the decoder's output in the window win_of,
- * which the display enlarges it to. Locked. */
+ * which the display enlarges it (in fill, its middle: port_zoom) to.
+ * Locked. */
 static int port_place(int ch)
 {
     vg_rect_t w = win_of(ch, &g_ch[ch].si);
@@ -368,6 +436,7 @@ static int port_place(int ch)
     }
     g_ch[ch].win = (vg_rect_t){ pa.stDispWin.u16X, pa.stDispWin.u16Y, pa.stDispWin.u16Width,
                                 pa.stDispWin.u16Height };
+    port_zoom(ch, sw, sh, &w);
     return 0;
 }
 
@@ -437,14 +506,15 @@ int hal_display_set_tile(int ch, const vg_rect_t *r)
     return rc;
 }
 
-void hal_display_set_aspect(int ch, unsigned w, unsigned h)
+void hal_display_set_aspect(int ch, unsigned w, unsigned h, vg_aspect_t how)
 {
     if (ch < 0 || ch >= MAX_CH) return;
     pthread_mutex_lock(&g_lock);
     vg_ratio_t a = w && h ? (vg_ratio_t){ w, h } : (vg_ratio_t){ 0, 0 };
-    if (!g_ch[ch].asp_set || a.w != g_ch[ch].asp.w || a.h != g_ch[ch].asp.h) {
+    if (!g_ch[ch].asp_set || a.w != g_ch[ch].asp.w || a.h != g_ch[ch].asp.h || how != g_ch[ch].how) {
         g_ch[ch].asp_set = 1;
         g_ch[ch].asp = a;
+        g_ch[ch].how = how;
         /* a decoder feeding the port: its output and window follow (a
          * larger output from its next keyframe, as for a larger tile) */
         if (g_ch[ch].codec != VG_CODEC_NONE && g_ch[ch].tile.w) {
@@ -1093,7 +1163,8 @@ int  hal_cap_signal(int in) { (void)in; return 0; }
  * from its decoder's output, the picture the display shows, through a
  * user queue of one on the decoder's output port (MI_SYS keeps the newest
  * picture there while hal_display_grab_keep is on), and drawn where the
- * port's window is. A copy of each tile's last picture stays here, at the
+ * port's window is (in fill, the part of it the display's zoom-in window
+ * shows). A copy of each tile's last picture stays here, at the
  * window's size on the screen, for a decoder with nothing new (a still
  * camera) and as the place the scaling happens in cached memory: the
  * decoder's buffers are read a whole row at a time.
@@ -1103,6 +1174,7 @@ static struct {
     unsigned char *pix;             /* y (w x h), then u and v ((w/2) x (h/2)) */
     unsigned       w, h;            /* 0: no picture yet */
     int            vdec;
+    vg_rect_t      crop;            /* the part of the decoder's picture it is */
 } g_gc[MAX_CH];
 static pthread_mutex_t g_grab_lock = PTHREAD_MUTEX_INITIALIZER;     /* g_gc, the grab itself */
 
@@ -1132,8 +1204,9 @@ void hal_display_grab_keep(int on)
 }
 
 /* The decoder's newest picture into the channel's copy, scaled to w x h
- * (nearest pixel). 1 copied, 0 nothing new. */
-static int grab_read(int ch, int vdec, unsigned w, unsigned h)
+ * (nearest pixel): the part `crop` of it (port_zoom's, in the pixels of a
+ * bw x bh picture; w == 0: all of it). 1 copied, 0 nothing new. */
+static int grab_read(int ch, int vdec, unsigned w, unsigned h, const vg_rect_t *crop, unsigned bw, unsigned bh)
 {
     MI_SYS_ChnPort_t port = vdec_port(vdec);
     MI_SYS_BufInfo_t bi, last;
@@ -1168,24 +1241,35 @@ static int grab_read(int ch, int vdec, unsigned w, unsigned h)
         g_gc[ch].h = g_gc[ch].pix ? h : 0;
     }
     unsigned sw = f->u16Width & ~1u, sh = f->u16Height & ~1u;
+    /* the part shown, even, in this picture's pixels (the size it was
+     * worked out for, unless a picture of another size is still on its
+     * way) */
+    unsigned cx = 0, cy = 0, cw = sw, chh = sh;
+    if (crop->w > 0 && crop->h > 0 && bw && bh) {
+        cx = (unsigned)((unsigned long long)crop->x * sw / bw) & ~1u;
+        cy = (unsigned)((unsigned long long)crop->y * sh / bh) & ~1u;
+        cw = (unsigned)((unsigned long long)crop->w * sw / bw) & ~1u;
+        chh = (unsigned)((unsigned long long)crop->h * sh / bh) & ~1u;
+        if (cw < 2 || chh < 2 || cx + cw > sw || cy + chh > sh) cx = cy = 0, cw = sw, chh = sh;
+    }
     unsigned char *row = g_gc[ch].pix ? malloc(f->u32Stride[0] > f->u32Stride[1] ? f->u32Stride[0] : f->u32Stride[1]) : NULL;
     unsigned *xm = row ? malloc(sizeof *xm * w) : NULL;
     if (xm) {
         /* The VPU writes these buffers behind the CPU's cache. */
         MI_SYS_FlushInvCache(f->pVirAddr[0], f->u32Stride[0] * sh);
         MI_SYS_FlushInvCache(f->pVirAddr[1], f->u32Stride[1] * (sh / 2));
-        for (unsigned x = 0; x < w; ++x) xm[x] = (unsigned)((unsigned long long)x * sw / w);
+        for (unsigned x = 0; x < w; ++x) xm[x] = cx + (unsigned)((unsigned long long)x * cw / w);
         unsigned char *dy = g_gc[ch].pix, *du = dy + (size_t)w * h, *dv = du + (size_t)(w / 2) * (h / 2);
         unsigned last_sy = ~0u;
         for (unsigned y = 0; y < h; ++y) {
-            unsigned sy = (unsigned)((unsigned long long)y * sh / h);
+            unsigned sy = cy + (unsigned)((unsigned long long)y * chh / h);
             if (sy != last_sy) memcpy(row, (unsigned char *)f->pVirAddr[0] + (size_t)sy * f->u32Stride[0], sw);
             last_sy = sy;
             for (unsigned x = 0; x < w; ++x) dy[(size_t)y * w + x] = row[xm[x]];
         }
         last_sy = ~0u;
         for (unsigned y = 0; y < h / 2; ++y) {
-            unsigned sy = (unsigned)((unsigned long long)y * (sh / 2) / (h / 2));
+            unsigned sy = cy / 2 + (unsigned)((unsigned long long)y * (chh / 2) / (h / 2));
             if (sy != last_sy) memcpy(row, (unsigned char *)f->pVirAddr[1] + (size_t)sy * f->u32Stride[1], sw);
             last_sy = sy;
             for (unsigned x = 0; x < w / 2; ++x) {
@@ -1195,6 +1279,7 @@ static int grab_read(int ch, int vdec, unsigned w, unsigned h)
             }
         }
         g_gc[ch].vdec = vdec;
+        g_gc[ch].crop = *crop;
         rc = 1;
     }
     free(xm);
@@ -1205,13 +1290,16 @@ static int grab_read(int ch, int vdec, unsigned w, unsigned h)
 
 int hal_display_grab(const hal_pic_t *pic)
 {
-    struct { int on, vdec; vg_rect_t r; } t[MAX_CH];
+    struct { int on, vdec; vg_rect_t r, crop; unsigned bw, bh; } t[MAX_CH];
     pthread_mutex_lock(&g_lock);
     int grab = g_grab;
     for (int ch = 0; ch < MAX_CH; ++ch) {
         vg_rect_t w = g_ch[ch].win;
         t[ch].on = g_ch[ch].codec != VG_CODEC_NONE && g_ch[ch].scr.w && w.w > 0 && w.h > 0 && g_w && g_h;
         t[ch].vdec = g_ch[ch].vdec;
+        t[ch].crop = g_ch[ch].crop;
+        t[ch].bw = g_ch[ch].crop_bw;
+        t[ch].bh = g_ch[ch].crop_bh;
         if (!t[ch].on) continue;
         /* the window on the output, as screen pixels of pic, even */
         int x0 = (int)((long long)w.x * pic->w / g_w), x1 = (int)((long long)(w.x + w.w) * pic->w / g_w);
@@ -1230,9 +1318,13 @@ int hal_display_grab(const hal_pic_t *pic)
     for (int ch = 0; ch < MAX_CH; ++ch) {
         if (!t[ch].on) continue;
         unsigned w = (unsigned)t[ch].r.w, h = (unsigned)t[ch].r.h;
-        grab_read(ch, t[ch].vdec, w, h);
-        /* A picture of another decoder, or of another size: not this one's. */
-        if (!g_gc[ch].pix || g_gc[ch].w != w || g_gc[ch].h != h || g_gc[ch].vdec != t[ch].vdec) continue;
+        grab_read(ch, t[ch].vdec, w, h, &t[ch].crop, t[ch].bw, t[ch].bh);
+        /* A picture of another decoder, of another size or another part of
+         * it: not this one's. */
+        const vg_rect_t *gc = &g_gc[ch].crop, *tc = &t[ch].crop;
+        if (!g_gc[ch].pix || g_gc[ch].w != w || g_gc[ch].h != h || g_gc[ch].vdec != t[ch].vdec ||
+            gc->x != tc->x || gc->y != tc->y || gc->w != tc->w || gc->h != tc->h)
+            continue;
         const unsigned char *sy = g_gc[ch].pix, *su = sy + (size_t)w * h, *sv = su + (size_t)(w / 2) * (h / 2);
         unsigned x = (unsigned)t[ch].r.x, y = (unsigned)t[ch].r.y;
         for (unsigned r = 0; r < h; ++r) memcpy(pic->y + (size_t)(y + r) * pic->ys + x, sy + (size_t)r * w, w);

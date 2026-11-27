@@ -307,7 +307,10 @@ background. *Status icons*: the corner, background. *Video*:
 `display.video_aspect`, Fit (the default: each picture at its camera's
 shape inside its tile or the full screen, black bars where the shapes
 differ, a sub-stream at its main stream's shape; see
-[architecture](architecture.md)) or Stretch (the picture fills the tile).
+[architecture](architecture.md)), Stretch (the picture fills the tile,
+whatever its shape) or Fill (the picture keeps its shape and covers the
+whole tile, what overflows cut off: the top and bottom of a 4:3 camera in a
+16:9 tile).
 Sizes are Small,
 Medium, Large and Extra large (Montserrat 14, 16, 20, 24: the only font
 built in; another family would cost the firmware's flash). Backgrounds are

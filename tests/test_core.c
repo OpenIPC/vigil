@@ -11,6 +11,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <math.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -280,6 +281,75 @@ static void test_aspect_scaled(void)
         CHECK(ow == T[i].ow && oh == T[i].oh, "%ux%u for %ux%u: %ux%u, not %ux%u", T[i].sw, T[i].sh, T[i].ww, T[i].wh,
               ow, oh, T[i].ow, T[i].oh);
     }
+}
+
+static void test_aspect_fill(void)
+{
+    /* The picture over the whole tile: the rectangle it takes. */
+    static const struct { vg_rect_t tile; unsigned aw, ah; vg_rect_t want; } V[] = {
+        { { 0, 0, 1280, 720 }, 4, 3, { 0, -120, 1280, 960 } },       /* 4:3 in 16:9: over top and bottom */
+        { { 0, 0, 1280, 720 }, 32, 9, { -640, 0, 2560, 720 } },      /* wider: over the sides */
+        { { 640, 360, 640, 360 }, 16, 9, { 640, 360, 640, 360 } },   /* the same shape: the tile */
+        { { 640, 360, 640, 360 }, 4, 3, { 640, 300, 640, 480 } },
+        { { 0, 0, 1280, 720 }, 0, 0, { 0, 0, 1280, 720 } },
+    };
+    for (size_t i = 0; i < sizeof V / sizeof V[0]; ++i) {
+        vg_rect_t r = aspect_cover(&V[i].tile, (vg_ratio_t){ V[i].aw, V[i].ah });
+        CHECK(rect_eq(r, V[i].want), "cover %u:%u over %dx%d: %d,%d %dx%d", V[i].aw, V[i].ah, V[i].tile.w,
+              V[i].tile.h, r.x, r.y, r.w, r.h);
+    }
+
+    /* The part of the picture that shows, in its pixels. */
+    static const struct { unsigned sw, sh, aw, ah, tw, th, align; vg_rect_t want; } K[] = {
+        { 1920, 1440, 4, 3, 1920, 1080, 2, { 0, 180, 1920, 1080 } },  /* 4:3 full screen at 1080p */
+        { 704, 576, 4, 3, 640, 360, 2, { 0, 72, 704, 432 } },         /* anamorphic 4:3 D1 in a 16:9 tile */
+        { 704, 576, 16, 9, 480, 360, 2, { 88, 0, 528, 576 } },        /* ... 16:9 D1 in a 4:3 tile */
+        { 704, 576, 16, 9, 640, 360, 2, { 0, 0, 704, 576 } },         /* the tile's shape: all of it */
+        { 2592, 1944, 0, 0, 1280, 720, 2, { 0, 242, 2592, 1458 } },   /* 0:0: the size's own shape */
+        { 960, 720, 4, 3, 1280, 720, 8, { 0, 88, 960, 544 } },        /* to multiples of 8 */
+        { 1920, 1080, 16, 9, 0, 0, 2, { 0, 0, 1920, 1080 } },         /* no tile: all of it */
+    };
+    for (size_t i = 0; i < sizeof K / sizeof K[0]; ++i) {
+        vg_rect_t r = aspect_crop(K[i].sw, K[i].sh, (vg_ratio_t){ K[i].aw, K[i].ah }, K[i].tw, K[i].th, K[i].align);
+        CHECK(rect_eq(r, K[i].want), "crop %ux%u %u:%u for %ux%u: %d,%d %dx%d", K[i].sw, K[i].sh, K[i].aw, K[i].ah,
+              K[i].tw, K[i].th, r.x, r.y, r.w, r.h);
+    }
+
+    /* Every camera size and shape, every layout, every output: inside the
+     * picture, even, centred, all of it one way, and shown at the camera's
+     * shape it is the tile's shape, to within the rounding to 2 px. */
+    static const unsigned sizes[][2] = { { 2592, 1944 }, { 2560, 1440 }, { 1920, 1080 }, { 800, 448 }, { 704, 576 } };
+    static const vg_ratio_t shapes[] = { { 0, 0 }, { 4, 3 }, { 16, 9 }, { 32, 9 }, { 1, 1 } };
+    static const unsigned outs[][2] = { { 1280, 720 }, { 1920, 1080 }, { 1280, 1024 }, { 1440, 900 } };
+    int bad = 0, cases = 0;
+    for (size_t o = 0; o < 4; ++o)
+        for (int n = 1; n <= 4; ++n)
+            for (int i = 0; i < n * n; ++i) {
+                vg_rect_t ui = cell(n, i, 1280, 720), t = aspect_map(&ui, 1280, 720, outs[o][0], outs[o][1], 2);
+                for (size_t z = 0; z < 5; ++z)
+                    for (size_t k = 0; k < 5; ++k) {
+                        unsigned sw = sizes[z][0], sh = sizes[z][1];
+                        vg_ratio_t a = shapes[k].w ? shapes[k] : (vg_ratio_t){ sw, sh };
+                        vg_rect_t r = aspect_crop(sw, sh, shapes[k], (unsigned)t.w, (unsigned)t.h, 2);
+                        ++cases;
+                        int in = r.x >= 0 && r.y >= 0 && r.x + r.w <= (int)sw && r.y + r.h <= (int)sh && r.w > 0 &&
+                                 r.h > 0 && !(r.x & 1) && !(r.y & 1) && !(r.w & 1) && !(r.h & 1);
+                        int lm = r.x, rm = (int)sw - r.x - r.w, tm = r.y, bm = (int)sh - r.y - r.h;
+                        int centred = abs(lm - rm) <= 2 && abs(tm - bm) <= 2;
+                        int full = r.w == (int)sw || r.h == (int)sh;
+                        /* shown at a: (r.w / sw * a.w) : (r.h / sh * a.h) against t.w : t.h */
+                        double shown = (double)r.w * a.w * sh / ((double)r.h * a.h * sw), want = (double)t.w / t.h;
+                        int cut = r.w < (int)sw ? r.w : r.h;
+                        int shape = fabs(shown / want - 1) <= 2.0 / cut;
+                        if (!(in && centred && full && shape)) {
+                            if (bad < 10)
+                                fprintf(stderr, "  %ux%u %u:%u %dx%d #%d out %ux%u: %d,%d %dx%d for %dx%d\n", sw,
+                                        sh, a.w, a.h, n, n, i, outs[o][0], outs[o][1], r.x, r.y, r.w, r.h, t.w, t.h);
+                            ++bad;
+                        }
+                    }
+            }
+    CHECK(bad == 0, "%d of %d crops wrong", bad, cases);
 }
 
 /* ---- au_norm --------------------------------------------------------------- */
@@ -1703,23 +1773,27 @@ void hal_dec_close(int ch)
     pthread_mutex_unlock(&g_dec_lock);
 }
 
-static vg_ratio_t g_aspect_at[CHANNEL_MAX]; /* hal_display_set_aspect, last */
-static int        g_aspect_sets[CHANNEL_MAX];
-void hal_display_set_aspect(int ch, unsigned w, unsigned h)
+static vg_ratio_t  g_aspect_at[CHANNEL_MAX]; /* hal_display_set_aspect, last */
+static vg_aspect_t g_aspect_how[CHANNEL_MAX];
+static int         g_aspect_sets[CHANNEL_MAX];
+void hal_display_set_aspect(int ch, unsigned w, unsigned h, vg_aspect_t how)
 {
     pthread_mutex_lock(&g_dec_lock);
     g_aspect_at[ch] = (vg_ratio_t){ w, h };
+    g_aspect_how[ch] = how;
     ++g_aspect_sets[ch];
     pthread_mutex_unlock(&g_dec_lock);
 }
 
-static int aspect_now(int ch, unsigned w, unsigned h)
+static int aspect_is(int ch, unsigned w, unsigned h, vg_aspect_t how)
 {
     pthread_mutex_lock(&g_dec_lock);
-    int v = g_aspect_sets[ch] && g_aspect_at[ch].w == w && g_aspect_at[ch].h == h;
+    int v = g_aspect_sets[ch] && g_aspect_at[ch].w == w && g_aspect_at[ch].h == h && g_aspect_how[ch] == how;
     pthread_mutex_unlock(&g_dec_lock);
     return v;
 }
+
+static int aspect_now(int ch, unsigned w, unsigned h) { return aspect_is(ch, w, h, VG_ASPECT_FIT); }
 
 static vg_rect_t g_tile_at[CHANNEL_MAX];    /* w == 0: cleared */
 static int       g_tile_sets[CHANNEL_MAX], g_tile_clears[CHANNEL_MAX];
@@ -2198,7 +2272,8 @@ static void test_channel_instant_switch(void)
 
 /* A 16:9 camera whose sub-stream is anamorphic D1 (704x576, claiming square
  * pixels): the sub-stream is shown at the main stream's 16:9, before and
- * after a switch to full screen; stretch, at once 0:0. */
+ * after a switch to full screen; stretch, at once 0:0; fill, at once at
+ * 16:9. */
 static void test_channel_aspect(void)
 {
     int port = cam_start("majestic_1080p.h265", "testsrc_704x576.h264");
@@ -2215,9 +2290,11 @@ static void test_channel_aspect(void)
     WAIT_FOR(view_is(0, "sub", 704) && aspect_now(0, 16, 9), 6000);
     CHECK(view_is(0, "sub", 704) && aspect_now(0, 16, 9), "the D1 sub-stream at the main stream's 16:9 (%u:%u)",
           g_aspect_at[0].w, g_aspect_at[0].h);
-    channels_set_stretch(1);
-    CHECK(aspect_now(0, 0, 0), "stretch: at once");
-    channels_set_stretch(0);
+    channels_set_aspect(VG_ASPECT_STRETCH);
+    CHECK(aspect_is(0, 0, 0, VG_ASPECT_STRETCH), "stretch: at once");
+    channels_set_aspect(VG_ASPECT_FILL);
+    CHECK(aspect_is(0, 16, 9, VG_ASPECT_FILL), "fill: at once, at the main stream's 16:9");
+    channels_set_aspect(VG_ASPECT_FIT);
     CHECK(aspect_now(0, 16, 9), "fit again");
     channels_set_tiles(full);
     WAIT_FOR(view_is(0, "main", 1920), 5000);
@@ -2855,6 +2932,7 @@ int main(int argc, char **argv)
     test_aspect_ratio();
     test_aspect_fit();
     test_aspect_scaled();
+    test_aspect_fill();
     test_channel_tiles();
     test_channel_decode();
     test_sub_url();

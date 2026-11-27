@@ -312,15 +312,15 @@ static const drow_t k_icon_rows[] = {
     { "display", "icons_background", "Background", BG_HELP, ui_bg_keys, k_bg_names, UI_N_BGS },
 };
 
-/* Two values: the drop-down needs no third. */
-static const char *const k_aspect_keys[] = { "fit", "stretch" };
-static const char *const k_aspect_names[] = { "Fit (keep its shape)", "Stretch to the tile" };
+static const char *const k_aspect_keys[] = { "fit", "stretch", "fill" };
+static const char *const k_aspect_names[] = { "Fit (keep its shape)", "Stretch to the tile", "Fill (crop to the tile)" };
 static const drow_t k_video_rows[] = {
     { "display", "video_aspect", "Video aspect",
       "Fit: each camera's picture keeps its shape in its tile and full screen, with black bars where "
       "the shapes differ; a sub-stream is shown at its main stream's shape. Stretch: the picture fills "
-      "the tile, whatever its shape.",
-      k_aspect_keys, k_aspect_names, 2 },
+      "the tile, whatever its shape. Fill: the picture keeps its shape and covers the whole tile, the "
+      "part that overflows cut off (top and bottom of a 4:3 camera in a 16:9 tile).",
+      k_aspect_keys, k_aspect_names, 3 },
 };
 
 static void dpage_load(dpage_t *d)

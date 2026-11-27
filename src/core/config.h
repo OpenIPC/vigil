@@ -134,7 +134,7 @@ typedef struct {
 /* The HDMI/VGA output and what the live view draws over the video. */
 typedef struct {
     char output[16];                /* "1920x1080@60" (config_output_mode) */
-    char video_aspect[8];           /* "fit" | "stretch" */
+    char video_aspect[8];           /* "fit" | "stretch" | "fill" */
     char clock_position[16];        /* "off" | "top-left" | "top-center" | ... | "bottom-right" */
     char clock_size[8];             /* "small" | "medium" | "large" | "xlarge" */
     char clock_background[8];       /* "outline" | "none" | "box" */

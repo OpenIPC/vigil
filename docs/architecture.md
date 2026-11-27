@@ -178,8 +178,11 @@ sample aspect ratio its SPS's VUI gives (1:1 when it gives none). A ratio
 within 2 % of a common one (16:9, 4:3, 16:10, 5:4, 3:2, 1:1, 2:1, 32:9) is
 taken as that one: 800x448 or an uncropped 1920x1088 is 16:9. The core
 tells the platform the ratio before a decoder opens and whenever it
-changes (`hal_display_set_aspect`); `display.video_aspect: stretch` makes
-it 0:0, the picture filling the tile.
+changes (`hal_display_set_aspect`), with how the picture fills the tile:
+`display.video_aspect: stretch` stretches it over the tile whatever its
+shape, and `fill` keeps its shape and covers the whole tile, the part that
+overflows cut off, centred (`aspect_crop`: a 4:3 camera in a 16:9 tile
+loses a strip at the top and at the bottom).
 
 ### Recording
 
@@ -317,7 +320,7 @@ read their state. Formats, sources and the protocol matrix are in
 |---|---|
 | `hal.h` | `hal_init(w, h, out)` brings up the media system and the output (a w x h screen sent out at mode `out` where the platform can); `hal_caps()` says what is there (display, decoder and its maximum size, number of channels, capture inputs); `hal_shutdown()`. |
 | `hal_decoder.h` | One hardware decoder per channel: open for a codec, size and reference count; send an AU; reset after a reconnect; close. Decoded pictures go to that channel's tile without passing through the core. |
-| `hal_display.h` | Where each channel's tile is on the screen, and the display aspect ratio its picture is fitted inside it at (`aspect_fit`), or stretched. The output modes it can switch to, the one in force, and a switch while running (the screen keeps its size, scaled to the mode). |
+| `hal_display.h` | Where each channel's tile is on the screen, and the display aspect ratio its picture is fitted inside it at (`aspect_fit`), stretched over it, or covering it with the overflow cut off (`aspect_crop`). The output modes it can switch to, the one in force, and a switch while running (the screen keeps its size, scaled to the mode). |
 | `hal_capture.h` | Local inputs: start input N in tile `ch` (the platform shows it itself) and deliver its *encoded* AUs to a callback for recording. |
 | `hal_ui.h` | Create the LVGL display on the graphics layer above the video, and say how the UI makes a tile transparent (a colour key, or alpha). |
 

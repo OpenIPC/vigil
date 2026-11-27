@@ -56,7 +56,7 @@ void hal_dec_reset(int ch) { (void)ch; }
 void hal_dec_close(int ch) { (void)ch; }
 int  hal_display_set_tile(int ch, const vg_rect_t *r) { (void)ch; (void)r; return 0; }
 void hal_display_clear_tile(int ch) { (void)ch; }
-void hal_display_set_aspect(int ch, unsigned w, unsigned h) { (void)ch; (void)w; (void)h; }
+void hal_display_set_aspect(int ch, unsigned w, unsigned h, vg_aspect_t how) { (void)ch; (void)w; (void)h; (void)how; }
 int  hal_cap_start(int in, int ch, hal_cap_cb cb, void *user) { (void)in; (void)ch; (void)cb; (void)user; return -1; }
 void hal_cap_stop(int in) { (void)in; }
 int  hal_cap_signal(int in) { (void)in; return 0; }
@@ -2741,6 +2741,11 @@ static void test_display_pages(void)
     run(300);
     config_get(&c);
     CHECK(!strcmp(c.display.video_aspect, "stretch"), "video aspect saved: %s", c.display.video_aspect);
+    dd_pick(nth_of(&lv_dropdown_class, 0), 2);          /* fill */
+    click_text(SAVE);
+    run(300);
+    config_get(&c);
+    CHECK(!strcmp(c.display.video_aspect, "fill"), "video aspect fill saved: %s", c.display.video_aspect);
     dd_pick(nth_of(&lv_dropdown_class, 0), 0);
     click_text(SAVE);
     run(300);
@@ -3709,6 +3714,9 @@ static void shots_display(void)
     shot("display-icons");
     click_text("Video");
     shot("display-video");
+    lv_dropdown_open(nth_of(&lv_dropdown_class, 0));
+    shot("display-video-list");
+    lv_dropdown_close(nth_of(&lv_dropdown_class, 0));
     click_text("Output");
 }
 

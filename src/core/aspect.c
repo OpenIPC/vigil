@@ -84,6 +84,54 @@ vg_rect_t aspect_fit(const vg_rect_t *t, vg_ratio_t a, unsigned align)
     return r;
 }
 
+vg_rect_t aspect_cover(const vg_rect_t *t, vg_ratio_t a)
+{
+    vg_rect_t r = *t;
+    if (!a.w || !a.h || t->w <= 0 || t->h <= 0) return r;
+    unsigned long long tw = (unsigned)t->w, th = (unsigned)t->h;
+    if (a.w * th > a.h * tw)
+        r.w = (int)((th * a.w + a.h / 2) / a.h);      /* wider: over the sides */
+    else
+        r.h = (int)((tw * a.h + a.w / 2) / a.w);      /* taller: above and below */
+    r.x -= (r.w - t->w) / 2;
+    r.y -= (r.h - t->h) / 2;
+    return r;
+}
+
+/* The num/den share of `src` pixels that shows, centred: its offset and
+ * size, multiples of `align` (the size at least `align`). */
+static void crop1(unsigned src, unsigned long long num, unsigned long long den, unsigned align, int *off,
+                  int *len)
+{
+    unsigned most = align_down(src, align);
+    if (most < align) {                             /* a picture smaller than align */
+        *off = 0;
+        *len = (int)src;
+        return;
+    }
+    unsigned v = align_near((src * num + den / 2) / den, align, most);
+    *len = (int)v;
+    *off = (int)align_down((src - v) / 2, align);
+}
+
+vg_rect_t aspect_crop(unsigned src_w, unsigned src_h, vg_ratio_t a, unsigned tile_w, unsigned tile_h,
+                      unsigned align)
+{
+    if (!align) align = 1;
+    vg_rect_t r = { 0, 0, (int)src_w, (int)src_h };
+    if (!src_w || !src_h || !tile_w || !tile_h) return r;
+    if (!a.w || !a.h) a = (vg_ratio_t){ src_w, src_h };
+    /* shown at a, the picture is a.w/a.h wide for its height; the tile
+     * tile_w/tile_h: the share of the picture that shows one way is the
+     * ratio of the two */
+    unsigned long long p = (unsigned long long)a.w * tile_h, q = (unsigned long long)a.h * tile_w;
+    if (p > q)
+        crop1(src_w, q, p, align, &r.x, &r.w);      /* wider: the sides cut */
+    else if (p < q)
+        crop1(src_h, p, q, align, &r.y, &r.h);      /* taller: top and bottom cut */
+    return r;
+}
+
 vg_rect_t aspect_map(const vg_rect_t *r, unsigned from_w, unsigned from_h, unsigned to_w, unsigned to_h,
                      unsigned align)
 {

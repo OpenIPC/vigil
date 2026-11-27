@@ -18,7 +18,9 @@ UI (main):       LVGL -> ARGB8888 buffer -> flip onto the UI plane above
   video decoder. Each channel has its own MPP decoder. Decoded pictures stay
   in DMA buffers and are never copied by the CPU.
 - **RGA** is Rockchip's 2D engine. It scales each picture into its tile,
-  keeping the aspect ratio, inside one 1280×720 NV12 buffer. Why compose at
+  keeping the aspect ratio (or stretched, or in `display.video_aspect:
+  fill` the middle of the frame over the whole tile), inside one 1280×720
+  NV12 buffer. Why compose at
   all, instead of giving each camera its own hardware plane? On RK3588 only
   the "Esmart" planes accept NV12, and only two of them can be attached to
   one output. So the four tiles are combined into one mosaic, shown on one
