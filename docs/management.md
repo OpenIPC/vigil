@@ -15,6 +15,7 @@ The same actions are in the HTTP API ([api.md](api.md#management)).
 | Network | Ethernet | works | DHCP or static address, netmask, gateway, two DNS servers, MTU; link, speed, MAC and the addresses in use. A change is undone unless confirmed within 60 s. |
 | | Wi-Fi | works | A USB adapter is recognised by its USB id even before its driver is loaded, with the firmware profile that loads it; joining sets `wlandev`, `wlanssid` and `wlanpass`, loads the driver the firmware's way and brings wlan0 up. Scan with `iw`. Without an adapter the page says so. |
 | | LTE | detection | USB modems by their USB id (and the profile of `/etc/wireless/modem` that names them, or by their driver), "Use this profile" sets `wlandev` for the next boot; a modem's network interface and its state once the firmware has brought it up. |
+| | Ports | works | The web server's (`web.listen`, 80) and the API's (`api.listen`, 8080) ports, moved at once when saved, each with what it listens on now (or why not); the RTSP (554), ONVIF (8899) and NETIP (34567) ports kept for servers vigild does not have yet, said so on the page. No two on one port; a port that is taken is refused with the reason. |
 | | DDNS | works | dyndns2 (Dyn and compatibles), No-IP, or a custom URL, every N minutes, through curl. |
 | | UPnP | stored | The settings are kept; vigild has no UPnP client yet. |
 | | SMTP | works | A test mail; trouble (disk full, recording failed, a camera offline) mailed, at most one mail per 10 minutes, through curl. |

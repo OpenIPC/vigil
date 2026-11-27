@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* ui_set_network.c — Network: Ethernet, Wi-Fi, LTE, DDNS, UPnP, SMTP,
- * Alarm center, QoS, P2P (docs/management.md).
+/* ui_set_network.c — Network: Ethernet, Wi-Fi, LTE, Ports, DDNS, UPnP,
+ * SMTP, Alarm center, QoS, P2P (docs/management.md).
  *
  * Ethernet and Wi-Fi change the system through the model's management
  * calls (jobs); an Ethernet change is undone unless "Keep" is pressed
@@ -494,6 +494,215 @@ static void *lte_open(ui_set_t *s, lv_obj_t *pane)
     return NULL;
 }
 
+/* ---- Ports ------------------------------------------------------------------------- */
+
+/* The ports of vigild's servers: the web server (web.listen) and the API
+ * (api.listen), which move at once when saved (main.c restarts them; a
+ * port that cannot be had is refused by the store, or put back, and said
+ * here), and those of the RTSP, ONVIF and NETIP servers vigild does not
+ * have yet (rtsp_server.port, ...), kept for them. No two on one port. */
+
+#define PORTS_N 5
+enum { P_WEB, P_API, P_RTSP, P_ONVIF, P_NETIP };
+static const char *const k_port_sec[PORTS_N] = { "web", "api", "rtsp_server", "onvif_server", "netip_server" };
+static const char *const k_port_key[PORTS_N] = { "listen", "listen", "port", "port", "port" };
+static const char *const k_port_name[PORTS_N] = { "Web server", "HTTP API", "RTSP", "ONVIF", "NETIP" };
+
+typedef struct {
+    ui_set_t   *s;
+    char        stored[PORTS_N][64];    /* the setting as stored: "0.0.0.0:80", "554" */
+    int         port[PORTS_N];          /* its port; 0: off (an empty listen) */
+    lv_obj_t   *num[PORTS_N], *state[2];
+    lv_timer_t *timer;
+} ports_t;
+
+static int listen_port(const char *v)
+{
+    const char *colon = strrchr(v, ':');
+    return *v ? atoi(colon ? colon + 1 : v) : 0;
+}
+
+static int sec_field(int sec, const char *key)
+{
+    const ui_section_t *u = &ui_model()->sections[sec];
+    for (int f = 0; f < u->n_fields; ++f)
+        if (!strcmp(u->fields[f].key, key)) return f;
+    return -1;
+}
+
+static void ports_state(ports_t *p)
+{
+    for (int i = 0; i < 2; ++i) {
+        if (!p->state[i]) continue;
+        ui_listen_t l;
+        if (!MG() || !MG()->listening) {
+            lv_label_set_text(p->state[i], "");
+            continue;
+        }
+        MG()->listening(i == P_WEB ? UI_SERVER_WEB : UI_SERVER_API, &l);
+        if (l.on && l.why[0]) lv_label_set_text_fmt(p->state[i], LV_SYMBOL_WARNING "  Listening on %s; %s", l.listen, l.why);
+        else if (l.on) lv_label_set_text_fmt(p->state[i], LV_SYMBOL_OK "  Listening on %s", l.listen);
+        else lv_label_set_text_fmt(p->state[i], LV_SYMBOL_WARNING "  Not listening: %s", l.why[0] ? l.why : "not started");
+        lv_obj_set_style_text_color(p->state[i], l.on && !l.why[0] ? UI_C(OK) : UI_C(WARN), 0);
+    }
+}
+
+static void ports_tick(lv_timer_t *t) { ports_state(lv_timer_get_user_data(t)); }
+
+static void ports_load(ports_t *p)
+{
+    for (int i = 0; i < PORTS_N; ++i) {
+        int sec = ui_set_section_index(k_port_sec[i]), f = sec < 0 ? -1 : sec_field(sec, k_port_key[i]);
+        p->stored[i][0] = 0;
+        if (f >= 0) ui_model()->get_value(sec, -1, f, p->stored[i], sizeof p->stored[i]);
+        p->port[i] = listen_port(p->stored[i]);
+        if (!p->num[i]) continue;
+        lv_obj_remove_state(p->num[i], LV_STATE_USER_1);
+        char t[8];
+        snprintf(t, sizeof t, "%d", p->port[i]);
+        lv_textarea_set_text(p->num[i], t);
+    }
+    ports_state(p);
+}
+
+static void ports_enable(lv_obj_t *num, int on)
+{
+    lv_obj_t *box = lv_obj_get_parent(num);
+    for (uint32_t i = 0; i < lv_obj_get_child_count(box); ++i) {
+        if (on) lv_obj_remove_state(lv_obj_get_child(box, (int32_t)i), LV_STATE_DISABLED);
+        else lv_obj_add_state(lv_obj_get_child(box, (int32_t)i), LV_STATE_DISABLED);
+    }
+}
+
+static void *ports_open(ui_set_t *s, lv_obj_t *pane)
+{
+    ports_t *p = calloc(1, sizeof *p);
+    if (!p) return NULL;
+    p->s = s;
+    ports_load(p);
+    static const char *const helps[PORTS_N] = {
+        "The zero channel: this screen in a browser (web.listen). 80 is HTTP's own port.",
+        "The HTTP API (api.listen): apps, scripts, the API's event WebSocket.",
+        "554 is RTSP's own.",
+        "8899: XM cameras' ONVIF port (80, ONVIF's usual one, is the web server's here).",
+        "34567: XM's NETIP, for CMS and VMS software.",
+    };
+    lv_obj_t *sec = ui_set_section(pane, "Servers");
+    int users = ui_allowed(UI_PERM_USERS);
+    for (int i = P_WEB; i <= P_API; ++i) {
+        lv_obj_t *box = ui_set_row(sec, k_port_name[i], helps[i]);
+        p->num[i] = ui_set_number(s, box, p->port[i], 1, 65535);
+        p->state[i] = ui_set_note(box, "", UI_C(TEXT2));
+        if (!p->port[i] || !users) ports_enable(p->num[i], 0);
+        if (!p->port[i])
+            ui_label(box, i == P_WEB ? "Off: web.listen is empty (System -> Zero channel)."
+                                      : "Off: api.listen is empty (System -> HTTP API).",
+                     VG_FONT_SM_LV, UI_C(TEXT2));
+    }
+    if (!users)
+        ui_set_note(pane, "Changing these two needs the users permission, as their sections (api, web) do.",
+                    UI_C(TEXT2));
+    ui_set_note(pane, "Saved, a server moves to its new port at once; its open connections close (a browser "
+                      "showing the zero channel reconnects at the new address). A port that cannot be had is "
+                      "refused, and said why.", UI_C(TEXT2));
+    lv_obj_t *later = ui_set_section(pane, "Services not available yet");
+    for (int i = P_RTSP; i < PORTS_N; ++i)
+        p->num[i] = ui_set_number(s, ui_set_row(later, k_port_name[i], helps[i]), p->port[i], 1, 65535);
+    ui_set_note(pane, LV_SYMBOL_WARNING "  vigild has no RTSP, ONVIF or NETIP server yet: nothing listens on these "
+                                        "ports. They are kept for those servers, and no other server of vigild's "
+                                        "may take them.", UI_C(WARN));
+    ports_load(p);
+    p->timer = lv_timer_create(ports_tick, 1000, p);
+    return p;
+}
+
+static int ports_dirty(void *st)
+{
+    ports_t *p = st;
+    for (int i = 0; i < PORTS_N; ++i)
+        if (p->port[i] && ui_set_number_get(p->num[i]) != p->port[i]) return 1;
+    return 0;
+}
+
+/* `stored` with its port replaced: "0.0.0.0:80" -> "0.0.0.0:8081", "554" -> "8554". */
+static void with_port(const char *stored, int port, char *out, size_t cap)
+{
+    const char *colon = strrchr(stored, ':');
+    if (colon) snprintf(out, cap, "%.*s:%d", (int)(colon - stored), stored, port);
+    else snprintf(out, cap, "%d", port);
+}
+
+static int ports_save_one(ports_t *p, int i, int port)
+{
+    int sec = ui_set_section_index(k_port_sec[i]);
+    if (sec < 0) return -1;
+    const ui_section_t *u = &ui_model()->sections[sec];
+    char buf[16][192];
+    const char *v[16];
+    if (u->n_fields > 16) return -1;
+    for (int f = 0; f < u->n_fields; ++f) {
+        ui_model()->get_value(sec, -1, f, buf[f], sizeof buf[f]);
+        if (!strcmp(u->fields[f].key, k_port_key[i])) with_port(p->stored[i], port, buf[f], sizeof buf[f]);
+        v[f] = buf[f];
+    }
+    unsigned gen = ui_model()->config_generation ? ui_model()->config_generation() : 0;
+    ui_errors_t errs;
+    memset(&errs, 0, sizeof errs);
+    ui_save_rc_t rc = ui_model()->save(sec, 1, v, NULL, gen, &errs);
+    if (rc == UI_SAVE_OK || rc == UI_SAVE_UNSYNCED) return 0;
+    lv_obj_add_state(p->num[i], LV_STATE_USER_1);
+    ui_toast(UI_TOAST_BAD, "%s port not saved: %s", k_port_name[i], errs.n ? errs.e[0].msg : "the settings changed meanwhile");
+    return -1;
+}
+
+static int ports_save(void *st)
+{
+    ports_t *p = st;
+    int want[PORTS_N];
+    for (int i = 0; i < PORTS_N; ++i) {
+        lv_obj_remove_state(p->num[i], LV_STATE_USER_1);
+        want[i] = p->port[i] ? ui_set_number_get(p->num[i]) : 0;
+    }
+    for (int i = 0; i < PORTS_N; ++i)
+        for (int k = 0; k < i; ++k)
+            if (want[i] && want[i] == want[k]) {
+                lv_obj_add_state(p->num[i], LV_STATE_USER_1);
+                ui_toast(UI_TOAST_BAD, "%s and %s cannot both be on port %d", k_port_name[k], k_port_name[i], want[i]);
+                return -1;
+            }
+    /* One section at a time, each checked against the others as stored:
+     * first those whose new port no other holds now, so that moving one
+     * onto a port another leaves works. Swapping two takes a free port in
+     * between. */
+    int left = 0;
+    for (int i = 0; i < PORTS_N; ++i) left += want[i] != p->port[i];
+    for (int pass = 0; left && pass < PORTS_N; ++pass)
+        for (int i = 0; i < PORTS_N; ++i) {
+            if (want[i] == p->port[i]) continue;
+            int held = 0;
+            for (int k = 0; k < PORTS_N; ++k) held |= k != i && p->port[k] == want[i];
+            if (held && pass < PORTS_N - 1) continue;
+            if (ports_save_one(p, i, want[i]) < 0) {
+                ports_load(p);
+                return -1;
+            }
+            p->port[i] = want[i];
+            --left;
+        }
+    ports_load(p);
+    ui_toast(UI_TOAST_OK, "Ports saved");
+    return 0;
+}
+
+static void ports_cancel(void *st) { ports_load(st); }
+
+static void ports_close(void *st)
+{
+    ports_t *p = st;
+    lv_timer_delete(p->timer);
+    free(p);
+}
+
 /* ---- services: a form of vigil.yaml and the service's state --------------------------- */
 
 typedef struct {
@@ -811,7 +1020,7 @@ static void *p2p_open(ui_set_t *s, lv_obj_t *pane)
 
 static void free_st(void *st) { free(st); }
 
-static ui_set_item_t g_items[9];
+static ui_set_item_t g_items[10];
 
 void ui_network_open(int first)
 {
@@ -819,6 +1028,7 @@ void ui_network_open(int first)
         { TR(S_ETHERNET), &ui_icon_nav_ethernet, eth_open, eth_dirty, eth_save, eth_cancel, eth_close },
         { TR(S_WIFI), &ui_icon_nav_wifi, wifi_open, wifi_dirty, wifi_save, wifi_cancel, free_st },
         { TR(S_LTE), &ui_icon_nav_lte, lte_open, NULL, NULL, NULL, NULL },
+        { TR(S_PORTS), &ui_icon_nav_ports, ports_open, ports_dirty, ports_save, ports_cancel, ports_close },
         { TR(S_DDNS), &ui_icon_nav_ddns, ddns_open, svc_dirty, svc_save, svc_cancel, svc_close },
         { TR(S_UPNP), &ui_icon_nav_upnp, upnp_open, svc_dirty, svc_save, svc_cancel, svc_close },
         { TR(S_SMTP), &ui_icon_nav_smtp, smtp_open, svc_dirty, svc_save, svc_cancel, svc_close },

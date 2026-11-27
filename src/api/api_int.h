@@ -58,4 +58,12 @@ int api_disc_request(struct mg_connection *conn, const char *uri, const char *me
 void api_qos_listeners(const struct mg_context *ctx, qos_class_t c);
 void api_qos_conn(const struct mg_connection *conn, qos_class_t c);
 
+/* The servers' state for api_listening and web_listening (`web` 0: the
+ * API, 1: the web server): what one listens on ("": nothing) and why
+ * not; after a restart (api_restart, web_restart) to `listen`, whether it
+ * failed, and whether the move was asked for (it clears an old failure)
+ * or is a way back (it keeps it); `err` gets the failure's reason. */
+void api_server_state(int web, const char *listen, const char *why);
+void api_server_moved(int web, const char *listen, int failed, int requested, char *err, size_t cap);
+
 #endif /* API_INT_H */

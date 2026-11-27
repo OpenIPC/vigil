@@ -24,6 +24,7 @@
 #include "hal.h"
 #include "log.h"
 #include "md5.h"
+#include "net.h"
 #include "sys_time.h"
 #include "users.h"
 
@@ -888,16 +889,73 @@ void api_auth_init(void)
     pthread_once(&once, random_key_once);
 }
 
-int api_start(void)
+/* What each server listens on, for Network -> Ports (api.h, web.h); here
+ * for both, so that reading it needs neither server linked. */
+static pthread_mutex_t g_listen_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+    char listening[64], why[160];
+    char move_failed[200];          /* the last move that failed, until the next one */
+} g_srv[2];
+
+void api_server_state(int web, const char *listen, const char *why)
 {
-    vigil_config_t *c = malloc(sizeof *c);
-    if (!c) return -1;
-    config_get(c);
-    config_api_t api = c->api;
-    free(c);
+    pthread_mutex_lock(&g_listen_lock);
+    snprintf(g_srv[!!web].listening, sizeof g_srv[0].listening, "%s", listen);
+    snprintf(g_srv[!!web].why, sizeof g_srv[0].why, "%s", why);
+    pthread_mutex_unlock(&g_listen_lock);
+}
+
+void api_server_moved(int web, const char *listen, int failed, int requested, char *err, size_t cap)
+{
+    pthread_mutex_lock(&g_listen_lock);
+    char why[sizeof g_srv[0].why];
+    memcpy(why, g_srv[!!web].why, sizeof why);
+    if (failed)
+        snprintf(g_srv[!!web].move_failed, sizeof g_srv[0].move_failed, "could not move to '%s': %s", listen, why);
+    else if (requested)
+        g_srv[!!web].move_failed[0] = 0;
+    if (failed && err) snprintf(err, cap, "%s", why);
+    pthread_mutex_unlock(&g_listen_lock);
+}
+
+static int server_listening(int web, char *listen, size_t cap, char *why, size_t wcap)
+{
+    pthread_mutex_lock(&g_listen_lock);
+    int on = g_srv[!!web].listening[0] != 0;
+    if (listen) snprintf(listen, cap, "%s", g_srv[!!web].listening);
+    if (why) snprintf(why, wcap, "%s", on ? g_srv[!!web].move_failed : g_srv[!!web].why);
+    pthread_mutex_unlock(&g_listen_lock);
+    return on;
+}
+
+int api_listening(char *listen, size_t cap, char *why, size_t wcap)
+{
+    return server_listening(0, listen, cap, why, wcap);
+}
+
+int web_listening(char *listen, size_t cap, char *why, size_t wcap)
+{
+    return server_listening(1, listen, cap, why, wcap);
+}
+
+static void set_listening(const char *listen, const char *why) { api_server_state(0, listen, why); }
+
+static int start_at(const char *listen, int auth)
+{
+    config_api_t api;
+    memset(&api, 0, sizeof api);
+    snprintf(api.listen, sizeof api.listen, "%s", listen);
+    api.auth = auth;
     if (!api.listen[0]) {
         vg_log("api: off (api.listen is empty)");
+        set_listening("", "off: api.listen is empty");
         return 0;
+    }
+    char why[128];
+    if (net_listen_check(api.listen, why, sizeof why) < 0) {
+        vg_log("api: cannot listen on %s: %s; running without the API", api.listen, why);
+        set_listening("", why);
+        return -1;
     }
     g_t0 = mono();
     api_auth_init();
@@ -918,9 +976,11 @@ int api_start(void)
     g_ctx = mg_start(&cb, NULL, options);
     if (!g_ctx) {
         vg_log("api: cannot listen on %s; running without the API", api.listen);
+        set_listening("", "the web server library could not start there");
         mg_exit_library();
         return -1;
     }
+    set_listening(api.listen, "");
     api_qos_listeners(g_ctx, QOS_MANAGEMENT);
     mg_set_auth_handler(g_ctx, "/api", auth_handler, NULL);
     mg_set_request_handler(g_ctx, "/api/v1", request_handler, NULL);
@@ -938,6 +998,29 @@ int api_start(void)
     vg_log("api: listening on %s%s", api.listen,
            api.auth ? "" : " WITHOUT authentication (api.auth is off)");
     return 0;
+}
+
+int api_start(void)
+{
+    vigil_config_t *c = malloc(sizeof *c);
+    if (!c) return -1;
+    config_get(c);
+    config_api_t api = c->api;
+    free(c);
+    return start_at(api.listen, api.auth);
+}
+
+int api_restart(const char *listen, char *err, size_t cap)
+{
+    vigil_config_t *c = malloc(sizeof *c);
+    if (!c) return -1;
+    config_get(c);
+    int auth = c->api.auth;
+    free(c);
+    api_stop();
+    int rc = start_at(listen, auth);
+    api_server_moved(0, listen, rc < 0, err != NULL, err, cap);
+    return rc;
 }
 
 void api_stop(void)
@@ -964,4 +1047,5 @@ void api_stop(void)
         pthread_cond_destroy(&c->wake);
     }
     mg_exit_library();
+    set_listening("", "stopped");
 }

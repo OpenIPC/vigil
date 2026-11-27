@@ -2717,6 +2717,86 @@ static void test_qos_sockets(void)
     close(l);
 }
 
+/* ---- ports of vigild's servers ---------------------------------------------------- */
+
+static char g_lc_what[8], g_lc_listen[64];
+static int fake_listen_check(const char *what, const char *listen, char *err, size_t cap)
+{
+    snprintf(g_lc_what, sizeof g_lc_what, "%s", what);
+    snprintf(g_lc_listen, sizeof g_lc_listen, "%s", listen);
+    if (config_listen_port(listen) == 81) {
+        snprintf(err, cap, "port 81 is in use");
+        return -1;
+    }
+    return 0;
+}
+
+static void test_ports(void)
+{
+    CHECK(config_listen_port("0.0.0.0:80") == 80 && config_listen_port("8080") == 8080 &&
+          config_listen_port("") == 0 && config_listen_port("x") == -1 && config_listen_port("1.2.3.4:") == -1,
+          "the port of a listen setting");
+    vigil_config_t c;
+    config_defaults(&c);
+    schema_errors_t e = { 0 };
+    CHECK(c.rtsp_server.port == 554 && c.onvif_server.port == 8899 && c.netip_server.port == 34567 &&
+          config_check_ports(&c, &e) == 0, "defaults: 80, 8080, 554, 8899, 34567, no clash");
+    c.onvif_server.port = 80;
+    CHECK(config_check_ports(&c, &e) < 0 && !strcmp(e.e[0].path, "onvif_server.port") &&
+          strstr(e.e[0].msg, "web.listen"), "ONVIF on 80: the web server's (%s)", e.n ? e.e[0].msg : "");
+    config_defaults(&c);
+    memset(&e, 0, sizeof e);
+    snprintf(c.api.listen, sizeof c.api.listen, "554");
+    CHECK(config_check_ports(&c, &e) < 0 && !strcmp(e.e[0].path, "rtsp_server.port"), "API on 554: RTSP's");
+    config_defaults(&c);
+    memset(&e, 0, sizeof e);
+    c.web.listen[0] = 0;
+    c.netip_server.port = 80;
+    CHECK(config_check_ports(&c, &e) == 0, "an empty web.listen holds no port");
+
+    /* through the store: a clash, a listen the check refuses, then a good one */
+    char dir[] = "/tmp/vigil-ports-XXXXXX", path[128];
+    if (!mkdtemp(dir)) return;
+    snprintf(path, sizeof path, "%s/vigil.yaml", dir);
+    write_file(path, "web:\n  listen: \"0.0.0.0:80\"\n");
+    config_init(path);
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("netip_server", "{\"port\":80}", 11, &e) == CONFIG_EINVAL && e.n &&
+          !strcmp(e.e[0].path, "netip_server.port"), "PUT NETIP onto the web server's port: refused");
+    config_set_listen_check(fake_listen_check);
+    memset(&e, 0, sizeof e);
+    const char *w81 = "{\"listen\":\"0.0.0.0:81\"}";
+    CHECK(config_put_json("web", w81, strlen(w81), &e) == CONFIG_EINVAL && !strcmp(e.e[0].path, "web.listen") &&
+          strstr(e.e[0].msg, "in use") && !strcmp(g_lc_what, "web"), "web.listen onto a port in use: refused, why");
+    g_lc_what[0] = 0;
+    const char *api_same = "{\"listen\":\"0.0.0.0:8080\"}";
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("api", api_same, strlen(api_same), &e) == CONFIG_OK && !g_lc_what[0],
+          "api.listen unchanged: not asked");
+    const char *w82 = "{\"listen\":\"0.0.0.0:82\"}";
+    vigil_config_t now;
+    CHECK(config_put_json("web", w82, strlen(w82), &e) == CONFIG_OK && !strcmp(g_lc_listen, "0.0.0.0:82") &&
+          (config_get(&now), !strcmp(now.web.listen, "0.0.0.0:82")), "web.listen to a free port: saved");
+    config_set_listen_check(NULL);
+
+    /* net_listen_check: a port this process listens on is in use */
+    int l = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    socklen_t al = sizeof a;
+    if (l >= 0 && bind(l, (struct sockaddr *)&a, sizeof a) == 0 && listen(l, 1) == 0 &&
+        getsockname(l, (struct sockaddr *)&a, &al) == 0) {
+        char lst[32], err[160] = "";
+        snprintf(lst, sizeof lst, "127.0.0.1:%d", ntohs(a.sin_port));
+        CHECK(net_listen_check(lst, err, sizeof err) < 0 && strstr(err, "in use"), "a port in use: %s", err);
+        close(l);
+        CHECK(net_listen_check(lst, err, sizeof err) == 0, "free again: %s", err);
+        CHECK(net_listen_check("1.2.3.4:x", err, sizeof err) < 0 && net_listen_check("10.0.0.1x:80", err, sizeof err) < 0,
+              "not listen settings");
+    }
+    unlink(path);
+    rmdir(dir);
+}
+
 static void test_display_config(void)
 {
     vigil_config_t c;
@@ -2846,6 +2926,7 @@ int main(int argc, char **argv)
     test_display_config();
     test_qos_config();
     test_qos_sockets();
+    test_ports();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

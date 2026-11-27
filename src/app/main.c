@@ -24,6 +24,7 @@
 #include <unistd.h>
 
 #include "api.h"
+#include "cJSON.h"
 #include "channel.h"
 #include "config.h"
 #include "events.h"
@@ -33,6 +34,7 @@
 #include "hal_display.h"
 #include "log.h"
 #include "mgmt.h"
+#include "net.h"
 #include "source.h"
 #include "web.h"
 
@@ -258,6 +260,46 @@ static void apply_qos(const vigil_config_t *c)
     memcpy(last, dscp, sizeof dscp);
 }
 
+/* api.listen or web.listen changed: the server moves there now. If it
+ * cannot (the port was taken since the store checked it), it goes back
+ * to `cur` and the setting is put back, so that the file says what runs;
+ * Network -> Ports shows why (api_listening, web_listening). */
+static void relisten(const char *what, const char *want, char *cur, int (*restart)(const char *, char *, size_t))
+{
+    char err[160] = "";
+    if (restart(want, err, sizeof err) == 0) {
+        vg_log("%s: now on '%s' (was '%s')", what, want, cur);
+        snprintf(cur, 64, "%s", want);
+        return;
+    }
+    vg_log("%s.listen '%s': %s; back on '%s'", what, want, err, cur);
+    events_push(0, "%s port: %.24s", what, err);
+    restart(cur, NULL, 0);
+    char *json = config_get_json(what, 0);
+    cJSON *doc = json ? cJSON_Parse(json) : NULL;
+    free(json);
+    if (doc) {
+        cJSON_ReplaceItemInObjectCaseSensitive(doc, "listen", cJSON_CreateString(cur));
+        char *body = cJSON_PrintUnformatted(doc);
+        schema_errors_t errs = { 0 };
+        if (!body || config_put_json(what, body, strlen(body), &errs) != CONFIG_OK)
+            vg_log("%s.listen: cannot put '%s' back: %s", what, cur, errs.n ? errs.e[0].msg : "out of memory");
+        free(body);
+        cJSON_Delete(doc);
+    }
+}
+
+/* config_put_json asks before saving a new api.listen or web.listen: a
+ * port vigild's own server holds now is free for it (the server moves). */
+static int listen_check(const char *what, const char *listen, char *err, size_t cap)
+{
+    char cur[64] = "";
+    if (!strcmp(what, "api")) api_listening(cur, sizeof cur, NULL, 0);
+    else web_listening(cur, sizeof cur, NULL, 0);
+    if (cur[0] && config_listen_port(cur) == config_listen_port(listen)) return 0;
+    return net_listen_check(listen, err, cap);
+}
+
 static void apply_config(void)
 {
     if (mgmt_power_pending() != MGMT_POWER_NONE) g_stop = 1;    /* reboot or shutdown: stop first */
@@ -281,10 +323,8 @@ static void apply_config(void)
         vg_log("configuration %u applied", gen);
         events_push(0, "config applied");
     }
-    if (strcmp(c.api.listen, g_api_listen) != 0)
-        vg_log("api.listen is now '%s'; it takes effect when vigild starts again", c.api.listen);
-    if (strcmp(c.web.listen, g_web_listen) != 0)
-        vg_log("web.listen is now '%s'; it takes effect when vigild starts again", c.web.listen);
+    if (strcmp(c.api.listen, g_api_listen) != 0) relisten("api", c.api.listen, g_api_listen, api_restart);
+    if (strcmp(c.web.listen, g_web_listen) != 0) relisten("web", c.web.listen, g_web_listen, web_restart);
 }
 
 int main(int argc, char **argv)
@@ -399,6 +439,7 @@ int main(int argc, char **argv)
     }
     config_override(&cfg);
     snprintf(g_api_listen, sizeof g_api_listen, "%s", cfg.api.listen);
+    config_set_listen_check(listen_check);
     snprintf(g_web_listen, sizeof g_web_listen, "%s", cfg.web.listen);
     if (write_path) {
         int wrc = write_config(write_path, cfg_path, loaded, &cfg);

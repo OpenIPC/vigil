@@ -20,6 +20,7 @@ static const struct { const char *key; unsigned perm; } SECTIONS[] = {
     { "nas", PERM_STORAGE },
     { "ddns", PERM_NETWORK }, { "upnp", PERM_NETWORK }, { "smtp", PERM_NETWORK },
     { "alarm", PERM_NETWORK }, { "qos", PERM_NETWORK },
+    { "rtsp_server", PERM_NETWORK }, { "onvif_server", PERM_NETWORK }, { "netip_server", PERM_NETWORK },
     { "time", PERM_SYSTEM }, { "ui", PERM_SYSTEM }, { "display", PERM_SYSTEM },
     /* api.auth and api.user decide who gets in at all; web, who reaches the console. */
     { "api", PERM_USERS }, { "web", PERM_USERS },

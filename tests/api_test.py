@@ -248,7 +248,8 @@ def main():
         secs = {s["key"]: s for s in schema["sections"]} if st == 200 else {}
         seg = [f for f in secs.get("record", {}).get("fields", []) if f["key"] == "segment"]
         check(set(secs) == {"cameras", "record", "schedule", "quota", "nas", "ddns", "upnp", "smtp",
-                              "alarm", "time", "ui", "display", "api", "web", "discovery", "qos"} and seg and seg[0]["min"] == 10 and
+                              "alarm", "time", "ui", "display", "api", "web", "discovery", "qos",
+                              "rtsp_server", "onvif_server", "netip_server"} and seg and seg[0]["min"] == 10 and
               seg[0]["max"] == 3600 and seg[0]["live"], "schema: sections and limits")
         st, _, _ = api.json("GET", "/api/v1/nothing")
         check(st == 404, "unknown endpoint: 404")
@@ -613,6 +614,42 @@ def main():
         check(st == 200, "the owner on another address still gets in (%s)" % st)
         st, _, _ = api.call("GET", "/api/v1/status")
         check(st == 200, "and so does the already logged-in client (%s)" % st)
+
+        # ---- Ports: no two of vigild's servers on one port; the API moves at once
+        st, _, srvs = api.json("GET", "/api/v1/config")
+        check(st == 200 and srvs["rtsp_server"] == {"port": 554} and srvs["onvif_server"] == {"port": 8899} and
+              srvs["netip_server"] == {"port": 34567}, "ports: the defaults (%s)" % st)
+        st, _, err = api.json("PUT", "/api/v1/config/onvif_server", {"port": 80})
+        check(st == 400 and err["errors"][0]["path"] == "onvif_server.port" and
+              "web.listen" in err["errors"][0]["message"], "ONVIF on the web server's port 80: refused (%s %s)" %
+              (st, err))
+        st, _, err = api.json("PUT", "/api/v1/config/rtsp_server", {"port": api_port})
+        check(st == 400 and "api.listen" in err["errors"][0]["message"], "RTSP on the API's port: refused (%s)" % st)
+        st, _, err = api.json("PUT", "/api/v1/config/netip_server", {"port": 0})
+        check(st == 400, "port 0: refused (%s)" % st)
+        st, _, _ = api.json("PUT", "/api/v1/config/rtsp_server", {"port": 8554})
+        check(st == 200, "RTSP on 8554: saved (%s)" % st)
+        api_cfg = {"auth": True, "user": "root", "shadow": shadow, "users": users_path}
+        busy = socket.socket()
+        busy.bind(("127.0.0.1", 0))
+        busy.listen(1)
+        st, _, err = api.json("PUT", "/api/v1/config/api",
+                              dict(api_cfg, listen="127.0.0.1:%d" % busy.getsockname()[1]))
+        busy.close()
+        check(st == 400 and err["errors"][0]["path"] == "api.listen" and "in use" in err["errors"][0]["message"],
+              "the API onto a port in use: refused, said why (%s %s)" % (st, err))
+        new_port = free_port()
+        st, _, _ = api.json("PUT", "/api/v1/config/api", dict(api_cfg, listen="127.0.0.1:%d" % new_port))
+
+        def answers(port):
+            try:
+                return Api(port).call("GET", "/api/v1/status")[0] == 200
+            except OSError:
+                return False
+        check(st == 200 and wait_for(lambda: answers(new_port), 10) and not answers(api_port),
+              "api.listen changed: the API moved to %d at once" % new_port)
+        api_port = new_port
+        api = Api(api_port)
     finally:
         if ws:
             ws.close()

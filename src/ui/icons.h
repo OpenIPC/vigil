@@ -35,6 +35,7 @@ extern const lv_image_dsc_t ui_icon_nav_smtp;    /* 22 px, mail.svg */
 extern const lv_image_dsc_t ui_icon_nav_alarm;    /* 22 px, bell-ringing.svg */
 extern const lv_image_dsc_t ui_icon_nav_p2p;    /* 22 px, cloud-off.svg */
 extern const lv_image_dsc_t ui_icon_nav_qos;    /* 22 px, traffic-lights.svg */
+extern const lv_image_dsc_t ui_icon_nav_ports;    /* 22 px, plug-connected.svg */
 extern const lv_image_dsc_t ui_icon_nav_basic;    /* 22 px, device-floppy.svg */
 extern const lv_image_dsc_t ui_icon_nav_schedule;    /* 22 px, calendar-time.svg */
 extern const lv_image_dsc_t ui_icon_nav_disks;    /* 22 px, server-2.svg */

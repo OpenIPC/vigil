@@ -48,6 +48,7 @@
 #include "hal.h"
 #include "kvm.h"
 #include "log.h"
+#include "net.h"
 #include "users.h"
 #include "web.h"
 
@@ -650,16 +651,28 @@ static int log_message(const struct mg_connection *conn, const char *msg)
     return 1;
 }
 
-int web_start(void)
+/* What the server listens on, for Network -> Ports (kept by api.c). */
+static void set_listening(const char *listen, const char *why) { api_server_state(1, listen, why); }
+
+static int start_at(const char *listen)
 {
     config_web_t cfg = web_config(NULL);
+    snprintf(cfg.listen, sizeof cfg.listen, "%s", listen);
     if (!cfg.enabled || !cfg.listen[0]) {
         vg_log("web: zero channel off (web.%s)", cfg.enabled ? "listen is empty" : "enabled is false");
+        set_listening("", cfg.enabled ? "off: web.listen is empty" : "off: web.enabled is off");
         return 0;
     }
     if (!hal_caps()->display) {
         vg_log("web: no screen on this platform; zero channel off");
+        set_listening("", "off: no screen on this platform");
         return 0;
+    }
+    char why[128];
+    if (net_listen_check(cfg.listen, why, sizeof why) < 0) {
+        vg_log("web: cannot listen on %s: %s; no zero channel", cfg.listen, why);
+        set_listening("", why);
+        return -1;
     }
     api_auth_init();
     const char *options[] = {
@@ -678,14 +691,26 @@ int web_start(void)
     g_ctx = mg_start(&cb, NULL, options);
     if (!g_ctx) {
         vg_log("web: cannot listen on %s; no zero channel", cfg.listen);
+        set_listening("", "the web server library could not start there");
         mg_exit_library();
         return -1;
     }
+    set_listening(cfg.listen, "");
     api_qos_listeners(g_ctx, QOS_MANAGEMENT);
     mg_set_request_handler(g_ctx, "/", request_handler, NULL);
     mg_set_websocket_handler(g_ctx, "/ws", ws_connect, ws_ready, ws_data, ws_close, NULL);
     vg_log("web: zero channel on %s", cfg.listen);
     return 0;
+}
+
+int web_start(void) { return start_at(web_config(NULL).listen); }
+
+int web_restart(const char *listen, char *err, size_t cap)
+{
+    web_stop();
+    int rc = start_at(listen);
+    api_server_moved(1, listen, rc < 0, err != NULL, err, cap);
+    return rc;
 }
 
 void web_stop(void)
@@ -695,4 +720,5 @@ void web_stop(void)
     mg_stop(g_ctx);
     g_ctx = NULL;
     mg_exit_library();
+    set_listening("", "stopped");
 }

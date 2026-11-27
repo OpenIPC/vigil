@@ -92,13 +92,13 @@ defaults, commented.
 | `alarm.enabled`, `protocol`, `host`, `port`, `path`, `interval` | | off, `http`, 80, `/`, 60 s | Every event POSTed as JSON, and a heartbeat. |
 | `time.ntp`, `time.ntp_interval` | boolean, minutes 10..1440 | `true`, 60 | NTP on (the firmware's ntpd, with the servers of `/etc/ntp.conf`), and how often vigild checks itself. |
 | `ui.language`, `date_format`, `time_format` | enums | `en`, `YYYY-MM-DD`, `24h` | The on-screen UI. |
-| `api.listen` | `"port"` or `"a.b.c.d:port"` | `"0.0.0.0:8080"` | Where the API listens (IPv4). Empty: no API. Read at start only. |
+| `api.listen` | `"port"` or `"a.b.c.d:port"` | `"0.0.0.0:8080"` | Where the API listens (IPv4). Empty: no API. A change moves it at once ([Ports](#ports)). |
 | `api.auth` | boolean | `true` | Require a login. See [Authentication](#authentication). |
 | `api.user` | string | `"root"` | The system account: it logs in with every permission (and as `admin` while no user of that name exists). |
 | `api.shadow` | absolute path | `"/etc/shadow"` | The shadow file holding that account's password hash. |
 | `api.users` | absolute path | `"/etc/vigil.users.yaml"` | vigil's own users and groups ([Accounts and permissions](#accounts-and-permissions)). |
 | `web.enabled` | boolean | `true` | The [zero channel](#zero-channel): the screen, mouse and keyboard in a browser. Off: its pages answer `503` and its viewers are disconnected. |
-| `web.listen` | `"port"` or `"a.b.c.d:port"` | `"0.0.0.0:80"` | Where its web server listens (IPv4). Empty: none. Read at start only. |
+| `web.listen` | `"port"` or `"a.b.c.d:port"` | `"0.0.0.0:80"` | Where its web server listens (IPv4). Empty: none. A change moves it at once ([Ports](#ports)). |
 | `web.fps` | integer 1..30 | 15 | Its pictures a second, at most. |
 | `discovery.interfaces` | string | `""` | Interfaces to search for cameras on, comma separated; empty: every IPv4 interface ([Discovery](#discovery)). |
 | `discovery.targets` | IPv4 addresses, comma separated | `""` | Also searched by unicast: cameras on a routed subnet. |
@@ -108,6 +108,9 @@ defaults, commented.
 | `qos.management` | integer 0..63 | 16 (CS2) | The HTTP API and the web server's pages and logins, DDNS, camera searches. |
 | `qos.camera` | integer 0..63 | 34 (AF41) | vigild's connections to cameras: RTSP and NETIP control and the ACKs of their video. |
 | `qos.alarm` | integer 0..63 | 18 (AF21) | The API's event WebSocket (`/api/v1/ws`), the alarm center's POSTs, mails. |
+| `rtsp_server.port` | integer 1..65535 | 554 | Kept for an RTSP server, which vigild does not have yet ([Ports](#ports)). |
+| `onvif_server.port` | integer 1..65535 | 8899 | Kept for an ONVIF server (not yet). 80, ONVIF's usual port, is the web server's; 8899 is XM cameras' ONVIF port. |
+| `netip_server.port` | integer 1..65535 | 34567 | Kept for a NETIP server (not yet), XM's port. |
 
 `GET /api/v1/schema` returns this table as data (below), so it is never out
 of date for a client.
@@ -170,8 +173,7 @@ configuration is not changed: `record.path` stays what was set.
 
 ## What applies when
 
-Every setting except `api.listen` applies while `vigild` runs (`"live"` in
-the schema). The main thread notices the new configuration within a fraction
+Every setting applies while `vigild` runs (`"live"` in the schema). The main thread notices the new configuration within a fraction
 of a second and:
 
 - **renames** a camera without touching its stream;
@@ -203,6 +205,28 @@ HTTP connection to the API or the web pages keeps its mark until it is
 closed (they are short). What vigild does not send is not marked: sshd,
 ntpd, the firmware's own `httpd` would need iptables' `DSCP` target, and
 the OpenIPC kernels built for these boards have no netfilter.
+
+## Ports
+
+`web.listen`, `api.listen`, `rtsp_server.port`, `onvif_server.port` and
+`netip_server.port`: no two on one port (an empty listen holds none); a
+`PUT` that would put two there is refused (`400`, the later one's path:
+`onvif_server.port: port 80 is web.listen's already`). A file that has
+them clash is still loaded, with the clash logged: the server that starts
+second does not get the port.
+
+A changed `api.listen` or `web.listen` is tried before it is saved (bound
+for a moment, as the server will): a port another program holds, one below
+1024 without root, or an address the recorder does not have is refused
+with the reason (`api.listen: port 8081 is in use ...`). Saved, the server
+moves at once: it stops (its open connections and WebSockets close) and
+listens on the new port. Should that fail all the same (the port was taken
+in between), it goes back to the old one, the setting is put back, the
+event `api port: ...` says why, and Network -> Ports shows it.
+
+vigild has no RTSP, ONVIF or NETIP server yet: their ports are settings
+only, kept and checked so that the web server or the API cannot take them
+before those servers come.
 
 ## Authentication
 
@@ -292,7 +316,7 @@ saved over it until it is fixed or removed.
 | `PUT /config` | every permission but `remote` |
 | `/config/cameras`, `discovery` | `cameras` |
 | `/config/record`, `schedule`, `quota`, `nas` | `storage` |
-| `/config/ddns`, `upnp`, `smtp`, `alarm`, `qos` | `network` |
+| `/config/ddns`, `upnp`, `smtp`, `alarm`, `qos`, `rtsp_server`, `onvif_server`, `netip_server` | `network` |
 | `/config/time`, `ui`, `display` | `system` |
 | `/config/api`, `web` | `users` |
 | `/network/…` | `network` |
@@ -441,7 +465,7 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `GET /api/v1/status` | Platform, uptime, configuration generation, one entry per camera. |
 | `GET /api/v1/config` | The configuration in force, passwords redacted. |
 | `PUT /api/v1/config` | Replace the whole configuration. Sections and keys it omits get their defaults. |
-| `GET /api/v1/config/<section>` | One section (`cameras`, `record`, `schedule`, `quota`, `nas`, `ddns`, `upnp`, `smtp`, `alarm`, `time`, `ui`, `display`, `api`, `discovery`, `qos`). |
+| `GET /api/v1/config/<section>` | One section (`cameras`, `record`, `schedule`, `quota`, `nas`, `ddns`, `upnp`, `smtp`, `alarm`, `time`, `ui`, `display`, `api`, `discovery`, `qos`, `rtsp_server`, `onvif_server`, `netip_server`). |
 | `PUT /api/v1/config/<section>` | Replace one section; the others stay. |
 | `GET /api/v1/schema` | Every setting: type, default, limits, label, help. |
 | `GET /api/v1/ws` | WebSocket: pushed status, events and configuration changes. |
