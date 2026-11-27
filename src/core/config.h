@@ -165,6 +165,12 @@ typedef struct {
     char prefer[32];                /* "netip,onvif,dhip" */
 } config_discovery_t;
 
+/* vigild as an ONVIF device (src/api/onvif.c, docs/onvif.md). */
+typedef struct {
+    int  enabled;
+    int  port;                      /* its web service; WS-Discovery is UDP 3702 */
+} config_onvif_server_t;
+
 typedef struct {
     int             n_cameras;
     config_camera_t cameras[CHANNEL_MAX];
@@ -184,6 +190,7 @@ typedef struct {
     config_api_t    api;
     config_web_t    web;
     config_discovery_t discovery;
+    config_onvif_server_t onvif_server;
 } vigil_config_t;
 
 /* "mon".."sun" */

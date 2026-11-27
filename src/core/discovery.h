@@ -85,6 +85,10 @@ typedef struct {
  * camera is "known" — set once from main. Default CHANNEL_MAX. */
 void disc_set_max_channels(int n);
 
+/* This recorder's own WS-Discovery endpoint reference ("urn:uuid:...",
+ * the ONVIF server's; NULL or "" none): searches skip its answers. */
+void disc_set_self(const char *uuid);
+
 /* Preference order of protocols for a device's URL, "netip,onvif,dhip"
  * (the default: NETIP names both streams without guessing a path; ONVIF
  * asks the device; Dahua's RTSP path is fixed). -1 on an unknown name. */

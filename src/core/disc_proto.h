@@ -133,6 +133,12 @@ int disc_xml_text(const char *xml, size_t len, const char *local, char *out, siz
 int disc_xml_attr(const char *xml, size_t len, const char *local, const char *attr, char *out,
                   size_t cap, size_t *from);
 
+/* Where the first element `local` at or after xml+start is: the offset of
+ * its '<' (*tag), its content [*c0, *c1) and the end of the element
+ * (*after); any may be NULL. 0, or -1 if there is none. */
+int disc_xml_elem(const char *xml, size_t len, const char *local, size_t start, size_t *tag, size_t *c0,
+                  size_t *c1, size_t *after);
+
 /* ---- DHIP ---------------------------------------------------------------- */
 
 /* The DHDiscover.search datagram. Returns its length. */

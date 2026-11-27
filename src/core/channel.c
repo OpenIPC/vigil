@@ -286,6 +286,14 @@ void channels_status(int idx, channel_status_t *st)
         st->width = v->width;
         st->height = v->height;
         st->fps = v->fps;
+        for (int i = 0; i < S_N; ++i) {
+            const sess_t *si = &c->s[i];
+            if (i == S_SUB && !sub_up) continue;
+            st->streams[i].codec = si->codec;
+            st->streams[i].width = si->width;
+            st->streams[i].height = si->height;
+            st->streams[i].fps = si->fps;
+        }
         snprintf(st->view, sizeof st->view, "%s", view_name(holder != VIEW_NONE ? holder : view));
         st->recording = c->rec_on && c->seg.f != NULL;
         st->rec_bytes = c->seg.bytes;

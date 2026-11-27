@@ -8,7 +8,9 @@
  *   -> channels_start (one thread per camera: source -> decode + record)
  *   -> mgmt_start (the management pages' jobs and timers: network
  *      rollback, NTP, DDNS, network storage, alarm center, mail)
- *   -> api_start (HTTP/WebSocket API on its own threads, if configured)
+ *   -> api_start (HTTP/WebSocket API on its own threads, if configured),
+ *      web_start (the zero channel), onvif_start (the ONVIF server and
+ *      WS-Discovery, while onvif_server.enabled)
  *   -> frontend_run (LVGL quad view, or status lines when headless); on
  *      this thread, a configuration the API saved is applied
  *      (channels_apply)
@@ -34,6 +36,7 @@
 #include "log.h"
 #include "mgmt.h"
 #include "source.h"
+#include "onvif.h"
 #include "web.h"
 
 static volatile sig_atomic_t g_stop;
@@ -422,7 +425,9 @@ int main(int argc, char **argv)
         disc_set_max_channels(caps->max_channels);
         api_start();                    /* failing to start it is logged, not fatal */
         web_start();                    /* the same */
+        onvif_start();                  /* the same */
         rc = frontend_run(run_secs, &g_stop, apply_config) < 0 ? 1 : 0;
+        onvif_stop();
         web_stop();
         api_stop();
         disc_shutdown();
