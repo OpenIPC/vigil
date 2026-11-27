@@ -240,6 +240,9 @@ Beside each hash the file keeps `md5(name:vigil:password)` (`digest`),
 which the [RTSP server](rtsp.md#logins)'s Digest logins need and a `crypt`
 hash cannot give: written with the password, and for a user from before
 it, at its next login.
+While the [ONVIF server](onvif.md#logging-in) is on, setting a password
+also stores the user's ONVIF key (the password itself, base64) next to the
+hash: ONVIF's digest logins need it.
 
 Permissions: `live` (live view, status, events), `playback`, `ptz`,
 `cameras` (the camera list, discovery), `storage` (recording, schedule,
@@ -275,7 +278,7 @@ saved over it until it is fixed or removed.
 | `PUT /config` | every permission but `remote` |
 | `/config/cameras`, `discovery` | `cameras` |
 | `/config/record`, `schedule`, `quota`, `nas` | `storage` |
-| `/config/ddns`, `upnp`, `smtp`, `alarm` | `network` |
+| `/config/ddns`, `upnp`, `smtp`, `alarm`, `onvif_server` | `network` |
 | `/config/time`, `ui`, `display` | `system` |
 | `/config/api`, `web`, `rtsp_server` | `users` |
 | `/network/…` | `network` |
@@ -435,6 +438,7 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `GET /api/v1/discovery/job` | The current or last discovery job. |
 | `POST /api/v1/discovery/ip` | Change devices' addresses, or (`dry_run`) show the plan. |
 | `POST /api/v1/channels/<n>/assign` | Add a device found to channel n. |
+| `POST /api/v1/channels/<n>/events` | Events of channel n's camera, reported from outside ([below](#post-apiv1channelsnevents)). |
 | `POST /api/v1/discovery/autoadd` | Add every new device to the empty channels. |
 | `POST /api/v1/devices/test` | Connect to a camera described by hand: codec and size, or why not. |
 
@@ -484,7 +488,7 @@ For example:
   "config": { "generation": 7, "applied": 7 },
   "platform": { "name": "sigmastar", "display": true, "decoder": true,
                 "decoder_max_width": 2592, "decoder_max_height": 2592,
-                "max_channels": 4, "capture_inputs": 0 },
+                "max_channels": 4, "capture_inputs": 0, "max_in_kbps": 64000 },
   "channels": [
     { "camera": 1, "url": "rtsp://admin:***@192.168.1.10/stream=0", "name": "Gate",
       "enabled": true, "host": "192.168.1.10", "running": true, "live": true,
@@ -492,7 +496,8 @@ For example:
       "main": { "status": "live", "state": "" }, "sub": null,
       "events": ["motion"], "decoding": true, "view": "main", "no_decoder": false, "recording": true, "rec_state": "recording",
       "rec_bytes": 73400320,
-      "codec": "H.265", "width": 1920, "height": 1080, "fps": 25 }
+      "codec": "H.265", "width": 1920, "height": 1080, "fps": 25,
+      "main_kbps": 4096, "sub_kbps": 0 }
   ]
 }
 ```
@@ -534,7 +539,11 @@ for again; `view`: the stream on screen, or about to be
 (`main`, `sub` for the camera's sub-stream in a small tile, `""` when the
 channel is not on screen or nothing decodes it); `codec`, `width`,
 `height` and `fps` (averaged over 2 s) are that stream's; `codec` is `null`
-until the stream says.
+until the stream says. `main_kbps` and `sub_kbps` are what each stream
+brings in, kbit/s of video averaged over 2 s (0 while it does not run);
+the platform's `max_in_kbps` is the chip's rated incoming bandwidth for
+network cameras, every stream together (0: not known), which the Channels
+page shows their sum against.
 
 ### `GET /api/v1/schema`
 
@@ -781,6 +790,24 @@ paths given. The results show the URLs, redacted (`url`, `sub_url`). A
 manual device is not refused for being on another channel already (an NVR's
 channels share an address).
 
+### `POST /api/v1/channels/<n>/events`
+
+`{"events": ["motion", "human"]}` reports events of channel n's camera as
+if the camera had (any of `motion`, `human`, `face`, `vehicle`): for an
+alarm input vigild does not read itself (a script relaying a camera's or a
+sensor's alarm), and for trying the tiles' alarm icons and frame
+(`display.alarm_icons`, `display.alert_frame`). Each is held 5 s after
+its last report, like a camera's, so a source repeats it while it lasts;
+the status's `events` and the live view show it meanwhile. The answer is
+the events held now, `{"channel": 1, "events": ["motion", "human"]}`.
+`400` for an unknown event, `404` past the channels. Needs `cameras`.
+
+```sh
+while sleep 2; do
+  curl -s -u root:PASSWORD -d '{"events": ["motion"]}' $NVR/api/v1/channels/1/events
+done
+```
+
 ### `POST /api/v1/devices/test`
 
 The same description as `manual` above, as the body. The job connects as
@@ -841,6 +868,8 @@ say which device went where.
   its own: libjpeg is not on the firmware) and its input.
   `src/api/rtsp_server.c`: the [RTSP server](rtsp.md), its own thread,
   fed by `src/core/stream_tap.c`.
+  `src/api/onvif.c`: the [ONVIF server](onvif.md#inside), a third
+  CivetWeb context and the WS-Discovery responder.
   `src/api/api_disc.c`: the discovery endpoints, over
   `src/core/discovery.{h,c}` (the device table and the jobs),
   `src/core/disc_proto.{h,c}` (the searches and their answers, as pure

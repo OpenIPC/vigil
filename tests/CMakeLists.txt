@@ -5,6 +5,9 @@ add_test(NAME core COMMAND test_core ${CMAKE_CURRENT_SOURCE_DIR}/data)
 add_executable(test_discovery test_discovery.c)
 target_link_libraries(test_discovery PRIVATE vigil_core)
 add_test(NAME discovery COMMAND test_discovery ${CMAKE_CURRENT_SOURCE_DIR}/data)
+add_executable(test_onvif test_onvif.c)
+target_link_libraries(test_onvif PRIVATE vigil_core)
+add_test(NAME onvif COMMAND test_onvif)
 
 # src/sys on a fake root: fake /etc, /sys, /proc and /dev files, and a
 # recorder in place of ifup, mkfs, mount, date, ntpd, hostname, curl.
@@ -109,6 +112,10 @@ if(Python3_FOUND)
     add_test(NAME rtsp_server_e2e
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/rtsp_server_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data)
+    # The ONVIF server as a client sees it: discovery, logins, profiles.
+    add_test(NAME onvif_e2e
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/onvif_test.py $<TARGET_FILE:vigild>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
     add_test(NAME api_e2e
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/api_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)

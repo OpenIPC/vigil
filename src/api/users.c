@@ -18,10 +18,12 @@
 #include "md5.h"
 #include "schema.h"
 #include "schema_yaml.h"
+#include "sha1.h"
 #include "users.h"
 
 #define FILE_MAX (64u << 10)
 #define HASH_MAX 128
+#define KEY_MAX  176                    /* base64 of a password of 128 bytes, and the NUL */
 
 const char *const users_perm_names[PERM_N] = {
     "live", "playback", "ptz", "cameras", "storage", "network", "system", "users", "remote",
@@ -47,6 +49,7 @@ typedef struct {
     int  enabled;
     char password[HASH_MAX];
     char digest[33];
+    char onvif[KEY_MAX];                /* the password, base64; "" none (users_login_with) */
 } user_rec_t;
 
 typedef struct {
@@ -113,6 +116,11 @@ static const schema_field_t user_fields[] = {
       .def_str = "", .secret = SCHEMA_SECRET, .label = "RTSP password hash",
       .help = "md5 of name:vigil:password (Digest's HA1), for logins to the RTSP server; "
               "written with the password, or at the user's next login when missing." },
+    { .key = "onvif", .type = SCHEMA_STRING, .off = offsetof(user_rec_t, onvif), .size = KEY_MAX,
+      .def_str = "", .secret = SCHEMA_SECRET, .label = "ONVIF key",
+      .help = "The password itself, base64-encoded: ONVIF clients prove they know it with a "
+              "digest, which a crypt(3) hash cannot check. Written with the password while "
+              "onvif_server is on; empty: this user cannot log in to ONVIF with a digest." },
 };
 
 #define N(a) (int)(sizeof(a) / sizeof((a)[0]))
@@ -134,8 +142,9 @@ static const schema_t users_schema = { .version = 1, .sections = user_sections,
 static const char file_header[] =
     "vigil's users and groups: https://github.com/OpenIPC/vigil/blob/main/docs/api.md\n"
     "Written by vigild when accounts are changed through its HTTP API or on-screen\n"
-    "UI; comments written by hand are not kept. Passwords are crypt(3) hashes,\n"
-    "and md5 digests for the RTSP server's Digest logins.";
+    "UI; comments written by hand are not kept. Passwords are crypt(3) hashes, with\n"
+    "md5 digests for the RTSP server's Digest logins; while the ONVIF server is on,\n"
+    "each also has an \"onvif\" key: the password itself.";
 
 /* ---- the store --------------------------------------------------------------------- */
 
@@ -401,6 +410,25 @@ static users_rc_t check_password(const char *pass, users_err_t *e)
     return USERS_OK;
 }
 
+/* The ONVIF key of `pass` into out (users.h, users_login_with): only
+ * while the ONVIF server is on, "" otherwise. */
+static void onvif_key(const char *pass, char *out, size_t cap)
+{
+    out[0] = 0;
+    vigil_config_t *c = malloc(sizeof *c);
+    if (!c) return;
+    config_get(c);
+    int on = c->onvif_server.enabled;
+    free(c);
+    if (on && base64_encode(pass, strlen(pass), out, cap) < 0) out[0] = 0;
+}
+
+static void wipe(void *p, size_t n)
+{
+    volatile unsigned char *w = p;
+    while (n--) *w++ = 0;
+}
+
 /* ---- changes ------------------------------------------------------------------------------ */
 
 users_rc_t users_add(const char *name, const char *group, const char *password, int enabled,
@@ -413,9 +441,10 @@ users_rc_t users_add(const char *name, const char *group, const char *password, 
     if (!password) return fail(e, USERS_EINVAL, "password", "%sis required", "");
     users_rc_t rc = check_password(password, e);
     if (rc) return rc;
-    char hash[HASH_MAX];
+    char hash[HASH_MAX], key[KEY_MAX];
     if (users_hash(password, hash, sizeof hash) < 0)
         return fail(e, USERS_EIO, "password", "%scannot hash passwords here (crypt)", "");
+    onvif_key(password, key, sizeof key);
     pthread_mutex_lock(&g_lock);
     load();
     users_db_t db = g_db;
@@ -430,10 +459,13 @@ users_rc_t users_add(const char *name, const char *group, const char *password, 
         u->enabled = !!enabled;
         snprintf(u->password, sizeof u->password, "%s", hash);
         ha1_of(name, password, u->digest);
+        snprintf(u->onvif, sizeof u->onvif, "%s", key);
         rc = save_locked(&db, e);
         if (!rc) vg_log("users: added %s (group %s%s)", name, group, enabled ? "" : ", disabled");
     }
     pthread_mutex_unlock(&g_lock);
+    wipe(key, sizeof key);
+    wipe(&db, sizeof db);
     return rc;
 }
 
@@ -441,12 +473,13 @@ users_rc_t users_update(const char *name, const char *group, int enabled, const 
                         users_err_t *e)
 {
     memset(e, 0, sizeof *e);
-    char hash[HASH_MAX] = "";
+    char hash[HASH_MAX] = "", key[KEY_MAX] = "";
     if (password) {
         users_rc_t rc = check_password(password, e);
         if (rc) return rc;
         if (users_hash(password, hash, sizeof hash) < 0)
             return fail(e, USERS_EIO, "password", "%scannot hash passwords here (crypt)", "");
+        onvif_key(password, key, sizeof key);
     }
     pthread_mutex_lock(&g_lock);
     load();
@@ -461,6 +494,7 @@ users_rc_t users_update(const char *name, const char *group, int enabled, const 
         if (password) {
             snprintf(u->password, sizeof u->password, "%s", hash);
             ha1_of(name, password, u->digest);
+            snprintf(u->onvif, sizeof u->onvif, "%s", key);
         }
         rc = save_locked(&db, e);
         if (!rc)
@@ -468,6 +502,8 @@ users_rc_t users_update(const char *name, const char *group, int enabled, const 
                    enabled < 0 ? "" : enabled ? " enabled" : " disabled", password ? " password" : "");
     }
     pthread_mutex_unlock(&g_lock);
+    wipe(key, sizeof key);
+    wipe(&db, sizeof db);
     return rc;
 }
 
@@ -686,5 +722,53 @@ int users_login(const char *name, const char *pass, unsigned *perms, char *why, 
      * say which names exist. */
     char r[HASH_MAX];
     auth_crypt(pass, "$6$vigilnouser$", r, sizeof r);
+    return 0;
+}
+
+int users_login_with(const char *name, int (*check)(const char *pass, void *ctx), void *ctx, unsigned *perms,
+                     char *why, size_t cap)
+{
+    *perms = 0;
+    if (cap) why[0] = 0;
+    config_api_t api;
+    api_settings(&api);
+    char key[KEY_MAX] = "";
+    unsigned gperms = 0;
+    int found = 0, enabled = 0, has_admin = 0;
+    pthread_mutex_lock(&g_lock);
+    load_locked(api.users);
+    user_rec_t *u = find_user(&g_db, name);
+    if (u) {
+        found = 1;
+        enabled = u->enabled && u->password[0];
+        snprintf(key, sizeof key, "%s", u->onvif);
+        group_rec_t *g = find_group(&g_db, u->group);
+        gperms = g ? rec_perms(g) : 0;
+    }
+    has_admin = find_user(&g_db, "admin") != NULL;
+    pthread_mutex_unlock(&g_lock);
+
+    if (found) {
+        unsigned char pass[KEY_MAX];
+        int n = key[0] ? auth_base64_decode(key, strlen(key), pass, sizeof pass - 1) : -1;
+        wipe(key, sizeof key);
+        if (n < 0) {
+            if (enabled)
+                snprintf(why, cap, "user '%s' has no ONVIF key: set its password again while onvif_server is on",
+                         name);
+            return enabled ? -1 : 0;
+        }
+        pass[n] = 0;
+        int ok = check((const char *)pass, ctx);
+        wipe(pass, sizeof pass);
+        if (!ok || !enabled) return 0;
+        *perms = gperms;
+        return 1;
+    }
+    if (!strcmp(name, api.user) || (!strcmp(name, "admin") && !has_admin)) {
+        snprintf(why, cap, "the system account (%s) has only a crypt(3) hash, which a digest login cannot be "
+                           "checked against: log in to ONVIF as one of vigil's users", api.user);
+        return -1;
+    }
     return 0;
 }

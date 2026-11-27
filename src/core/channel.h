@@ -117,6 +117,12 @@ typedef struct {
     uint64_t   rec_bytes;
     vg_codec_t codec;
     unsigned   width, height, fps;  /* fps averaged over 2 s */
+    /* What each stream brings in, kbit/s of video averaged over 2 s (the
+     * access units as received); 0 while it does not run. */
+    unsigned   main_kbps, sub_kbps;
+    /* Each stream's own, whether shown or not: [0] main, [1] sub (for the
+     * ONVIF server's profiles). 0 / VG_CODEC_NONE until it is known. */
+    struct { vg_codec_t codec; unsigned width, height, fps; } streams[2];
     char       host[64];
     char       name[32];            /* the configured name, else `title` */
     char       title[32];           /* what the camera calls the channel (NETIP
@@ -153,11 +159,11 @@ void channels_set_tiles(const vg_rect_t *tiles);
  * Unset (0), the main stream everywhere. Before channels_start. */
 void channels_set_screen(unsigned w, unsigned h);
 
-/* How pictures fill their tiles (display.video_aspect): 0 fitted at the
- * camera's display aspect ratio, black bars around (aspect.h), 1 stretched
- * over the whole tile. From the thread that calls channels_apply; applies
- * at once. */
-void channels_set_stretch(int stretch);
+/* How pictures fill their tiles (display.video_aspect): fitted at the
+ * camera's display aspect ratio, black bars around (aspect.h); stretched
+ * over the whole tile; or covering it at that ratio, the overflow cut off.
+ * From the thread that calls channels_apply; applies at once. */
+void channels_set_aspect(vg_aspect_t how);
 
 /* Stop recording into `dir` and everything under it (a disk about to be
  * unmounted or formatted): the channels recording there close their

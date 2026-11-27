@@ -198,7 +198,10 @@ display:
   # Video aspect: fit: each picture keeps its shape inside its tile or the
   # full screen, with black bars where the shapes differ; a sub-stream
   # (704x576, 352x288, ...) is shown at its main stream's shape. stretch: the
-  # picture fills the tile. One of: fit, stretch. Default fit.
+  # picture fills the tile, whatever its shape. fill: the picture keeps its
+  # shape and covers the whole tile, what overflows cut off (a 4:3 camera in a
+  # 16:9 tile loses a strip at the top and at the bottom). One of: fit,
+  # stretch, fill. Default fit.
   video_aspect: fit
   # Clock: Where the date and time are on the live view; their format is
   # ui.date_format and ui.time_format. One of: off, top-left, top-center,
@@ -228,6 +231,19 @@ display:
   # straight on the video; none: the text alone; box: on a dark box. One of:
   # outline, none, box. Default outline.
   icons_background: outline
+  # REC icon: REC in the status icons' corner of each tile while its channel
+  # records. Default true.
+  rec_icon: true
+  # Alarm icons: The events the camera reports (motion, human, face, vehicle)
+  # as icons in the status icons' corner, while they last. Default true.
+  alarm_icons: true
+  # Lines between tiles: A thin line around each tile of the live view. Off:
+  # the pictures touch. Default true.
+  tile_dividers: true
+  # Alarm frame: A red frame, blinking, inside the edge of a tile while its
+  # camera reports an event (the alarm icons' events); none otherwise. Default
+  # false.
+  alert_frame: false
 
 # HTTP API
 api:
@@ -296,3 +312,15 @@ discovery:
   # answers more than one: NETIP names both streams, ONVIF asks the camera,
   # Dahua's RTSP path is fixed. Default netip,onvif,dhip.
   prefer: "netip,onvif,dhip"
+
+# ONVIF server
+onvif_server:
+  # On: Be an ONVIF device for video management software and other recorders:
+  # a profile for each camera's main and sub-stream with its RTSP address, and
+  # WS-Discovery so they find this recorder (docs/onvif.md). They log in as
+  # vigil's users; the video needs the live permission. Default true.
+  enabled: true
+  # Port: TCP port of its web service, whose device service is
+  # /onvif/device_service (port 80 is the zero channel's). Discovery tells
+  # clients which port it is. 1..65535, default 8899.
+  port: 8899

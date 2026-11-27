@@ -17,7 +17,9 @@
  * rectangle at the display aspect ratio the core gives
  * (hal_display_set_aspect: ASPECT_RATIO_MANUAL with aspect_fit's
  * rectangle, black around it; NONE to stretch), or, before the core says,
- * at the picture's own (ASPECT_RATIO_AUTO).
+ * at the picture's own (ASPECT_RATIO_AUTO). In fill the VPSS group crops
+ * the decoded picture to its middle at the tile's shape (aspect_crop) and
+ * the VO channel stretches that over the tile.
  *
  * Revision-2 Hi3536DV100 chips (SC_SYSID0 0x12050EE0 bits 31:24 = 2) need a
  * vdec.ko whose chip-revision check is bypassed: the stock SDK module reads
@@ -64,7 +66,9 @@ static struct {
     vg_codec_t codec;                               /* VG_CODEC_NONE: no VDEC */
     vg_rect_t  tile;                                /* the VO channel's rectangle */
     int        asp_set;                             /* hal_display_set_aspect said: */
-    vg_ratio_t asp;                                 /* 0:0 stretch */
+    vg_ratio_t asp;                                 /* 0:0 the picture's own size */
+    vg_aspect_t how;
+    unsigned   pic_w, pic_h;                        /* the decoder's picture (0: none yet) */
 } g_ch[MAX_CH];
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -103,12 +107,13 @@ static void chn_aspect(int ch)
     VO_CHN_PARAM_S vp;
     if (HI_MPI_VO_GetChnParam(HI_DISPLAY_VO_LAYER, ch, &vp) != HI_SUCCESS) return;
     vp.stAspectRatio.u32BgColor = 0x000000;
-    if (!g_ch[ch].asp_set) {
+    vg_ratio_t a = g_ch[ch].asp.w ? g_ch[ch].asp : (vg_ratio_t){ g_ch[ch].pic_w, g_ch[ch].pic_h };
+    if (!g_ch[ch].asp_set || (g_ch[ch].how == VG_ASPECT_FIT && !a.w)) {
         vp.stAspectRatio.enMode = ASPECT_RATIO_AUTO;
-    } else if (!g_ch[ch].asp.w) {
-        vp.stAspectRatio.enMode = ASPECT_RATIO_NONE;
+    } else if (g_ch[ch].how != VG_ASPECT_FIT) {
+        vp.stAspectRatio.enMode = ASPECT_RATIO_NONE;  /* stretched, or the crop over the tile */
     } else {
-        vg_rect_t w = aspect_fit(&g_ch[ch].tile, g_ch[ch].asp, 2);
+        vg_rect_t w = aspect_fit(&g_ch[ch].tile, a, 2);
         vp.stAspectRatio.enMode = ASPECT_RATIO_MANUAL;
         vp.stAspectRatio.stVideoRect.s32X = w.x;
         vp.stAspectRatio.stVideoRect.s32Y = w.y;
@@ -119,13 +124,34 @@ static void chn_aspect(int ch)
     if (rc != HI_SUCCESS) fprintf(stderr, "hi3536dv100: VO_SetChnParam(%d) aspect 0x%x\n", ch, rc);
 }
 
-void hal_display_set_aspect(int ch, unsigned w, unsigned h)
+/* In fill, the VPSS group's crop: the middle of the decoded picture at the
+ * tile's shape, in the picture's pixels, multiples of 4 (the coarser of
+ * what the SDK's VPSS takes for an offset); off otherwise. Locked. */
+static void grp_crop(int ch)
+{
+    if (!g_ch[ch].vpss_up || !g_ch[ch].pic_w) return;
+    VPSS_CROP_INFO_S ci;
+    memset(&ci, 0, sizeof ci);
+    ci.enCropCoordinate = VPSS_CROP_ABS_COOR;
+    if (g_ch[ch].asp_set && g_ch[ch].how == VG_ASPECT_FILL && g_ch[ch].tile.w) {
+        vg_rect_t c = aspect_crop(g_ch[ch].pic_w, g_ch[ch].pic_h, g_ch[ch].asp, (unsigned)g_ch[ch].tile.w,
+                                  (unsigned)g_ch[ch].tile.h, 4);
+        ci.bEnable = c.w != (int)g_ch[ch].pic_w || c.h != (int)g_ch[ch].pic_h ? HI_TRUE : HI_FALSE;
+        ci.stCropRect = (RECT_S){ c.x, c.y, (HI_U32)c.w, (HI_U32)c.h };
+    }
+    HI_S32 rc = HI_MPI_VPSS_SetGrpCrop(ch, &ci);
+    if (rc != HI_SUCCESS) fprintf(stderr, "hi3536dv100: VPSS_SetGrpCrop(%d) 0x%x\n", ch, rc);
+}
+
+void hal_display_set_aspect(int ch, unsigned w, unsigned h, vg_aspect_t how)
 {
     if (ch < 0 || ch >= MAX_CH) return;
     pthread_mutex_lock(&g_lock);                    /* a channel's thread, while tiles move */
     g_ch[ch].asp_set = 1;
     g_ch[ch].asp = w && h ? (vg_ratio_t){ w, h } : (vg_ratio_t){ 0, 0 };
+    g_ch[ch].how = how;
     if (g_ch[ch].tile.w) chn_aspect(ch);
+    grp_crop(ch);
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -146,6 +172,7 @@ int hal_display_set_tile(int ch, const vg_rect_t *r)
     pthread_mutex_lock(&g_lock);
     g_ch[ch].tile = (vg_rect_t){ 0, 0, (int)va.stRect.u32Width, (int)va.stRect.u32Height };
     chn_aspect(ch);
+    grp_crop(ch);
     pthread_mutex_unlock(&g_lock);
     /* A move (another layout, full screen) changes the attributes of a
      * channel that is already enabled. */
@@ -217,6 +244,10 @@ int hal_dec_open(int ch, vg_codec_t codec, const vg_stream_info_t *si)
         goto fail;
     }
     g_ch[ch].vpss_up = 1;
+    g_ch[ch].pic_w = si->width;
+    g_ch[ch].pic_h = si->height;
+    grp_crop(ch);
+    if (g_ch[ch].tile.w) chn_aspect(ch);            /* 0:0 is the new picture's own shape */
     MPP_CHN_S vpss = { .enModId = HI_ID_VPSS, .s32DevId = ch, .s32ChnId = 0 };
     MPP_CHN_S vo   = { .enModId = HI_ID_VOU, .s32DevId = HI_DISPLAY_VO_LAYER, .s32ChnId = ch };
     if ((rc = HI_MPI_VPSS_SetChnAttr(ch, 0, &ca)) != HI_SUCCESS ||

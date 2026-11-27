@@ -134,7 +134,7 @@ typedef struct {
 /* The HDMI/VGA output and what the live view draws over the video. */
 typedef struct {
     char output[16];                /* "1920x1080@60" (config_output_mode) */
-    char video_aspect[8];           /* "fit" | "stretch" */
+    char video_aspect[8];           /* "fit" | "stretch" | "fill" */
     char clock_position[16];        /* "off" | "top-left" | "top-center" | ... | "bottom-right" */
     char clock_size[8];             /* "small" | "medium" | "large" | "xlarge" */
     char clock_background[8];       /* "outline" | "none" | "box" */
@@ -143,6 +143,11 @@ typedef struct {
     char name_background[8];
     char icons_position[16];        /* a tile corner */
     char icons_background[8];
+    /* What the tiles show besides the video (booleans). */
+    int  rec_icon;                  /* REC while the channel records */
+    int  alarm_icons;               /* the camera's events (motion, human, face, vehicle) */
+    int  tile_dividers;             /* a line between the tiles */
+    int  alert_frame;               /* a frame around a tile while its camera reports an event */
 } config_display_t;
 
 typedef struct {
@@ -173,6 +178,12 @@ typedef struct {
     char prefer[32];                /* "netip,onvif,dhip" */
 } config_discovery_t;
 
+/* vigild as an ONVIF device (src/api/onvif.c, docs/onvif.md). */
+typedef struct {
+    int  enabled;
+    int  port;                      /* its web service; WS-Discovery is UDP 3702 */
+} config_onvif_server_t;
+
 typedef struct {
     int             n_cameras;
     config_camera_t cameras[CHANNEL_MAX];
@@ -193,6 +204,7 @@ typedef struct {
     config_web_t    web;
     config_rtsp_server_t rtsp_server;
     config_discovery_t discovery;
+    config_onvif_server_t onvif_server;
 } vigil_config_t;
 
 /* "mon".."sun" */

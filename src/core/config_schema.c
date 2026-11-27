@@ -253,7 +253,7 @@ static const char *const corners_off[] = { "off", "top-left", "top-right", "bott
 static const char *const corners[] = { "top-left", "top-right", "bottom-left", "bottom-right", NULL };
 static const char *const osd_sizes[] = { "small", "medium", "large", "xlarge", NULL };
 static const char *const osd_backgrounds[] = { "outline", "none", "box", NULL };
-static const char *const video_aspects[] = { "fit", "stretch", NULL };
+static const char *const video_aspects[] = { "fit", "stretch", "fill", NULL };
 
 int config_output_mode(const char *s, unsigned *w, unsigned *h, unsigned *hz)
 {
@@ -460,7 +460,9 @@ static const schema_field_t display_fields[] = {
       .label = "Video aspect",
       .help = "fit: each picture keeps its shape inside its tile or the full screen, with black bars "
               "where the shapes differ; a sub-stream (704x576, 352x288, ...) is shown at its main "
-              "stream's shape. stretch: the picture fills the tile." },
+              "stream's shape. stretch: the picture fills the tile, whatever its shape. fill: the picture "
+              "keeps its shape and covers the whole tile, what overflows cut off (a 4:3 camera in a 16:9 "
+              "tile loses a strip at the top and at the bottom)." },
     { .key = "clock_position", ENUM(config_display_t, clock_position, clock_positions), .def_str = "top-right",
       .live = 1, .label = "Clock",
       .help = "Where the date and time are on the live view; their format is ui.date_format and "
@@ -481,6 +483,17 @@ static const schema_field_t display_fields[] = {
               "just above the name (below it at the top)." },
     { .key = "icons_background", ENUM(config_display_t, icons_background, osd_backgrounds),
       .def_str = "outline", .live = 1, .label = "Status icons background", .help = OSD_BG_HELP },
+    { .key = "rec_icon", BOOL(config_display_t, rec_icon), .def_int = 1, .live = 1, .label = "REC icon",
+      .help = "REC in the status icons' corner of each tile while its channel records." },
+    { .key = "alarm_icons", BOOL(config_display_t, alarm_icons), .def_int = 1, .live = 1, .label = "Alarm icons",
+      .help = "The events the camera reports (motion, human, face, vehicle) as icons in the status "
+              "icons' corner, while they last." },
+    { .key = "tile_dividers", BOOL(config_display_t, tile_dividers), .def_int = 1, .live = 1,
+      .label = "Lines between tiles",
+      .help = "A thin line around each tile of the live view. Off: the pictures touch." },
+    { .key = "alert_frame", BOOL(config_display_t, alert_frame), .def_int = 0, .live = 1, .label = "Alarm frame",
+      .help = "A red frame, blinking, inside the edge of a tile while its camera reports an event "
+              "(the alarm icons' events); none otherwise." },
 };
 
 static const schema_field_t api_fields[] = {
@@ -550,6 +563,18 @@ static const schema_field_t discovery_fields[] = {
               "NETIP names both streams, ONVIF asks the camera, Dahua's RTSP path is fixed." },
 };
 
+static const schema_field_t onvif_server_fields[] = {
+    { .key = "enabled", BOOL(config_onvif_server_t, enabled), .def_int = 1, .live = 1, .label = "On",
+      .help = "Be an ONVIF device for video management software and other recorders: a profile "
+              "for each camera's main and sub-stream with its RTSP address, and WS-Discovery "
+              "so they find this recorder (docs/onvif.md). They log in as vigil's users; the "
+              "video needs the live permission." },
+    { .key = "port", INT(config_onvif_server_t, port), .def_int = 8899, .min = 1, .max = 65535, .live = 1,
+      .label = "Port",
+      .help = "TCP port of its web service, whose device service is /onvif/device_service (port "
+              "80 is the zero channel's). Discovery tells clients which port it is." },
+};
+
 #define N(a) (int)(sizeof(a) / sizeof((a)[0]))
 
 static const schema_section_t sections[] = {
@@ -587,6 +612,7 @@ static const schema_section_t sections[] = {
     OBJECT("rtsp_server", rtsp_server, rtsp_server_fields, "RTSP server"),
     { .key = "discovery", .off = offsetof(vigil_config_t, discovery), .fields = discovery_fields,
       .n_fields = N(discovery_fields), .label = "Camera search" },
+    OBJECT("onvif_server", onvif_server, onvif_server_fields, "ONVIF server"),
 };
 
 const schema_t config_schema = {

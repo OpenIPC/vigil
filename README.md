@@ -38,6 +38,10 @@ are part of the design.
   another recorder at `rtsp://<recorder>/ch1/main`, as the camera sends it
   (no re-encoding), over TCP or UDP, starting at once at a keyframe, with
   Digest logins of vigil's users ([docs/rtsp.md](docs/rtsp.md)).
+- **ONVIF server**: VMS and other recorders find the recorder by
+  WS-Discovery and get a profile per camera and stream (media and media2,
+  H.265 too) with its RTSP address, logging in as vigil's users
+  ([docs/onvif.md](docs/onvif.md)).
 
 ## Platforms
 
@@ -71,6 +75,8 @@ For a board, see its page under [docs/platforms](docs/platforms/).
 - [Configuration and HTTP API](docs/api.md): the configuration file, the
   endpoints, the WebSocket, authentication and password redaction.
 - [RTSP server](docs/rtsp.md): the cameras' streams to other clients.
+- [ONVIF server](docs/onvif.md): what VMS see, logins and permissions,
+  WS-Discovery.
 - [On-screen UI](docs/ui.md): screens, data binding, schema-driven
   settings, design tokens, mouse and keyboard input, headless tests.
 - [Adding a platform](docs/porting.md): what a new SoC family has to

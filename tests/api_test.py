@@ -249,7 +249,7 @@ def main():
         seg = [f for f in secs.get("record", {}).get("fields", []) if f["key"] == "segment"]
         check(set(secs) == {"cameras", "record", "schedule", "quota", "nas", "ddns", "upnp", "smtp",
                               "alarm", "time", "ui", "display", "api", "web", "rtsp_server",
-                              "discovery"} and seg and seg[0]["min"] == 10 and
+                              "discovery", "onvif_server"} and seg and seg[0]["min"] == 10 and
               seg[0]["max"] == 3600 and seg[0]["live"], "schema: sections and limits")
         st, _, _ = api.json("GET", "/api/v1/nothing")
         check(st == 404, "unknown endpoint: 404")
@@ -345,6 +345,13 @@ def main():
                   ch["width"] == 640 and CAM_PASS not in json.dumps(status),
                   "status: name, host, codec, size; no password")
             check(status["config"]["applied"] == status["config"]["generation"], "status: config applied")
+            check(status["platform"]["max_in_kbps"] == 0 and "sub_kbps" in ch, "status: no rated bandwidth here; sub_kbps")
+
+        def bitrate():
+            s, _, d = api.json("GET", "/api/v1/status")
+            return s == 200 and d["channels"] and d["channels"][0]["main_kbps"] > 0 and d["channels"][0]["main_kbps"]
+        kbps = wait_for(bitrate, 6, 0.5)
+        check(kbps, "status: the main stream's bitrate (%s kbit/s)" % kbps)
         check(wait_for(lambda: ws.find(lambda m: m["type"] == "event" and m["data"]["camera"] == 1 and
                                        m["data"]["text"] == "online"), 5),
               "WebSocket: event CAM1 online")
@@ -381,6 +388,19 @@ def main():
         check(len(ws.find(lambda m: m["type"] == "event")) > events_before, "rename applied (event)")
         st, _, d = api.json("GET", "/api/v1/status")
         check(d["config"]["generation"] > gen and d["channels"][0]["live"], "generation moved, still live")
+
+        # ---- events from outside: held a few seconds, in the status
+        st, _, d = api.json("POST", "/api/v1/channels/1/events", {"events": ["motion", "human"]})
+        check(st == 200 and d == {"channel": 1, "events": ["motion", "human"]},
+              "POST events: motion and human held (%s %s)" % (st, d))
+        check(api.json("GET", "/api/v1/status")[2]["channels"][0]["events"] == ["motion", "human"],
+              "and in the status")
+        st, _, _ = api.json("POST", "/api/v1/channels/1/events", {"events": ["smoke"]})
+        check(st == 400, "an unknown event: 400 (%s)" % st)
+        st, _, _ = api.json("POST", "/api/v1/channels/9/events", {"events": ["motion"]})
+        check(st == 404, "no such channel: 404 (%s)" % st)
+        check(wait_for(lambda: api.json("GET", "/api/v1/status")[2]["channels"][0]["events"] == [], 8),
+              "gone a few seconds later")
 
         # ---- a recording setting restarts the camera, which comes back
         st, _, _ = api.json("PUT", "/api/v1/config/record", {"path": rec, "segment": 120, "allow_rootfs": True})
@@ -528,6 +548,8 @@ def main():
         check(st == 403 and err["needs"] == "system", "viewer: config 403 (%s)" % st)
         st, _, err = vera.json("PUT", "/api/v1/config/record", {"path": rec, "allow_rootfs": True})
         check(st == 403 and err["needs"] == "storage", "viewer: PUT record 403 (%s)" % st)
+        st, _, err = vera.json("POST", "/api/v1/channels/1/events", {"events": ["motion"]})
+        check(st == 403 and err["needs"] == "cameras", "viewer: POST events 403 (%s)" % st)
         st, _, _ = vera.json("GET", "/api/v1/users")
         check(st == 403, "viewer: users 403 (%s)" % st)
         st, _, me = vera.json("GET", "/api/v1/me")

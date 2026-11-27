@@ -1000,7 +1000,7 @@ static void do_setup(rs_conn_t *c, const char *req, const char *cseq, int ch, in
 static void do_play(rs_conn_t *c, const char *url, const char *cseq)
 {
     rs_stream_t *st = c->st;
-    char extra[512];
+    char extra[1200];
     int n = snprintf(extra, sizeof extra, "Range: npt=0.000-\r\n");
     pthread_mutex_lock(&st->lock);
     c->pkts = c->octets = 0;

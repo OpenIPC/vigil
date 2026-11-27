@@ -4,6 +4,7 @@
 #include "config.h"
 #include "log.h"
 #include "rtsp_server.h"
+#include "onvif.h"
 #include "web.h"
 
 int api_start(void)
@@ -36,3 +37,12 @@ int rtsp_server_start(void)
 
 void rtsp_server_stop(void) {}
 void rtsp_server_apply(void) {}
+int onvif_start(void)
+{
+    vigil_config_t c;
+    config_get(&c);
+    if (c.onvif_server.enabled) vg_log("onvif_server.enabled is on, but this vigild is built without the API");
+    return 0;
+}
+
+void onvif_stop(void) {}
