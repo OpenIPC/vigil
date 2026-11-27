@@ -20,8 +20,8 @@ live view                  tiles over the whole screen, clock in a corner
  +-> Main menu             cards: PLAYBACK, AI, ALARM, OPERATION, BACKUP, DISPLAY
       |                    MANAGEMENT: CAMERA, NETWORK, STORAGE, SYSTEM, ACCOUNT
       +-> CAMERA           Channels: cameras found on the network (Search, Add,
-      |    |               Change IP, Mass change, Auto add, Manual add) and every channel
-      |    |               (Edit, Clear, Add / Replace with a device found)
+      |    |               Change IP, Mass change, Auto add, Manual add; Show) and every
+      |    |               channel (bandwidth; X / +; Clear, Delete, Edit, Title)
       |    +-> a camera    form: URL, name, enabled
       +-> NETWORK          settings screen: Ethernet, Wi-Fi, LTE, DDNS, UPnP,
       |                    SMTP, Alarm center, P2P
@@ -471,7 +471,11 @@ The page CAMERA and the context menu's **Channels** open
 (its progress and how many have answered beside it), and a table of the
 devices found: a check box, address, port, MAC, vendor and model, the
 protocols that answered, and "New" or "On channel N" (the channel whose
-camera URL points at that address). Devices show **as they answer**: the
+camera URL points at that address). **Show** (after Select all) narrows
+the table to the devices **Not added** to a channel or those **Added**
+(as "On channel N" says), or shows **All**; the count beside it says "N
+found, M shown", **Select all** checks the rows shown, and a device the
+filter hides is not checked. Devices show **as they answer**: the
 page polls the model's generation (`disc_gen`, moved by the core with each
 answer that tells something new) and reads the devices only when it moved.
 A row keeps its place while the list fills: a device already listed stays
@@ -481,7 +485,7 @@ so the row under the pointer or the keyboard's focus does not move. A new
 search starts from the list sorted by address; devices an earlier search
 found are dimmed, "No answer", until they answer this one. While it runs,
 Search is **Stop** (the search ends, keeping what it found), and the list
-stays usable: Add, Add to..., Replace, and the Change IP, Mass change,
+stays usable: Add, Add to..., a channel's +, and the Change IP, Mass change,
 Auto add and Manual add pages stop it first (discovery runs one job at a
 time). The two panes share the page 3:2, each table scrolling inside
 (wheel, drag, or the keyboard's focus). A device row's **Add to...** opens a small menu of the empty
@@ -516,14 +520,31 @@ device) with the device's message under it. **Save** puts the camera there
 
 ![Manual add, tested](../tests/ui/manual_test_ok.png)
 
-**Channels** (bottom): one row per channel: name, source URL (password
-hidden), protocol, state (as the tiles say it), enabled; **Edit** (the
-camera form), **Clear** (asks, then empties the slot), **Add** on an
-empty one (the camera form, or with one device checked, that device), and
-with one device checked, **Replace** on the others.
+**Channels** (bottom): after the title, **Bandwidth**: what the cameras
+bring in now, every stream (main and sub-stream) of every channel,
+averaged over 2 s (the channels' `main_kbps` and `sub_kbps`), against what
+the chip is rated for (`hal_caps()->max_in_kbps`: 64 Mbit/s on the
+SSR621Q, from its recorders' spec sheets; only the current figure where the
+platform does not know it). It turns amber from 80 % of the rating and red
+over it. One row per channel: a check box, the camera's address (no URL,
+no password), **X** on a channel with a camera (deletes it from the
+channel, asked first) or **+** on an empty one (the one device checked
+above goes there; otherwise Manual add opens with that channel chosen),
+protocol, state (as the tiles say it; "Disabled" for a camera switched
+off), and the channel's name (the configured one, else the camera's). A
+click on a row checks it. The buttons beside the title act on the
+channels checked: **Clear** deletes every channel's camera (asked first),
+**Delete** the checked channels' cameras (asked first), **Edit** (one
+checked) opens the camera form (a new camera on an empty channel), and
+**Title** (one checked, with a camera) asks for the name the screen shows
+for it, with the on-screen keyboard for the mouse; an empty name shows the
+camera's own. A button that does not apply is greyed. Deleting empties
+the slot: the cameras after it keep their channels.
 
 ![A search running: the first two devices](../tests/ui/channels_searching.png)
 ![Search results, one device checked](../tests/ui/channels_results.png)
+![Show: Added](../tests/ui/channels_show_added.png)
+![Title of a channel](../tests/ui/channels_title.png)
 ![34 devices, scrolled to the end](../tests/ui/channels_scroll_bottom.png)
 ![Opened from channel 4's "+"](../tests/ui/tile_add_channels.png)
 ![Mass change preview](../tests/ui/channels_mass_preview.png)
@@ -729,9 +750,10 @@ longer opens the on-screen keyboard: type into it.
 | | Ctrl+S | Save |
 | | Esc with unsaved changes | asks first (Cancel is focused: Enter keeps the page) |
 | Channels: devices | arrows, Enter or Space | move, check the device |
-| Channels: channels | Enter | edit the camera (an empty channel: add one) |
-| | Delete | clear the channel (asks first) |
-| | A, + | put the checked device on the channel |
+| Channels: channels | arrows, Enter or Space | move, check the channel |
+| | E | edit the camera (an empty channel: add one) |
+| | Delete | delete the channel's camera (asks first) |
+| | A, + | an empty channel: the device checked above, else Manual add for it |
 
 ![Keyboard shortcuts](../tests/ui/help.png)
 

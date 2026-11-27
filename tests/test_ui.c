@@ -48,7 +48,7 @@ static int g_fail, g_checks;
 /* ---- a platform: four decoders, a UI layer with black (video) holes -------------------- */
 
 static const hal_caps_t g_caps = { .name = "test", .display = 1, .decoder = 1, .dec_max_w = 1920,
-                                   .dec_max_h = 1080, .max_channels = 4 };
+                                   .dec_max_h = 1080, .max_channels = 4, .max_in_kbps = 64000 };
 const hal_caps_t *hal_caps(void) { return &g_caps; }
 int  hal_dec_open(int ch, vg_codec_t c, const vg_stream_info_t *si) { (void)ch; (void)c; (void)si; return -1; }
 int  hal_dec_send(int ch, const vg_au_t *au) { (void)ch; (void)au; return -1; }
@@ -141,7 +141,8 @@ static void fake_status(int idx, ui_chan_t *st)
         *st = (ui_chan_t){ .configured = 1, .status = UI_CH_LIVE, .live = 1, .recording = 1,
                            .events = UI_EV_MOTION | UI_EV_HUMAN, .rec_bytes = 734u << 20, .name = "Gate",
                            .codec = "H.265", .width = 1920, .height = 1080, .fps = 25, .view = "main",
-                           .rec_state = "recording", .main_status = UI_CH_LIVE };
+                           .rec_state = "recording", .main_status = UI_CH_LIVE, .main_kbps = 4096,
+                           .sub_kbps = 512 };
         break;
     case 1:
         *st = (ui_chan_t){ .configured = 1, .status = UI_CH_CONNECTING, .name = "Yard", .state = "CONNECTING",
@@ -1214,6 +1215,45 @@ static lv_obj_t *textarea(int nth)
     return find_textarea(lv_screen_active(), nth, &seen);
 }
 
+static lv_obj_t *dd_near(const char *label);
+
+/* The Channels page's channel table (the rows under the "Channel name"
+ * header), channel `ch`'s row, and a click on its number (checks it). */
+static lv_obj_t *chan_rows(void)
+{
+    lv_obj_t *h = find("Channel name", 0);
+    if (!h) return NULL;
+    lv_obj_t *hdr = lv_obj_get_parent(h);
+    return lv_obj_get_child(lv_obj_get_parent(hdr), (int32_t)lv_obj_get_index(hdr) + 1);
+}
+
+static lv_obj_t *chan_row(int ch)
+{
+    lv_obj_t *t = chan_rows();
+    return t && ch < (int)lv_obj_get_child_count(t) ? lv_obj_get_child(t, ch) : NULL;
+}
+
+static void click_chan(int ch, int cell)
+{
+    lv_obj_t *r = chan_row(ch);
+    CHECK(r, "channel %d's row", ch + 1);
+    if (!r) return;
+    lv_obj_scroll_to_view(r, LV_ANIM_OFF);
+    run(50);
+    int x, y;
+    center_of(lv_obj_get_child(r, cell), &x, &y);
+    click_at(x, y);
+    run(50);
+}
+#define CH_NUM 0                        /* the number: a click checks the row */
+#define CH_ICON 3                       /* X or + */
+
+static int disabled(const char *text)
+{
+    lv_obj_t *l = find(text, 0);
+    return l && lv_obj_has_state(lv_obj_get_parent(l), LV_STATE_DISABLED);
+}
+
 /* A visible A8 icon `img` among `o`'s descendants. */
 static int icon_shown(lv_obj_t *o, const lv_image_dsc_t *img)
 {
@@ -1559,10 +1599,19 @@ static void test_menu_and_settings(void)
 static void test_cameras(void)
 {
     click_text("CAMERA");
-    CHECK(find("rtsp://admin:***@192.168.1.10/stream1", 0), "URL redacted as in the API");
+    run(300);
+    CHECK(find("192.168.1.10", 0) && !find("rtsp://", 1) && !find("secret", 1),
+          "the camera's address only: no URL, no password");
     CHECK(find("Search settings", 1) && find("No devices yet", 1) && find("Empty", 0),
           "CAMERA: the Channels page, its two panes, channel 4 empty");
+    CHECK(find("4.6 / 64 Mbps", 0), "the bandwidth: every stream now, against the chip's");
+    CHECK(disabled(LV_SYMBOL_EDIT "  Edit") && disabled(LV_SYMBOL_CLOSE "  Delete") &&
+          disabled(LV_SYMBOL_KEYBOARD "  Title") && !disabled(LV_SYMBOL_TRASH "  Clear"),
+          "nothing checked: Clear only");
     shot("cameras");
+    click_chan(0, CH_NUM);
+    CHECK(find("1 checked", 0) && !disabled(LV_SYMBOL_EDIT "  Edit") && !disabled(LV_SYMBOL_CLOSE "  Delete") &&
+          !disabled(LV_SYMBOL_KEYBOARD "  Title"), "channel 1 checked: Edit, Delete, Title");
     lv_obj_t *edit = find(LV_SYMBOL_EDIT "  Edit", 0);
     int x, y;
     center_of(edit, &x, &y);
@@ -1585,19 +1634,52 @@ static void test_cameras(void)
     click_text("Discard");
     CHECK(find("Search settings", 1) && find("Front gate", 0), "back on the Channels page, updated");
 
-    /* Clear the third channel, confirmed. */
-    lv_obj_t *rm = find_nth(lv_screen_active(), LV_SYMBOL_TRASH "  Clear", 2);
-    CHECK(rm, "third Clear button");
-    if (rm) {
-        center_of(rm, &x, &y);
+    /* Title: channel 1 (still checked) renamed in a dialog. */
+    CHECK(find("1 checked", 0), "channel 1 still checked");
+    click_text(LV_SYMBOL_KEYBOARD "  Title");
+    CHECK(ui_popup_is_open() && find("Title of channel 1", 0), "Title: the dialog");
+    lv_obj_t *ta = NULL;
+    {
+        int seen = 0;
+        ta = find_textarea(lv_layer_top(), 0, &seen);
+    }
+    CHECK(ta && !strcmp(lv_textarea_get_text(ta), "Front gate"), "... with the name");
+    if (ta) lv_textarea_set_text(ta, "Gate 1");
+    shot("channels_title");
+    click_text(LV_SYMBOL_OK "  Save");
+    run(100);
+    config_get(&c);
+    CHECK(!ui_popup_is_open() && !strcmp(c.cameras[0].name, "Gate 1") &&
+          !strcmp(c.cameras[0].url, "rtsp://admin:secret@192.168.1.10/stream1"), "renamed, password kept: %s",
+          c.cameras[0].name);
+    run(VG_DURATION_TOAST);
+
+    /* Delete: the cameras of the channels checked, asked first. */
+    click_chan(1, CH_NUM);
+    CHECK(find("2 checked", 0) && disabled(LV_SYMBOL_EDIT "  Edit") && disabled(LV_SYMBOL_KEYBOARD "  Title"),
+          "two checked: no Edit, no Title");
+    click_text(LV_SYMBOL_CLOSE "  Delete");
+    CHECK(ui_popup_is_open() && find("Delete the cameras of channels 1, 2?", 1), "Delete asks");
+    shot("channels_delete");
+    click_text("Cancel");
+    /* Clear: every camera, asked first. */
+    click_text(LV_SYMBOL_TRASH "  Clear");
+    CHECK(ui_popup_is_open() && find("Clear every channel? The 3 cameras are removed at once.", 0), "Clear asks");
+    shot("channels_clear");
+    click_text("Cancel");
+    config_get(&c);
+    CHECK(c.n_cameras == 3, "nothing deleted (%d)", c.n_cameras);
+    click_chan(0, CH_NUM);
+    click_chan(1, CH_NUM);
+
+    /* The third channel's X, confirmed. */
+    click_chan(2, CH_ICON);
+    CHECK(ui_popup_is_open() && find("Delete the camera of channel 3?", 1), "X asks");
+    lv_obj_t *yes = find_in(lv_layer_top(), "Delete", 0);
+    CHECK(yes, "Delete button in the question");
+    if (yes) {
+        center_of(yes, &x, &y);
         click_at(x, y);
-        CHECK(ui_popup_is_open() && find("Clear channel 3?", 1), "clear question");
-        lv_obj_t *yes = find_in(lv_layer_top(), "Clear", 0);
-        CHECK(yes, "Clear button in the question");
-        if (yes) {
-            center_of(yes, &x, &y);
-            click_at(x, y);
-        }
     }
     config_get(&c);
     CHECK(c.n_cameras == 2, "camera removed (%d left)", c.n_cameras);
@@ -1639,8 +1721,40 @@ static void test_channels_discovery(void)
     center_of(dh, &x, &y);
     click_at(x, y);
     run(100);
-    CHECK(find("1 checked", 0) && find("Replace", 1) && find("Add checked", 1), "one device checked: Add/Replace");
+    CHECK(find("1 checked", 0), "one device checked");
     shot("channels_results");
+
+    /* Show: the devices on a channel, or not, and all again. */
+    lv_obj_t *show = dd_near("Show");
+    CHECK(show, "Show: a drop-down");
+    if (show) {
+        lv_dropdown_set_selected(show, 2);
+        lv_obj_send_event(show, LV_EVENT_VALUE_CHANGED, NULL);
+        run(100);
+        CHECK(find("5 found, 1 shown", 0) && find("On channel 1", 0) && !find("192.168.1.108", 0),
+              "Show Added: the device on channel 1 only; the hidden one unchecked");
+        shot("channels_show_added");
+        lv_dropdown_set_selected(show, 1);
+        lv_obj_send_event(show, LV_EVENT_VALUE_CHANGED, NULL);
+        run(100);
+        CHECK(find("5 found, 4 shown", 0) && !find("On channel 1", 0) && find("192.168.1.108", 0),
+              "Show Not added: the other four");
+        click_text("Select all");
+        run(100);
+        CHECK(find("4 checked", 0), "Select all: the rows shown");
+        shot("channels_show_not_added");
+        click_text("Select all");
+        run(100);
+        lv_dropdown_set_selected(show, 0);
+        lv_obj_send_event(show, LV_EVENT_VALUE_CHANGED, NULL);
+        run(100);
+        CHECK(find("5 found", 0) && find("On channel 1", 0), "Show All");
+    }
+    dh = find("192.168.1.108", 0);
+    if (!dh) return;
+    center_of(dh, &x, &y);
+    click_at(x, y);
+    run(100);
 
     click_text("Change IP...");
     CHECK(find("Change IP: 192.168.1.108", 0) && textarea(0) &&
@@ -1878,7 +1992,8 @@ static void test_same_redacted_urls(void)
     run(300);
     click_text("Main menu");
     click_text("CAMERA");
-    lv_obj_t *edit = find_nth(lv_screen_active(), LV_SYMBOL_EDIT "  Edit", 1);
+    click_chan(1, CH_NUM);
+    lv_obj_t *edit = find(LV_SYMBOL_EDIT "  Edit", 0);
     int x, y;
     center_of(edit, &x, &y);
     click_at(x, y);
@@ -3135,24 +3250,29 @@ static void test_keyboard_settings(void)
     config_get(&c);
     CHECK(!strcmp(c.record.path, "/tmp/Kbd"), "nothing saved");
 
-    /* The Channels page: Tab to the channel table, Enter edits, Space
-     * toggles, Delete asks to clear. */
+    /* The Channels page: Tab to the channel table, Space and Enter check
+     * a channel, E edits it, Delete asks to delete its camera. */
     key(KEY_LEFT);
     key(KEY_LEFT);
     key(KEY_ENTER);
     CHECK(find("Search settings", 1), "Left, Left: CAMERA, the Channels page");
     CHECK(c.n_cameras == 1, "one camera left by the steps before");
-    lv_obj_t *chans = NULL;
-    for (int i = 0; i < 20 && !chans; ++i) {
+    lv_obj_t *chans = NULL, *rows = chan_rows();
+    int saw_show = 0, saw_clear = 0;
+    for (int i = 0; i < 40 && !chans; ++i) {
         key(KEY_TAB);
         lv_obj_t *f = focused();
-        if (f && lv_obj_has_flag(f, UI_FLAG_ARROWS) && lv_obj_get_child_count(f) &&
-            find_in(lv_obj_get_child(f, 0), "Edit", 1))
-            chans = f;                          /* the rows of channels: Edit on the first */
+        if (f && f == dd_near("Show")) saw_show = 1;
+        if (f && f == lv_obj_get_parent(find(LV_SYMBOL_TRASH "  Clear", 0))) saw_clear = 1;
+        if (f && f == rows) chans = f;
     }
-    CHECK(chans, "Tab reaches the channel table");
+    CHECK(chans && saw_show && saw_clear, "Tab: Show, the channel pane's Clear, the channel table");
+    key(KEY_SPACE);
+    CHECK(find("1 checked", 0), "Space checks the channel");
     key(KEY_ENTER);
-    CHECK(find("Cameras: 1", 0), "Enter: the camera's form");
+    CHECK(!find("1 checked", 0), "Enter unchecks it");
+    key(KEY_E);
+    CHECK(find("Cameras: 1", 0), "E: the camera's form");
     lv_obj_t *sw = NULL;
     key(KEY_TAB);
     key(KEY_TAB);
@@ -3168,7 +3288,7 @@ static void test_keyboard_settings(void)
     key(KEY_ESC);
     CHECK(find("Search settings", 1) && !ui_popup_is_open(), "Esc: unchanged, back on the Channels page");
     key(KEY_DELETE);
-    CHECK(ui_popup_is_open() && find("Clear channel 1?", 1), "Delete on a row asks");
+    CHECK(ui_popup_is_open() && find("Delete the camera of channel 1?", 1), "Delete on a row asks");
     key(KEY_ESC);
     CHECK(!ui_popup_is_open(), "Esc: not cleared");
     key(KEY_ESC);
@@ -3250,12 +3370,17 @@ static void test_empty_slot(void)
     run(100);
     CHECK(find("Channel 4: check a device above", 1), "\"+\": Channels, for channel 4");
     shot("tile_add_channels");
-    /* The toolbar's Add, then the empty channels' (2, 3, 4). */
-    lv_obj_t *add4 = find_nth(lv_screen_active(), LV_SYMBOL_PLUS "  Add", 3);
-    CHECK(add4 != NULL, "channel 4: Add");
-    if (!add4) return;
-    center_of(add4, &x, &y);
-    click_at(x, y);
+    /* Its row's "+", nothing checked above: Manual add, for channel 4. */
+    click_chan(3, CH_ICON);
+    lv_obj_t *dd = dd_near("Channel");
+    char sel[32] = "";
+    if (dd) lv_dropdown_get_selected_str(dd, sel, sizeof sel);
+    CHECK(find("Manual add", 0) && !strcmp(sel, "4  empty"), "+: Manual add, channel 4 chosen (%s)", sel);
+    button(BTN_RIGHT);
+    run(100);
+    /* Checked, Edit: the camera form for it. */
+    click_chan(3, CH_NUM);
+    click_text(LV_SYMBOL_EDIT "  Edit");
     run(100);
     CHECK(find("Cameras 4: new", 0), "the form for a camera on channel 4");
     lv_obj_t *url = textarea(0);
@@ -3289,7 +3414,8 @@ static void test_empty_slot(void)
           c.n_cameras);
     button(BTN_RIGHT);
     run(VG_DURATION_TOAST);
-    CHECK(find("Channel 4: check a device above", 1), "back on Channels");
+    CHECK(find("Search settings", 1) && find("1 checked", 0) && find("10.1.1.4", 0),
+          "back on Channels, channel 4 still checked, its camera there");
     button(BTN_RIGHT);
     run(100);
 
@@ -3844,7 +3970,8 @@ static int shots_4(void)
     shot("channels-search-settings");
     button(BTN_RIGHT);
     run(VG_DURATION_TOAST + 100);
-    lv_obj_t *edit = find("Edit", 1);
+    click_chan(0, CH_NUM);
+    lv_obj_t *edit = find(LV_SYMBOL_EDIT "  Edit", 0);
     if (edit) {
         center_of(edit, &x, &y);
         click_at(x, y);

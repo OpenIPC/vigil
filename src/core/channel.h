@@ -114,6 +114,9 @@ typedef struct {
     uint64_t   rec_bytes;
     vg_codec_t codec;
     unsigned   width, height, fps;  /* fps averaged over 2 s */
+    /* What each stream brings in, kbit/s of video averaged over 2 s (the
+     * access units as received); 0 while it does not run. */
+    unsigned   main_kbps, sub_kbps;
     char       host[64];
     char       name[32];            /* the configured name, else `title` */
     char       title[32];           /* what the camera calls the channel (NETIP

@@ -356,6 +356,7 @@ static cJSON *status_json(void)
     cJSON_AddNumberToObject(p, "decoder_max_height", caps->dec_max_h);
     cJSON_AddNumberToObject(p, "max_channels", caps->max_channels);
     cJSON_AddNumberToObject(p, "capture_inputs", caps->capture);
+    cJSON_AddNumberToObject(p, "max_in_kbps", caps->max_in_kbps);
 
     cJSON *chans = cJSON_AddArrayToObject(doc, "channels");
     int n = channels_count();
@@ -412,6 +413,8 @@ static cJSON *status_json(void)
         cJSON_AddNumberToObject(o, "width", st.width);
         cJSON_AddNumberToObject(o, "height", st.height);
         cJSON_AddNumberToObject(o, "fps", st.fps);
+        cJSON_AddNumberToObject(o, "main_kbps", st.main_kbps);
+        cJSON_AddNumberToObject(o, "sub_kbps", st.sub_kbps);
         cJSON_AddItemToArray(chans, o);
     }
     free(c);

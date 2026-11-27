@@ -82,6 +82,8 @@ typedef struct {
     int             live;
     unsigned        fps, width, height;
     vg_codec_t      codec;
+    uint64_t        bytes;          /* video received since the last rate (its thread's) */
+    unsigned        kbps;           /* ... over 2 s, under c->lock */
 } sess_t;
 
 struct channel {
@@ -269,6 +271,8 @@ void channels_status(int idx, channel_status_t *st)
         st->width = v->width;
         st->height = v->height;
         st->fps = v->fps;
+        st->main_kbps = c->s[S_MAIN].kbps;
+        st->sub_kbps = sub_up ? sub->kbps : 0;
         snprintf(st->view, sizeof st->view, "%s", view_name(holder != VIEW_NONE ? holder : view));
         st->recording = c->rec_on && c->seg.f != NULL;
         st->rec_bytes = c->seg.bytes;
@@ -652,6 +656,7 @@ static void on_raw_au(void *user, const vg_au_t *au)
      * packets must not hold off the no-data reconnect. */
     s->last_video = time(NULL);
     ++s->frames_total;
+    s->bytes += au->len;
     if (au->codec != s->norm.codec) {
         au_norm_free(&s->norm);
         au_norm_init(&s->norm, au->codec);
@@ -758,6 +763,7 @@ static void *sess_thread(void *arg)
         time_t sec = time(NULL);
         s->last_video = sec;
         s->frames_total = 0;
+        s->bytes = 0;
         while (!s->stop && sess_wanted(s)) {
             int rc = s->src->ops->poll(s->src, on_raw_au, s);
             time_t now = time(NULL);
@@ -783,6 +789,8 @@ static void *sess_thread(void *arg)
                 pthread_mutex_lock(c->lock);
                 s->fps = (s->frames + (unsigned)(now - sec) / 2) / (unsigned)(now - sec);
                 s->frames = 0;
+                s->kbps = (unsigned)(s->bytes * 8 / 1000 / (uint64_t)(now - sec));
+                s->bytes = 0;
                 pthread_mutex_unlock(c->lock);
                 sec = now;
             }
@@ -800,6 +808,7 @@ static void *sess_thread(void *arg)
         pthread_mutex_lock(c->lock);
         if (main) rec_close(c);
         s->fps = 0;
+        s->kbps = 0;
         s->live = 0;
         pthread_mutex_unlock(c->lock);
         if (!s->stop && sess_wanted(s)) sleep_interruptible(&s->stop, 1);
@@ -836,6 +845,8 @@ static int sess_start(channel_t *c, int id, const char *url)
     snprintf(s->state, sizeof s->state, "CONNECTING");
     s->live = 0;
     s->fps = s->width = s->height = 0;
+    s->kbps = 0;
+    s->bytes = 0;
     s->codec = VG_CODEC_NONE;
     pthread_mutex_unlock(c->lock);
     if (pthread_create(&s->thread, NULL, sess_thread, s) != 0) {
@@ -860,6 +871,7 @@ static void sess_reap(channel_t *c, int id)
     s->thread_up = 0;
     s->live = 0;
     s->fps = 0;
+    s->kbps = 0;
     pthread_mutex_unlock(c->lock);
     source_destroy(s->src);
     s->src = NULL;

@@ -476,7 +476,7 @@ For example:
   "config": { "generation": 7, "applied": 7 },
   "platform": { "name": "sigmastar", "display": true, "decoder": true,
                 "decoder_max_width": 2592, "decoder_max_height": 2592,
-                "max_channels": 4, "capture_inputs": 0 },
+                "max_channels": 4, "capture_inputs": 0, "max_in_kbps": 64000 },
   "channels": [
     { "camera": 1, "url": "rtsp://admin:***@192.168.1.10/stream=0", "name": "Gate",
       "enabled": true, "host": "192.168.1.10", "running": true, "live": true,
@@ -484,7 +484,8 @@ For example:
       "main": { "status": "live", "state": "" }, "sub": null,
       "events": ["motion"], "decoding": true, "view": "main", "no_decoder": false, "recording": true, "rec_state": "recording",
       "rec_bytes": 73400320,
-      "codec": "H.265", "width": 1920, "height": 1080, "fps": 25 }
+      "codec": "H.265", "width": 1920, "height": 1080, "fps": 25,
+      "main_kbps": 4096, "sub_kbps": 0 }
   ]
 }
 ```
@@ -526,7 +527,11 @@ for again; `view`: the stream on screen, or about to be
 (`main`, `sub` for the camera's sub-stream in a small tile, `""` when the
 channel is not on screen or nothing decodes it); `codec`, `width`,
 `height` and `fps` (averaged over 2 s) are that stream's; `codec` is `null`
-until the stream says.
+until the stream says. `main_kbps` and `sub_kbps` are what each stream
+brings in, kbit/s of video averaged over 2 s (0 while it does not run);
+the platform's `max_in_kbps` is the chip's rated incoming bandwidth for
+network cameras, every stream together (0: not known), which the Channels
+page shows their sum against.
 
 ### `GET /api/v1/schema`
 

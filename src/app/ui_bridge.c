@@ -78,6 +78,8 @@ static void chan_status(int idx, ui_chan_t *st)
     st->width = cs.width;
     st->height = cs.height;
     st->fps = cs.fps;
+    st->main_kbps = cs.main_kbps;
+    st->sub_kbps = cs.sub_kbps;
     st->no_decoder = cs.no_decoder;
 }
 
@@ -599,6 +601,7 @@ int ui_bridge_init(ui_model_t *m)
     m->channels = c->max_channels > 0 && c->max_channels < CHANNEL_MAX ? c->max_channels : CHANNEL_MAX;
     if (m->channels > UI_MAX_CHANNELS) m->channels = UI_MAX_CHANNELS;
     m->fixed_tiles = c->fixed_tiles;
+    m->max_in_kbps = c->max_in_kbps;
     m->chan_status = chan_status;
     m->next_event = next_event;
     m->show_tiles = show_tiles;
