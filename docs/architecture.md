@@ -403,12 +403,17 @@ adding a platform is covered in [porting.md](porting.md).
   the configuration file (YAML round trip, the generated comments, quoting,
   boolean spellings, invalid YAML, aliases, depth, `.json` files, atomic
   save, `docs/vigil.example.yaml` being what vigild writes), the
+  passwords' cipher (`secret.c`: round trip, another field's or key's
+  value, a changed one, no key) and the file's sealed passwords (shape,
+  migration from the clear, without the key), the
   store (sections, password redaction and `***`), the event ring, and
   channels following a new layout (`channels_set_tiles`, with a fake
   HAL).
 - `api_auth`: Basic credentials, the shadow/`crypt(3)` check, the accounts
-  file (hashing, logging in, the root fallback, built-in groups) and the
-  table of permissions per endpoint.
+  file (hashing, logging in, the root fallback, built-in groups, the sealed
+  passwords every protocol logs in with, the older files' fields migrated,
+  the system account's password set into the shadow file and forgotten
+  after `passwd`, a lost key) and the table of permissions per endpoint.
 - `api_auth`: Basic credentials and the shadow/`crypt(3)` check.
 - `discovery`: the discovery parsers on good, malformed, oversized and
   truncated replies, and on thousands of randomly changed ones (two ONVIF
@@ -433,6 +438,10 @@ adding a platform is covered in [porting.md](porting.md).
   invalid configurations refused with every error, redaction, the file
   saved as commented YAML (read back with `vigild -w`), and the pushed
   status, event and configuration messages.
+- `secrets_e2e`: passwords set through the API, a user's and the system
+  account's, logging in over RTSP, ONVIF and NETIP at once and after a
+  restart (the camera's sealed password too); none in the clear in a file,
+  the log or the API (`tests/secrets_test.py`).
 - `netip_*`: `vigild` against `tests/netip_server.py`, a NETIP camera
   emulator, with H.264 and H.265 clips and a wrong password.
 - `fault_*`: misbehaving servers. A NETIP login that is never answered

@@ -284,7 +284,8 @@ static const schema_field_t camera_fields[] = {
       .live = 1, .check = check_url, .label = "Source URL",
       .help = "rtsp://[user:pass@]host[:554]/path, "
               "netip://[user:pass@]host[:34567]/[?ch=N&stream=main|extra] or capture:N. "
-              "The password is shown as *** and kept when sent back unchanged. "
+              "The password is shown as *** and kept when sent back unchanged; in this file it is "
+              "sealed (enc:v1:..., docs/security.md). "
               "Empty: no camera in this channel (the list is in channel order)." },
     { .key = "name", STR(config_camera_t, name), .def_str = "", .live = 1,
       .label = "Name", .help = "Shown in the status and the API; empty: the camera's host." },
@@ -357,7 +358,8 @@ static const schema_field_t nas_fields[] = {
     { .key = "user", STR(config_nas_t, user), .def_str = "", .live = 1, .check = check_word,
       .label = "User", .help = "SMB only; empty: guest." },
     { .key = "password", STR(config_nas_t, password), .def_str = "", .secret = SCHEMA_SECRET,
-      .live = 1, .label = "Password", .help = "Shown as ***; sent back as *** it is kept." },
+      .live = 1, .label = "Password",
+      .help = "Shown as ***; sent back as *** it is kept. Sealed in this file (docs/security.md)." },
     { .key = "options", STR(config_nas_t, options), .def_str = "", .live = 1,
       .check = check_mount_opts, .label = "Mount options",
       .help = "Added to the mount's own (vers=2.1, ...)." },
@@ -375,7 +377,8 @@ static const schema_field_t ddns_fields[] = {
     { .key = "user", STR(config_ddns_t, user), .def_str = "", .live = 1, .check = check_word,
       .label = "User", .help = "" },
     { .key = "password", STR(config_ddns_t, password), .def_str = "", .secret = SCHEMA_SECRET,
-      .live = 1, .check = check_word, .label = "Password", .help = "Shown as ***; sent back as *** it is kept." },
+      .live = 1, .check = check_word, .label = "Password",
+      .help = "Shown as ***; sent back as *** it is kept. Sealed in this file (docs/security.md)." },
     { .key = "url", STR(config_ddns_t, url), .def_str = "", .live = 1, .check = check_http_url,
       .label = "Update URL",
       .help = "custom: requested with GET; {host}, {user} and {password} are replaced." },
@@ -406,7 +409,8 @@ static const schema_field_t smtp_fields[] = {
     { .key = "user", STR(config_smtp_t, user), .def_str = "", .live = 1, .check = check_word,
       .label = "User", .help = "Empty: no login." },
     { .key = "password", STR(config_smtp_t, password), .def_str = "", .secret = SCHEMA_SECRET,
-      .live = 1, .check = check_word, .label = "Password", .help = "Shown as ***; sent back as *** it is kept." },
+      .live = 1, .check = check_word, .label = "Password",
+      .help = "Shown as ***; sent back as *** it is kept. Sealed in this file (docs/security.md)." },
     { .key = "from", STR(config_smtp_t, from), .def_str = "", .live = 1, .check = check_mail,
       .label = "From", .help = "The sender's address." },
     { .key = "to", STR(config_smtp_t, to), .def_str = "", .live = 1, .check = check_mails,

@@ -311,7 +311,9 @@ most pictures a second): this screen in a browser (below, Input).
 **Account.** *Users*: name, group, enabled, password set; Add and Edit open
 an editor in the pane (an empty password on Edit keeps it), Remove asks
 first; the list follows changes made through the API. Changes apply at
-once. *Groups*: a row per group with a toggle per permission (Live,
+once. *System account password* changes root's (the board's console and
+SSH login too, so it asks for the current one first), in the shadow file
+and sealed for RTSP, ONVIF and NETIP ([security.md](security.md)). *Groups*: a row per group with a toggle per permission (Live,
 Playback, PTZ, Cameras, Storage, Network, System, Users, Remote: the zero
 channel, this screen from a browser), saved with Save;
 `admin` is read-only, `user` cannot be removed. The on-screen UI does not

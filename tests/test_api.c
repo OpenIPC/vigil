@@ -16,6 +16,7 @@
 #include "md5.h"
 #include "rtsp_client.h"
 #include "rtsp_server.h"
+#include "secret.h"
 #include "users.h"
 
 /* The configuration's URL check links the capture source; it never runs. */
@@ -198,18 +199,19 @@ static void test_users(void)
           users_login("carl", "newpw1", &perms, why, sizeof why) == 1, "password changed");
     CHECK(digest_is("carl", "newpw1", PERM_LIVE), "the HA1 follows the password");
 
-    /* ONVIF's digests: checked against the password itself, the ONVIF key
-     * written with it while onvif_server is on (the default). */
+    /* ONVIF's digests: checked against the password itself, sealed with
+     * it; the system account's since its login above. */
     CHECK(users_login_with("carl", pass_is, "newpw1", &perms, why, sizeof why) == 1 && perms == PERM_LIVE,
           "digest login with the ONVIF key: %s", why);
     CHECK(users_login_with("carl", pass_is, "carlpw", &perms, why, sizeof why) == 0 && perms == 0,
           "digest login, wrong password");
     CHECK(users_login_with("nobody", pass_is, "x", &perms, why, sizeof why) == 0, "digest login, unknown user");
-    CHECK(users_login_with("root", pass_is, "secret", &perms, why, sizeof why) == -1 && strstr(why, "system account"),
-          "the system account has no ONVIF key: %s", why);
+    CHECK(users_login_with("root", pass_is, "secret", &perms, why, sizeof why) == 1 && perms == PERM_ALL,
+          "the system account too: %s", why);
+    CHECK(users_login_with("admin", pass_is, "secret", &perms, why, sizeof why) == 1, "and as admin");
 
-    /* NETIP clients send Xiongmai's hash of the password: the one set
-     * with the password, and the system account's learnt at its login. */
+    /* NETIP clients send Xiongmai's hash of the password: made from the
+     * sealed one. */
     char xm[9];
     md5_sofia("annapw", xm);
     CHECK(users_login_netip("anna", xm, &perms, why, sizeof why) == 1 && perms == PERM_LIVE, "anna over NETIP");
@@ -221,13 +223,13 @@ static void test_users(void)
     CHECK(users_login_netip("carl", xm, &perms, why, sizeof why) == 0, "not carl's old one");
     md5_sofia("secret", xm);
     CHECK(users_login_netip("root", xm, &perms, why, sizeof why) == 1 && perms == PERM_ALL,
-          "root over NETIP, learnt at its login: %s", why);
+          "root over NETIP, known since its login: %s", why);
     CHECK(users_login_netip("nobody", xm, &perms, why, sizeof why) == 0, "unknown over NETIP");
     f = fopen(shadow, "w");
     fprintf(f, "root:$6$other$abc:19000:0:99999:7:::\n");
     fclose(f);
     CHECK(users_login_netip("root", xm, &perms, why, sizeof why) == -1 && strstr(why, "changed"),
-          "root's password changed (passwd): its NETIP hash is forgotten: %s", why);
+          "root's password changed (passwd): the sealed one is not used: %s", why);
     f = fopen(shadow, "w");
     fprintf(f, "root:" SHA512_SECRET ":19000:0:99999:7:::\n");
     fclose(f);
@@ -238,7 +240,9 @@ static void test_users(void)
     CHECK(stat(users, &st) == 0 && (st.st_mode & 0777) == 0600, "users file is 0600 (%o)", st.st_mode & 0777);
     char *text = slurp(users);
     CHECK(text && strstr(text, "# Groups") && strstr(text, "name: anna") && strstr(text, "password: \"$6$") &&
-          !strstr(text, "annapw"), "commented YAML with hashes");
+          strstr(text, "password_enc: \"enc:v1:") && !strstr(text, "annapw") && !strstr(text, "onvif") &&
+          !strstr(text, "netip_password") && !strstr(text, "digest"), "commented YAML: hashes, sealed passwords:\n%s",
+          text ? text : "");
     free(text);
     unsigned gen = users_generation();
     users_user_t u[USERS_MAX];
@@ -268,65 +272,162 @@ static void test_users(void)
     CHECK(users_delete("admin", &e) == USERS_OK && users_delete("admin", &e) == USERS_ENOENT, "delete");
     CHECK(users_login("admin", "secret", &perms, why, sizeof why) == 1, "admin is root's again");
 
-    /* With the ONVIF server off, no key is written: such a user is told
-     * to set the password again. */
+    /* With the ONVIF server off the password is sealed all the same:
+     * turned on later, ONVIF logins work at once. */
     f = fopen(cfg, "w");
     fprintf(f, "api:\n  user: root\n  shadow: %s\n  users: %s\nonvif_server:\n  enabled: false\n", shadow, users);
     fclose(f);
     CHECK(config_init(cfg) == 0, "configuration, ONVIF off");
     CHECK(users_add("dan", "viewer", "danpw1", 1, &e) == USERS_OK, "add dan");
-    text = slurp(users);
-    CHECK(text && !strstr(text, "ZGFucHcx"), "no ONVIF key for dan");
-    free(text);
-    CHECK(users_login_with("dan", pass_is, "danpw1", &perms, why, sizeof why) == -1 && strstr(why, "no ONVIF key"),
-          "without a key: %s", why);
-    CHECK(users_login("dan", "danpw1", &perms, why, sizeof why) == 1, "dan's password works elsewhere");
-
-    /* ONVIF on again: dan's key is filled in at his next login with the
-     * password, as is everything a user from before the NETIP hash and the
-     * ONVIF key lacks (only its crypt hash in the file), and kept. */
+    CHECK(users_login_with("dan", pass_is, "danpw1", &perms, why, sizeof why) == 1, "dan's ONVIF login: %s", why);
     f = fopen(cfg, "w");
     fprintf(f, "api:\n  user: root\n  shadow: %s\n  users: %s\n", shadow, users);
     fclose(f);
     CHECK(config_init(cfg) == 0, "configuration, ONVIF on");
-    CHECK(users_login("dan", "danpw1", &perms, why, sizeof why) == 1 &&
-              users_login_with("dan", pass_is, "danpw1", &perms, why, sizeof why) == 1,
-          "dan's ONVIF key, from his login now that ONVIF is on: %s", why);
+
+    /* A file from an older vigild: the password in base64 ("onvif"), with
+     * its hashes; sealed as it is read, the old fields gone. */
+    char xm_sec[9], ha1_sec[33], buf[200];
+    md5_sofia("secret", xm_sec);
+    snprintf(buf, sizeof buf, "dora:%s:secret", USERS_REALM);
+    md5_hex(buf, strlen(buf), ha1_sec);
     f = fopen(users, "w");
-    fprintf(f, "users:\n  - name: dora\n    group: user\n    password: \"" SHA512_SECRET "\"\n");
+    fprintf(f, "users:\n  - name: dora\n    group: user\n    password: \"" SHA512_SECRET "\"\n"
+               "    digest: \"%s\"\n    onvif: c2VjcmV0\n    netip_password: \"%s\"\n", ha1_sec, xm_sec);
     fclose(f);
-    CHECK(users_reload() == 0, "a file with a bare user");
-    md5_sofia("secret", xm);
-    CHECK(users_login_with("dora", pass_is, "secret", &perms, why, sizeof why) == -1 &&
-              users_login_netip("dora", xm, &perms, why, sizeof why) == -1,
-          "no ONVIF key, no NETIP hash yet: %s", why);
-    CHECK(users_login("dora", "secret", &perms, why, sizeof why) == 1, "dora logs in with her password");
-    CHECK(users_login_with("dora", pass_is, "secret", &perms, why, sizeof why) == 1 &&
-              users_login_netip("dora", xm, &perms, why, sizeof why) == 1,
-          "then both are there: %s", why);
+    CHECK(users_reload() == 0, "an older file with an ONVIF key");
     text = slurp(users);
-    CHECK(text && strstr(text, "onvif: c2VjcmV0") && strstr(text, xm), "and in the file:\n%s", text ? text : "");
+    CHECK(text && strstr(text, "password_enc: \"enc:v1:") && !strstr(text, "c2VjcmV0") && !strstr(text, "onvif") &&
+              !strstr(text, "digest") && !strstr(text, "netip_password"),
+          "rewritten at once: sealed, the old fields gone:\n%s", text ? text : "");
+    free(text);
+    CHECK(users_login_with("dora", pass_is, "secret", &perms, why, sizeof why) == 1 &&
+              users_login_netip("dora", xm_sec, &perms, why, sizeof why) == 1 &&
+              digest_is("dora", "secret", PERM_LIVE | PERM_PLAYBACK),
+          "ONVIF, NETIP and RTSP from the sealed password: %s", why);
+
+    /* An older file with only the hashes (the ONVIF server was off): they
+     * keep working; ONVIF waits for the password, which the next login
+     * with it seals, the hashes then gone. */
+    snprintf(buf, sizeof buf, "fay:%s:secret", USERS_REALM);
+    char ha1_fay[33];
+    md5_hex(buf, strlen(buf), ha1_fay);
+    f = fopen(users, "w");
+    fprintf(f, "users:\n  - name: fay\n    password: \"" SHA512_SECRET "\"\n    digest: \"%s\"\n"
+               "    netip_password: \"%s\"\n  - name: gus\n    password: \"" SHA512_SECRET "\"\n", ha1_fay, xm_sec);
+    fclose(f);
+    CHECK(users_reload() == 0, "an older file with hashes only");
+    CHECK(digest_is("fay", "secret", PERM_LIVE | PERM_PLAYBACK) &&
+              users_login_netip("fay", xm_sec, &perms, why, sizeof why) == 1, "the old hashes work: %s", why);
+    CHECK(users_login_with("fay", pass_is, "secret", &perms, why, sizeof why) == -1 && strstr(why, "log in once"),
+          "ONVIF cannot yet: %s", why);
+    CHECK(users_digest("gus", ha1, &perms) == -1 && users_login_netip("gus", xm_sec, &perms, why, sizeof why) == -1,
+          "a user with only its crypt hash: nothing yet");
+    CHECK(users_login("gus", "secret", &perms, why, sizeof why) == 1, "gus logs in with the password");
+    text = slurp(users);
+    CHECK(text && strstr(text, "netip_password: ") && strstr(text, "From an older vigild"),
+          "the file rewritten, fay's old hashes kept until she does:\n%s", text ? text : "");
+    free(text);
+    CHECK(users_login("fay", "secret", &perms, why, sizeof why) == 1, "fay logs in with the password");
+    CHECK(users_login_with("fay", pass_is, "secret", &perms, why, sizeof why) == 1 &&
+              users_login_netip("gus", xm_sec, &perms, why, sizeof why) == 1 &&
+              digest_is("gus", "secret", PERM_LIVE | PERM_PLAYBACK), "then everything: %s", why);
+    text = slurp(users);
+    CHECK(text && strstr(text, "password_enc: \"enc:v1:") && !strstr(text, "netip_password") &&
+              !strstr(text, "digest") && !strstr(text, "older vigild"), "sealed, the hashes gone:\n%s",
+          text ? text : "");
     free(text);
 
-    /* A user from before the HA1s (a crypt hash only): none until it logs
-     * in, then kept in the file. */
+    /* The system account in an older file: its hashes, for this shadow
+     * entry, until it logs in. */
+    char id[33], ha1_root[33];
+    CHECK(auth_shadow_id(shadow, "root", id, why, sizeof why) == 0, "shadow id");
+    snprintf(buf, sizeof buf, "root:%s:secret", USERS_REALM);
+    md5_hex(buf, strlen(buf), ha1_root);
     f = fopen(users, "w");
-    fprintf(f, "users:\n  - name: fay\n    password: \"" SHA512_SECRET "\"\n");
+    fprintf(f, "system:\n  netip_password: \"%s\"\n  digest: \"%s\"\n  shadow: \"%s\"\n", xm_sec, ha1_root, id);
     fclose(f);
     users_reload();
-    CHECK(users_digest("fay", ha1, &perms) == -1, "a user without an HA1 yet: -1");
-    CHECK(users_login("fay", "secret", &perms, why, sizeof why) == 1 && digest_is("fay", "secret", PERM_LIVE | PERM_PLAYBACK),
-          "its HA1 kept at its login");
+    CHECK(users_login_netip("root", xm_sec, &perms, why, sizeof why) == 1 && digest_is("root", "secret", PERM_ALL),
+          "root's old hashes: %s", why);
+    CHECK(users_login_with("root", pass_is, "secret", &perms, why, sizeof why) == -1, "not ONVIF: %s", why);
+    CHECK(users_login("root", "secret", &perms, why, sizeof why) == 1 &&
+              users_login_with("root", pass_is, "secret", &perms, why, sizeof why) == 1, "after its login, ONVIF too");
     text = slurp(users);
-    CHECK(text && strstr(text, "digest:"), "and written to the file");
+    CHECK(text && strstr(text, "system:\n") && strstr(text, "  password_enc: \"enc:v1:") && !strstr(text, "digest"),
+          "root's sealed:\n%s", text ? text : "");
     free(text);
-    /* The shadow file changed (passwd): root's HA1 is not trusted. */
-    f = fopen(shadow, "a");
-    fprintf(f, "nobody:*:19000:0:99999:7:::\n");
+
+    /* The shadow file changed (passwd, even to the same password): root's
+     * sealed password is not used. */
+    f = fopen(shadow, "w");
+    fprintf(f, "root:" MD5_SECRET ":19000:0:99999:7:::\nnobody:*:19000:0:99999:7:::\n");
     fclose(f);
-    CHECK(users_digest("root", ha1, &perms) == -1, "root's HA1 forgotten with a new shadow file");
+    CHECK(users_digest("root", ha1, &perms) == -1 && users_login_netip("root", xm_sec, &perms, why, sizeof why) == -1 &&
+              users_login_with("root", pass_is, "secret", &perms, why, sizeof why) == -1 && strstr(why, "changed"),
+          "root's unknown with a new shadow file: %s", why);
     CHECK(users_login("root", "secret", &perms, why, sizeof why) == 1 && digest_is("root", "secret", PERM_ALL),
-          "and learnt again at its login");
+          "and known again at its login");
+
+    /* Set through vigil: the shadow file follows (mode, the other lines
+     * kept), and every protocol has it at once, root and admin alike. */
+    chmod(shadow, 0640);
+    CHECK(users_set_system_password("abc", &e) == USERS_EINVAL, "too short for root too");
+    CHECK(users_set_system_password("N3w-root", &e) == USERS_OK, "root's password set: %s", e.msg);
+    text = slurp(shadow);
+    char *rl = text ? strstr(text, "root:$6$") : NULL;
+    CHECK(rl && strstr(text, "nobody:*:19000:0:99999:7:::\n") && strstr(rl, ":0:99999:7:::\n") &&
+              !strstr(text, SHA512_SECRET), "the shadow file: a new SHA-512 hash, the rest kept:\n%s", text ? text : "");
+    free(text);
+    CHECK(stat(shadow, &st) == 0 && (st.st_mode & 0777) == 0640, "its mode kept (%o)", st.st_mode & 0777);
+    CHECK(users_login("root", "secret", &perms, why, sizeof why) == 0 &&
+              users_login("root", "N3w-root", &perms, why, sizeof why) == 1, "root's new password in the shadow file");
+    md5_sofia("N3w-root", xm);
+    CHECK(digest_is("root", "N3w-root", PERM_ALL) && digest_is("admin", "N3w-root", PERM_ALL) &&
+              users_login_netip("root", xm, &perms, why, sizeof why) == 1 &&
+              users_login_netip("admin", xm, &perms, why, sizeof why) == 1 &&
+              users_login_with("root", pass_is, "N3w-root", &perms, why, sizeof why) == 1,
+          "RTSP, NETIP and ONVIF at once: %s", why);
+    CHECK(users_is_system("root") && users_is_system("admin") && !users_is_system("fay"), "who is the system account");
+    char link[160];
+    snprintf(link, sizeof link, "%s/shadow-link", dir);
+    if (symlink(shadow, link)) {}
+    f = fopen(cfg, "w");
+    fprintf(f, "api:\n  user: root\n  shadow: %s\n  users: %s\n", link, users);
+    fclose(f);
+    CHECK(config_init(cfg) == 0, "configuration, shadow through a link");
+    CHECK(users_set_system_password("N3w-root2", &e) == USERS_OK && lstat(link, &st) == 0 && S_ISLNK(st.st_mode) &&
+              users_login("root", "N3w-root2", &perms, why, sizeof why) == 1,
+          "a link to the shadow file stays a link: %s", e.msg);
+    f = fopen(cfg, "w");
+    fprintf(f, "api:\n  user: nosuch\n  shadow: %s\n  users: %s\n", shadow, users);
+    fclose(f);
+    config_init(cfg);
+    CHECK(users_set_system_password("N3w-root3", &e) == USERS_EIO && strstr(e.msg, "no account"),
+          "an account not in the shadow file: %s", e.msg);
+    f = fopen(cfg, "w");
+    fprintf(f, "api:\n  user: root\n  shadow: %s\n  users: %s\n", shadow, users);
+    fclose(f);
+    config_init(cfg);
+
+    /* The key lost (deleted, the file copied to another board): the
+     * passwords are unknown, nothing crashes, a login seals them again. */
+    char key[160], key2[170];
+    CHECK(users_add("hal", NULL, "secret", 1, &e) == USERS_OK && digest_is("hal", "secret", PERM_LIVE | PERM_PLAYBACK),
+          "add hal");
+    secret_key_path(key, sizeof key);
+    snprintf(key2, sizeof key2, "%s.new", key);
+    secret_set_key_path(key2);
+    CHECK(users_digest("hal", ha1, &perms) == -1 && users_login_netip("hal", xm_sec, &perms, why, sizeof why) == -1 &&
+              strstr(why, "cannot be read"), "hal's password unknown without its key: %s", why);
+    CHECK(users_digest("root", ha1, &perms) == -1, "and root's");
+    CHECK(users_login("hal", "secret", &perms, why, sizeof why) == 1 && digest_is("hal", "secret", PERM_LIVE | PERM_PLAYBACK),
+          "and sealed again with the new key at his login");
+    secret_set_key_path(key);
+    text = slurp(users);
+    CHECK(text && !strstr(text, "secret") && !strstr(text, "N3w-root") && !strstr(text, "annapw"),
+          "no password in the clear in the users file");
+    free(text);
 
     /* An invalid file: only root, and nothing is saved over it. */
     f = fopen(users, "w");
@@ -334,7 +435,7 @@ static void test_users(void)
     fclose(f);
     CHECK(users_reload() < 0, "invalid file");
     CHECK(users_login("anna", "annapw", &perms, why, sizeof why) == 0, "no users from an invalid file");
-    CHECK(users_login("root", "secret", &perms, why, sizeof why) == 1, "root still");
+    CHECK(users_login("root", "N3w-root2", &perms, why, sizeof why) == 1, "root still");
     CHECK(users_add("eve", NULL, "evepw1", 1, &e) == USERS_EIO, "not saved over an invalid file");
 
     char cmd[160];

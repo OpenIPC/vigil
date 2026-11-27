@@ -1088,6 +1088,24 @@ static int fa_group_delete(const char *name, char *err, size_t cap)
     return 0;
 }
 
+/* The system account's password: "rootpw" now; the new one is kept. */
+static char g_root_new[64];
+static int fa_system_password(const char *cur, const char *pass, char *field, size_t fcap, char *err, size_t cap)
+{
+    if (strcmp(cur, "rootpw")) {
+        snprintf(field, fcap, "current");
+        snprintf(err, cap, "not the current password");
+        return UI_MGMT_EINVAL;
+    }
+    if (strlen(pass) < 4) {
+        snprintf(field, fcap, "password");
+        snprintf(err, cap, "at least 4 characters");
+        return UI_MGMT_EINVAL;
+    }
+    snprintf(g_root_new, sizeof g_root_new, "%s", pass);
+    return 0;
+}
+
 /* Logins: root with "rootpw" (every permission), a user of the list with
  * its name and "pw" (its group's). */
 static int fa_login(const char *name, const char *pass, unsigned *perms, char *why, size_t cap)
@@ -1170,6 +1188,7 @@ static void fake_mgmt(ui_model_t *m)
     g_mg.group_set = fa_group_set;
     g_mg.group_delete = fa_group_delete;
     g_mg.login = fa_login;
+    g_mg.system_password = fa_system_password;
     g_mg.system_user = fa_system_user;
     g_mg.power = fa_power;
     m->mgmt = &g_mg;
@@ -3204,6 +3223,27 @@ static void test_account_pages(void)
     run(100);
     CHECK(g_nfu == 0 && find("No users yet", 1), "anna removed");
 
+    /* The system account's password: the current one first. */
+    click_obj(find(LV_SYMBOL_EDIT "  System account password", 0));
+    run(VG_DURATION_TOAST);
+    CHECK(find("The system account's password (root)", 1) && find("console and SSH", 1), "its editor");
+    lv_textarea_set_text(textarea(0), "wrong");
+    lv_textarea_set_text(textarea(1), "N3w-pw");
+    lv_textarea_set_text(textarea(2), "N3w-pw");
+    shot("account_system_password");
+    click_obj(find(LV_SYMBOL_OK "  Change password", 0));
+    run(100);
+    CHECK(!g_root_new[0] && find("not the current password", 1), "a wrong current password: refused under it");
+    lv_textarea_set_text(textarea(0), "rootpw");
+    lv_textarea_set_text(textarea(2), "N3w-px");
+    click_obj(find(LV_SYMBOL_OK "  Change password", 0));
+    run(100);
+    CHECK(!g_root_new[0] && find("the two passwords differ", 1), "the two must match");
+    lv_textarea_set_text(textarea(2), "N3w-pw");
+    click_obj(find(LV_SYMBOL_OK "  Change password", 0));
+    run(100);
+    CHECK(!strcmp(g_root_new, "N3w-pw") && !find("Change password", 0), "changed, the editor closed");
+
     click_text("Groups");
     run(200);
     lv_obj_t *admin = find("admin", 0);
@@ -3259,6 +3299,8 @@ static void shots_account(void)
     shot("account-users-add");
     click_obj(find(LV_SYMBOL_EDIT "  Edit", 0));
     shot("account-users-edit");
+    click_obj(find(LV_SYMBOL_EDIT "  System account password", 0));
+    shot("account-users-system-password");
     button(BTN_RIGHT);
 }
 

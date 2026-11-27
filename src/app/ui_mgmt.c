@@ -505,6 +505,27 @@ _Static_assert((unsigned)UI_PERM_LIVE == (unsigned)PERM_LIVE && (unsigned)UI_PER
                    (unsigned)UI_PERM_REMOTE == (unsigned)PERM_REMOTE,
                "UI_PERM_* are users.h's PERM_*");
 
+static void system_user(char *buf, size_t cap);
+
+static int system_password(const char *current, const char *pass, char *field, size_t fcap, char *err,
+                           size_t cap)
+{
+    char user[64], why[200] = "";
+    unsigned perms;
+    system_user(user, sizeof user);
+    users_reload();
+    /* The screen may be anyone's while ui.login is off: the password
+     * opens the board's console and SSH too, so it takes the current one. */
+    int rc = users_login(user, current, &perms, why, sizeof why);
+    if (rc != 1) {
+        snprintf(field, fcap, "current");
+        snprintf(err, cap, "%s", rc < 0 ? why : "not the current password");
+        return -1;
+    }
+    users_err_t e = { 0 };
+    return urc(users_set_system_password(pass, &e), &e, field, fcap, err, cap);
+}
+
 static int login_(const char *name, const char *pass, unsigned *perms, char *why, size_t cap)
 {
     users_reload();
@@ -558,6 +579,7 @@ static const ui_mgmt_t g_mgmt = {
     .users_gen = users_gen, .users = users_, .groups = groups_, .perm_names = users_perm_names,
     .n_perms = PERM_N, .user_add = user_add, .user_update = user_update, .user_delete = user_delete,
     .group_set = group_set, .group_delete = group_delete, .login = login_, .listening = listening,
+    .system_password = system_password,
 #endif
     .system_user = system_user, .power = power,
 };

@@ -36,6 +36,13 @@ the video wherever it sees that colour.
   sysroot (OpenIPC firmware builds with `yaml-cli` have it); otherwise add a
   firmware build's staging directory with `-DCMAKE_FIND_ROOT_PATH=<firmware>/output/staging`,
   or give `-DLIBYAML_INCLUDE_DIR=… -DLIBYAML_LIBRARY=…`.
+- **libmbedcrypto for the target** (`mbedtls/gcm.h`, `libmbedcrypto.so`,
+  mbedTLS 2.28 or 3.x): it seals the passwords vigild keeps
+  ([security.md](../security.md)). OpenIPC images carry it
+  (`mbedtls-openipc`); found the same way as libyaml (the staging
+  directory, or `-DMBEDCRYPTO_INCLUDE_DIR=… -DMBEDCRYPTO_LIBRARY=…`). The
+  toolchain's sysroot may hold an mbedTLS of its own: put the firmware's
+  staging first so the headers match the library on the image.
 - **Kernel modules**: the OpenIPC lite image ships none. Build them with
   [openhisilicon](https://github.com/OpenIPC/openhisilicon) for this SoC
   (`open_*.ko`: OSAL from source, the MPP modules relinked from the SDK).

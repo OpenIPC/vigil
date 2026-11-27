@@ -83,8 +83,9 @@ typedef struct {
     lv_obj_t  *list, *editor;
     /* the editor */
     int        adding;
+    int        system;                  /* the system account's password */
     char       name[32];
-    lv_obj_t  *name_ta, *group_dd, *en_sw, *pass, *pass2, *err[3], *title;
+    lv_obj_t  *name_ta, *group_dd, *en_sw, *cur, *pass, *pass2, *err[3], *title;
     char       groups[UI_GROUPS_MAX][32];
     int        n_groups;
     ui_user_t  users[UI_USERS_MAX];
@@ -99,13 +100,14 @@ static void editor_close(users_t *u)
 {
     lv_obj_clean(u->editor);
     lv_obj_add_flag(u->editor, LV_OBJ_FLAG_HIDDEN);
-    u->name_ta = NULL;
+    u->name_ta = u->cur = u->group_dd = NULL;
+    u->system = 0;
 }
 
 static void editor_err(users_t *u, const char *field, const char *msg)
 {
-    int i = !strcmp(field, "name") ? 0 : !strcmp(field, "group") ? 1 : 2;
-    lv_obj_t *w = i == 0 ? u->name_ta : i == 1 ? u->group_dd : u->pass;
+    int i = !strcmp(field, "name") || !strcmp(field, "current") ? 0 : !strcmp(field, "group") ? 1 : 2;
+    lv_obj_t *w = i == 0 ? (u->system ? u->cur : u->name_ta) : i == 1 ? u->group_dd : u->pass;
     if (w) lv_obj_add_state(w, LV_STATE_USER_1);
     lv_label_set_text_fmt(u->err[i], LV_SYMBOL_CLOSE "  %s", msg);
     lv_obj_remove_flag(u->err[i], LV_OBJ_FLAG_HIDDEN);
@@ -116,10 +118,26 @@ static void editor_save_cb(lv_event_t *e)
     users_t *u = lv_event_get_user_data(e);
     for (int i = 0; i < 3; ++i) lv_obj_add_flag(u->err[i], LV_OBJ_FLAG_HIDDEN);
     if (u->name_ta) lv_obj_remove_state(u->name_ta, LV_STATE_USER_1);
+    if (u->cur) lv_obj_remove_state(u->cur, LV_STATE_USER_1);
     lv_obj_remove_state(u->pass, LV_STATE_USER_1);
     const char *p1 = lv_textarea_get_text(u->pass), *p2 = lv_textarea_get_text(u->pass2);
     if (strcmp(p1, p2)) {
         editor_err(u, "password", "the two passwords differ");
+        return;
+    }
+    if (u->system) {
+        char field[16] = "", err[160] = "";
+        if (!*p1) {
+            editor_err(u, "password", "enter the new password");
+            return;
+        }
+        if (MG()->system_password(lv_textarea_get_text(u->cur), p1, field, sizeof field, err, sizeof err) < 0) {
+            editor_err(u, field[0] ? field : "password", err);
+            ui_toast(UI_TOAST_BAD, "Not changed: %s", err);
+            return;
+        }
+        ui_toast(UI_TOAST_OK, "The system account's password changed");
+        editor_close(u);
         return;
     }
     if (u->adding && !*p1) {
@@ -190,7 +208,42 @@ static void editor_open(users_t *u, int i)
     lv_obj_scroll_to_y(lv_obj_get_parent(u->editor), 0, LV_ANIM_OFF);
 }
 
+/* The system account's password: root's in the shadow file, also the
+ * board's console and SSH login, so the current one first. */
+static void system_open(users_t *u)
+{
+    editor_close(u);
+    lv_obj_remove_flag(u->editor, LV_OBJ_FLAG_HIDDEN);
+    u->system = 1;
+    char who[64] = "root";
+    if (MG()->system_user) MG()->system_user(who, sizeof who);
+    ui_set_t *s = u->s;
+    char title[96];
+    snprintf(title, sizeof title, "The system account's password (%s)", who);
+    lv_obj_t *sec = ui_set_section(u->editor, title);
+    ui_set_note(sec, "Also the board's console and SSH login. RTSP, ONVIF and NETIP clients log in with it at once.",
+                UI_C(TEXT2));
+    lv_obj_t *box = ui_set_row(sec, "Current password", NULL);
+    u->cur = ui_set_password(s, box, 128, 320);
+    u->err[0] = ui_set_note(lv_obj_get_parent(box), "", UI_C(BAD));
+    u->err[1] = ui_set_note(sec, "", UI_C(BAD));
+    box = ui_set_row(sec, "New password", "At least four characters.");
+    u->pass = ui_set_password(s, box, 128, 320);
+    u->err[2] = ui_set_note(lv_obj_get_parent(box), "", UI_C(BAD));
+    u->pass2 = ui_set_password(s, ui_set_row(sec, "Repeat it", NULL), 128, 320);
+    for (int k = 0; k < 3; ++k) lv_obj_add_flag(u->err[k], LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t *row = ui_set_hbox(u->editor);
+    lv_obj_t *cancel = ui_set_button(s, row, LV_SYMBOL_CLOSE, TR(S_CANCEL));
+    lv_obj_add_event_cb(cancel, editor_cancel_cb, LV_EVENT_CLICKED, u);
+    lv_obj_t *ok = ui_set_button(s, row, LV_SYMBOL_OK, "Change password");
+    ui_btn_accent(ok);
+    lv_obj_add_event_cb(ok, editor_save_cb, LV_EVENT_CLICKED, u);
+    lv_group_focus_obj(u->cur);
+    lv_obj_scroll_to_y(lv_obj_get_parent(u->editor), 0, LV_ANIM_OFF);
+}
+
 static void add_cb(lv_event_t *e) { editor_open(lv_event_get_user_data(e), -1); }
+static void system_cb(lv_event_t *e) { system_open(lv_event_get_user_data(e)); }
 
 static void edit_cb(lv_event_t *e)
 {
@@ -272,8 +325,13 @@ static void *users_open(ui_set_t *s, lv_obj_t *pane)
     ui_set_note(pane, "The system account (root) always logs in to the HTTP API with every permission, and so "
                       "does 'admin' until a user of that name exists. The on-screen UI does not ask for a login "
                       "yet; these accounts are enforced on the HTTP API.", UI_C(TEXT2));
-    lv_obj_t *add = ui_set_button(s, ui_set_hbox(pane), LV_SYMBOL_PLUS, "Add user");
+    lv_obj_t *top = ui_set_hbox(pane);
+    lv_obj_t *add = ui_set_button(s, top, LV_SYMBOL_PLUS, "Add user");
     lv_obj_add_event_cb(add, add_cb, LV_EVENT_CLICKED, u);
+    if (MG()->system_password) {
+        lv_obj_t *sys = ui_set_button(s, top, LV_SYMBOL_EDIT, "System account password");
+        lv_obj_add_event_cb(sys, system_cb, LV_EVENT_CLICKED, u);
+    }
     u->editor = lv_obj_create(pane);
     ui_plain(u->editor);
     ui_ring_room(u->editor);

@@ -22,7 +22,8 @@ are part of the design.
   every setting explained in a comment) and an
   **HTTP/WebSocket API** to read and change it while video keeps running,
   with live status and events; login with the system account
-  ([docs/api.md](docs/api.md)).
+  ([docs/api.md](docs/api.md)). Passwords in the files are sealed with a
+  key of the board's own ([docs/security.md](docs/security.md)).
 - **On-screen UI** with a USB mouse and/or keyboard: a full-screen live
   view (1 to 64 windows, as many as the platform shows) with page arrows at
   the screen's edges and double-click full screen; on each tile the
@@ -60,7 +61,7 @@ are part of the design.
 
 ```sh
 git clone --recursive https://github.com/OpenIPC/vigil && cd vigil
-sudo apt install cmake libyaml-dev           # Debian/Ubuntu
+sudo apt install cmake libyaml-dev libmbedtls-dev   # Debian/Ubuntu
 cmake -B build && cmake --build build -j && (cd build && ctest)
 ./build/vigild -o /tmp/rec -c rtsp://user:pass@camera/stream -c netip://admin:@dvr:34567/
 ```
@@ -80,6 +81,8 @@ For a board, see its page under [docs/platforms](docs/platforms/).
 - [RTSP server](docs/rtsp.md): the cameras' streams to other clients.
 - [ONVIF server](docs/onvif.md): what VMS see, logins and permissions,
   WS-Discovery.
+- [Credentials](docs/security.md): where passwords are kept, the key that
+  seals them, what it protects and what it does not.
 - [On-screen UI](docs/ui.md): screens, data binding, schema-driven
   settings, design tokens, mouse and keyboard input, headless tests.
 - [Adding a platform](docs/porting.md): what a new SoC family has to
@@ -93,7 +96,8 @@ For a board, see its page under [docs/platforms](docs/platforms/).
 
 GPL-3.0-or-later. [LVGL](https://lvgl.io), [cJSON](https://github.com/DaveGamble/cJSON)
 and [CivetWeb](https://github.com/civetweb/civetweb) (all MIT) are included
-as submodules; [libyaml](https://github.com/yaml/libyaml) (MIT) is used from
-the system.
+as submodules; [libyaml](https://github.com/yaml/libyaml) (MIT) and
+[mbedTLS](https://github.com/Mbed-TLS/mbedtls)'s libmbedcrypto (Apache-2.0)
+are used from the system.
 Vendor SDKs, libraries and kernel modules are not part of this repository.
 They are used from wherever you keep them.

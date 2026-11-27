@@ -17,6 +17,7 @@ stopped.
 """
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -24,6 +25,8 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+
+import vigil_secret
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PW = "camPW1"
@@ -235,7 +238,15 @@ def main():
               (cams[1]["name"], cams[3]["name"]))
         with open(cfg) as f:
             saved = f.read()
-        check(PW in saved and "keep@127.0.0.99" in saved, "the file holds the passwords (and kept the old one)")
+        sealed = re.findall(r"enc:v1:[A-Za-z0-9+/=]+@127\.0\.0\.(\d+)", saved)
+        check(PW not in saved and ":keep@" not in saved and {"99", "50", "51", "52", "53"} <= set(sealed),
+              "the file holds the passwords sealed (and kept the old one): %s" % sealed)
+        if vigil_secret.HAVE:
+            key = vigil_secret.read_key(os.path.join(os.path.dirname(cfg), "vigil.key"))
+            urls = re.findall(r'^  - url: "(.*)"$', saved, re.M)
+            opened = [vigil_secret.open_url(key, "config:cameras[%d].url" % i, u) for i, u in enumerate(urls)]
+            check(opened[0] == "rtsp://admin:keep@127.0.0.99/x" and all(PW in u for u in opened[1:5]),
+                  "and they open to what was set: %s" % [re.sub(PW, "PW", u) for u in opened])
         st, doc, raw = api.call("GET", "/api/v1/discovery")
         ch = {d["mac"]: d["channel"] for d in doc["devices"]}
         check(ch == {"02:00:00:00:00:10": 2, "02:00:00:00:00:11": 3, "02:00:00:00:00:12": 4, "02:00:00:00:00:13": 5},

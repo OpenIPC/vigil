@@ -286,14 +286,12 @@ that says what its users may do. They are kept in `api.users`
 (`/etc/vigil.users.yaml`, mode 0600), commented YAML written by `vigild`
 like `vigil.yaml`; passwords are stored as `crypt(3)` hashes (SHA-512,
 `$6$`, with a random salt; SHA-256 or MD5 where the C library has no
-SHA-512) and never leave `vigild`: the API shows `"password_set": true`.
-Beside each hash the file keeps `md5(name:vigil:password)` (`digest`),
-which the [RTSP server](rtsp.md#logins)'s Digest logins need and a `crypt`
-hash cannot give: written with the password, and for a user from before
-it, at its next login.
-While the [ONVIF server](onvif.md#logging-in) is on, setting a password
-also stores the user's ONVIF key (the password itself, base64) next to the
-hash: ONVIF's digest logins need it.
+SHA-512), which check the logins that send the password (the API, the web
+page, the screen), and **sealed** beside them (`password_enc`, AES-256-GCM
+under `vigil.key`: [security.md](security.md)), from which the RTSP, ONVIF
+and NETIP servers work out what their clients prove they know. Neither
+leaves `vigild`: the API shows `"password_set": true`. A password set
+through the API or the screen works on every server at once.
 
 Permissions: `live` (live view, status, events), `playback`, `ptz`,
 `cameras` (the camera list, discovery), `storage` (recording, schedule,
@@ -349,6 +347,7 @@ read before any request is dispatched: an endpoint not listed there needs
 | `GET /api/v1/users` | `[{"name", "group", "enabled", "password_set"}]` |
 | `POST /api/v1/users` | `{"name", "password", "group": "user", "enabled": true}` → `201` and the user. The password: 4 to 128 characters. |
 | `GET`, `PUT`, `DELETE /api/v1/users/<name>` | `PUT` takes any of `group`, `enabled`, `password` (a user is not renamed). |
+| `PUT /api/v1/users/<system account>` | `{"password"}` → `200`, `{"name", "system": true, "password_set": true}`: the system account's (`api.user`, `root`) password, written into `api.shadow` (its SSH and console login too) and sealed for RTSP, ONVIF and NETIP ([security.md](security.md)). Only the system account itself may (`403` otherwise, even for `admin`'s group); nothing else of it can be set (`400`). |
 | `GET /api/v1/groups` | `[{"name", "builtin", "editable", "members", "permissions": {"live": true, …}}]` |
 | `POST /api/v1/groups` | `{"name", "permissions": {"live": true}}` (missing permissions are off) → `201`. |
 | `GET`, `PUT`, `DELETE /api/v1/groups/<name>` | `PUT {"permissions": {…}}` changes the ones it names. |
@@ -452,16 +451,14 @@ users.
 **Who gets in.** vigil's users and the system account, with their own
 passwords. XM's clients never send the password, only XM's 8-character
 hash of it (an MD5 folded into 62 letters and digits), which cannot be
-checked against the `crypt(3)` hash vigil keeps. So vigil keeps XM's hash
-too, as `netip_password` next to `password` (and the ONVIF server's
-`onvif` key, [onvif.md](onvif.md)) in the users file (`api.users`, mode
-0600; the API never shows either): it is set with the password (API,
-UI), and for a user made before there was one, and for the system
-account (whose password is in `/etc/shadow`), learnt the next time that
-account logs in with its password to the API, the web page or the UI. Until then such an
-account cannot log in over NETIP (the log says why). The system account's
-hash is tied to its shadow entry: after `passwd` it is forgotten until
-the next login. XM's hash is weak (any 8-character string with the same
+checked against the `crypt(3)` hash vigil keeps; it is checked against
+the same hash of the user's sealed password ([security.md](security.md)),
+so a password works over NETIP as soon as it is set. The system account's
+password is in `/etc/shadow`: vigil knows it when it was set through vigil
+(`PUT /api/v1/users/root`, the screen's Account → Users), or since that
+account last logged in with it to the API, the web page or the UI; after
+a `passwd` elsewhere it is not used until then, and such a login is
+refused (the log says why). XM's hash is weak (any 8-character string with the same
 fold logs in, and the hash is all a client needs), so the LAN is where
 this server belongs: five wrong logins from one address lock that address
 out for a minute (`Ret 205`). A wrong password or user answers `Ret 203`

@@ -37,7 +37,8 @@ Settings that are vigild's own live in `/etc/vigil.yaml` like every other
 setting ([api.md](api.md#the-configuration-file)): `record.on_full`,
 `schedule`, `quota`, `nas`, `ddns`, `upnp`, `smtp`, `alarm`, `time.ntp`,
 `time.ntp_interval`, `ui.language`, `ui.date_format`, `ui.time_format`.
-Users and groups are in `/etc/vigil.users.yaml` (mode 0600). What belongs to
+Users and groups are in `/etc/vigil.users.yaml` (mode 0600). Passwords in
+either file are sealed with the key in `/etc/vigil.key` ([security.md](security.md)). What belongs to
 the system is written where the firmware keeps it:
 
 | What | File | Written as |
