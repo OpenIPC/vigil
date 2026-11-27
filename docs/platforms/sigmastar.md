@@ -390,8 +390,8 @@ there with the machine's emulated USB mouse. Nothing has run on an SSR621Q
 board yet.
 
 Output modes, also only in emulation, on that machine with its GOP model
-scaling the UI layer as fbdev.ko programs it (qemu-bench branch
-`sigmastar/i2m-gop-stretch`; the stock model ignored the scale registers
+scaling the UI layer as fbdev.ko programs it (a change to the emulator's
+GOP model; the stock model ignored the scale registers
 and showed the 1280x720 layer unscaled): every mode in the table set
 through the API and the Display page, the video layer and the decoders
 following (960x540 decoders at 1080p in 2x2), vigild started at 1080p, a
@@ -402,7 +402,7 @@ keyed pixel (whether it blends the key colour into the text's edge at
 1080p) and how monitors take each timing are unverified.
 
 The hardware cursor, also only in emulation, on a GOP 0 model added for it
-(qemu-bench, `mstar-disp`'s fourth region, banks 0x1231/0x1232: the window,
+(the emulator's `mstar-disp`, its fourth region, banks 0x1231/0x1232: the window,
 its ARGB1555 alphas, blended above GOP 1): the arrow at the UI's position at
 720p and at 1080p (1.5 times larger, at 1.5 times the coordinates), hidden
 with no mouse, and the pointer moved in 55 to 60 of every 60 frames while
@@ -434,7 +434,7 @@ at 16:9): the circle's width over its height measured in screendumps of
 two nearest-neighbour scalers' rounding of a thick line), and the tile's
 own shape in stretch. Full screen and back switched between the
 sub-stream and the main stream without the picture changing shape. That
-took a fix to qemu-bench's VPU model, which scaled the cropped picture
+took a fix to the emulator's VPU model, which scaled the cropped picture
 where mi_vdec's content size says the firmware scales the whole decoded
 frame: with the stock model a 1080-line stream came out 0.8 % too tall.
 Whether mi_disp on a board crops to the content as it does in emulation is
@@ -444,9 +444,8 @@ Fill, also only in emulation (OpenIPC firmware image, four NETIP cameras
 with a test picture of a circle, a grid and a coloured band along each
 edge: 2592x1944 4:3 with a 704x576 sub-stream drawn at 4:3, 2560x1440 with
 800x448, 2048x1536 4:3 with a sub-stream coded 800x448 but drawn at 4:3,
-1920x1080 H.265 with a 704x576 H.265 one at 16:9), on qemu-bench's machine
-with a MOP model that reads the ADDR16 field (branch
-`sigmastar/i2m-mop-crop`; the stock model ignored it, and a crop whose x
+1920x1080 H.265 with a 704x576 H.265 one at 16:9), on the emulated machine
+with a MOP model changed to read the ADDR16 field (the stock model ignored it, and a crop whose x
 was not a multiple of 16 showed shifted by up to 15 source pixels, 4 to 10
 screen pixels at 1280x1024): in 2x2 and full screen at 1280x720 the 4:3
 cameras lost their top and bottom bands and the 16:9 ones nothing; at
@@ -460,7 +459,7 @@ unverified.
 
 The zero channel, also only in emulation (OpenIPC firmware image, the four
 NETIP cameras above at 10 pictures a second, a 2x2 live view at 720p, on
-qemu-bench's machine with the cursor plane model): headless Chrome logged
+the emulated machine with the cursor plane model): headless Chrome logged
 in, showed the picture (the tiles where the screendump has them, the
 names, clock and bars), opened the context menu with the right button,
 went through the menus, typed into a text field, and the monitor's
@@ -498,8 +497,8 @@ Margins and picture presets, also only in emulation, on that machine with
 the GOP and cursor models plus, for this, the display timing from the OP2
 timing generator (bank 0x1129: the output's size no longer comes from the
 GOP's window), the GOP stretch window's position, and the colour engine
-and gamma applied to the video plane as open_mhal programs them (qemu-bench
-local branch `sigmastar/i2m-gop-offset`): at 720p and 1080p with 0 and 5 %
+and gamma applied to the video plane as open_mhal programs them (changes
+to the emulator's display models): at 720p and 1080p with 0 and 5 %
 margins the video, the UI and the pointer inside the inner rectangle,
 black around, a slider dragged on the Display page moving everything as it
 went and saved when let go, the zero channel's picture the whole screen;
