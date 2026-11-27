@@ -71,6 +71,8 @@ add_library(vigil_core STATIC
   src/core/md5.c
   src/core/net.c
   src/core/netip_proto.c
+  src/core/overscan.c
+  src/core/picture.c
   src/core/onvif_proto.c
   src/core/qos.c
   src/core/schema.c
@@ -88,7 +90,7 @@ add_library(vigil_core STATIC
   src/core/source/source_netip.c
   src/core/source/source_rtsp.c)
 target_include_directories(vigil_core PUBLIC src/core src/core/source src/hal)
-target_link_libraries(vigil_core PUBLIC cjson vigil_yaml Threads::Threads)
+target_link_libraries(vigil_core PUBLIC cjson vigil_yaml Threads::Threads m)
 
 # ---- sys: looking after the system vigild runs on (src/sys, Linux) ------------
 # Network, time, host name, disks, network storage, mail: OS work the

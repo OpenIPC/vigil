@@ -325,7 +325,23 @@ and asks "Keep this resolution?" with a 15 s countdown; Keep saves
 old mode back and save nothing, so a monitor that cannot show the new mode
 gets its picture back by itself. The menus keep their 1280x720 layout and
 are scaled to the output (stretched on a 5:4 or 16:10 monitor); a board
-with one mode says so. *Clock*: position (off, a corner, the middle of the
+with one mode says so. Below the resolution, where the board has them
+(`ui_model_t.out_adj_caps`, from `hal_caps()`; hidden otherwise), three
+controls that act at once, without Save, and are saved as they change:
+**Picture**, a preset for HDMI and VGA (`display.picture`: Standard as the
+display starts, Bright, Soft, Vivid; the values are in `src/core/picture.h`);
+**Margins (overscan)**, four sliders 0..10 % (`display.margin_top`,
+`_bottom`, `_left`, `_right`, a percentage of the output's height or width,
+so they hold at every resolution) and *No margins*: for a TV that cuts the
+picture's edges off, everything on the output (the video, the menus, the
+pointer) is drawn inside what the margins leave, black around it, while
+the screen keeps its 1280x720 coordinates (mouse, layout, the zero
+channel's picture, which stays the whole screen). A slider is put in force
+while it is dragged and saved when it is let go (from the keyboard, at each
+step); **Sound (HDMI)**, a volume slider 0..100 and Mute
+(`display.hdmi_volume`, `display.hdmi_mute`), with a note that nothing
+plays yet (vigild does not decode the cameras' sound), kept for when it
+does. *Clock*: position (off, a corner, the middle of the
 top or bottom edge), size, background, and the date and time formats (the
 same settings as System, General). *Camera names*: position (off or a
 tile corner), size (a step smaller in tiles under 400 pixels wide),
@@ -348,6 +364,7 @@ the video), **None** (hard-edged, no outline) and **Box** (the opaque chip
 of earlier versions). A save applies to the live view at once.
 
 ![Display, Output](../tests/ui/display.png)
+![Display, Output: picture, margins, sound](../tests/ui/display_output.png)
 
 ## Login and Exit
 
@@ -391,7 +408,7 @@ src/ui/ui_menu.c        main menu
 src/ui/ui_form.c        settings forms and lists, from the schema
 src/ui/ui_channels.c    Channels: camera search (discovery jobs) and the channel table
 src/ui/ui_system.c      System page
-src/ui/ui_set_display.c Display: the output resolution (with its keep-or-undo question), clock, names, icons
+src/ui/ui_set_display.c Display: the output resolution (with its keep-or-undo question), picture, margins, HDMI volume, clock, names, icons
 src/ui/ui_layout.c      tile geometry (plain C, shared with frontend_tiles)
 src/ui/ui_theme.c       LVGL styles from the design tokens
 src/ui/ui_cursor.c      the mouse pointer's arrow

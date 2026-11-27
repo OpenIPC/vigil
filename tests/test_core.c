@@ -33,6 +33,8 @@
 #include "disc_proto.h"
 #include "net.h"
 #include "netip_proto.h"
+#include "overscan.h"
+#include "picture.h"
 #include "qos.h"
 #include "rec_place.h"
 #include "rec_sched.h"
@@ -259,6 +261,99 @@ static void test_aspect_fit(void)
                         }
             }
     CHECK(bad == 0, "%d of %d placements wrong", bad, cases);
+}
+
+/* The output's margins: the inner rectangle, and the screen placed in it. */
+static void test_overscan(void)
+{
+    vg_margins_t none = { 0, 0, 0, 0 }, five = { 5, 5, 5, 5 }, odd = { 3, 1, 7, 2 }, big = { 40, 0, 0, 0 };
+    CHECK(rect_eq(overscan_inner(1920, 1080, &none, 2), (vg_rect_t){ 0, 0, 1920, 1080 }) && overscan_none(&none) &&
+          overscan_none(NULL), "no margins: the whole output");
+    CHECK(rect_eq(overscan_inner(1920, 1080, &five, 2), (vg_rect_t){ 96, 54, 1728, 972 }), "5 %% at 1080p");
+    CHECK(rect_eq(overscan_inner(1280, 720, &five, 2), (vg_rect_t){ 64, 36, 1152, 648 }), "5 %% at 720p");
+    /* 3 % of 720 = 21.6 -> 20 (even); 1 % = 7.2 -> 6; 7 % of 1280 = 89.6 -> 88; 2 % = 25.6 -> 24 */
+    CHECK(rect_eq(overscan_inner(1280, 720, &odd, 2), (vg_rect_t){ 88, 20, 1280 - 88 - 24, 720 - 20 - 6 }),
+          "each edge on its own, even");
+    CHECK(rect_eq(overscan_inner(1280, 720, &big, 2), (vg_rect_t){ 0, 72, 1280, 648 }), "at most 10 %%");
+    vg_rect_t in = overscan_inner(1920, 1080, &five, 2);
+    /* the whole screen fills the inner rectangle; a 2x2 grid's cells still meet */
+    CHECK(rect_eq(overscan_map(&(vg_rect_t){ 0, 0, 1280, 720 }, 1280, 720, &in, 2), in), "full screen: the inner rect");
+    vg_rect_t a = overscan_map(&(vg_rect_t){ 0, 0, 640, 360 }, 1280, 720, &in, 2);
+    vg_rect_t b = overscan_map(&(vg_rect_t){ 640, 360, 640, 360 }, 1280, 720, &in, 2);
+    CHECK(a.x == 96 && a.y == 54 && a.x + a.w == b.x && a.y + a.h == b.y && b.x + b.w == 96 + 1728 &&
+          b.y + b.h == 54 + 972 && !(a.w & 1) && !(b.x & 1), "2x2: cells meet, inside, even (%d,%d %dx%d)", b.x,
+          b.y, b.w, b.h);
+    int x, y;
+    overscan_point(0, 0, 1280, 720, &in, &x, &y);
+    CHECK(x == 96 && y == 54, "the pointer's top left: the inner rect's");
+    overscan_point(1279, 719, 1280, 720, &in, &x, &y);
+    CHECK(x < 96 + 1728 && y < 54 + 972 && x >= 96 + 1728 - 2 && y >= 54 + 972 - 2,
+          "its bottom right: inside (%d, %d)", x, y);
+    overscan_point(640, 360, 1280, 720, &in, &x, &y);
+    CHECK(x == 96 + 864 && y == 54 + 486, "the centre");
+    /* back to the screen: a cell, and something partly outside */
+    vg_rect_t u = overscan_unmap(&b, &in, 1280, 720);
+    CHECK(u.x >= 638 && u.x <= 640 && u.x + u.w == 1280 && u.y + u.h == 720, "unmap a cell (%d,%d %dx%d)", u.x,
+          u.y, u.w, u.h);
+    u = overscan_unmap(&(vg_rect_t){ 0, 0, 1920, 1080 }, &in, 1280, 720);
+    CHECK(rect_eq(u, (vg_rect_t){ 0, 0, 1280, 720 }), "the margins cut off");
+    vg_rect_t full = overscan_inner(1920, 1080, &none, 2);
+    u = overscan_unmap(&(vg_rect_t){ 960, 540, 960, 540 }, &full, 1280, 720);
+    CHECK(rect_eq(u, (vg_rect_t){ 640, 360, 640, 360 }), "no margins: plain scaling");
+}
+
+static void test_picture(void)
+{
+    vg_picture_t p;
+    CHECK(picture_preset("standard", &p) == 0 && p.luma == 50 && p.contrast == 50 && p.hue == 50 &&
+          p.saturation == 50 && p.gamma == 100, "standard: unchanged");
+    CHECK(picture_preset("bright", &p) == 0 && p.luma > 50 && p.gamma < 100, "bright: luma up, gamma lifted");
+    CHECK(picture_preset("soft", &p) == 0 && p.contrast < 50 && p.sharpness < 50, "soft: less contrast, sharpness");
+    CHECK(picture_preset("vivid", &p) == 0 && p.saturation > 50 && p.contrast > 50, "vivid: colour and contrast");
+    CHECK(picture_preset("cinema", &p) < 0 && p.gamma == 100 && p.luma == 50, "unknown: standard");
+    unsigned char g[33];
+    picture_gamma_curve(100, 33, g);
+    int line = 1;
+    for (int i = 0; i < 32; ++i) line &= g[i] == i * 8;
+    CHECK(line && g[32] == 255, "gamma 1.0: the display's straight line (0, 8, ... 248, 255)");
+    unsigned char lo[33], hi[33];
+    picture_gamma_curve(80, 33, lo);
+    picture_gamma_curve(110, 33, hi);
+    int ok = lo[0] == 0 && hi[0] == 0 && lo[32] == 255 && hi[32] == 255;
+    for (int i = 1; i < 32; ++i) ok &= lo[i] > g[i] && hi[i] < g[i] && lo[i] >= lo[i - 1] && hi[i] >= hi[i - 1];
+    CHECK(ok, "0.8 above the line, 1.1 below, both rising, black and white kept (mid %u %u %u)", lo[16], g[16],
+          hi[16]);
+}
+
+static void write_file(const char *path, const char *text);
+
+static void test_output_adj_config(void)
+{
+    vigil_config_t c;
+    config_defaults(&c);
+    CHECK(!c.display.margin_top && !c.display.margin_bottom && !c.display.margin_left && !c.display.margin_right &&
+          !strcmp(c.display.picture, "standard") && c.display.hdmi_volume == 80 && !c.display.hdmi_mute,
+          "defaults: no margins, standard, volume 80, not muted");
+    char dir[] = "/tmp/vigil-adj-XXXXXX", path[128];
+    if (!mkdtemp(dir)) return;
+    snprintf(path, sizeof path, "%s/vigil.yaml", dir);
+    schema_errors_t e = { 0 };
+    write_file(path, "version: 1\ndisplay:\n  margin_top: 3\n  margin_right: 10\n  picture: vivid\n"
+                     "  hdmi_volume: 40\n  hdmi_mute: true\n");
+    CHECK(config_load_file(path, &c, &e) == 0 && c.display.margin_top == 3 && c.display.margin_right == 10 &&
+          !c.display.margin_left && !strcmp(c.display.picture, "vivid") && c.display.hdmi_volume == 40 &&
+          c.display.hdmi_mute, "loaded: %s", e.n ? e.e[0].msg : "");
+    memset(&e, 0, sizeof e);
+    write_file(path, "version: 1\ndisplay:\n  margin_left: 11\n");
+    CHECK(config_load_file(path, &c, &e) < 0 && e.n && strstr(e.e[0].path, "margin_left"), "11 %%: refused");
+    memset(&e, 0, sizeof e);
+    write_file(path, "version: 1\ndisplay:\n  picture: cinema\n");
+    CHECK(config_load_file(path, &c, &e) < 0 && e.n && strstr(e.e[0].path, "picture"), "an unknown preset: refused");
+    memset(&e, 0, sizeof e);
+    write_file(path, "version: 1\ndisplay:\n  hdmi_volume: 101\n");
+    CHECK(config_load_file(path, &c, &e) < 0, "volume 101: refused");
+    unlink(path);
+    rmdir(dir);
 }
 
 static void test_aspect_scaled(void)
@@ -3452,6 +3547,9 @@ int main(int argc, char **argv)
     test_aspect_ratio();
     test_aspect_fit();
     test_aspect_scaled();
+    test_overscan();
+    test_picture();
+    test_output_adj_config();
     test_aspect_fill();
     test_channel_tiles();
     test_channel_decode();

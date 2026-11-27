@@ -287,7 +287,9 @@ flag, and its status lock outlives restarts, so `channels_status()` is
 safe from any thread at any time. The outcome goes out as events. A
 changed `display.output` switches the output (`hal_display_set_mode`)
 unless it already runs at that mode: the Display page switches first and
-saves only a mode the user keeps.
+saves only a mode the user keeps. Changed margins, picture preset or HDMI
+volume go to the platform the same way (`apply_output_adj`), the Display
+page having put them in force already as the user moved them.
 
 ## Threads
 

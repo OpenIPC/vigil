@@ -144,6 +144,13 @@ typedef struct {
     char name_background[8];
     char icons_position[16];        /* a tile corner */
     char icons_background[8];
+    /* The output's margins (overscan.h), picture preset (picture.h) and
+     * HDMI sound: */
+    int  margin_top, margin_bottom; /* % of the output's height, 0..OVERSCAN_MAX_PCT */
+    int  margin_left, margin_right; /* % of its width */
+    char picture[12];               /* "standard" | "bright" | "soft" | "vivid" */
+    int  hdmi_volume;               /* 0..100 */
+    int  hdmi_mute;
     /* What the tiles show besides the video (booleans). */
     int  rec_icon;                  /* REC while the channel records */
     int  alarm_icons;               /* the camera's events (motion, human, face, vehicle) */
