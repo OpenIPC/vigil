@@ -9,12 +9,16 @@
 
 static const hal_caps_t g_caps = { .name = "generic" };
 
-int hal_init(unsigned w, unsigned h, unsigned fps) { (void)w; (void)h; (void)fps; return 0; }
+int hal_init(unsigned w, unsigned h, const vg_mode_t *out) { (void)w; (void)h; (void)out; return 0; }
 const hal_caps_t *hal_caps(void) { return &g_caps; }
 void hal_shutdown(void) {}
 
 int  hal_display_set_tile(int ch, const vg_rect_t *r) { (void)ch; (void)r; return -1; }
 void hal_display_clear_tile(int ch) { (void)ch; }
+/* No output. */
+int  hal_display_modes(vg_mode_t *out, int max) { (void)out; (void)max; return 0; }
+void hal_display_mode(vg_mode_t *cur) { *cur = (vg_mode_t){ 0, 0, 0 }; }
+int  hal_display_set_mode(const vg_mode_t *m) { (void)m; return -1; }
 
 int  hal_dec_open(int ch, vg_codec_t codec, const vg_stream_info_t *si) { (void)ch; (void)codec; (void)si; return -1; }
 int  hal_dec_send(int ch, const vg_au_t *au) { (void)ch; (void)au; return -1; }

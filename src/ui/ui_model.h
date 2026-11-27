@@ -123,6 +123,12 @@ typedef struct {
     char value[96];
 } ui_info_t;
 
+/* An output mode (HDMI/VGA): the UI's screen keeps its size, scaled to it. */
+typedef struct {
+    int w, h, hz;
+} ui_mode_t;
+#define UI_MODES_MAX 16
+
 /* ---- camera discovery ------------------------------------------------------------- */
 
 enum { UI_DISC_NETIP = 1u, UI_DISC_ONVIF = 2u, UI_DISC_DHIP = 4u };
@@ -391,6 +397,14 @@ typedef struct ui_model {
 
     /* system page */
     int (*system_info)(ui_info_t *info, int max);
+
+    /* The output: the modes the board can switch to (0: no choice), the
+     * one in force, and a switch now, not saved (0, or -1 with the old one
+     * still in force): the Display page keeps it by saving display.output,
+     * or switches back. NULL: none. */
+    int  (*out_modes)(ui_mode_t *out, int max);
+    void (*out_mode)(ui_mode_t *cur);
+    int  (*out_set)(const ui_mode_t *m);
 
     /* Camera discovery (NULL when vigild has none). Each starting call
      * returns the job's id, or -1 with `err` (another job runs, too many

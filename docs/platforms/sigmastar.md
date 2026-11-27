@@ -21,9 +21,9 @@ scaler shrinks at most 8 times (the SDK's decoder sample puts DIVP behind it
 beyond that).
 
 The UI is drawn on the GOP framebuffer `/dev/fb0` above the video layer.
-fbdev.ko sets its size and format from `/config/fbdev.ini` (1280x720,
-ARGB8888 on OpenIPC); vigild checks them and paints tiles magenta,
-which the GOP's colour key makes see-through.
+fbdev.ko sets its size and format from `fbdev.ini` (1280x720, ARGB8888 on
+OpenIPC); vigild checks them and paints tiles magenta, which the GOP's
+colour key makes see-through.
 
 Layouts and full screen ([ui.md](../ui.md)) move a channel's input port
 window (`hal_display_set_tile`). A smaller tile shrinks the decoder's
@@ -136,7 +136,49 @@ load_sigmastar             # the firmware runs it at boot
 vigild -o /mnt/disk/rec -c rtsp://user:pass@camera/stream -c netip://admin:@dvr:34567/
 ```
 
-The display runs at 1280x720 (720p60), the size of vigil's layout.
+## Output resolution
+
+The UI is laid out on a 1280x720 screen, always; `display.output` (Display
+→ Output on screen, `PUT /api/v1/config/display`) picks the timing the
+display sends to HDMI and VGA:
+
+| `display.output` | `MI_DISP` timing | open_hdmi |
+|---|---|---|
+| `1280x720@60` (default) | `E_MI_DISP_OUTPUT_720P60` | `720p60` |
+| `1280x720@50` | `E_MI_DISP_OUTPUT_720P50` | `720p50` |
+| `1920x1080@60` | `E_MI_DISP_OUTPUT_1080P60` | `1080p60` |
+| `1920x1080@50` | `E_MI_DISP_OUTPUT_1080P50` | `1080p50` |
+| `1280x1024@60` | `E_MI_DISP_OUTPUT_1280x1024_60` | `1280x1024p60` |
+| `1440x900@60` | `E_MI_DISP_OUTPUT_1440x900_60` | `1440x900p60` |
+
+These are the modes both `MI_DISP` and open_hdmi have, at least as wide and
+as tall as the screen. The GOP scales the UI layer to the output in
+hardware: fbdev.ko keeps its buffer at `fbdev.ini`'s size, and vigild sets
+the screen (the timing's size) and the stretch window's destination with
+`FBIOSET_DISPLAYLAYER_ATTRIBUTES` (`MASK_SCREEN_SIZE | MASK_DISP_POS |
+MASK_DISP_SIZE`); fbdev.ko then programs the GOP's scale registers
+(`HSTRCH`/`VSTRCH`, 0x1000 = 1:1, 0xaaa for 720 → 1080). It refuses a
+destination smaller than the buffer (EINVAL), so the GOP does not shrink:
+1024x768 is not offered. The UI's 16:9 layout is stretched on 5:4 and 16:10
+monitors. The video layer runs at the output's own size and each tile is
+scaled to it (`to_output`), so a camera is decoded for its tile at 1080p
+(960x540 in 2x2) rather than enlarged twice.
+
+A switch (`hal_display_set_mode`) turns HDMI off, disables the display,
+sets the new timing on HDMI and VGA, enables it, resizes the video layer,
+moves every input port window (a decoder whose window grew is made again
+at its next keyframe, as for a larger tile), scales the UI layer, and turns
+HDMI on at the new timing; the ports and their bindings stay. If any step
+fails, the old mode is set again the same way. vigild starts at the
+configured mode directly; a mode this board does not have is logged and
+1280x720@60 used. `fbdev.ini` needs no change: its `FB_TIMMING_*` is only
+the start-up screen, which vigild sets anyway (a stretch left by an earlier
+run stays in fbdev.ko).
+
+On screen a new resolution must be kept within 15 s ("Keep this
+resolution?"): with no answer, Undo, Esc or the right button, the old mode
+comes back and nothing is saved. Through the API or the file it applies at
+once, without that question.
 
 ## Verified
 
@@ -147,6 +189,18 @@ request that added the platform). The UI (live view, navigation bar,
 context menu, full screen and back, settings saved and applied) was driven
 there with the machine's emulated USB mouse. Nothing has run on an SSR621Q
 board yet.
+
+Output modes, also only in emulation, on that machine with its GOP model
+scaling the UI layer as fbdev.ko programs it (qemu-bench branch
+`sigmastar/i2m-gop-stretch`; the stock model ignored the scale registers
+and showed the 1280x720 layer unscaled): every mode in the table set
+through the API and the Display page, the video layer and the decoders
+following (960x540 decoders at 1080p in 2x2), vigild started at 1080p, a
+mode left unanswered back after 15 s, and the UI layer free of pixels
+blended with the key in every clock and name style. The emulator scales
+nearest-neighbour; what the GOP's own stretch filter does at the edge of a
+keyed pixel (whether it blends the key colour into the text's edge at
+1080p) and how monitors take each timing are unverified.
 
 Sixteen channels, also only in emulation (OpenIPC firmware image, 16 fake
 cameras: ten NETIP with a CIF sub-stream on `stream=extra`, six RTSP with a

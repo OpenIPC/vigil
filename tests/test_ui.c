@@ -57,6 +57,23 @@ void hal_display_clear_tile(int ch) { (void)ch; }
 int  hal_cap_start(int in, int ch, hal_cap_cb cb, void *user) { (void)in; (void)ch; (void)cb; (void)user; return -1; }
 void hal_cap_stop(int in) { (void)in; }
 int  hal_cap_signal(int in) { (void)in; return 0; }
+/* An output with three modes; switching only notes the new one. */
+static const vg_mode_t k_modes[] = { { 1280, 720, 60 }, { 1920, 1080, 60 }, { 1024, 768, 60 } };
+static vg_mode_t g_mode = { 1280, 720, 60 };
+static int       g_mode_sets;
+int hal_display_modes(vg_mode_t *out, int max)
+{
+    int n = 0;
+    for (; n < 3 && n < max; ++n) out[n] = k_modes[n];
+    return n;
+}
+void hal_display_mode(vg_mode_t *cur) { *cur = g_mode; }
+int  hal_display_set_mode(const vg_mode_t *m)
+{
+    ++g_mode_sets;
+    g_mode = *m;
+    return 0;
+}
 /* Black holes for the tests' references; for the screenshots, the boards'
  * magenta key, replaced by a picture when the screen is written (shot),
  * as the video layer would: what is drawn over the video can be judged,

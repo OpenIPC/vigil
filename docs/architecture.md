@@ -225,7 +225,10 @@ what runs there: a renamed camera keeps its stream, a changed URL or a
 changed recording setting stops and restarts just those channels (all the
 stops first, so their timeouts overlap). Each channel has its own stop
 flag, and its status lock outlives restarts, so `channels_status()` is
-safe from any thread at any time. The outcome goes out as events.
+safe from any thread at any time. The outcome goes out as events. A
+changed `display.output` switches the output (`hal_display_set_mode`)
+unless it already runs at that mode: the Display page switches first and
+saves only a mode the user keeps.
 
 ## Threads
 
@@ -267,9 +270,9 @@ read their state. Formats, sources and the protocol matrix are in
 
 | Header | What the platform does |
 |---|---|
-| `hal.h` | `hal_init(w, h, fps)` brings up the media system and the output; `hal_caps()` says what is there (display, decoder and its maximum size, number of channels, capture inputs); `hal_shutdown()`. |
+| `hal.h` | `hal_init(w, h, out)` brings up the media system and the output (a w x h screen sent out at mode `out` where the platform can); `hal_caps()` says what is there (display, decoder and its maximum size, number of channels, capture inputs); `hal_shutdown()`. |
 | `hal_decoder.h` | One hardware decoder per channel: open for a codec, size and reference count; send an AU; reset after a reconnect; close. Decoded pictures go to that channel's tile without passing through the core. |
-| `hal_display.h` | Where each channel's tile is on the screen. The platform keeps the picture's aspect ratio inside it. |
+| `hal_display.h` | Where each channel's tile is on the screen. The platform keeps the picture's aspect ratio inside it. The output modes it can switch to, the one in force, and a switch while running (the screen keeps its size, scaled to the mode). |
 | `hal_capture.h` | Local inputs: start input N in tile `ch` (the platform shows it itself) and deliver its *encoded* AUs to a callback for recording. |
 | `hal_ui.h` | Create the LVGL display on the graphics layer above the video, and say how the UI makes a tile transparent (a colour key, or alpha). |
 
@@ -286,8 +289,9 @@ every video layer places exactly). Channels start in the 2×2 grid (`frontend_ti
 them for another layout, another page or one channel full screen through
 `channels_set_tiles()`, which places each running channel with
 `hal_display_set_tile` (or hides it with `hal_display_clear_tile`) from the
-main thread. LVGL draws the clock, small chips on each tile and, when
-asked for, the navigation bar and menus over the video, and
+main thread. LVGL draws the clock, each tile's name and icons (where and
+how: `display.*`) and, when asked for, the navigation bar and menus over
+the video, and
 paints the rest of each tile as a "hole" so the video plane underneath
 shows through: a colour key on HiSilicon hifb and SigmaStar's GOP, full
 transparency on Rockchip's alpha-blended plane. The screens, the

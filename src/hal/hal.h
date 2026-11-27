@@ -28,9 +28,11 @@ typedef struct {
                                  * its tile goes (recording carries on) */
 } hal_caps_t;
 
-/* Bring up the media system and the display (w x h @ fps when the
- * platform has one). Returns 0 or -1. */
-int  hal_init(unsigned w, unsigned h, unsigned fps);
+/* Bring up the media system and the display: a w x h screen (the UI's
+ * and the tiles' coordinates), sent out at `out` (NULL: w x h at 60 Hz)
+ * where the platform can (hal_display_modes); otherwise at its own mode.
+ * Returns 0 or -1. */
+int  hal_init(unsigned w, unsigned h, const vg_mode_t *out);
 const hal_caps_t *hal_caps(void);
 void hal_shutdown(void);
 

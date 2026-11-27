@@ -40,10 +40,11 @@ static const hal_caps_t g_caps = {
 };
 
 const hal_caps_t *hal_caps(void) { return &g_caps; }
+static vg_mode_t g_mode;                            /* what hal_init started */
 
-int hal_init(unsigned w, unsigned h, unsigned fps)
+int hal_init(unsigned w, unsigned h, const vg_mode_t *out)
 {
-    (void)fps;
+    (void)out;                                      /* 720P60 */
     /* u32MaxPoolCnt MUST be the vendor's 128: libmpi indexes pool storage
      * past the configured astCommPool[] entries. VI captures 1280x720
      * sp420 (1280 * 720 * 3/2 bytes, already 64-aligned) into this pool. */
@@ -52,6 +53,7 @@ int hal_init(unsigned w, unsigned h, unsigned fps)
         .astCommPool   = { { .u32BlkSize = 1280 * 720 * 3 / 2, .u32BlkCnt = 16, .acMmzName = "" } },
     };
     if (hi_display_start(&vb, VO_INTF_HDMI, VO_OUTPUT_720P60, w, h) < 0) return -1;
+    g_mode = (vg_mode_t){ w, h, 60 };
 
     /* A private pool before any VENC call, as the vendor's sample_venc does;
      * registering it with libmpi is what matters. */
@@ -84,3 +86,19 @@ void hal_dec_close(int ch) { (void)ch; }
 int  hal_cap_start(int in, int ch, hal_cap_cb cb, void *user) { (void)ch; return venc_reader_start(in, cb, user); }
 void hal_cap_stop(int in) { venc_reader_stop(in); }
 int  hal_cap_signal(int in) { return venc_reader_active(in); }
+
+/* ---- output mode: the one hal_init started; it does not change ---------------- */
+
+int hal_display_modes(vg_mode_t *out, int max)
+{
+    if (max < 1 || !g_mode.w) return 0;
+    *out = g_mode;
+    return 1;
+}
+
+void hal_display_mode(vg_mode_t *cur) { *cur = g_mode; }
+
+int hal_display_set_mode(const vg_mode_t *m)
+{
+    return m->w == g_mode.w && m->h == g_mode.h && m->hz == g_mode.hz ? 0 : -1;
+}

@@ -2210,6 +2210,100 @@ static void test_secrets(void)
     if (system(cmd)) {}
 }
 
+/* display: the output mode and what the live view draws over the video. */
+static void test_display_config(void)
+{
+    vigil_config_t c;
+    config_defaults(&c);
+    CHECK(!strcmp(c.display.output, "1280x720@60") && !strcmp(c.display.clock_position, "top-right") &&
+          !strcmp(c.display.clock_size, "medium") && !strcmp(c.display.clock_background, "outline") &&
+          !strcmp(c.display.name_position, "bottom-left") && !strcmp(c.display.name_background, "outline") &&
+          !strcmp(c.display.icons_position, "bottom-right") && !strcmp(c.display.icons_background, "outline"),
+          "display defaults: 720p60, an outlined clock at the top right, names bottom left, icons bottom right");
+
+    unsigned w = 0, h = 0, hz = 0;
+    CHECK(config_output_mode("1920x1080@50", &w, &h, &hz) == 0 && w == 1920 && h == 1080 && hz == 50,
+          "1920x1080@50: %ux%u@%u", w, h, hz);
+    CHECK(config_output_mode("1920x1080", &w, &h, &hz) < 0 && config_output_mode("1920x1080@60Hz", &w, &h, &hz) < 0 &&
+          config_output_mode("0x1080@60", &w, &h, &hz) < 0 && config_output_mode("", &w, &h, &hz) < 0,
+          "not modes: no rate, a unit, a zero, nothing");
+
+    char dir[] = "/tmp/vigil-disp-XXXXXX", path[128], err[160];
+    if (!mkdtemp(dir)) return;
+    snprintf(path, sizeof path, "%s/vigil.yaml", dir);
+    write_file(path, "display:\n"
+                     "  output: 1920x1080@60\n"
+                     "  clock_position: bottom-center\n"
+                     "  clock_size: xlarge\n"
+                     "  clock_background: box\n"
+                     "  name_position: \"off\"\n"
+                     "  icons_position: top-left\n"
+                     "  icons_background: none\n");
+    schema_errors_t e = { 0 };
+    CHECK(config_load_file(path, &c, &e) == 0, "display read: %s %s", e.n ? e.e[0].path : "", e.n ? e.e[0].msg : "");
+    CHECK(!strcmp(c.display.output, "1920x1080@60") && !strcmp(c.display.clock_position, "bottom-center") &&
+          !strcmp(c.display.clock_size, "xlarge") && !strcmp(c.display.clock_background, "box") &&
+          !strcmp(c.display.name_position, "off") && !strcmp(c.display.name_size, "medium") &&
+          !strcmp(c.display.icons_position, "top-left") && !strcmp(c.display.icons_background, "none"),
+          "display as written, the rest defaults");
+
+    /* written back with its help, and read again the same */
+    CHECK(config_save_file(path, &c, err, sizeof err) == 0, "save: %s", err);
+    char *raw = read_file(path);
+    CHECK(raw && strstr(raw, "\n# Display: The HDMI/VGA output") && strstr(raw, "\ndisplay:\n") &&
+          strstr(raw, "  output: \"1920x1080@60\"\n") && strstr(raw, "  clock_background: box\n") &&
+          strstr(raw, "  name_position: \"off\"\n") && strstr(raw, "  icons_background: none\n") &&
+          strstr(raw, "  # Clock background: outline: hard-edged text"),
+          "display in the YAML, with its help:\n%s", raw ? raw : "");
+    free(raw);
+    vigil_config_t d;
+    memset(&e, 0, sizeof e);
+    CHECK(config_load_file(path, &d, &e) == 0 && !memcmp(&c.display, &d.display, sizeof c.display),
+          "display round trip");
+
+    /* values outside the lists: refused, each by its path */
+    static const struct { const char *yaml, *path; } bad[] = {
+        { "display:\n  output: 800x600@60\n", "display.output" },
+        { "display:\n  output: 1920x1080\n", "display.output" },
+        { "display:\n  clock_position: middle\n", "display.clock_position" },
+        { "display:\n  name_position: top-center\n", "display.name_position" },
+        { "display:\n  icons_position: \"off\"\n", "display.icons_position" },
+        { "display:\n  clock_size: huge\n", "display.clock_size" },
+        { "display:\n  name_background: shadow\n", "display.name_background" },
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
+        write_file(path, bad[i].yaml);
+        memset(&e, 0, sizeof e);
+        CHECK(config_load_file(path, &c, &e) < 0 && e.n && !strcmp(e.e[0].path, bad[i].path),
+              "%s refused at %s (%s)", bad[i].yaml, bad[i].path, e.n ? e.e[0].path : "no error");
+    }
+
+    /* the API's section: a partial one, the rest its defaults */
+    write_file(path, "display:\n  output: 1920x1080@60\n");
+    CHECK(config_init(path) == 0, "store");
+    const char *body = "{\"clock_position\":\"top-left\",\"clock_background\":\"box\"}";
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("display", body, strlen(body), &e) == CONFIG_OK, "PUT display");
+    config_get(&c);
+    CHECK(!strcmp(c.display.clock_position, "top-left") && !strcmp(c.display.clock_background, "box") &&
+          !strcmp(c.display.output, "1280x720@60"), "PUT display: what it says, the rest defaults");
+    char *j = config_get_json("display", 1);
+    CHECK(j && strstr(j, "\"output\":\t\"1280x720@60\"") && strstr(j, "\"clock_position\":\t\"top-left\""),
+          "GET display: %s", j ? j : "");
+    free(j);
+    body = "{\"output\":\"640x480@60\"}";
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("display", body, strlen(body), &e) == CONFIG_EINVAL && !strcmp(e.e[0].path, "display.output"),
+          "PUT display: a mode not in the list is refused");
+    body = "{\"colour\":\"red\"}";
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("display", body, strlen(body), &e) == CONFIG_EINVAL && !strcmp(e.e[0].path, "display.colour"),
+          "PUT display: an unknown setting is refused");
+    char cmd[80];
+    snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
+    if (system(cmd)) {}
+}
+
 int main(int argc, char **argv)
 {
     g_data = argc > 1 ? argv[1] : "tests/data";
@@ -2237,6 +2331,7 @@ int main(int argc, char **argv)
     test_channel_events();
     test_rec_policies();
     test_secrets();
+    test_display_config();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

@@ -62,17 +62,20 @@ static struct {
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
 const hal_caps_t *hal_caps(void) { return &g_caps; }
+static vg_mode_t g_mode;                            /* what hal_init started */
 
-int hal_init(unsigned w, unsigned h, unsigned fps)
+int hal_init(unsigned w, unsigned h, const vg_mode_t *out)
 {
-    (void)fps;                                      /* 720P60 / 1080P60 by size */
+    (void)out;                                      /* 720P60 / 1080P60 by the screen's size */
     /* The common pool only carries VPSS output at tile size (640x300
      * sp420); decoded pictures live in each decoder's private pool. */
     VB_CONF_S vb = {
         .u32MaxPoolCnt = 16,
         .astCommPool   = { { .u32BlkSize = 640 * 320 * 3 / 2, .u32BlkCnt = 24, .acMmzName = "" } },
     };
-    return hi_display_start(&vb, VO_INTF_HDMI, h >= 1080 ? VO_OUTPUT_1080P60 : VO_OUTPUT_720P60, w, h);
+    if (hi_display_start(&vb, VO_INTF_HDMI, h >= 1080 ? VO_OUTPUT_1080P60 : VO_OUTPUT_720P60, w, h) < 0) return -1;
+    g_mode = (vg_mode_t){ w, h, 60 };
+    return 0;
 }
 
 void hal_shutdown(void)
@@ -272,3 +275,19 @@ void hal_dec_reset(int ch)
 int  hal_cap_start(int in, int ch, hal_cap_cb cb, void *user) { (void)in; (void)ch; (void)cb; (void)user; return -1; }
 void hal_cap_stop(int in) { (void)in; }
 int  hal_cap_signal(int in) { (void)in; return 0; }
+
+/* ---- output mode: the one hal_init started; it does not change ---------------- */
+
+int hal_display_modes(vg_mode_t *out, int max)
+{
+    if (max < 1 || !g_mode.w) return 0;
+    *out = g_mode;
+    return 1;
+}
+
+void hal_display_mode(vg_mode_t *cur) { *cur = g_mode; }
+
+int hal_display_set_mode(const vg_mode_t *m)
+{
+    return m->w == g_mode.w && m->h == g_mode.h && m->hz == g_mode.hz ? 0 : -1;
+}

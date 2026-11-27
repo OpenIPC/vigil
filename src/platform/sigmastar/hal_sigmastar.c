@@ -13,6 +13,12 @@
  * mi_hdmi: the HDMI transmitter is opensigmastar's open_hdmitx.ko, switched
  * on through open_hdmi.ko's sysfs file once the display runs.
  *
+ * The output mode (k_modes) can change while running. The screen (the
+ * UI's coordinates, what hal_init was given) stays: the GOP stretches the
+ * UI layer to the output (sstar_fb.h), and the video layer runs at the
+ * output's own size, each tile scaled to it, so the video is not scaled
+ * twice.
+ *
  * The picture goes into a window fitted inside the tile at its aspect ratio
  * (the rest of the tile shows the layer's black background). The decoder
  * outputs it at the window's size and follows the tile when it changes:
@@ -37,6 +43,7 @@
 #include "hal_capture.h"
 #include "hal_decoder.h"
 #include "hal_display.h"
+#include "sstar_fb.h"
 
 /*
  * Channels: video layer 0 has 16 input ports (MI_DISP_INPUTPORT_MAX; the
@@ -100,7 +107,8 @@ static struct {
     unsigned long long mem;         /* its share of the heap (dec_footprint) */
     vg_stream_info_t si;            /* the stream it was opened for */
     unsigned         buf_size;      /* its bitstream buffer */
-    vg_rect_t        tile;          /* w == 0: not placed */
+    vg_rect_t        scr;           /* the tile as given, on the screen; w == 0: not placed */
+    vg_rect_t        tile;          /* ... on the output (the video layer); w == 0: not placed */
     unsigned         src_w, src_h;  /* what the decoder outputs */
     int              out_small;     /* the tile wants more: a new decoder at a keyframe */
     /* After a takeover the port keeps the old decoder's picture, and its
@@ -124,7 +132,9 @@ static struct {
     unsigned         lost_buf;
     time_t           lost_at;
 } g_ch[MAX_CH];
-static unsigned g_w, g_h;
+static unsigned g_sw, g_sh;         /* the screen: the UI's and the tiles' coordinates */
+static unsigned g_w, g_h;           /* the output: the video layer */
+static int g_mode = -1;             /* k_modes[], in force */
 static unsigned char g_vdec_busy[VDEC_IDS];
 static unsigned g_vdec_freed[VDEC_IDS], g_vdec_frees;   /* when each was last freed */
 static int g_vdec_ids = VDEC_IDS;   /* lowered to what mi_vdec takes */
@@ -155,20 +165,81 @@ static void hdmi_output(const char *timing)
         fprintf(stderr, "sigmastar: HDMI %s failed\n", timing);
 }
 
-int hal_init(unsigned w, unsigned h, unsigned fps)
-{
-    (void)fps;                                  /* 60 Hz */
+/*
+ * The modes both the display (MI_DISP) and open_hdmi have; VGA follows
+ * the same timing. The display's own list goes further (1366x768,
+ * 1680x1050, 2560x1440, 4K), open_hdmi's does not. None narrower or lower
+ * than the screen: the GOP enlarges the UI layer but does not shrink it
+ * (fbdev.ko refuses a stretch destination smaller than its buffer, seen
+ * in qemu for 1024x768: EINVAL).
+ */
+static const struct {
+    vg_mode_t              m;
     MI_DISP_OutputTiming_e sync;
-    const char *timing;
-    if (w == 1920 && h == 1080) {
-        sync = E_MI_DISP_OUTPUT_1080P60;
-        timing = "1080p60";
-    } else if (w == 1280 && h == 720) {
-        sync = E_MI_DISP_OUTPUT_720P60;
-        timing = "720p60";
-    } else {
-        fprintf(stderr, "sigmastar: no output timing for %ux%u\n", w, h);
-        return -1;
+    const char            *hdmi;        /* open_hdmi's name */
+} k_modes[] = {
+    { { 1280, 720, 60 }, E_MI_DISP_OUTPUT_720P60, "720p60" },
+    { { 1280, 720, 50 }, E_MI_DISP_OUTPUT_720P50, "720p50" },
+    { { 1920, 1080, 60 }, E_MI_DISP_OUTPUT_1080P60, "1080p60" },
+    { { 1920, 1080, 50 }, E_MI_DISP_OUTPUT_1080P50, "1080p50" },
+    { { 1280, 1024, 60 }, E_MI_DISP_OUTPUT_1280x1024_60, "1280x1024p60" },
+    { { 1440, 900, 60 }, E_MI_DISP_OUTPUT_1440x900_60, "1440x900p60" },
+};
+#define N_MODES (int)(sizeof k_modes / sizeof k_modes[0])
+
+static int mode_index(const vg_mode_t *m)
+{
+    for (int i = 0; i < N_MODES; ++i)
+        if (k_modes[i].m.w == m->w && k_modes[i].m.h == m->h && k_modes[i].m.hz == m->hz) return i;
+    return -1;
+}
+
+/* The device's timing on both interfaces. HDMI first: without its panel
+ * ini files in /config it fails, and nothing is shown. */
+static MI_S32 disp_timing(int mode)
+{
+    MI_DISP_PubAttr_t pub;
+    memset(&pub, 0, sizeof pub);
+    pub.u32BgColor = 0x800080;                  /* YUYV black */
+    pub.eIntfSync = k_modes[mode].sync;
+    pub.eIntfType = E_MI_DISP_INTF_HDMI;
+    MI_S32 rc = MI_DISP_SetPubAttr(DISP_DEV, &pub);
+    if (rc != MI_SUCCESS) {
+        fprintf(stderr, "sigmastar: MI_DISP_SetPubAttr(HDMI, %s) 0x%x\n", k_modes[mode].hdmi, rc);
+        return rc;
+    }
+    pub.eIntfType = E_MI_DISP_INTF_VGA;
+    if ((rc = MI_DISP_SetPubAttr(DISP_DEV, &pub)) != MI_SUCCESS)
+        fprintf(stderr, "sigmastar: MI_DISP_SetPubAttr(VGA, %s) 0x%x\n", k_modes[mode].hdmi, rc);
+    return MI_SUCCESS;
+}
+
+/* The video layer over the whole output. */
+static MI_S32 layer_size(int mode)
+{
+    MI_DISP_VideoLayerAttr_t lay;
+    memset(&lay, 0, sizeof lay);
+    lay.stVidLayerSize.u16Width = k_modes[mode].m.w;
+    lay.stVidLayerSize.u16Height = k_modes[mode].m.h;
+    lay.stVidLayerDispWin.u16Width = k_modes[mode].m.w;
+    lay.stVidLayerDispWin.u16Height = k_modes[mode].m.h;
+    lay.ePixFormat = E_MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420;
+    return MI_DISP_SetVideoLayerAttr(DISP_LAYER, &lay);
+}
+
+int hal_init(unsigned w, unsigned h, const vg_mode_t *out)
+{
+    vg_mode_t want = out ? *out : (vg_mode_t){ w, h, 60 };
+    int mode = mode_index(&want);
+    if (mode < 0) {
+        vg_mode_t screen = { w, h, 60 };
+        mode = mode_index(&screen);
+        if (mode < 0) {
+            fprintf(stderr, "sigmastar: no output mode for a %ux%u screen\n", w, h);
+            return -1;
+        }
+        fprintf(stderr, "sigmastar: no output mode %ux%u@%u, using %s\n", want.w, want.h, want.hz,
+                k_modes[mode].hdmi);
     }
     MI_S32 rc;
     if ((rc = MI_SYS_Init()) != MI_SUCCESS) {
@@ -176,41 +247,29 @@ int hal_init(unsigned w, unsigned h, unsigned fps)
         return -1;
     }
 
-    MI_DISP_PubAttr_t pub;
-    memset(&pub, 0, sizeof pub);
-    pub.u32BgColor = 0x800080;                  /* YUYV black */
-    pub.eIntfSync = sync;
-    pub.eIntfType = E_MI_DISP_INTF_HDMI;
-    if ((rc = MI_DISP_SetPubAttr(DISP_DEV, &pub)) != MI_SUCCESS) {
-        /* the panel ini files are missing from /config, typically */
-        fprintf(stderr, "sigmastar: MI_DISP_SetPubAttr(HDMI) 0x%x\n", rc);
-        goto fail_sys;
-    }
-    pub.eIntfType = E_MI_DISP_INTF_VGA;
-    if ((rc = MI_DISP_SetPubAttr(DISP_DEV, &pub)) != MI_SUCCESS)
-        fprintf(stderr, "sigmastar: MI_DISP_SetPubAttr(VGA) 0x%x\n", rc);
+    if (disp_timing(mode) != MI_SUCCESS) goto fail_sys;      /* the panel ini files, typically */
     if ((rc = MI_DISP_Enable(DISP_DEV)) != MI_SUCCESS) {
         fprintf(stderr, "sigmastar: MI_DISP_Enable 0x%x\n", rc);
         goto fail_sys;
     }
-
-    MI_DISP_VideoLayerAttr_t lay;
-    memset(&lay, 0, sizeof lay);
-    lay.stVidLayerSize.u16Width = w;
-    lay.stVidLayerSize.u16Height = h;
-    lay.stVidLayerDispWin.u16Width = w;
-    lay.stVidLayerDispWin.u16Height = h;
-    lay.ePixFormat = E_MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420;
     if ((rc = MI_DISP_BindVideoLayer(DISP_LAYER, DISP_DEV)) != MI_SUCCESS ||
-        (rc = MI_DISP_SetVideoLayerAttr(DISP_LAYER, &lay)) != MI_SUCCESS ||
+        (rc = layer_size(mode)) != MI_SUCCESS ||
         (rc = MI_DISP_EnableVideoLayer(DISP_LAYER)) != MI_SUCCESS) {
         fprintf(stderr, "sigmastar: video layer 0x%x\n", rc);
         goto fail_disp;
     }
-    g_w = w;
-    g_h = h;
-    hdmi_output(timing);
-    fprintf(stderr, "sigmastar: display %ux%u (%s) on HDMI and VGA\n", w, h, timing);
+    g_sw = w;
+    g_sh = h;
+    g_w = k_modes[mode].m.w;
+    g_h = k_modes[mode].m.h;
+    g_mode = mode;
+    /* The UI layer to the output, also when that is the screen's size: a
+     * stretch set by a vigild that ran before stays in fbdev.ko. */
+    if (sstar_fb_screen(g_w, g_h) < 0 && (g_w != w || g_h != h))
+        fprintf(stderr, "sigmastar: the UI layer is not scaled to %s\n", k_modes[mode].hdmi);
+    hdmi_output(k_modes[mode].hdmi);
+    fprintf(stderr, "sigmastar: display %ux%u (%s) on HDMI and VGA, screen %ux%u\n", g_w, g_h,
+            k_modes[mode].hdmi, w, h);
     mem_baseline();
     if (g_mem_known)
         fprintf(stderr, "sigmastar: %llu MiB of the media heap for decoders\n", g_mem_budget >> 20);
@@ -349,16 +408,22 @@ static void out_follow(int ch)
     g_ch[ch].src_h = oh;
 }
 
+/* A tile on the screen as a window on the output: scaled, then x on 16
+ * pixels and the sizes even, as the display's windows want. */
+static vg_rect_t to_output(const vg_rect_t *r)
+{
+    int x0 = (int)((long long)r->x * g_w / g_sw), x1 = (int)((long long)(r->x + r->w) * g_w / g_sw);
+    int y0 = (int)((long long)r->y * g_h / g_sh), y1 = (int)((long long)(r->y + r->h) * g_h / g_sh);
+    return (vg_rect_t){ x0 & ~15, y0 & ~1, (x1 - x0 + (x0 & 15)) & ~15, (y1 - y0) & ~1 };
+}
+
 int hal_display_set_tile(int ch, const vg_rect_t *r)
 {
     if (ch < 0 || ch >= MAX_CH || r->w <= 0 || r->h <= 0) return -1;
     pthread_mutex_lock(&g_lock);
-    vg_rect_t old = g_ch[ch].tile;
-    /* the display's windows: x on 16 pixels, sizes even */
-    g_ch[ch].tile.x = r->x & ~15;
-    g_ch[ch].tile.y = r->y & ~1;
-    g_ch[ch].tile.w = (r->w + (r->x & 15)) & ~15;
-    g_ch[ch].tile.h = r->h & ~1;
+    vg_rect_t old = g_ch[ch].tile, old_scr = g_ch[ch].scr;
+    g_ch[ch].scr = *r;
+    g_ch[ch].tile = to_output(r);
     int rc = 0;
     if (g_ch[ch].codec != VG_CODEC_NONE) {      /* a decoder feeds the port */
         out_follow(ch);
@@ -367,6 +432,7 @@ int hal_display_set_tile(int ch, const vg_rect_t *r)
             MI_DISP_ShowInputPort(DISP_LAYER, ch);
         } else {
             g_ch[ch].tile = old;                /* back to the old window */
+            g_ch[ch].scr = old_scr;
             out_follow(ch);
             port_place(ch);
         }
@@ -382,7 +448,83 @@ void hal_display_clear_tile(int ch)
     if (g_ch[ch].codec != VG_CODEC_NONE)
         MI_DISP_HideInputPort(DISP_LAYER, ch);
     g_ch[ch].tile.w = 0;
+    g_ch[ch].scr.w = 0;
     pthread_mutex_unlock(&g_lock);
+}
+
+/* ---- output mode ------------------------------------------------------------ */
+
+int hal_display_modes(vg_mode_t *out, int max)
+{
+    int n = 0;
+    for (int i = 0; i < N_MODES && n < max; ++i) out[n++] = k_modes[i].m;
+    return n;
+}
+
+void hal_display_mode(vg_mode_t *cur)
+{
+    *cur = g_mode >= 0 ? k_modes[g_mode].m : (vg_mode_t){ 0, 0, 0 };
+}
+
+/*
+ * The device off, its timing changed, on again, as the SDK's NVR demo
+ * changes the timing (st_main_vdec.c, HDMI and VGA): the video layer is
+ * resized, not rebuilt, and the input ports and their bindings stay, each
+ * window moved to its tile on the new output. Locked.
+ */
+static int switch_to(int mode)
+{
+    MI_S32 rc;
+    hdmi_output("off");
+    MI_DISP_DisableVideoLayer(DISP_LAYER);
+    if ((rc = MI_DISP_Disable(DISP_DEV)) != MI_SUCCESS)
+        fprintf(stderr, "sigmastar: MI_DISP_Disable 0x%x\n", rc);
+    int ok = disp_timing(mode) == MI_SUCCESS;
+    if ((rc = MI_DISP_Enable(DISP_DEV)) != MI_SUCCESS) {
+        fprintf(stderr, "sigmastar: MI_DISP_Enable 0x%x\n", rc);
+        ok = 0;
+    }
+    if (ok && (rc = layer_size(mode)) != MI_SUCCESS) {
+        fprintf(stderr, "sigmastar: video layer %ux%u 0x%x\n", k_modes[mode].m.w, k_modes[mode].m.h, rc);
+        ok = 0;
+    }
+    if ((rc = MI_DISP_EnableVideoLayer(DISP_LAYER)) != MI_SUCCESS) {
+        fprintf(stderr, "sigmastar: MI_DISP_EnableVideoLayer 0x%x\n", rc);
+        ok = 0;
+    }
+    if (!ok) return -1;
+    g_w = k_modes[mode].m.w;
+    g_h = k_modes[mode].m.h;
+    g_mode = mode;
+    for (int ch = 0; ch < MAX_CH; ++ch) {
+        if (!g_ch[ch].scr.w) continue;
+        g_ch[ch].tile = to_output(&g_ch[ch].scr);
+        if (g_ch[ch].codec == VG_CODEC_NONE) continue;
+        out_follow(ch);                         /* larger: a new decoder at a keyframe */
+        if (port_place(ch) == 0) MI_DISP_ShowInputPort(DISP_LAYER, ch);
+    }
+    /* Without the UI scaled to it the mode is no use: the old one again. */
+    if (sstar_fb_screen(g_w, g_h) < 0) {
+        fprintf(stderr, "sigmastar: the UI layer is not scaled to %s\n", k_modes[mode].hdmi);
+        return -1;
+    }
+    hdmi_output(k_modes[mode].hdmi);
+    return 0;
+}
+
+int hal_display_set_mode(const vg_mode_t *m)
+{
+    int mode = mode_index(m);
+    if (mode < 0 || g_mode < 0) return -1;
+    if (mode == g_mode) return 0;
+    pthread_mutex_lock(&g_lock);
+    int old = g_mode, rc = switch_to(mode);
+    if (rc < 0 && switch_to(old) < 0)
+        fprintf(stderr, "sigmastar: could not go back to %s either\n", k_modes[old].hdmi);
+    pthread_mutex_unlock(&g_lock);
+    fprintf(stderr, "sigmastar: display %s%s\n", k_modes[rc < 0 ? old : mode].hdmi,
+            rc < 0 ? " (the new mode failed)" : "");
+    return rc;
 }
 
 /* ---- decoder --------------------------------------------------------------- */

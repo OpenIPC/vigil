@@ -27,6 +27,9 @@ typedef struct {
 
 typedef struct { int x, y, w, h; } vg_rect_t;
 
+/* An output mode: the picture the display sends to HDMI/VGA. */
+typedef struct { unsigned w, h, hz; } vg_mode_t;
+
 static inline const char *vg_codec_name(vg_codec_t c)
 {
     return c == VG_CODEC_H264 ? "H.264" : c == VG_CODEC_H265 ? "H.265" : "?";

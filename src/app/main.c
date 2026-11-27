@@ -3,7 +3,8 @@
  *
  *   config_init (-f FILE) + command-line overrides
  *   -> -w OUT: write that configuration to OUT and exit
- *   -> hal_init (media system + HDMI on platforms that have it)
+ *   -> hal_init (media system + HDMI on platforms that have it, at
+ *      display.output)
  *   -> channels_start (one thread per camera: source -> decode + record)
  *   -> mgmt_start (the management pages' jobs and timers: network
  *      rollback, NTP, DDNS, network storage, alarm center, mail)
@@ -29,6 +30,7 @@
 #include "discovery.h"
 #include "frontend.h"
 #include "hal.h"
+#include "hal_display.h"
 #include "log.h"
 #include "mgmt.h"
 #include "source.h"
@@ -223,6 +225,23 @@ static int write_config(const char *out, const char *in, int loaded, const vigil
 
 static unsigned g_applied_gen;
 static char     g_api_listen[64];
+static char     g_output[16];           /* display.output last applied */
+
+/* display.output, when it changed in the file (the API, the UI's Keep):
+ * the output follows. The UI tries a mode before it saves it (its "keep
+ * this resolution?"), so a mode the output already runs at is left as
+ * it is. */
+static void apply_output(const char *output)
+{
+    if (!strcmp(output, g_output)) return;
+    snprintf(g_output, sizeof g_output, "%s", output);
+    vg_mode_t m, cur;
+    if (config_output_mode(output, &m.w, &m.h, &m.hz) < 0) return;
+    hal_display_mode(&cur);
+    if (!cur.w || (cur.w == m.w && cur.h == m.h && cur.hz == m.hz)) return;
+    if (hal_display_set_mode(&m) < 0) vg_log("display.output %s: not on this board, or it failed", output);
+    else vg_log("display: %s", output);
+}
 
 static void apply_config(void)
 {
@@ -235,6 +254,7 @@ static void apply_config(void)
     rec_week_t weeks[CHANNEL_MAX];
     rec_sched_set(weeks, config_to_schedule(&c, weeks));
     int failed = channels_apply(&cc);
+    apply_output(c.display.output);
     g_applied_gen = gen;
     config_mark_applied(gen);
     if (failed) {
@@ -366,7 +386,10 @@ int main(int argc, char **argv)
         return wrc;
     }
 
-    if (hal_init(SCREEN_W, SCREEN_H, 60) < 0) {
+    vg_mode_t out = { SCREEN_W, SCREEN_H, 60 };
+    if (config_output_mode(cfg.display.output, &out.w, &out.h, &out.hz) < 0) vg_log("display.output: bad");
+    snprintf(g_output, sizeof g_output, "%s", cfg.display.output);
+    if (hal_init(SCREEN_W, SCREEN_H, &out) < 0) {
         vg_log("platform init failed");
         log_to_syslog_stop();
         return 1;

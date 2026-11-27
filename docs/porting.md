@@ -82,8 +82,10 @@ from 5, 4x4 from 10). Set `.fixed_tiles` when the platform places the
 tiles itself and `hal_display_set_tile` cannot move them: the UI then
 offers only the 2x2 view.
 
-`hal_init(w, h, fps)` brings up the vendor media system and the display
-output at w×h (1280×720 today). If it fails, it must undo what it already
+`hal_init(w, h, out)` brings up the vendor media system and the display:
+a w×h screen (1280×720), the UI's and the tiles' coordinates, sent out at
+mode `out` (`display.output`) if the platform has it, else at its own
+mode. If it fails, it must undo what it already
 brought up itself: vigild then exits without calling `hal_shutdown()`.
 `hal_shutdown()` undoes a successful `hal_init` in reverse order.
 
@@ -125,6 +127,14 @@ changes the layout or shows a channel full screen: the tile may move and
 grow. `hal_display_clear_tile(ch)` hides the channel until it is placed
 again; nothing of its picture may stay on screen, including in parts of
 the screen no other tile covers now.
+
+`hal_display_modes()` lists the output modes the board can run at,
+`hal_display_mode()` the one in force, and `hal_display_set_mode()` switches
+while running (the Display page tries a mode before saving it, and puts
+the old one back unless the user keeps it). The screen stays w×h: the
+platform scales the UI layer and the tiles to the mode (SigmaStar: the
+GOP's stretch and a video layer at the output's size). A platform that
+cannot switch lists the mode it runs and refuses any other.
 
 ## 5. UI: `hal_ui.h`
 
