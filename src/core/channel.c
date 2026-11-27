@@ -301,6 +301,19 @@ static void aspect_tell(channel_t *c, const vg_stream_info_t *si, int id)
     if (!atomic_load(&g_stretch))
         a = aspect_of_camera(si, id == S_SUB, c->main_known ? &c->main_info : NULL);
     if (c->aspect_told && a.w == c->aspect.w && a.h == c->aspect.h) return;
+    /* With what it came from: a wrong shape on a board is a misread SPS
+     * (size, VUI) or a camera that says something odd, and only this tells
+     * which. */
+    char main[64] = "main unknown";
+    if (c->main_known)
+        snprintf(main, sizeof main, "main %ux%u sar %u:%u", c->main_info.width, c->main_info.height,
+                 c->main_info.sar_w, c->main_info.sar_h);
+    if (a.w)
+        vg_log("CAM%d: picture %u:%u (%s, shown %s %ux%u sar %u:%u)", c->idx + 1, a.w, a.h, main,
+               id == S_SUB ? "sub" : "main", si->width, si->height, si->sar_w, si->sar_h);
+    else
+        vg_log("CAM%d: picture stretched over the tile (%s, shown %s %ux%u)", c->idx + 1, main,
+               id == S_SUB ? "sub" : "main", si->width, si->height);
     hal_display_set_aspect(c->idx, a.w, a.h);
     c->aspect = a;
     c->aspect_told = 1;
