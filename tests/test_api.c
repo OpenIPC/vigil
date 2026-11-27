@@ -106,6 +106,9 @@ static char *slurp(const char *path)
     return b;
 }
 
+/* users_login_with's check: is it the password in ctx? */
+static int pass_is(const char *pass, void *ctx) { return !strcmp(pass, (const char *)ctx); }
+
 static void test_users(void)
 {
     char dir[] = "/tmp/vigil-users-XXXXXX", cfg[128], shadow[128], users[128], why[160];
@@ -176,6 +179,16 @@ static void test_users(void)
           users_login("carl", "carlpw", &perms, why, sizeof why) == 0 &&
           users_login("carl", "newpw1", &perms, why, sizeof why) == 1, "password changed");
 
+    /* ONVIF's digests: checked against the password itself, the ONVIF key
+     * written with it while onvif_server is on (the default). */
+    CHECK(users_login_with("carl", pass_is, "newpw1", &perms, why, sizeof why) == 1 && perms == PERM_LIVE,
+          "digest login with the ONVIF key: %s", why);
+    CHECK(users_login_with("carl", pass_is, "carlpw", &perms, why, sizeof why) == 0 && perms == 0,
+          "digest login, wrong password");
+    CHECK(users_login_with("nobody", pass_is, "x", &perms, why, sizeof why) == 0, "digest login, unknown user");
+    CHECK(users_login_with("root", pass_is, "secret", &perms, why, sizeof why) == -1 && strstr(why, "system account"),
+          "the system account has no ONVIF key: %s", why);
+
     /* NETIP clients send Xiongmai's hash of the password: the one set
      * with the password, and the system account's learnt at its login. */
     char xm[9];
@@ -235,6 +248,46 @@ static void test_users(void)
           "root still gets in");
     CHECK(users_delete("admin", &e) == USERS_OK && users_delete("admin", &e) == USERS_ENOENT, "delete");
     CHECK(users_login("admin", "secret", &perms, why, sizeof why) == 1, "admin is root's again");
+
+    /* With the ONVIF server off, no key is written: such a user is told
+     * to set the password again. */
+    f = fopen(cfg, "w");
+    fprintf(f, "api:\n  user: root\n  shadow: %s\n  users: %s\nonvif_server:\n  enabled: false\n", shadow, users);
+    fclose(f);
+    CHECK(config_init(cfg) == 0, "configuration, ONVIF off");
+    CHECK(users_add("dan", "viewer", "danpw1", 1, &e) == USERS_OK, "add dan");
+    text = slurp(users);
+    CHECK(text && !strstr(text, "ZGFucHcx"), "no ONVIF key for dan");
+    free(text);
+    CHECK(users_login_with("dan", pass_is, "danpw1", &perms, why, sizeof why) == -1 && strstr(why, "no ONVIF key"),
+          "without a key: %s", why);
+    CHECK(users_login("dan", "danpw1", &perms, why, sizeof why) == 1, "dan's password works elsewhere");
+
+    /* ONVIF on again: dan's key is filled in at his next login with the
+     * password, as is everything a user from before the NETIP hash and the
+     * ONVIF key lacks (only its crypt hash in the file), and kept. */
+    f = fopen(cfg, "w");
+    fprintf(f, "api:\n  user: root\n  shadow: %s\n  users: %s\n", shadow, users);
+    fclose(f);
+    CHECK(config_init(cfg) == 0, "configuration, ONVIF on");
+    CHECK(users_login("dan", "danpw1", &perms, why, sizeof why) == 1 &&
+              users_login_with("dan", pass_is, "danpw1", &perms, why, sizeof why) == 1,
+          "dan's ONVIF key, from his login now that ONVIF is on: %s", why);
+    f = fopen(users, "w");
+    fprintf(f, "users:\n  - name: dora\n    group: user\n    password: \"" SHA512_SECRET "\"\n");
+    fclose(f);
+    CHECK(users_reload() == 0, "a file with a bare user");
+    md5_sofia("secret", xm);
+    CHECK(users_login_with("dora", pass_is, "secret", &perms, why, sizeof why) == -1 &&
+              users_login_netip("dora", xm, &perms, why, sizeof why) == -1,
+          "no ONVIF key, no NETIP hash yet: %s", why);
+    CHECK(users_login("dora", "secret", &perms, why, sizeof why) == 1, "dora logs in with her password");
+    CHECK(users_login_with("dora", pass_is, "secret", &perms, why, sizeof why) == 1 &&
+              users_login_netip("dora", xm, &perms, why, sizeof why) == 1,
+          "then both are there: %s", why);
+    text = slurp(users);
+    CHECK(text && strstr(text, "onvif: c2VjcmV0") && strstr(text, xm), "and in the file:\n%s", text ? text : "");
+    free(text);
 
     /* An invalid file: only root, and nothing is saved over it. */
     f = fopen(users, "w");

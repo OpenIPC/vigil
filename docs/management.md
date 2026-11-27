@@ -15,10 +15,12 @@ The same actions are in the HTTP API ([api.md](api.md#management)).
 | Network | Ethernet | works | DHCP or static address, netmask, gateway, two DNS servers, MTU; link, speed, MAC and the addresses in use. A change is undone unless confirmed within 60 s. |
 | | Wi-Fi | works | A USB adapter is recognised by its USB id even before its driver is loaded, with the firmware profile that loads it; joining sets `wlandev`, `wlanssid` and `wlanpass`, loads the driver the firmware's way and brings wlan0 up. Scan with `iw`. Without an adapter the page says so. |
 | | LTE | detection | USB modems by their USB id (and the profile of `/etc/wireless/modem` that names them, or by their driver), "Use this profile" sets `wlandev` for the next boot; a modem's network interface and its state once the firmware has brought it up. |
+| | Ports | works | The web server's (`web.listen`, 80), the API's (`api.listen`, 8080), ONVIF's (`onvif_server.port`, 8899) and NETIP's (`netip_server.port`, 34567) ports, moved at once when saved, each with what it listens on now (or why not); the RTSP port (554) kept for a server vigild does not have yet, said so on the page. No two on one port; a port that is taken is refused with the reason. |
 | | DDNS | works | dyndns2 (Dyn and compatibles), No-IP, or a custom URL, every N minutes, through curl. |
 | | UPnP | stored | The settings are kept; vigild has no UPnP client yet. |
 | | SMTP | works | A test mail; trouble (disk full, recording failed, a camera offline) mailed, at most one mail per 10 minutes, through curl. |
 | | Alarm center | works | Every event POSTed as JSON to `http://server:port/path`, and a heartbeat. |
+| | QoS | works | DSCP marking of vigild's own packets (`qos`): off, standard (RFC 4594: video AF41, management CS2, cameras AF41, alarms AF21) or custom values 0..63 per class; applied at once. Other programs (sshd, ntpd) are not marked: the firmware's kernel has no netfilter, so no iptables `DSCP` target. |
 | | P2P | none | vigil has no P2P service; the page says so. |
 | Storage | Basic | works | When the disk is full: overwrite the oldest recordings, or stop (event `REC disk full`); segment length in minutes; the recording directory. |
 | | Schedule | works | A week per camera in half hours: continuous, motion only, off. Motion only records while the camera reports motion, which no source does yet. |

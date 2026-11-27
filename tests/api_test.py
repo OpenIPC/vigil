@@ -248,7 +248,8 @@ def main():
         secs = {s["key"]: s for s in schema["sections"]} if st == 200 else {}
         seg = [f for f in secs.get("record", {}).get("fields", []) if f["key"] == "segment"]
         check(set(secs) == {"cameras", "record", "schedule", "quota", "nas", "ddns", "upnp", "smtp",
-                              "alarm", "time", "ui", "display", "api", "web", "netip_server", "discovery"} and seg and seg[0]["min"] == 10 and
+                              "alarm", "time", "ui", "display", "api", "web", "discovery", "onvif_server",
+                              "qos", "rtsp_server", "netip_server"} and seg and seg[0]["min"] == 10 and
               seg[0]["max"] == 3600 and seg[0]["live"], "schema: sections and limits")
         st, _, _ = api.json("GET", "/api/v1/nothing")
         check(st == 404, "unknown endpoint: 404")
@@ -256,6 +257,19 @@ def main():
         check(st == 405 and "PUT" in hdr.get("Allow", ""), "DELETE config: 405 with Allow")
         st, _, _ = api.json("PUT", "/api/v1/config/nope", {})
         check(st == 404, "unknown section: 404")
+
+        # ---- QoS: a section like the others, 0..63
+        st, _, q = api.json("GET", "/api/v1/config/qos")
+        check(st == 200 and q == {"type": "off", "video": 34, "management": 16, "camera": 34, "alarm": 18},
+              "qos: off by default (%s %s)" % (st, q))
+        st, _, err = api.json("PUT", "/api/v1/config/qos", {"type": "custom", "video": 64})
+        check(st == 400 and err["errors"][0]["path"] == "qos.video", "qos: DSCP 64 refused (%s)" % st)
+        st, _, _ = api.json("PUT", "/api/v1/config/qos", {"type": "custom", "video": 46, "camera": 26})
+        st2, _, q = api.json("GET", "/api/v1/config/qos")
+        check(st == 200 and q["type"] == "custom" and q["video"] == 46 and q["camera"] == 26 and q["alarm"] == 18,
+              "qos: custom saved (%s %s)" % (st, q))
+        st, _, _ = api.json("PUT", "/api/v1/config/qos", {"type": "off"})
+        check(st == 200, "qos: back off (%s)" % st)
 
         # ---- management: on a host vigild does not manage, it shows and refuses
         st, _, eth = api.json("GET", "/api/v1/network/ethernet")
@@ -344,6 +358,13 @@ def main():
                   ch["width"] == 640 and CAM_PASS not in json.dumps(status),
                   "status: name, host, codec, size; no password")
             check(status["config"]["applied"] == status["config"]["generation"], "status: config applied")
+            check(status["platform"]["max_in_kbps"] == 0 and "sub_kbps" in ch, "status: no rated bandwidth here; sub_kbps")
+
+        def bitrate():
+            s, _, d = api.json("GET", "/api/v1/status")
+            return s == 200 and d["channels"] and d["channels"][0]["main_kbps"] > 0 and d["channels"][0]["main_kbps"]
+        kbps = wait_for(bitrate, 6, 0.5)
+        check(kbps, "status: the main stream's bitrate (%s kbit/s)" % kbps)
         check(wait_for(lambda: ws.find(lambda m: m["type"] == "event" and m["data"]["camera"] == 1 and
                                        m["data"]["text"] == "online"), 5),
               "WebSocket: event CAM1 online")
@@ -380,6 +401,19 @@ def main():
         check(len(ws.find(lambda m: m["type"] == "event")) > events_before, "rename applied (event)")
         st, _, d = api.json("GET", "/api/v1/status")
         check(d["config"]["generation"] > gen and d["channels"][0]["live"], "generation moved, still live")
+
+        # ---- events from outside: held a few seconds, in the status
+        st, _, d = api.json("POST", "/api/v1/channels/1/events", {"events": ["motion", "human"]})
+        check(st == 200 and d == {"channel": 1, "events": ["motion", "human"]},
+              "POST events: motion and human held (%s %s)" % (st, d))
+        check(api.json("GET", "/api/v1/status")[2]["channels"][0]["events"] == ["motion", "human"],
+              "and in the status")
+        st, _, _ = api.json("POST", "/api/v1/channels/1/events", {"events": ["smoke"]})
+        check(st == 400, "an unknown event: 400 (%s)" % st)
+        st, _, _ = api.json("POST", "/api/v1/channels/9/events", {"events": ["motion"]})
+        check(st == 404, "no such channel: 404 (%s)" % st)
+        check(wait_for(lambda: api.json("GET", "/api/v1/status")[2]["channels"][0]["events"] == [], 8),
+              "gone a few seconds later")
 
         # ---- a recording setting restarts the camera, which comes back
         st, _, _ = api.json("PUT", "/api/v1/config/record", {"path": rec, "segment": 120, "allow_rootfs": True})
@@ -527,6 +561,8 @@ def main():
         check(st == 403 and err["needs"] == "system", "viewer: config 403 (%s)" % st)
         st, _, err = vera.json("PUT", "/api/v1/config/record", {"path": rec, "allow_rootfs": True})
         check(st == 403 and err["needs"] == "storage", "viewer: PUT record 403 (%s)" % st)
+        st, _, err = vera.json("POST", "/api/v1/channels/1/events", {"events": ["motion"]})
+        check(st == 403 and err["needs"] == "cameras", "viewer: POST events 403 (%s)" % st)
         st, _, _ = vera.json("GET", "/api/v1/users")
         check(st == 403, "viewer: users 403 (%s)" % st)
         st, _, me = vera.json("GET", "/api/v1/me")
@@ -600,6 +636,42 @@ def main():
         check(st == 200, "the owner on another address still gets in (%s)" % st)
         st, _, _ = api.call("GET", "/api/v1/status")
         check(st == 200, "and so does the already logged-in client (%s)" % st)
+
+        # ---- Ports: no two of vigild's servers on one port; the API moves at once
+        st, _, srvs = api.json("GET", "/api/v1/config")
+        check(st == 200 and srvs["rtsp_server"] == {"port": 554} and srvs["onvif_server"]["port"] == 8899 and
+              srvs["netip_server"] == {"enabled": True, "port": 34567}, "ports: the defaults (%s)" % st)
+        st, _, err = api.json("PUT", "/api/v1/config/onvif_server", {"port": 80})
+        check(st == 400 and err["errors"][0]["path"] == "onvif_server.port" and
+              "web.listen" in err["errors"][0]["message"], "ONVIF on the web server's port 80: refused (%s %s)" %
+              (st, err))
+        st, _, err = api.json("PUT", "/api/v1/config/rtsp_server", {"port": api_port})
+        check(st == 400 and "api.listen" in err["errors"][0]["message"], "RTSP on the API's port: refused (%s)" % st)
+        st, _, err = api.json("PUT", "/api/v1/config/netip_server", {"port": 0})
+        check(st == 400, "port 0: refused (%s)" % st)
+        st, _, _ = api.json("PUT", "/api/v1/config/rtsp_server", {"port": 8554})
+        check(st == 200, "RTSP on 8554: saved (%s)" % st)
+        api_cfg = {"auth": True, "user": "root", "shadow": shadow, "users": users_path}
+        busy = socket.socket()
+        busy.bind(("127.0.0.1", 0))
+        busy.listen(1)
+        st, _, err = api.json("PUT", "/api/v1/config/api",
+                              dict(api_cfg, listen="127.0.0.1:%d" % busy.getsockname()[1]))
+        busy.close()
+        check(st == 400 and err["errors"][0]["path"] == "api.listen" and "in use" in err["errors"][0]["message"],
+              "the API onto a port in use: refused, said why (%s %s)" % (st, err))
+        new_port = free_port()
+        st, _, _ = api.json("PUT", "/api/v1/config/api", dict(api_cfg, listen="127.0.0.1:%d" % new_port))
+
+        def answers(port):
+            try:
+                return Api(port).call("GET", "/api/v1/status")[0] == 200
+            except OSError:
+                return False
+        check(st == 200 and wait_for(lambda: answers(new_port), 10) and not answers(api_port),
+              "api.listen changed: the API moved to %d at once" % new_port)
+        api_port = new_port
+        api = Api(api_port)
     finally:
         if ws:
             ws.close()

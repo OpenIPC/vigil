@@ -32,7 +32,13 @@ int  netip_server_start(const config_netip_server_t *cfg, const char *platform);
 void netip_server_stop(void);
 
 /* A new configuration: start, stop or move to another port when it
- * changed. Main thread. */
+ * changed (its connections close; a port that cannot be had leaves it on
+ * the old one, said by netip_server_listening). Main thread. */
 void netip_server_apply(const config_netip_server_t *cfg);
+
+/* As api_listening (api.h): 1 while it listens, with `listen`
+ * ("0.0.0.0:34567") and `why` a move that failed; 0 with `why` it does
+ * not (off, the port in use). Any thread. */
+int  netip_server_listening(char *listen, size_t cap, char *why, size_t wcap);
 
 #endif /* NETIP_SRV_H */

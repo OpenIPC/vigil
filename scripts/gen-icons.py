@@ -62,6 +62,8 @@ ICONS = [
     ("nav_smtp", "mail.svg", 22, 2),
     ("nav_alarm", "bell-ringing.svg", 22, 2),
     ("nav_p2p", "cloud-off.svg", 22, 2),
+    ("nav_qos", "traffic-lights.svg", 22, 2),
+    ("nav_ports", "plug-connected.svg", 22, 2),
     ("nav_basic", "device-floppy.svg", 22, 2),
     ("nav_schedule", "calendar-time.svg", 22, 2),
     ("nav_disks", "server-2.svg", 22, 2),
@@ -76,6 +78,7 @@ ICONS = [
     ("nav_names", "device-cctv.svg", 22, 2),
     ("nav_icons", "activity.svg", 22, 2),
     ("nav_aspect", "aspect-ratio.svg", 22, 2),
+    ("nav_tiles", "layout-grid.svg", 22, 2),
 ]
 
 

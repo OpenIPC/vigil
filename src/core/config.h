@@ -39,6 +39,7 @@
 #include <stddef.h>
 
 #include "channel.h"
+#include "qos.h"
 #include "rec_sched.h"
 #include "schema.h"
 
@@ -134,7 +135,7 @@ typedef struct {
 /* The HDMI/VGA output and what the live view draws over the video. */
 typedef struct {
     char output[16];                /* "1920x1080@60" (config_output_mode) */
-    char video_aspect[8];           /* "fit" | "stretch" */
+    char video_aspect[8];           /* "fit" | "stretch" | "fill" */
     char clock_position[16];        /* "off" | "top-left" | "top-center" | ... | "bottom-right" */
     char clock_size[8];             /* "small" | "medium" | "large" | "xlarge" */
     char clock_background[8];       /* "outline" | "none" | "box" */
@@ -143,6 +144,11 @@ typedef struct {
     char name_background[8];
     char icons_position[16];        /* a tile corner */
     char icons_background[8];
+    /* What the tiles show besides the video (booleans). */
+    int  rec_icon;                  /* REC while the channel records */
+    int  alarm_icons;               /* the camera's events (motion, human, face, vehicle) */
+    int  tile_dividers;             /* a line between the tiles */
+    int  alert_frame;               /* a frame around a tile while its camera reports an event */
 } config_display_t;
 
 typedef struct {
@@ -170,6 +176,24 @@ typedef struct {
     char prefer[32];                /* "netip,onvif,dhip" */
 } config_discovery_t;
 
+/* vigild as an ONVIF device (src/api/onvif.c, docs/onvif.md). */
+typedef struct {
+    int  enabled;
+    int  port;                      /* its web service; WS-Discovery is UDP 3702 */
+} config_onvif_server_t;
+
+/* DSCP marking of vigild's packets (qos.h). */
+typedef struct {
+    char type[12];                  /* "off" | "standard" | "custom" */
+    int  video, management, camera, alarm;     /* custom: DSCP 0..63 */
+} config_qos_t;
+
+/* A server vigild is to have (RTSP): its port, kept and checked against
+ * the others before the server exists. */
+typedef struct {
+    int port;
+} config_server_t;
+
 typedef struct {
     int             n_cameras;
     config_camera_t cameras[CHANNEL_MAX];
@@ -190,6 +214,9 @@ typedef struct {
     config_web_t    web;
     config_netip_server_t netip_server;
     config_discovery_t discovery;
+    config_onvif_server_t onvif_server;
+    config_qos_t    qos;
+    config_server_t rtsp_server;
 } vigil_config_t;
 
 /* "mon".."sun" */
@@ -211,6 +238,31 @@ void config_to_channels(const vigil_config_t *c, channels_config_t *cc);
 /* The cameras' weeks (record schedule) for rec_sched_set; returns the
  * number of entries (CHANNEL_MAX). A camera listed twice: the last wins. */
 int config_to_schedule(const vigil_config_t *c, rec_week_t weeks[CHANNEL_MAX]);
+
+/* The DSCP of each class (qos_class_t) that `c.qos` sets: 0 for "off",
+ * the fields' defaults for "standard", the fields for "custom". */
+void config_to_qos(const vigil_config_t *c, int dscp[QOS_CLASSES]);
+
+/* The port of a listen setting ("port", "a.b.c.d:port"); 0 for "" (off),
+ * -1 when it has none. */
+int config_listen_port(const char *listen);
+
+/* No two of vigild's servers on one port: web.listen, api.listen,
+ * onvif_server.port, netip_server.port, and rtsp_server's, kept for the
+ * server to come (an empty listen is none).
+ * 0, or -1 with an error at the later one's path. config_put_json checks
+ * it; a file is loaded anyway (the server that comes second does not
+ * start, logged). */
+int config_check_ports(const vigil_config_t *c, schema_errors_t *errs);
+
+/* Before config_put_json saves a changed api.listen, web.listen,
+ * onvif_server.port while ONVIF is on or netip_server.port while NETIP is
+ * (`what` "api", "web", "onvif" or "netip"; for ONVIF and NETIP `listen`
+ * is the port alone), whether it can be listened on: 0, or -1 with
+ * `err`. Set by vigild (it knows which ports its own servers hold); NULL
+ * (the default): not asked. */
+typedef int (*config_listen_check_fn)(const char *what, const char *listen, char *err, size_t cap);
+void config_set_listen_check(config_listen_check_fn fn);
 
 /* display.output "1920x1080@60" as numbers; 0, or -1 when it is not one. */
 int config_output_mode(const char *s, unsigned *w, unsigned *h, unsigned *hz);

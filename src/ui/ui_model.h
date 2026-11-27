@@ -62,6 +62,7 @@ typedef struct {
     char     codec[8];          /* "H.264", "H.265", "" */
     int      no_decoder;        /* live, but the platform has no decoder for it now */
     unsigned width, height, fps;
+    unsigned main_kbps, sub_kbps;   /* what each stream brings in (2 s average), 0: not running */
 } ui_chan_t;
 
 typedef struct {
@@ -355,6 +356,16 @@ typedef struct {
     int      builtin, editable, members;
 } ui_group_t;
 
+/* One of vigild's servers (Network -> Ports): what it listens on now
+ * ("": nothing), and why not, or the last move to another port that
+ * failed (""). */
+enum { UI_SERVER_WEB, UI_SERVER_API, UI_SERVER_ONVIF, UI_SERVER_NETIP };
+typedef struct {
+    int  on;
+    char listen[64];
+    char why[200];
+} ui_listen_t;
+
 /* Permissions, users.h's PERM_* bits (the bridge asserts they agree). */
 enum {
     UI_PERM_LIVE = 1u << 0, UI_PERM_PLAYBACK = 1u << 1, UI_PERM_PTZ = 1u << 2, UI_PERM_CAMERAS = 1u << 3,
@@ -446,6 +457,8 @@ typedef struct {
     /* Exit: reboot (1) or power off (0), after vigild stops cleanly; 0, or
      * < 0 on a system vigild does not manage */
     int  (*power)(int reboot);
+    /* UI_SERVER_*; NULL: not known in this build */
+    void (*listening)(int server, ui_listen_t *out);
 } ui_mgmt_t;
 
 typedef struct ui_model {
@@ -453,6 +466,7 @@ typedef struct ui_model {
     const char *role;           /* "NVR" / "DVR" */
     int         channels;       /* tiles the platform can show */
     int         fixed_tiles;    /* no layouts, no full screen */
+    unsigned    max_in_kbps;    /* the chip's rated incoming bandwidth, kbit/s; 0: not known */
 
     /* live view */
     void   (*chan_status)(int idx, ui_chan_t *st);

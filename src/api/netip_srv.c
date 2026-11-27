@@ -41,15 +41,18 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "api_int.h"
 #include "auth.h"
 #include "cJSON.h"
 #include "channel.h"
 #include "disc_proto.h"
+#include "events.h"
 #include "discovery.h"
 #include "log.h"
 #include "md5.h"
 #include "netip_proto.h"
 #include "netip_srv.h"
+#include "qos.h"
 #include "stream_tap.h"
 #include "sys_net.h"
 #include "users.h"
@@ -401,6 +404,9 @@ static int mon_start(conn_t *c)
         free(ring);
         return -1;
     }
+    /* Its media from now on: the video class (qos.h); a connection
+     * starts as its listener's, management. */
+    qos_mark(c->fd, QOS_VIDEO, 1);
     pthread_mutex_lock(&g_lock);
     c->mon = MON_ON;
     pthread_mutex_unlock(&g_lock);
@@ -1073,6 +1079,7 @@ static void *conn_main(void *arg)
     c->session = c->owner = 0;
     c->done = 1;
     pthread_mutex_unlock(&g_lock);
+    qos_forget(c->fd);
     close(c->fd);
     c->fd = -1;
     free(c->rx);
@@ -1244,47 +1251,85 @@ static int open_udp(void)
     return fd;
 }
 
-int netip_server_start(const config_netip_server_t *cfg, const char *platform)
+static void state(const char *why)
 {
-    if (platform) snprintf(g_platform, sizeof g_platform, "%s", platform);
-    g_cfg = *cfg;
-    if (!cfg->enabled || g_running) return 0;
+    char l[24] = "";
+    if (g_running) snprintf(l, sizeof l, "0.0.0.0:%d", g_cfg.port);
+    api_server_state(3, l, why);
+}
+
+/* Listen on cfg->port and start the listener thread. 0, or -1 with
+ * `why` (nothing listens then). */
+static int serve(const config_netip_server_t *cfg, char *why, size_t cap)
+{
     g_tcp = open_tcp(cfg->port);
     if (g_tcp < 0) {
-        vg_log("netip server: cannot listen on TCP %d: %s", cfg->port, strerror(errno));
+        int e = errno;
+        snprintf(why, cap, "port %d: %s", cfg->port,
+                 e == EADDRINUSE ? "in use (another program, or another of vigild's servers)" : strerror(e));
         return -1;
     }
     g_udp = open_udp();
     if (g_udp < 0) vg_log("netip server: cannot answer searches on UDP %d: %s", DISC_NETIP_UDP, strerror(errno));
     if (pipe2(g_stop_pipe, O_CLOEXEC | O_NONBLOCK) < 0) {
-        close(g_tcp);
-        if (g_udp >= 0) close(g_udp);
-        g_tcp = g_udp = -1;
-        return -1;
+        snprintf(why, cap, "pipe: %s", strerror(errno));
+        goto fail;
     }
+    /* Logins and requests, and the search answers: the management class;
+     * the connections take the listener's (qos.h), a media connection
+     * becomes video when its stream starts. */
+    qos_mark(g_tcp, QOS_MANAGEMENT, 1);
+    if (g_udp >= 0) qos_mark(g_udp, QOS_MANAGEMENT, 1);
     if (!g_next_session) {
         uint32_t r = (uint32_t)time(NULL) ^ (uint32_t)getpid() << 16;
         g_next_session = r & 0x7fffffu;
     }
     make_serial();
+    g_cfg = *cfg;
     atomic_store(&g_stop, 0);
     if (pthread_create(&g_listen_th, NULL, listen_main, NULL) != 0) {
-        close(g_tcp);
-        if (g_udp >= 0) close(g_udp);
+        snprintf(why, cap, "cannot start its thread");
         close(g_stop_pipe[0]);
         close(g_stop_pipe[1]);
-        g_tcp = g_udp = -1;
-        return -1;
+        goto fail;
     }
     g_running = 1;
-    disc_set_self(g_serial, cfg->port);
+    disc_set_self_netip(g_serial, cfg->port);
     stream_tap_standby(1);
     vg_log("netip server: on TCP %d%s (serial %s)", cfg->port, g_udp >= 0 ? ", answering searches" : "",
            g_serial);
     return 0;
+fail:
+    qos_forget(g_tcp);
+    close(g_tcp);
+    if (g_udp >= 0) {
+        qos_forget(g_udp);
+        close(g_udp);
+    }
+    g_tcp = g_udp = -1;
+    return -1;
 }
 
-void netip_server_stop(void)
+int netip_server_start(const config_netip_server_t *cfg, const char *platform)
+{
+    if (platform) snprintf(g_platform, sizeof g_platform, "%s", platform);
+    if (g_running) return 0;
+    g_cfg = *cfg;
+    if (!cfg->enabled) {
+        state("off: netip_server.enabled is off");
+        return 0;
+    }
+    char why[160];
+    if (serve(cfg, why, sizeof why) < 0) {
+        vg_log("netip server: not listening: %s", why);
+        state(why);
+        return -1;
+    }
+    state("");
+    return 0;
+}
+
+static void halt(void)
 {
     if (!g_running) return;
     atomic_store(&g_stop, 1);
@@ -1299,20 +1344,61 @@ void netip_server_stop(void)
         }
     pthread_mutex_unlock(&g_lock);
     reap(1);
+    qos_forget(g_tcp);
     close(g_tcp);
-    if (g_udp >= 0) close(g_udp);
+    if (g_udp >= 0) {
+        qos_forget(g_udp);
+        close(g_udp);
+    }
     close(g_stop_pipe[0]);
     close(g_stop_pipe[1]);
     g_tcp = g_udp = g_stop_pipe[0] = g_stop_pipe[1] = -1;
     g_running = 0;
-    disc_set_self("", 0);
+    disc_set_self_netip("", 0);
     stream_tap_standby(0);
+}
+
+void netip_server_stop(void)
+{
+    if (!g_running) return;
+    halt();
+    state("stopped");
     vg_log("netip server: stopped");
 }
 
 void netip_server_apply(const config_netip_server_t *cfg)
 {
-    if (cfg->enabled == g_cfg.enabled && cfg->port == g_cfg.port) return;
-    netip_server_stop();
-    netip_server_start(cfg, NULL);
+    if (cfg->enabled == g_cfg.enabled && cfg->port == g_cfg.port && (g_running || !cfg->enabled)) return;
+    if (!cfg->enabled) {
+        halt();
+        g_cfg = *cfg;
+        state("off: netip_server.enabled is off");
+        vg_log("netip server: off");
+        return;
+    }
+    /* On, or to another port: its clients reconnect (XM's clients find it
+     * again by the search). The store tried the port before saving it
+     * (config_set_listen_check), so this fails only when something took
+     * it meanwhile: back to the old port then, and the move's failure
+     * said on Network -> Ports. */
+    config_netip_server_t old = g_cfg;
+    int was = g_running;
+    halt();
+    char why[160], l[16];
+    snprintf(l, sizeof l, "%d", cfg->port);
+    if (serve(cfg, why, sizeof why) == 0) {
+        state("");
+        api_server_moved(3, l, 0, 1, NULL, 0);
+        return;
+    }
+    vg_log("netip server: port %d: %s%s", cfg->port, why, was ? "; back on the old port" : "");
+    events_push(0, "netip port: %.24s", why);
+    char why2[160];
+    if (was && serve(&old, why2, sizeof why2) == 0) {
+        state(why);                         /* listening on the old port; the move's failure: */
+        api_server_moved(3, l, 1, 1, NULL, 0);
+    } else {
+        g_cfg = *cfg;
+        state(why);
+    }
 }

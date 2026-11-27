@@ -48,7 +48,7 @@ static int g_fail, g_checks;
 /* ---- a platform: four decoders, a UI layer with black (video) holes -------------------- */
 
 static const hal_caps_t g_caps = { .name = "test", .display = 1, .decoder = 1, .dec_max_w = 1920,
-                                   .dec_max_h = 1080, .max_channels = 4 };
+                                   .dec_max_h = 1080, .max_channels = 4, .max_in_kbps = 64000 };
 const hal_caps_t *hal_caps(void) { return &g_caps; }
 int  hal_dec_open(int ch, vg_codec_t c, const vg_stream_info_t *si) { (void)ch; (void)c; (void)si; return -1; }
 int  hal_dec_send(int ch, const vg_au_t *au) { (void)ch; (void)au; return -1; }
@@ -56,7 +56,7 @@ void hal_dec_reset(int ch) { (void)ch; }
 void hal_dec_close(int ch) { (void)ch; }
 int  hal_display_set_tile(int ch, const vg_rect_t *r) { (void)ch; (void)r; return 0; }
 void hal_display_clear_tile(int ch) { (void)ch; }
-void hal_display_set_aspect(int ch, unsigned w, unsigned h) { (void)ch; (void)w; (void)h; }
+void hal_display_set_aspect(int ch, unsigned w, unsigned h, vg_aspect_t how) { (void)ch; (void)w; (void)h; (void)how; }
 int  hal_cap_start(int in, int ch, hal_cap_cb cb, void *user) { (void)in; (void)ch; (void)cb; (void)user; return -1; }
 void hal_cap_stop(int in) { (void)in; }
 int  hal_cap_signal(int in) { (void)in; return 0; }
@@ -141,7 +141,8 @@ static void fake_status(int idx, ui_chan_t *st)
         *st = (ui_chan_t){ .configured = 1, .status = UI_CH_LIVE, .live = 1, .recording = 1,
                            .events = UI_EV_MOTION | UI_EV_HUMAN, .rec_bytes = 734u << 20, .name = "Gate",
                            .codec = "H.265", .width = 1920, .height = 1080, .fps = 25, .view = "main",
-                           .rec_state = "recording", .main_status = UI_CH_LIVE };
+                           .rec_state = "recording", .main_status = UI_CH_LIVE, .main_kbps = 4096,
+                           .sub_kbps = 512 };
         break;
     case 1:
         *st = (ui_chan_t){ .configured = 1, .status = UI_CH_CONNECTING, .name = "Yard", .state = "CONNECTING",
@@ -699,6 +700,20 @@ static int  fm_nas_support(const char *type, char *why, size_t cap)
 }
 static int  fm_nas_mounted(void) { return 0; }
 static int  fm_curl(void) { return 1; }
+static int  g_mg_move_failed;           /* the API's last move failed */
+static void fm_listening(int server, ui_listen_t *out)
+{
+    memset(out, 0, sizeof *out);
+    out->on = 1;
+    snprintf(out->listen, sizeof out->listen, "%s",
+             server == UI_SERVER_WEB     ? "0.0.0.0:80"
+             : server == UI_SERVER_ONVIF ? "0.0.0.0:8899"
+             : server == UI_SERVER_NETIP ? "0.0.0.0:34567"
+                                         : "0.0.0.0:8080");
+    if (server == UI_SERVER_API && g_mg_move_failed)
+        snprintf(out->why, sizeof out->why, "could not move to '0.0.0.0:81': port 81 is in use (another program, "
+                                            "or another of vigild's servers)");
+}
 static int  fm_job(int id, ui_mjob_t *j)
 {
     memset(j, 0, sizeof *j);
@@ -1097,6 +1112,7 @@ static void fake_mgmt(ui_model_t *m)
     g_mg.nas_support = fm_nas_support;
     g_mg.nas_mounted = fm_nas_mounted;
     g_mg.curl = fm_curl;
+    g_mg.listening = fm_listening;
     g_mg.job = fm_job;
     g_mg.disks = fm_disks;
     g_mg.disk_formats = fm_formats;
@@ -1212,6 +1228,45 @@ static lv_obj_t *textarea(int nth)
 {
     int seen = 0;
     return find_textarea(lv_screen_active(), nth, &seen);
+}
+
+static lv_obj_t *dd_near(const char *label);
+
+/* The Channels page's channel table (the rows under the "Channel name"
+ * header), channel `ch`'s row, and a click on its number (checks it). */
+static lv_obj_t *chan_rows(void)
+{
+    lv_obj_t *h = find("Channel name", 0);
+    if (!h) return NULL;
+    lv_obj_t *hdr = lv_obj_get_parent(h);
+    return lv_obj_get_child(lv_obj_get_parent(hdr), (int32_t)lv_obj_get_index(hdr) + 1);
+}
+
+static lv_obj_t *chan_row(int ch)
+{
+    lv_obj_t *t = chan_rows();
+    return t && ch < (int)lv_obj_get_child_count(t) ? lv_obj_get_child(t, ch) : NULL;
+}
+
+static void click_chan(int ch, int cell)
+{
+    lv_obj_t *r = chan_row(ch);
+    CHECK(r, "channel %d's row", ch + 1);
+    if (!r) return;
+    lv_obj_scroll_to_view(r, LV_ANIM_OFF);
+    run(50);
+    int x, y;
+    center_of(lv_obj_get_child(r, cell), &x, &y);
+    click_at(x, y);
+    run(50);
+}
+#define CH_NUM 0                        /* the number: a click checks the row */
+#define CH_ICON 3                       /* X or + */
+
+static int disabled(const char *text)
+{
+    lv_obj_t *l = find(text, 0);
+    return l && lv_obj_has_state(lv_obj_get_parent(l), LV_STATE_DISABLED);
 }
 
 /* A visible A8 icon `img` among `o`'s descendants. */
@@ -1529,10 +1584,11 @@ static void test_menu_and_settings(void)
     CHECK(find("Main menu", 0), "back from the form");
 
     click_text("NETWORK");
-    CHECK(find("Ethernet", 0) && find("Alarm center", 0) && find("P2P", 0), "NETWORK: the network screen");
+    CHECK(find("Ethernet", 0) && find("Ports", 0) && find("Alarm center", 0) && find("QoS", 0) && find("P2P", 0),
+          "NETWORK: the network screen");
     button(BTN_RIGHT);
     open_form("api");
-    CHECK(find("applies after restart", 1), "non-live setting marked");
+    CHECK(!find("applies after restart", 1), "api.listen applies at once: no restart mark");
     click_text("Listen on");                    /* the label: no keyboard */
     lv_obj_t *listen = textarea(0);
     int x, y;
@@ -1559,10 +1615,19 @@ static void test_menu_and_settings(void)
 static void test_cameras(void)
 {
     click_text("CAMERA");
-    CHECK(find("rtsp://admin:***@192.168.1.10/stream1", 0), "URL redacted as in the API");
+    run(300);
+    CHECK(find("192.168.1.10", 0) && !find("rtsp://", 1) && !find("secret", 1),
+          "the camera's address only: no URL, no password");
     CHECK(find("Search settings", 1) && find("No devices yet", 1) && find("Empty", 0),
           "CAMERA: the Channels page, its two panes, channel 4 empty");
+    CHECK(find("4.6 / 64 Mbps", 0), "the bandwidth: every stream now, against the chip's");
+    CHECK(disabled(LV_SYMBOL_EDIT "  Edit") && disabled(LV_SYMBOL_CLOSE "  Delete") &&
+          disabled(LV_SYMBOL_KEYBOARD "  Title") && !disabled(LV_SYMBOL_TRASH "  Clear"),
+          "nothing checked: Clear only");
     shot("cameras");
+    click_chan(0, CH_NUM);
+    CHECK(find("1 checked", 0) && !disabled(LV_SYMBOL_EDIT "  Edit") && !disabled(LV_SYMBOL_CLOSE "  Delete") &&
+          !disabled(LV_SYMBOL_KEYBOARD "  Title"), "channel 1 checked: Edit, Delete, Title");
     lv_obj_t *edit = find(LV_SYMBOL_EDIT "  Edit", 0);
     int x, y;
     center_of(edit, &x, &y);
@@ -1585,19 +1650,52 @@ static void test_cameras(void)
     click_text("Discard");
     CHECK(find("Search settings", 1) && find("Front gate", 0), "back on the Channels page, updated");
 
-    /* Clear the third channel, confirmed. */
-    lv_obj_t *rm = find_nth(lv_screen_active(), LV_SYMBOL_TRASH "  Clear", 2);
-    CHECK(rm, "third Clear button");
-    if (rm) {
-        center_of(rm, &x, &y);
+    /* Title: channel 1 (still checked) renamed in a dialog. */
+    CHECK(find("1 checked", 0), "channel 1 still checked");
+    click_text(LV_SYMBOL_KEYBOARD "  Title");
+    CHECK(ui_popup_is_open() && find("Title of channel 1", 0), "Title: the dialog");
+    lv_obj_t *ta = NULL;
+    {
+        int seen = 0;
+        ta = find_textarea(lv_layer_top(), 0, &seen);
+    }
+    CHECK(ta && !strcmp(lv_textarea_get_text(ta), "Front gate"), "... with the name");
+    if (ta) lv_textarea_set_text(ta, "Gate 1");
+    shot("channels_title");
+    click_text(LV_SYMBOL_OK "  Save");
+    run(100);
+    config_get(&c);
+    CHECK(!ui_popup_is_open() && !strcmp(c.cameras[0].name, "Gate 1") &&
+          !strcmp(c.cameras[0].url, "rtsp://admin:secret@192.168.1.10/stream1"), "renamed, password kept: %s",
+          c.cameras[0].name);
+    run(VG_DURATION_TOAST);
+
+    /* Delete: the cameras of the channels checked, asked first. */
+    click_chan(1, CH_NUM);
+    CHECK(find("2 checked", 0) && disabled(LV_SYMBOL_EDIT "  Edit") && disabled(LV_SYMBOL_KEYBOARD "  Title"),
+          "two checked: no Edit, no Title");
+    click_text(LV_SYMBOL_CLOSE "  Delete");
+    CHECK(ui_popup_is_open() && find("Delete the cameras of channels 1, 2?", 1), "Delete asks");
+    shot("channels_delete");
+    click_text("Cancel");
+    /* Clear: every camera, asked first. */
+    click_text(LV_SYMBOL_TRASH "  Clear");
+    CHECK(ui_popup_is_open() && find("Clear every channel? The 3 cameras are removed at once.", 0), "Clear asks");
+    shot("channels_clear");
+    click_text("Cancel");
+    config_get(&c);
+    CHECK(c.n_cameras == 3, "nothing deleted (%d)", c.n_cameras);
+    click_chan(0, CH_NUM);
+    click_chan(1, CH_NUM);
+
+    /* The third channel's X, confirmed. */
+    click_chan(2, CH_ICON);
+    CHECK(ui_popup_is_open() && find("Delete the camera of channel 3?", 1), "X asks");
+    lv_obj_t *yes = find_in(lv_layer_top(), "Delete", 0);
+    CHECK(yes, "Delete button in the question");
+    if (yes) {
+        center_of(yes, &x, &y);
         click_at(x, y);
-        CHECK(ui_popup_is_open() && find("Clear channel 3?", 1), "clear question");
-        lv_obj_t *yes = find_in(lv_layer_top(), "Clear", 0);
-        CHECK(yes, "Clear button in the question");
-        if (yes) {
-            center_of(yes, &x, &y);
-            click_at(x, y);
-        }
     }
     config_get(&c);
     CHECK(c.n_cameras == 2, "camera removed (%d left)", c.n_cameras);
@@ -1639,8 +1737,40 @@ static void test_channels_discovery(void)
     center_of(dh, &x, &y);
     click_at(x, y);
     run(100);
-    CHECK(find("1 checked", 0) && find("Replace", 1) && find("Add checked", 1), "one device checked: Add/Replace");
+    CHECK(find("1 checked", 0), "one device checked");
     shot("channels_results");
+
+    /* Show: the devices on a channel, or not, and all again. */
+    lv_obj_t *show = dd_near("Show");
+    CHECK(show, "Show: a drop-down");
+    if (show) {
+        lv_dropdown_set_selected(show, 2);
+        lv_obj_send_event(show, LV_EVENT_VALUE_CHANGED, NULL);
+        run(100);
+        CHECK(find("5 found, 1 shown", 0) && find("On channel 1", 0) && !find("192.168.1.108", 0),
+              "Show Added: the device on channel 1 only; the hidden one unchecked");
+        shot("channels_show_added");
+        lv_dropdown_set_selected(show, 1);
+        lv_obj_send_event(show, LV_EVENT_VALUE_CHANGED, NULL);
+        run(100);
+        CHECK(find("5 found, 4 shown", 0) && !find("On channel 1", 0) && find("192.168.1.108", 0),
+              "Show Not added: the other four");
+        click_text("Select all");
+        run(100);
+        CHECK(find("4 checked", 0), "Select all: the rows shown");
+        shot("channels_show_not_added");
+        click_text("Select all");
+        run(100);
+        lv_dropdown_set_selected(show, 0);
+        lv_obj_send_event(show, LV_EVENT_VALUE_CHANGED, NULL);
+        run(100);
+        CHECK(find("5 found", 0) && find("On channel 1", 0), "Show All");
+    }
+    dh = find("192.168.1.108", 0);
+    if (!dh) return;
+    center_of(dh, &x, &y);
+    click_at(x, y);
+    run(100);
 
     click_text("Change IP...");
     CHECK(find("Change IP: 192.168.1.108", 0) && textarea(0) &&
@@ -1878,7 +2008,8 @@ static void test_same_redacted_urls(void)
     run(300);
     click_text("Main menu");
     click_text("CAMERA");
-    lv_obj_t *edit = find_nth(lv_screen_active(), LV_SYMBOL_EDIT "  Edit", 1);
+    click_chan(1, CH_NUM);
+    lv_obj_t *edit = find(LV_SYMBOL_EDIT "  Edit", 0);
     int x, y;
     center_of(edit, &x, &y);
     click_at(x, y);
@@ -2022,6 +2153,35 @@ static void test_network_pages(void)
     CHECK(!strcmp(g_mg_lte_profile, "rndis-e3372h") && find("next boot", 1), "Use this profile: wlandev");
     g_mg_modem = 0;
     g_mg_lte_profile[0] = 0;
+    nav_to("Ports");
+    lv_obj_t *pw = textarea(0), *pa = textarea(1), *po = textarea(2), *pn = textarea(3);
+    CHECK(pw && pa && po && pn && !strcmp(lv_textarea_get_text(pw), "80") &&
+          !strcmp(lv_textarea_get_text(pa), "8080") && !strcmp(lv_textarea_get_text(po), "8899") &&
+          !strcmp(lv_textarea_get_text(pn), "34567") && find("Listening on 0.0.0.0:80", 1) &&
+          find("Listening on 0.0.0.0:8899", 1) && find("Listening on 0.0.0.0:34567", 1) &&
+          find("Services not available yet", 0) && find("nothing listens on its port", 1),
+          "Ports: web 80, API 8080, ONVIF 8899, NETIP 34567, what each listens on, the RTSP port to come");
+    if (po) lv_textarea_set_text(po, "80");
+    click_text(SAVE);
+    run(100);
+    vigil_config_t pc;
+    config_get(&pc);
+    CHECK(find("cannot both be on port 80", 1) && po && lv_obj_has_state(po, LV_STATE_USER_1) &&
+          pc.onvif_server.port == 8899, "two on port 80: refused, marked, nothing saved");
+    if (po) lv_textarea_set_text(po, "8000");
+    if (pw) lv_textarea_set_text(pw, "8081");
+    if (pn) lv_textarea_set_text(pn, "34570");
+    click_text(SAVE);
+    run(100);
+    config_get(&pc);
+    CHECK(pc.onvif_server.port == 8000 && !strcmp(pc.web.listen, "0.0.0.0:8081") && pc.netip_server.port == 34570 &&
+              find("Ports saved", 1),
+          "Ports saved, the address kept: web %s, ONVIF %d, NETIP %d", pc.web.listen, pc.onvif_server.port,
+          pc.netip_server.port);
+    g_mg_move_failed = 1;
+    run(1100);
+    CHECK(find("could not move to '0.0.0.0:81'", 1), "a failed move: said on the page");
+    g_mg_move_failed = 0;
     nav_to("DDNS");
     CHECK(find("Update now", 1) && find("good 203.0.113.7", 1), "DDNS: the form and the last update");
     lv_obj_t *host = textarea(0);
@@ -2040,6 +2200,32 @@ static void test_network_pages(void)
     click_text("Send test mail");
     run(800);
     CHECK(find("done", 1), "test mail: the job's result");
+    nav_to("QoS");
+    lv_obj_t *qdd = nth_of(&lv_dropdown_class, 0);
+    lv_obj_t *video = textarea(0);
+    CHECK(qdd && lv_dropdown_get_selected(qdd) == 0 && find("Nothing is marked", 1) && !find("Video", 1),
+          "QoS: off, no classes shown");
+    if (qdd) {
+        lv_dropdown_set_selected(qdd, 1);
+        lv_obj_send_event(qdd, LV_EVENT_VALUE_CHANGED, NULL);
+    }
+    run(50);
+    video = textarea(0);
+    CHECK(find("Video", 1) && video && !strcmp(lv_textarea_get_text(video), "34") &&
+          lv_obj_has_state(video, LV_STATE_DISABLED) && find("AF41", 0), "QoS standard: the preset, greyed");
+    if (qdd) {
+        lv_dropdown_set_selected(qdd, 2);
+        lv_obj_send_event(qdd, LV_EVENT_VALUE_CHANGED, NULL);
+    }
+    run(50);
+    if (video) lv_textarea_set_text(video, "46");
+    run(50);
+    CHECK(video && !lv_obj_has_state(video, LV_STATE_DISABLED) && find("EF", 0), "QoS custom: editable, named");
+    click_text(SAVE);
+    run(100);
+    config_get(&c);
+    CHECK(!strcmp(c.qos.type, "custom") && c.qos.video == 46 && c.qos.management == 16,
+          "QoS saved through the store: %s %d %d", c.qos.type, c.qos.video, c.qos.management);
     nav_to("P2P");
     CHECK(find("P2P is not available", 0), "P2P: said so");
     button(BTN_RIGHT);
@@ -2066,10 +2252,32 @@ static void shots_settings(const char *tile, const char *prefix, const char *con
 
 static void shots_network(void)
 {
-    static const char *const items[] = { "Ethernet", "Wi-Fi", "LTE", "DDNS", "UPnP", "SMTP", "Alarm center", "P2P" };
-    shots_settings("NETWORK", "network", items, 8);
+    static const char *const items[] = { "Ethernet", "Wi-Fi", "LTE", "Ports", "DDNS", "UPnP", "SMTP", "Alarm center",
+                                         "QoS", "P2P" };
+    shots_settings("NETWORK", "network", items, (int)(sizeof items / sizeof items[0]));
     g_mg_wifi = 1;
     click_text("NETWORK");
+    nav_to("QoS");
+    for (int t = 1; t <= 2; ++t) {
+        lv_obj_t *qdd = nth_of(&lv_dropdown_class, 0);
+        if (qdd) {
+            lv_dropdown_set_selected(qdd, (uint32_t)t);
+            lv_obj_send_event(qdd, LV_EVENT_VALUE_CHANGED, NULL);
+        }
+        if (t == 2 && textarea(0)) lv_textarea_set_text(textarea(0), "46");
+        shot(t == 1 ? "network-qos-standard" : "network-qos-custom");
+    }
+    click_text("Cancel");
+    run(50);
+    nav_to("Ports");
+    if (textarea(2)) lv_textarea_set_text(textarea(2), "80");
+    click_text(SAVE);
+    shot("network-ports-clash");
+    click_text("Cancel");
+    g_mg_move_failed = 1;
+    run(1100);
+    shot("network-ports-failed");
+    g_mg_move_failed = 0;
     nav_to("Wi-Fi");
     shot("network-wifi-adapter");
     click_text("Scan");
@@ -2571,6 +2779,19 @@ static lv_obj_t *first_tile(void)
     return grid ? lv_obj_get_child(grid, 0) : NULL;
 }
 
+/* The alarm frame on tile `t` (display.alert_frame): shown, in the
+ * theme's alarm colour. */
+static int alarm_frame_shown(lv_obj_t *t)
+{
+    for (uint32_t i = 0; t && i < lv_obj_get_child_count(t); ++i) {
+        lv_obj_t *o = lv_obj_get_child(t, (int32_t)i);
+        if (lv_obj_get_style_border_width(o, 0) == 3 &&
+            lv_color_eq(lv_obj_get_style_border_color(o, 0), lv_color_hex(VG_COLOR_BAD)) && visible(o))
+            return 1;
+    }
+    return 0;
+}
+
 static int put_display(const char *json)
 {
     schema_errors_t e;
@@ -2637,7 +2858,7 @@ static void test_display_pages(void)
     button(BTN_RIGHT);
     click_text("Display");
     CHECK(find("Display", 1) && find("Output", 0) && find("Clock", 0) && find("Camera names", 0) &&
-          find("Status icons", 0) && find("Video", 0), "Display: its five parts");
+          find("Status icons", 0) && find("Video", 0) && find("Tiles", 0), "Display: its six parts");
 
     /* A new resolution, kept: switched, then saved. */
     int sets = g_mode_sets;
@@ -2741,6 +2962,11 @@ static void test_display_pages(void)
     run(300);
     config_get(&c);
     CHECK(!strcmp(c.display.video_aspect, "stretch"), "video aspect saved: %s", c.display.video_aspect);
+    dd_pick(nth_of(&lv_dropdown_class, 0), 2);          /* fill */
+    click_text(SAVE);
+    run(300);
+    config_get(&c);
+    CHECK(!strcmp(c.display.video_aspect, "fill"), "video aspect fill saved: %s", c.display.video_aspect);
     dd_pick(nth_of(&lv_dropdown_class, 0), 0);
     click_text(SAVE);
     run(300);
@@ -2803,6 +3029,49 @@ static void test_display_pages(void)
     CHECK(put_display("{\"clock_position\":\"off\",\"name_position\":\"off\"}") == CONFIG_OK, "no clock");
     CHECK(!osd_clock() && !find("Gate", 0) && icon_shown(first_tile(), &ui_icon_rec),
           "no clock, no names; the icons stay");
+
+    /* The switches: REC off on Status icons; Tiles without lines, with
+     * the alarm frame, which the first tile's events (motion) bring up. */
+    lv_obj_t *t0 = first_tile();
+    CHECK(t0 && lv_obj_get_style_border_width(t0, 0) == 1 && !alarm_frame_shown(t0),
+          "by default: a line around the tile, no alarm frame");
+    button(BTN_RIGHT);
+    click_text("Display");
+    click_text("Status icons");
+    lv_obj_t *rec_sw = nth_of(&lv_switch_class, 0), *ev_sw = nth_of(&lv_switch_class, 1);
+    CHECK(find("REC", 0) && find("Alarms", 0) && rec_sw && ev_sw && lv_obj_has_state(rec_sw, LV_STATE_CHECKED) &&
+              lv_obj_has_state(ev_sw, LV_STATE_CHECKED),
+          "Status icons: REC and Alarms, both on");
+    if (rec_sw) click_obj(rec_sw);
+    click_text(SAVE);
+    run(300);
+    click_text("Tiles");
+    lv_obj_t *div_sw = nth_of(&lv_switch_class, 0), *frame_sw = nth_of(&lv_switch_class, 1);
+    CHECK(find("Lines between tiles", 0) && find("Alarm frame", 0) && div_sw && frame_sw &&
+              lv_obj_has_state(div_sw, LV_STATE_CHECKED) && !lv_obj_has_state(frame_sw, LV_STATE_CHECKED),
+          "Tiles: lines on, the alarm frame off");
+    if (div_sw) click_obj(div_sw);
+    if (frame_sw) click_obj(frame_sw);
+    click_text(SAVE);
+    run(300);
+    config_get(&c);
+    CHECK(!c.display.rec_icon && c.display.alarm_icons && !c.display.tile_dividers && c.display.alert_frame,
+          "switches saved: %d %d %d %d", c.display.rec_icon, c.display.alarm_icons, c.display.tile_dividers,
+          c.display.alert_frame);
+    button(BTN_RIGHT);
+    CHECK(!ui_page_top(), "back on the live view");
+    t0 = first_tile();
+    CHECK(t0 && !icon_shown(t0, &ui_icon_rec) && icon_shown(t0, &ui_icon_ev_motion), "no REC, the motion icon");
+    CHECK(t0 && lv_obj_get_style_border_width(t0, 0) == 0, "no line around the tile");
+    int seen = 0;
+    for (int i = 0; i < 8; ++i) {
+        run(250);
+        seen |= alarm_frame_shown(first_tile()) ? 1 : 2;
+    }
+    CHECK(seen == 3, "the alarm frame on the first tile, blinking (%d)", seen);
+    CHECK(put_display("{\"alarm_icons\":false}") == CONFIG_OK && !icon_shown(first_tile(), &ui_icon_ev_motion) &&
+              !alarm_frame_shown(first_tile()),
+          "alarm icons off; the frame back off with the defaults");
     CHECK(put_display("{}") == CONFIG_OK, "the defaults");
     clk = osd_clock();
     CHECK(clk && lv_obj_get_style_bg_opa(clk, 0) == LV_OPA_TRANSP, "an outlined clock by default");
@@ -3135,24 +3404,29 @@ static void test_keyboard_settings(void)
     config_get(&c);
     CHECK(!strcmp(c.record.path, "/tmp/Kbd"), "nothing saved");
 
-    /* The Channels page: Tab to the channel table, Enter edits, Space
-     * toggles, Delete asks to clear. */
+    /* The Channels page: Tab to the channel table, Space and Enter check
+     * a channel, E edits it, Delete asks to delete its camera. */
     key(KEY_LEFT);
     key(KEY_LEFT);
     key(KEY_ENTER);
     CHECK(find("Search settings", 1), "Left, Left: CAMERA, the Channels page");
     CHECK(c.n_cameras == 1, "one camera left by the steps before");
-    lv_obj_t *chans = NULL;
-    for (int i = 0; i < 20 && !chans; ++i) {
+    lv_obj_t *chans = NULL, *rows = chan_rows();
+    int saw_show = 0, saw_clear = 0;
+    for (int i = 0; i < 40 && !chans; ++i) {
         key(KEY_TAB);
         lv_obj_t *f = focused();
-        if (f && lv_obj_has_flag(f, UI_FLAG_ARROWS) && lv_obj_get_child_count(f) &&
-            find_in(lv_obj_get_child(f, 0), "Edit", 1))
-            chans = f;                          /* the rows of channels: Edit on the first */
+        if (f && f == dd_near("Show")) saw_show = 1;
+        if (f && f == lv_obj_get_parent(find(LV_SYMBOL_TRASH "  Clear", 0))) saw_clear = 1;
+        if (f && f == rows) chans = f;
     }
-    CHECK(chans, "Tab reaches the channel table");
+    CHECK(chans && saw_show && saw_clear, "Tab: Show, the channel pane's Clear, the channel table");
+    key(KEY_SPACE);
+    CHECK(find("1 checked", 0), "Space checks the channel");
     key(KEY_ENTER);
-    CHECK(find("Cameras: 1", 0), "Enter: the camera's form");
+    CHECK(!find("1 checked", 0), "Enter unchecks it");
+    key(KEY_E);
+    CHECK(find("Cameras: 1", 0), "E: the camera's form");
     lv_obj_t *sw = NULL;
     key(KEY_TAB);
     key(KEY_TAB);
@@ -3168,7 +3442,7 @@ static void test_keyboard_settings(void)
     key(KEY_ESC);
     CHECK(find("Search settings", 1) && !ui_popup_is_open(), "Esc: unchanged, back on the Channels page");
     key(KEY_DELETE);
-    CHECK(ui_popup_is_open() && find("Clear channel 1?", 1), "Delete on a row asks");
+    CHECK(ui_popup_is_open() && find("Delete the camera of channel 1?", 1), "Delete on a row asks");
     key(KEY_ESC);
     CHECK(!ui_popup_is_open(), "Esc: not cleared");
     key(KEY_ESC);
@@ -3250,12 +3524,17 @@ static void test_empty_slot(void)
     run(100);
     CHECK(find("Channel 4: check a device above", 1), "\"+\": Channels, for channel 4");
     shot("tile_add_channels");
-    /* The toolbar's Add, then the empty channels' (2, 3, 4). */
-    lv_obj_t *add4 = find_nth(lv_screen_active(), LV_SYMBOL_PLUS "  Add", 3);
-    CHECK(add4 != NULL, "channel 4: Add");
-    if (!add4) return;
-    center_of(add4, &x, &y);
-    click_at(x, y);
+    /* Its row's "+", nothing checked above: Manual add, for channel 4. */
+    click_chan(3, CH_ICON);
+    lv_obj_t *dd = dd_near("Channel");
+    char sel[32] = "";
+    if (dd) lv_dropdown_get_selected_str(dd, sel, sizeof sel);
+    CHECK(find("Manual add", 0) && !strcmp(sel, "4  empty"), "+: Manual add, channel 4 chosen (%s)", sel);
+    button(BTN_RIGHT);
+    run(100);
+    /* Checked, Edit: the camera form for it. */
+    click_chan(3, CH_NUM);
+    click_text(LV_SYMBOL_EDIT "  Edit");
     run(100);
     CHECK(find("Cameras 4: new", 0), "the form for a camera on channel 4");
     lv_obj_t *url = textarea(0);
@@ -3289,7 +3568,8 @@ static void test_empty_slot(void)
           c.n_cameras);
     button(BTN_RIGHT);
     run(VG_DURATION_TOAST);
-    CHECK(find("Channel 4: check a device above", 1), "back on Channels");
+    CHECK(find("Search settings", 1) && find("1 checked", 0) && find("10.1.1.4", 0),
+          "back on Channels, channel 4 still checked, its camera there");
     button(BTN_RIGHT);
     run(100);
 
@@ -3709,6 +3989,9 @@ static void shots_display(void)
     shot("display-icons");
     click_text("Video");
     shot("display-video");
+    lv_dropdown_open(nth_of(&lv_dropdown_class, 0));
+    shot("display-video-list");
+    lv_dropdown_close(nth_of(&lv_dropdown_class, 0));
     click_text("Output");
 }
 
@@ -3844,7 +4127,8 @@ static int shots_4(void)
     shot("channels-search-settings");
     button(BTN_RIGHT);
     run(VG_DURATION_TOAST + 100);
-    lv_obj_t *edit = find("Edit", 1);
+    click_chan(0, CH_NUM);
+    lv_obj_t *edit = find(LV_SYMBOL_EDIT "  Edit", 0);
     if (edit) {
         center_of(edit, &x, &y);
         click_at(x, y);

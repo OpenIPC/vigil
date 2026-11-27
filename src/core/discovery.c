@@ -22,6 +22,7 @@
 #include "cJSON.h"
 #include "config.h"
 #include "discovery.h"
+#include "qos.h"
 #include "log.h"
 #include "schema.h"
 #include "source.h"
@@ -43,8 +44,6 @@ static unsigned        g_prefer[3] = { DISC_NETIP, DISC_ONVIF, DISC_DHIP };
 static disc_scan_opts_t g_last;      /* the last scan's interfaces, targets and ports */
 static unsigned        g_gen;        /* the table's generation: moves with every change */
 static unsigned        g_scan;       /* the id of the last scan job */
-static char            g_self_sn[48];   /* our own NETIP server (disc_set_self), under g_lock */
-static int             g_self_port;
 
 static time_t mono(void)
 {
@@ -64,6 +63,39 @@ static void wipe(void *p, size_t n)
 {
     volatile unsigned char *w = p;
     while (n--) *w++ = 0;
+}
+
+/* This recorder's own servers answer our searches too, and those answers
+ * are not a camera found: the ONVIF server by its WS-Discovery endpoint,
+ * the NETIP server by the serial and TCP port its search answer gives.
+ * Under g_lock. */
+static char g_self_uuid[64];
+static char g_self_sn[48];
+static int  g_self_port;
+
+void disc_set_self(const char *uuid)
+{
+    pthread_mutex_lock(&g_lock);
+    snprintf(g_self_uuid, sizeof g_self_uuid, "%s", uuid ? uuid : "");
+    pthread_mutex_unlock(&g_lock);
+}
+
+void disc_set_self_netip(const char *serial, int port)
+{
+    pthread_mutex_lock(&g_lock);
+    snprintf(g_self_sn, sizeof g_self_sn, "%s", serial ? serial : "");
+    g_self_port = port;
+    pthread_mutex_unlock(&g_lock);
+}
+
+static int is_self(const disc_device_t *d)
+{
+    pthread_mutex_lock(&g_lock);
+    int self = (g_self_uuid[0] && d->uuid[0] && !strcmp(g_self_uuid, d->uuid)) ||
+               (g_self_sn[0] && (d->protos & DISC_NETIP) && !strcmp(d->serial, g_self_sn) &&
+                d->netip_port == g_self_port);
+    pthread_mutex_unlock(&g_lock);
+    return self;
 }
 
 void disc_set_max_channels(int n)
@@ -388,6 +420,7 @@ static int udp_socket(int port)
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof one);
     setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &one, sizeof one);
+    qos_mark(fd, QOS_MANAGEMENT, 0);    /* the searches: short-lived, not tracked */
     if (port) setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port) };
     if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) {
@@ -553,24 +586,6 @@ static void scanner_send(scanner_t *s, uint32_t only)
 
 /* Read what has arrived for up to `ms`; each device heard goes into the
  * table (and to `heard`, if given: called with each parsed device). */
-void disc_set_self(const char *serial, int port)
-{
-    pthread_mutex_lock(&g_lock);
-    snprintf(g_self_sn, sizeof g_self_sn, "%s", serial ? serial : "");
-    g_self_port = port;
-    pthread_mutex_unlock(&g_lock);
-}
-
-/* Our own NETIP server's answer: the serial it gives and its port. */
-static int is_self(const disc_device_t *d)
-{
-    pthread_mutex_lock(&g_lock);
-    int self = g_self_sn[0] && d->protos == DISC_NETIP && !strcmp(d->serial, g_self_sn) &&
-               d->netip_port == g_self_port;
-    pthread_mutex_unlock(&g_lock);
-    return self;
-}
-
 static void scanner_listen(scanner_t *s, int ms, void (*heard)(const disc_device_t *, void *), void *u)
 {
     long long end = mono_ms() + ms;
@@ -598,7 +613,7 @@ static void scanner_listen(scanner_t *s, int ms, void (*heard)(const disc_device
                 int ok = map[k] == 0 ? disc_netip_parse(buf, (size_t)r, &d)
                        : map[k] == 1 ? disc_onvif_parse((const char *)buf, (size_t)r, &d)
                                      : disc_dhip_parse(buf, (size_t)r, &d);
-                if (ok < 0 || (map[k] == 0 && is_self(&d))) continue;
+                if (ok < 0 || is_self(&d)) continue;
                 /* A reply from a unicast target (or through NAT) gives the
                  * address that answered; devices on another subnet still
                  * report their own. */

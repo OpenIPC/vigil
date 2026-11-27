@@ -34,6 +34,8 @@ extern const lv_image_dsc_t ui_icon_nav_upnp;    /* 22 px, router.svg */
 extern const lv_image_dsc_t ui_icon_nav_smtp;    /* 22 px, mail.svg */
 extern const lv_image_dsc_t ui_icon_nav_alarm;    /* 22 px, bell-ringing.svg */
 extern const lv_image_dsc_t ui_icon_nav_p2p;    /* 22 px, cloud-off.svg */
+extern const lv_image_dsc_t ui_icon_nav_qos;    /* 22 px, traffic-lights.svg */
+extern const lv_image_dsc_t ui_icon_nav_ports;    /* 22 px, plug-connected.svg */
 extern const lv_image_dsc_t ui_icon_nav_basic;    /* 22 px, device-floppy.svg */
 extern const lv_image_dsc_t ui_icon_nav_schedule;    /* 22 px, calendar-time.svg */
 extern const lv_image_dsc_t ui_icon_nav_disks;    /* 22 px, server-2.svg */
@@ -48,5 +50,6 @@ extern const lv_image_dsc_t ui_icon_nav_clock;    /* 22 px, clock.svg */
 extern const lv_image_dsc_t ui_icon_nav_names;    /* 22 px, device-cctv.svg */
 extern const lv_image_dsc_t ui_icon_nav_icons;    /* 22 px, activity.svg */
 extern const lv_image_dsc_t ui_icon_nav_aspect;    /* 22 px, aspect-ratio.svg */
+extern const lv_image_dsc_t ui_icon_nav_tiles;    /* 22 px, layout-grid.svg */
 
 #endif /* ICONS_H */

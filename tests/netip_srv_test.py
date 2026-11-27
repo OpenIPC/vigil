@@ -423,6 +423,39 @@ def run(vigild, h264, h265, tmp, procs):
     rid, r = c.login("viewer", "secret")
     check(r.get("Ret") == 205, "after five wrong logins: locked out, 205 (%s)" % r)
 
+    # ---- the port moves at once; a taken one is refused before it is saved
+    taken = socket.socket()
+    taken.bind(("0.0.0.0", 0))
+    taken.listen(1)
+    st, _ = api(api_port, "PUT", "/api/v1/config/netip_server",
+                {"enabled": True, "port": taken.getsockname()[1]})
+    check(st == 400, "a port another program holds: refused (%s)" % st)
+    taken.close()
+    new = free_port()
+    st, _ = api(api_port, "PUT", "/api/v1/config/netip_server", {"enabled": True, "port": new})
+    moved = False
+    end = time.time() + 5
+    while time.time() < end and not moved:
+        try:
+            Conn(new).close()
+            moved = True
+        except OSError:
+            time.sleep(0.2)
+    try:
+        Conn(port).close()
+        old_open = True
+    except OSError:
+        old_open = False
+    check(st == 200 and moved and not old_open, "moved to port %d at once, the old one closed (%s)" % (new, st))
+    st, _ = api(api_port, "PUT", "/api/v1/config/netip_server", {"enabled": False, "port": new})
+    time.sleep(1.5)
+    try:
+        Conn(new).close()
+        off = False
+    except OSError:
+        off = True
+    check(st == 200 and off, "turned off: nothing listens (%s)" % st)
+
 
 if __name__ == "__main__":
     main()

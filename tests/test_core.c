@@ -11,6 +11,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <math.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -32,6 +33,7 @@
 #include "disc_proto.h"
 #include "net.h"
 #include "netip_proto.h"
+#include "qos.h"
 #include "rec_place.h"
 #include "rec_sched.h"
 #include "rtp_depay.h"
@@ -283,6 +285,75 @@ static void test_aspect_scaled(void)
         CHECK(ow == T[i].ow && oh == T[i].oh, "%ux%u for %ux%u: %ux%u, not %ux%u", T[i].sw, T[i].sh, T[i].ww, T[i].wh,
               ow, oh, T[i].ow, T[i].oh);
     }
+}
+
+static void test_aspect_fill(void)
+{
+    /* The picture over the whole tile: the rectangle it takes. */
+    static const struct { vg_rect_t tile; unsigned aw, ah; vg_rect_t want; } V[] = {
+        { { 0, 0, 1280, 720 }, 4, 3, { 0, -120, 1280, 960 } },       /* 4:3 in 16:9: over top and bottom */
+        { { 0, 0, 1280, 720 }, 32, 9, { -640, 0, 2560, 720 } },      /* wider: over the sides */
+        { { 640, 360, 640, 360 }, 16, 9, { 640, 360, 640, 360 } },   /* the same shape: the tile */
+        { { 640, 360, 640, 360 }, 4, 3, { 640, 300, 640, 480 } },
+        { { 0, 0, 1280, 720 }, 0, 0, { 0, 0, 1280, 720 } },
+    };
+    for (size_t i = 0; i < sizeof V / sizeof V[0]; ++i) {
+        vg_rect_t r = aspect_cover(&V[i].tile, (vg_ratio_t){ V[i].aw, V[i].ah });
+        CHECK(rect_eq(r, V[i].want), "cover %u:%u over %dx%d: %d,%d %dx%d", V[i].aw, V[i].ah, V[i].tile.w,
+              V[i].tile.h, r.x, r.y, r.w, r.h);
+    }
+
+    /* The part of the picture that shows, in its pixels. */
+    static const struct { unsigned sw, sh, aw, ah, tw, th, align; vg_rect_t want; } K[] = {
+        { 1920, 1440, 4, 3, 1920, 1080, 2, { 0, 180, 1920, 1080 } },  /* 4:3 full screen at 1080p */
+        { 704, 576, 4, 3, 640, 360, 2, { 0, 72, 704, 432 } },         /* anamorphic 4:3 D1 in a 16:9 tile */
+        { 704, 576, 16, 9, 480, 360, 2, { 88, 0, 528, 576 } },        /* ... 16:9 D1 in a 4:3 tile */
+        { 704, 576, 16, 9, 640, 360, 2, { 0, 0, 704, 576 } },         /* the tile's shape: all of it */
+        { 2592, 1944, 0, 0, 1280, 720, 2, { 0, 242, 2592, 1458 } },   /* 0:0: the size's own shape */
+        { 960, 720, 4, 3, 1280, 720, 8, { 0, 88, 960, 544 } },        /* to multiples of 8 */
+        { 1920, 1080, 16, 9, 0, 0, 2, { 0, 0, 1920, 1080 } },         /* no tile: all of it */
+    };
+    for (size_t i = 0; i < sizeof K / sizeof K[0]; ++i) {
+        vg_rect_t r = aspect_crop(K[i].sw, K[i].sh, (vg_ratio_t){ K[i].aw, K[i].ah }, K[i].tw, K[i].th, K[i].align);
+        CHECK(rect_eq(r, K[i].want), "crop %ux%u %u:%u for %ux%u: %d,%d %dx%d", K[i].sw, K[i].sh, K[i].aw, K[i].ah,
+              K[i].tw, K[i].th, r.x, r.y, r.w, r.h);
+    }
+
+    /* Every camera size and shape, every layout, every output: inside the
+     * picture, even, centred, all of it one way, and shown at the camera's
+     * shape it is the tile's shape, to within the rounding to 2 px. */
+    static const unsigned sizes[][2] = { { 2592, 1944 }, { 2560, 1440 }, { 1920, 1080 }, { 800, 448 }, { 704, 576 } };
+    static const vg_ratio_t shapes[] = { { 0, 0 }, { 4, 3 }, { 16, 9 }, { 32, 9 }, { 1, 1 } };
+    static const unsigned outs[][2] = { { 1280, 720 }, { 1920, 1080 }, { 1280, 1024 }, { 1440, 900 } };
+    int bad = 0, cases = 0;
+    for (size_t o = 0; o < 4; ++o)
+        for (int n = 1; n <= 4; ++n)
+            for (int i = 0; i < n * n; ++i) {
+                vg_rect_t ui = cell(n, i, 1280, 720), t = aspect_map(&ui, 1280, 720, outs[o][0], outs[o][1], 2);
+                for (size_t z = 0; z < 5; ++z)
+                    for (size_t k = 0; k < 5; ++k) {
+                        unsigned sw = sizes[z][0], sh = sizes[z][1];
+                        vg_ratio_t a = shapes[k].w ? shapes[k] : (vg_ratio_t){ sw, sh };
+                        vg_rect_t r = aspect_crop(sw, sh, shapes[k], (unsigned)t.w, (unsigned)t.h, 2);
+                        ++cases;
+                        int in = r.x >= 0 && r.y >= 0 && r.x + r.w <= (int)sw && r.y + r.h <= (int)sh && r.w > 0 &&
+                                 r.h > 0 && !(r.x & 1) && !(r.y & 1) && !(r.w & 1) && !(r.h & 1);
+                        int lm = r.x, rm = (int)sw - r.x - r.w, tm = r.y, bm = (int)sh - r.y - r.h;
+                        int centred = abs(lm - rm) <= 2 && abs(tm - bm) <= 2;
+                        int full = r.w == (int)sw || r.h == (int)sh;
+                        /* shown at a: (r.w / sw * a.w) : (r.h / sh * a.h) against t.w : t.h */
+                        double shown = (double)r.w * a.w * sh / ((double)r.h * a.h * sw), want = (double)t.w / t.h;
+                        int cut = r.w < (int)sw ? r.w : r.h;
+                        int shape = fabs(shown / want - 1) <= 2.0 / cut;
+                        if (!(in && centred && full && shape)) {
+                            if (bad < 10)
+                                fprintf(stderr, "  %ux%u %u:%u %dx%d #%d out %ux%u: %d,%d %dx%d for %dx%d\n", sw,
+                                        sh, a.w, a.h, n, n, i, outs[o][0], outs[o][1], r.x, r.y, r.w, r.h, t.w, t.h);
+                            ++bad;
+                        }
+                    }
+            }
+    CHECK(bad == 0, "%d of %d crops wrong", bad, cases);
 }
 
 /* ---- au_norm --------------------------------------------------------------- */
@@ -1706,23 +1777,27 @@ void hal_dec_close(int ch)
     pthread_mutex_unlock(&g_dec_lock);
 }
 
-static vg_ratio_t g_aspect_at[CHANNEL_MAX]; /* hal_display_set_aspect, last */
-static int        g_aspect_sets[CHANNEL_MAX];
-void hal_display_set_aspect(int ch, unsigned w, unsigned h)
+static vg_ratio_t  g_aspect_at[CHANNEL_MAX]; /* hal_display_set_aspect, last */
+static vg_aspect_t g_aspect_how[CHANNEL_MAX];
+static int         g_aspect_sets[CHANNEL_MAX];
+void hal_display_set_aspect(int ch, unsigned w, unsigned h, vg_aspect_t how)
 {
     pthread_mutex_lock(&g_dec_lock);
     g_aspect_at[ch] = (vg_ratio_t){ w, h };
+    g_aspect_how[ch] = how;
     ++g_aspect_sets[ch];
     pthread_mutex_unlock(&g_dec_lock);
 }
 
-static int aspect_now(int ch, unsigned w, unsigned h)
+static int aspect_is(int ch, unsigned w, unsigned h, vg_aspect_t how)
 {
     pthread_mutex_lock(&g_dec_lock);
-    int v = g_aspect_sets[ch] && g_aspect_at[ch].w == w && g_aspect_at[ch].h == h;
+    int v = g_aspect_sets[ch] && g_aspect_at[ch].w == w && g_aspect_at[ch].h == h && g_aspect_how[ch] == how;
     pthread_mutex_unlock(&g_dec_lock);
     return v;
 }
+
+static int aspect_now(int ch, unsigned w, unsigned h) { return aspect_is(ch, w, h, VG_ASPECT_FIT); }
 
 static vg_rect_t g_tile_at[CHANNEL_MAX];    /* w == 0: cleared */
 static int       g_tile_sets[CHANNEL_MAX], g_tile_clears[CHANNEL_MAX];
@@ -2379,7 +2454,8 @@ static void test_stream_tap(void)
 
 /* A 16:9 camera whose sub-stream is anamorphic D1 (704x576, claiming square
  * pixels): the sub-stream is shown at the main stream's 16:9, before and
- * after a switch to full screen; stretch, at once 0:0. */
+ * after a switch to full screen; stretch, at once 0:0; fill, at once at
+ * 16:9. */
 static void test_channel_aspect(void)
 {
     int port = cam_start("majestic_1080p.h265", "testsrc_704x576.h264");
@@ -2396,9 +2472,11 @@ static void test_channel_aspect(void)
     WAIT_FOR(view_is(0, "sub", 704) && aspect_now(0, 16, 9), 6000);
     CHECK(view_is(0, "sub", 704) && aspect_now(0, 16, 9), "the D1 sub-stream at the main stream's 16:9 (%u:%u)",
           g_aspect_at[0].w, g_aspect_at[0].h);
-    channels_set_stretch(1);
-    CHECK(aspect_now(0, 0, 0), "stretch: at once");
-    channels_set_stretch(0);
+    channels_set_aspect(VG_ASPECT_STRETCH);
+    CHECK(aspect_is(0, 0, 0, VG_ASPECT_STRETCH), "stretch: at once");
+    channels_set_aspect(VG_ASPECT_FILL);
+    CHECK(aspect_is(0, 16, 9, VG_ASPECT_FILL), "fill: at once, at the main stream's 16:9");
+    channels_set_aspect(VG_ASPECT_FIT);
     CHECK(aspect_now(0, 16, 9), "fit again");
     channels_set_tiles(full);
     WAIT_FOR(view_is(0, "main", 1920), 5000);
@@ -3039,6 +3117,215 @@ static void test_secrets(void)
 }
 
 /* display: the output mode and what the live view draws over the video. */
+/* ---- QoS (DSCP marking) ------------------------------------------------------------- */
+
+static int sock_tos(int fd)
+{
+    int v = -1;
+    socklen_t l = sizeof v;
+    return getsockopt(fd, IPPROTO_IP, IP_TOS, &v, &l) < 0 ? -1 : v;
+}
+
+static void test_qos_config(void)
+{
+    CHECK(qos_tos(0) == 0 && qos_tos(34) == 136 && qos_tos(46) == 184 && qos_tos(63) == 252 &&
+          qos_tos(64) == -1 && qos_tos(-1) == -1, "DSCP -> TOS: << 2, ECN bits 0, 0..63 only");
+    CHECK(!strcmp(qos_dscp_name(34), "AF41") && !strcmp(qos_dscp_name(46), "EF") &&
+          !strcmp(qos_dscp_name(16), "CS2") && !strcmp(qos_dscp_name(0), "CS0") && !qos_dscp_name(5),
+          "DSCP names");
+
+    vigil_config_t c;
+    config_defaults(&c);
+    int d[QOS_CLASSES];
+    config_to_qos(&c, d);
+    CHECK(!strcmp(c.qos.type, "off") && !d[QOS_VIDEO] && !d[QOS_MANAGEMENT] && !d[QOS_CAMERA] && !d[QOS_ALARM],
+          "qos defaults: off, DSCP 0 everywhere");
+    snprintf(c.qos.type, sizeof c.qos.type, "standard");
+    c.qos.video = 7;                    /* ignored unless custom */
+    config_to_qos(&c, d);
+    CHECK(d[QOS_VIDEO] == 34 && d[QOS_MANAGEMENT] == 16 && d[QOS_CAMERA] == 34 && d[QOS_ALARM] == 18,
+          "standard: AF41, CS2, AF41, AF21: %d %d %d %d", d[0], d[1], d[2], d[3]);
+    snprintf(c.qos.type, sizeof c.qos.type, "custom");
+    c.qos.management = 0;
+    c.qos.camera = 63;
+    config_to_qos(&c, d);
+    CHECK(d[QOS_VIDEO] == 7 && d[QOS_MANAGEMENT] == 0 && d[QOS_CAMERA] == 63 && d[QOS_ALARM] == 18,
+          "custom: the fields");
+
+    const schema_section_t *sec = schema_section(&config_schema, "qos");
+    schema_errors_t e = { 0 };
+    cJSON *j = cJSON_Parse("{\"type\":\"custom\",\"video\":64}");
+    CHECK(sec && schema_section_from_json(&config_schema, sec, j, &c, 1, &e) < 0 &&
+          !strcmp(e.e[0].path, "qos.video"), "video 64: refused (%s %s)", e.n ? e.e[0].path : "", e.n ? e.e[0].msg : "");
+    cJSON_Delete(j);
+    memset(&e, 0, sizeof e);
+    j = cJSON_Parse("{\"type\":\"custom\",\"alarm\":-1}");
+    CHECK(sec && schema_section_from_json(&config_schema, sec, j, &c, 1, &e) < 0, "alarm -1: refused");
+    cJSON_Delete(j);
+    memset(&e, 0, sizeof e);
+    j = cJSON_Parse("{\"type\":\"wfq\"}");
+    CHECK(sec && schema_section_from_json(&config_schema, sec, j, &c, 1, &e) < 0, "an unknown type: refused");
+    cJSON_Delete(j);
+    memset(&e, 0, sizeof e);
+    j = cJSON_Parse("{\"type\":\"custom\",\"video\":46,\"management\":0,\"camera\":63}");
+    CHECK(sec && schema_section_from_json(&config_schema, sec, j, &c, 1, &e) == 0 && c.qos.video == 46 &&
+          c.qos.camera == 63 && c.qos.alarm == 18, "custom 46/0/63: accepted, alarm its default");
+    cJSON_Delete(j);
+}
+
+/* What qos_set and the markers do to real sockets: read back with
+ * getsockopt(IP_TOS). */
+static void test_qos_sockets(void)
+{
+    int l = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    socklen_t al = sizeof a;
+    if (l < 0 || bind(l, (struct sockaddr *)&a, sizeof a) < 0 || listen(l, 4) < 0 ||
+        getsockname(l, (struct sockaddr *)&a, &al) < 0) {
+        fprintf(stderr, "qos socket test: no listener, skipped\n");
+        return;
+    }
+    int port = ntohs(a.sin_port);
+    int dscp[QOS_CLASSES] = { [QOS_VIDEO] = 34, [QOS_MANAGEMENT] = 16, [QOS_CAMERA] = 26, [QOS_ALARM] = 18 };
+    qos_set(dscp);
+    CHECK(qos_mark_listeners(port, QOS_MANAGEMENT) == 1 && sock_tos(l) == 64, "the listener: CS2 (TOS %d)",
+          sock_tos(l));
+
+    char err[64];
+    int c = net_connect("127.0.0.1", port, 2000, NULL, err, sizeof err);
+    int s = c >= 0 ? accept(l, NULL, NULL) : -1;
+    CHECK(c >= 0 && sock_tos(c) == 26 << 2, "net_connect: the camera class, AF31 (TOS %d)", sock_tos(c));
+    CHECK(s >= 0 && sock_tos(s) == 64, "accepted: the listener's class (TOS %d)", sock_tos(s));
+
+    /* the server's end found by its peer, as a WebSocket after its upgrade */
+    struct sockaddr_in ca;
+    socklen_t cal = sizeof ca;
+    getsockname(c, (struct sockaddr *)&ca, &cal);
+    CHECK(qos_mark_peer(port, "127.0.0.1", ntohs(ca.sin_port), QOS_VIDEO) == 0 && sock_tos(s) == 34 << 2,
+          "by its peer: video (TOS %d)", sock_tos(s));
+    CHECK(qos_mark_peer(port, "127.0.0.2", ntohs(ca.sin_port), QOS_VIDEO) < 0, "no such peer");
+
+    /* a change marks the tracked ones again, each by its class */
+    int dscp2[QOS_CLASSES] = { [QOS_VIDEO] = 46, [QOS_MANAGEMENT] = 8, [QOS_CAMERA] = 0, [QOS_ALARM] = 0 };
+    int n = qos_set(dscp2);
+    CHECK(n >= 3 && sock_tos(l) == 32 && sock_tos(s) == 184 && sock_tos(c) == 0,
+          "qos_set: %d marked again; listener %d, video %d, camera %d", n, sock_tos(l), sock_tos(s), sock_tos(c));
+
+    /* a closed fd whose number is reused by another socket is left alone */
+    close(c);
+    int u = socket(AF_INET, SOCK_DGRAM, 0);
+    CHECK(u == c || u != c, "(fd %d reused as %d)", c, u);
+    int dscp3[QOS_CLASSES] = { [QOS_CAMERA] = 10 };
+    qos_set(dscp3);
+    CHECK(u != c || sock_tos(u) == 0, "a reused fd: not marked (TOS %d)", sock_tos(u));
+
+    /* IPv6: the traffic class */
+    int s6 = socket(AF_INET6, SOCK_STREAM, 0);
+    if (s6 >= 0) {
+        int tc = -1;
+        socklen_t tl = sizeof tc;
+        CHECK(qos_apply(s6, 46) == 0 && getsockopt(s6, IPPROTO_IPV6, IPV6_TCLASS, &tc, &tl) == 0 && tc == 184,
+              "IPv6: IPV6_TCLASS %d", tc);
+        close(s6);
+    }
+    CHECK(qos_apply(l, 64) < 0, "64: refused");
+    int zero[QOS_CLASSES] = { 0 };
+    qos_set(zero);
+    qos_forget(l);
+    if (u >= 0) close(u);
+    if (s >= 0) close(s);
+    close(l);
+}
+
+/* ---- ports of vigild's servers ---------------------------------------------------- */
+
+static char g_lc_what[8], g_lc_listen[64];
+static int fake_listen_check(const char *what, const char *listen, char *err, size_t cap)
+{
+    snprintf(g_lc_what, sizeof g_lc_what, "%s", what);
+    snprintf(g_lc_listen, sizeof g_lc_listen, "%s", listen);
+    if (config_listen_port(listen) == 81) {
+        snprintf(err, cap, "port 81 is in use");
+        return -1;
+    }
+    return 0;
+}
+
+static void test_ports(void)
+{
+    CHECK(config_listen_port("0.0.0.0:80") == 80 && config_listen_port("8080") == 8080 &&
+          config_listen_port("") == 0 && config_listen_port("x") == -1 && config_listen_port("1.2.3.4:") == -1,
+          "the port of a listen setting");
+    vigil_config_t c;
+    config_defaults(&c);
+    schema_errors_t e = { 0 };
+    CHECK(c.rtsp_server.port == 554 && c.onvif_server.port == 8899 && c.netip_server.port == 34567 &&
+          config_check_ports(&c, &e) == 0, "defaults: 80, 8080, 554, 8899, 34567, no clash");
+    c.onvif_server.port = 80;
+    CHECK(config_check_ports(&c, &e) < 0 && !strcmp(e.e[0].path, "onvif_server.port") &&
+          strstr(e.e[0].msg, "web.listen"), "ONVIF on 80: the web server's (%s)", e.n ? e.e[0].msg : "");
+    config_defaults(&c);
+    memset(&e, 0, sizeof e);
+    snprintf(c.api.listen, sizeof c.api.listen, "554");
+    CHECK(config_check_ports(&c, &e) < 0 && !strcmp(e.e[0].path, "rtsp_server.port"), "API on 554: RTSP's");
+    config_defaults(&c);
+    memset(&e, 0, sizeof e);
+    c.web.listen[0] = 0;
+    c.netip_server.port = 80;
+    CHECK(config_check_ports(&c, &e) == 0, "an empty web.listen holds no port");
+
+    /* through the store: a clash, a listen the check refuses, then a good one */
+    char dir[] = "/tmp/vigil-ports-XXXXXX", path[128];
+    if (!mkdtemp(dir)) return;
+    snprintf(path, sizeof path, "%s/vigil.yaml", dir);
+    write_file(path, "web:\n  listen: \"0.0.0.0:80\"\n");
+    config_init(path);
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("netip_server", "{\"port\":80}", 11, &e) == CONFIG_EINVAL && e.n &&
+          !strcmp(e.e[0].path, "netip_server.port"), "PUT NETIP onto the web server's port: refused");
+    config_set_listen_check(fake_listen_check);
+    memset(&e, 0, sizeof e);
+    const char *w81 = "{\"listen\":\"0.0.0.0:81\"}";
+    CHECK(config_put_json("web", w81, strlen(w81), &e) == CONFIG_EINVAL && !strcmp(e.e[0].path, "web.listen") &&
+          strstr(e.e[0].msg, "in use") && !strcmp(g_lc_what, "web"), "web.listen onto a port in use: refused, why");
+    const char *o81 = "{\"enabled\":true,\"port\":81}", *o81off = "{\"enabled\":false,\"port\":81}";
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("onvif_server", o81, strlen(o81), &e) == CONFIG_EINVAL &&
+          !strcmp(e.e[0].path, "onvif_server.port") && !strcmp(g_lc_what, "onvif") && !strcmp(g_lc_listen, "81"),
+          "onvif_server.port onto a port in use: refused (%s)", e.n ? e.e[0].msg : "");
+    g_lc_what[0] = 0;
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("onvif_server", o81off, strlen(o81off), &e) == CONFIG_OK && !g_lc_what[0],
+          "ONVIF off: its port is not tried");
+    g_lc_what[0] = 0;
+    const char *api_same = "{\"listen\":\"0.0.0.0:8080\"}";
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("api", api_same, strlen(api_same), &e) == CONFIG_OK && !g_lc_what[0],
+          "api.listen unchanged: not asked");
+    const char *w82 = "{\"listen\":\"0.0.0.0:82\"}";
+    vigil_config_t now;
+    CHECK(config_put_json("web", w82, strlen(w82), &e) == CONFIG_OK && !strcmp(g_lc_listen, "0.0.0.0:82") &&
+          (config_get(&now), !strcmp(now.web.listen, "0.0.0.0:82")), "web.listen to a free port: saved");
+    config_set_listen_check(NULL);
+
+    /* net_listen_check: a port this process listens on is in use */
+    int l = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    socklen_t al = sizeof a;
+    if (l >= 0 && bind(l, (struct sockaddr *)&a, sizeof a) == 0 && listen(l, 1) == 0 &&
+        getsockname(l, (struct sockaddr *)&a, &al) == 0) {
+        char lst[32], err[160] = "";
+        snprintf(lst, sizeof lst, "127.0.0.1:%d", ntohs(a.sin_port));
+        CHECK(net_listen_check(lst, err, sizeof err) < 0 && strstr(err, "in use"), "a port in use: %s", err);
+        close(l);
+        CHECK(net_listen_check(lst, err, sizeof err) == 0, "free again: %s", err);
+        CHECK(net_listen_check("1.2.3.4:x", err, sizeof err) < 0 && net_listen_check("10.0.0.1x:80", err, sizeof err) < 0,
+              "not listen settings");
+    }
+    unlink(path);
+    rmdir(dir);
+}
+
 static void test_display_config(void)
 {
     vigil_config_t c;
@@ -3048,6 +3335,9 @@ static void test_display_config(void)
           !strcmp(c.display.name_position, "bottom-left") && !strcmp(c.display.name_background, "outline") &&
           !strcmp(c.display.icons_position, "bottom-right") && !strcmp(c.display.icons_background, "outline"),
           "display defaults: 720p60, an outlined clock at the top right, names bottom left, icons bottom right");
+    CHECK(c.display.rec_icon == 1 && c.display.alarm_icons == 1 && c.display.tile_dividers == 1 &&
+              c.display.alert_frame == 0,
+          "display defaults: REC and alarm icons, lines between tiles, no alarm frame");
 
     unsigned w = 0, h = 0, hz = 0;
     CHECK(config_output_mode("1920x1080@50", &w, &h, &hz) == 0 && w == 1920 && h == 1080 && hz == 50,
@@ -3066,7 +3356,10 @@ static void test_display_config(void)
                      "  clock_background: box\n"
                      "  name_position: \"off\"\n"
                      "  icons_position: top-left\n"
-                     "  icons_background: none\n");
+                     "  icons_background: none\n"
+                     "  rec_icon: false\n"
+                     "  tile_dividers: false\n"
+                     "  alert_frame: true\n");
     schema_errors_t e = { 0 };
     CHECK(config_load_file(path, &c, &e) == 0, "display read: %s %s", e.n ? e.e[0].path : "", e.n ? e.e[0].msg : "");
     CHECK(!strcmp(c.display.output, "1920x1080@60") && !strcmp(c.display.clock_position, "bottom-center") &&
@@ -3074,6 +3367,9 @@ static void test_display_config(void)
           !strcmp(c.display.name_position, "off") && !strcmp(c.display.name_size, "medium") &&
           !strcmp(c.display.icons_position, "top-left") && !strcmp(c.display.icons_background, "none"),
           "display as written, the rest defaults");
+    CHECK(!c.display.rec_icon && c.display.alarm_icons && !c.display.tile_dividers && c.display.alert_frame,
+          "display switches as written, alarm_icons by default: %d %d %d %d", c.display.rec_icon,
+          c.display.alarm_icons, c.display.tile_dividers, c.display.alert_frame);
 
     /* written back with its help, and read again the same */
     CHECK(config_save_file(path, &c, err, sizeof err) == 0, "save: %s", err);
@@ -3081,7 +3377,8 @@ static void test_display_config(void)
     CHECK(raw && strstr(raw, "\n# Display: The HDMI/VGA output") && strstr(raw, "\ndisplay:\n") &&
           strstr(raw, "  output: \"1920x1080@60\"\n") && strstr(raw, "  clock_background: box\n") &&
           strstr(raw, "  name_position: \"off\"\n") && strstr(raw, "  icons_background: none\n") &&
-          strstr(raw, "  # Clock background: outline: hard-edged text"),
+          strstr(raw, "  # Clock background: outline: hard-edged text") && strstr(raw, "  rec_icon: false\n") &&
+          strstr(raw, "  alarm_icons: true\n") && strstr(raw, "  alert_frame: true\n"),
           "display in the YAML, with its help:\n%s", raw ? raw : "");
     free(raw);
     vigil_config_t d;
@@ -3098,6 +3395,7 @@ static void test_display_config(void)
         { "display:\n  icons_position: \"off\"\n", "display.icons_position" },
         { "display:\n  clock_size: huge\n", "display.clock_size" },
         { "display:\n  name_background: shadow\n", "display.name_background" },
+        { "display:\n  alert_frame: sometimes\n", "display.alert_frame" },
     };
     for (size_t i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
         write_file(path, bad[i].yaml);
@@ -3154,6 +3452,7 @@ int main(int argc, char **argv)
     test_aspect_ratio();
     test_aspect_fit();
     test_aspect_scaled();
+    test_aspect_fill();
     test_channel_tiles();
     test_channel_decode();
     test_sub_url();
@@ -3170,6 +3469,9 @@ int main(int argc, char **argv)
     test_rec_policies();
     test_secrets();
     test_display_config();
+    test_qos_config();
+    test_qos_sockets();
+    test_ports();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

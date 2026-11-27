@@ -101,6 +101,8 @@ typedef struct {
     int             live;
     unsigned        fps, width, height;
     vg_codec_t      codec;
+    uint64_t        bytes;          /* video received since the last rate (its thread's) */
+    unsigned        kbps;           /* ... over 2 s, under c->lock */
 } sess_t;
 
 struct channel {
@@ -148,6 +150,7 @@ struct channel {
     vg_stream_info_t main_info;
     int             main_known;
     vg_ratio_t      aspect;         /* what the platform was told ... */
+    vg_aspect_t     aspect_how;
     int             aspect_told;    /* ... if anything yet */
     time_t          dec_failed_at;
     unsigned        dec_failed_frees; /* g_dec_frees when it failed */
@@ -174,7 +177,7 @@ static vg_rect_t       g_tiles[CHANNEL_MAX];
 static int             g_have_tiles;
 static int             g_shown_only;   /* hal_caps()->dec_shown_only with a display */
 static unsigned long long g_screen_area; /* 0: unknown, the main stream everywhere */
-static atomic_int      g_stretch;   /* display.video_aspect stretch */
+static atomic_int      g_aspect;    /* display.video_aspect: a vg_aspect_t */
 /* Decoders closed so far: a channel that could not get one (memory, the
  * decoder's channels) tries again as soon as another lets its go. */
 static atomic_uint     g_dec_frees;
@@ -291,6 +294,16 @@ void channels_status(int idx, channel_status_t *st)
         st->width = v->width;
         st->height = v->height;
         st->fps = v->fps;
+        st->main_kbps = c->s[S_MAIN].kbps;
+        st->sub_kbps = sub_up ? sub->kbps : 0;
+        for (int i = 0; i < S_N; ++i) {
+            const sess_t *si = &c->s[i];
+            if (i == S_SUB && !sub_up) continue;
+            st->streams[i].codec = si->codec;
+            st->streams[i].width = si->width;
+            st->streams[i].height = si->height;
+            st->streams[i].fps = si->fps;
+        }
         snprintf(st->view, sizeof st->view, "%s", view_name(holder != VIEW_NONE ? holder : view));
         st->recording = c->rec_on && c->seg.f != NULL;
         st->rec_bytes = c->seg.bytes;
@@ -314,15 +327,16 @@ int channels_count(void)
 /* ---- decoding (under c->dec_lock) ------------------------------------------- */
 
 /* Tell the platform the shape of the picture for `si` (`id` the session
- * whose stream it is), if that changed: the camera's display aspect ratio,
- * or 0:0 to stretch it over the tile. */
+ * whose stream it is) and how it fills the tile, if that changed: the
+ * camera's display aspect ratio (0:0 when stretched over the tile). */
 static void aspect_tell(channel_t *c, const vg_stream_info_t *si, int id)
 {
     if (!hal_caps()->display || c->self_displayed) return;
+    vg_aspect_t how = (vg_aspect_t)atomic_load(&g_aspect);
     vg_ratio_t a = { 0, 0 };
-    if (!atomic_load(&g_stretch))
+    if (how != VG_ASPECT_STRETCH)
         a = aspect_of_camera(si, id == S_SUB, c->main_known ? &c->main_info : NULL);
-    if (c->aspect_told && a.w == c->aspect.w && a.h == c->aspect.h) return;
+    if (c->aspect_told && a.w == c->aspect.w && a.h == c->aspect.h && how == c->aspect_how) return;
     /* With what it came from: a wrong shape on a board is a misread SPS
      * (size, VUI) or a camera that says something odd, and only this tells
      * which. */
@@ -331,13 +345,14 @@ static void aspect_tell(channel_t *c, const vg_stream_info_t *si, int id)
         snprintf(main, sizeof main, "main %ux%u sar %u:%u", c->main_info.width, c->main_info.height,
                  c->main_info.sar_w, c->main_info.sar_h);
     if (a.w)
-        vg_log("CAM%d: picture %u:%u (%s, shown %s %ux%u sar %u:%u)", c->idx + 1, a.w, a.h, main,
-               id == S_SUB ? "sub" : "main", si->width, si->height, si->sar_w, si->sar_h);
+        vg_log("CAM%d: picture %u:%u%s (%s, shown %s %ux%u sar %u:%u)", c->idx + 1, a.w, a.h,
+               how == VG_ASPECT_FILL ? " filled" : "", main, id == S_SUB ? "sub" : "main", si->width, si->height, si->sar_w, si->sar_h);
     else
         vg_log("CAM%d: picture stretched over the tile (%s, shown %s %ux%u)", c->idx + 1, main,
                id == S_SUB ? "sub" : "main", si->width, si->height);
-    hal_display_set_aspect(c->idx, a.w, a.h);
+    hal_display_set_aspect(c->idx, a.w, a.h, how);
     c->aspect = a;
+    c->aspect_how = how;
     c->aspect_told = 1;
 }
 
@@ -369,7 +384,7 @@ static int decoder_ensure(channel_t *c, sess_t *s, vg_codec_t codec)
      * stream's SPS tells: at the start give it a moment, rather than show
      * the (often anamorphic) picture at its own shape first and make the
      * decoder again for the right one a second later. */
-    if (s->id == S_SUB && !c->main_known && !atomic_load(&g_stretch)) {
+    if (s->id == S_SUB && !c->main_known && atomic_load(&g_aspect) != VG_ASPECT_STRETCH) {
         time_t now = time(NULL);
         if (!s->info_at) s->info_at = now;
         if (now - s->info_at < MAIN_SPS_WAIT_SECS) return 0;
@@ -767,6 +782,7 @@ static void on_raw_au(void *user, const vg_au_t *au)
      * packets must not hold off the no-data reconnect. */
     s->last_video = time(NULL);
     ++s->frames_total;
+    s->bytes += au->len;
     if (au->codec != s->norm.codec) {
         au_norm_free(&s->norm);
         au_norm_init(&s->norm, au->codec);
@@ -851,6 +867,7 @@ static void *sess_thread(void *arg)
         time_t sec = time(NULL);
         s->last_video = sec;
         s->frames_total = 0;
+        s->bytes = 0;
         while (!s->stop) {
             int rc = s->src->ops->poll(s->src, on_raw_au, s);
             time_t now = time(NULL);
@@ -876,6 +893,8 @@ static void *sess_thread(void *arg)
                 pthread_mutex_lock(c->lock);
                 s->fps = (s->frames + (unsigned)(now - sec) / 2) / (unsigned)(now - sec);
                 s->frames = 0;
+                s->kbps = (unsigned)(s->bytes * 8 / 1000 / (uint64_t)(now - sec));
+                s->bytes = 0;
                 pthread_mutex_unlock(c->lock);
                 sec = now;
             }
@@ -893,6 +912,7 @@ static void *sess_thread(void *arg)
         pthread_mutex_lock(c->lock);
         if (main) rec_close(c);
         s->fps = 0;
+        s->kbps = 0;
         s->live = 0;
         pthread_mutex_unlock(c->lock);
         /* The next connection starts at a keyframe: nothing to keep. */
@@ -936,6 +956,8 @@ static int sess_start(channel_t *c, int id, const char *url)
     snprintf(s->state, sizeof s->state, "CONNECTING");
     s->live = 0;
     s->fps = s->width = s->height = 0;
+    s->kbps = 0;
+    s->bytes = 0;
     s->codec = VG_CODEC_NONE;
     pthread_mutex_unlock(c->lock);
     stream_tap_present(c->idx, id == S_SUB, 1);
@@ -963,6 +985,7 @@ static void sess_reap(channel_t *c, int id)
     s->thread_up = 0;
     s->live = 0;
     s->fps = 0;
+    s->kbps = 0;
     pthread_mutex_unlock(c->lock);
     source_destroy(s->src);
     s->src = NULL;
@@ -1191,10 +1214,10 @@ void channels_set_screen(unsigned w, unsigned h)
     g_screen_area = (unsigned long long)w * h;
 }
 
-void channels_set_stretch(int stretch)
+void channels_set_aspect(vg_aspect_t how)
 {
     pthread_once(&g_once, locks_init);
-    if (atomic_exchange(&g_stretch, !!stretch) == !!stretch) return;
+    if (atomic_exchange(&g_aspect, (int)how) == (int)how) return;
     for (int i = 0; i < CHANNEL_MAX; ++i) {
         channel_t *c = &g_ch[i];
         /* Only this thread starts and stops channels: active is stable. */

@@ -15,7 +15,7 @@ void hal_shutdown(void) {}
 
 int  hal_display_set_tile(int ch, const vg_rect_t *r) { (void)ch; (void)r; return -1; }
 void hal_display_clear_tile(int ch) { (void)ch; }
-void hal_display_set_aspect(int ch, unsigned w, unsigned h) { (void)ch; (void)w; (void)h; }
+void hal_display_set_aspect(int ch, unsigned w, unsigned h, vg_aspect_t how) { (void)ch; (void)w; (void)h; (void)how; }
 /* No output. */
 int  hal_display_modes(vg_mode_t *out, int max) { (void)out; (void)max; return 0; }
 void hal_display_mode(vg_mode_t *cur) { *cur = (vg_mode_t){ 0, 0, 0 }; }

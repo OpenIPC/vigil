@@ -65,7 +65,7 @@ void hal_dec_reset(int ch) { (void)ch; }
 void hal_dec_close(int ch) { (void)ch; }
 int  hal_display_set_tile(int ch, const vg_rect_t *r) { (void)ch; (void)r; return 0; }
 void hal_display_clear_tile(int ch) { (void)ch; }
-void hal_display_set_aspect(int ch, unsigned w, unsigned h) { (void)ch; (void)w; (void)h; }
+void hal_display_set_aspect(int ch, unsigned w, unsigned h, vg_aspect_t how) { (void)ch; (void)w; (void)h; (void)how; }
 /* No cursor plane: LVGL draws the pointer, so the pictures have it. */
 int  hal_ui_cursor_create(const uint32_t *argb, int w, int h) { (void)argb; (void)w; (void)h; return -1; }
 void hal_ui_cursor_move(int x, int y) { (void)x; (void)y; }

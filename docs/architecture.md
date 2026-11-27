@@ -191,8 +191,11 @@ sample aspect ratio its SPS's VUI gives (1:1 when it gives none). A ratio
 within 2 % of a common one (16:9, 4:3, 16:10, 5:4, 3:2, 1:1, 2:1, 32:9) is
 taken as that one: 800x448 or an uncropped 1920x1088 is 16:9. The core
 tells the platform the ratio before a decoder opens and whenever it
-changes (`hal_display_set_aspect`); `display.video_aspect: stretch` makes
-it 0:0, the picture filling the tile.
+changes (`hal_display_set_aspect`), with how the picture fills the tile:
+`display.video_aspect: stretch` stretches it over the tile whatever its
+shape, and `fill` keeps its shape and covers the whole tile, the part that
+overflows cut off, centred (`aspect_crop`: a 4:3 camera in a 16:9 tile
+loses a strip at the top and at the bottom).
 
 ### Recording
 
@@ -326,13 +329,20 @@ the API (`api_disc.c`) and the UI (through `ui_model.h`) start them and
 read their state. Formats, sources and the protocol matrix are in
 `disc_proto.h`, `disc_ops.h` and [api.md](api.md#discovery).
 
+The other way round, the **ONVIF server** (`src/api/onvif.c`,
+[onvif.md](onvif.md)) makes the recorder an ONVIF device for VMS: like
+the API it only reads snapshots (`channels_status` gives each stream's
+codec and size, `config_get`), its wire formats are pure functions in
+`src/core/onvif_proto.c`, and the camera search skips its WS-Discovery
+answers by their endpoint reference (`disc_set_self`).
+
 ## The HAL
 
 | Header | What the platform does |
 |---|---|
 | `hal.h` | `hal_init(w, h, out)` brings up the media system and the output (a w x h screen sent out at mode `out` where the platform can); `hal_caps()` says what is there (display, decoder and its maximum size, number of channels, capture inputs); `hal_shutdown()`. |
 | `hal_decoder.h` | One hardware decoder per channel: open for a codec, size and reference count; send an AU; reset after a reconnect; close. Decoded pictures go to that channel's tile without passing through the core. |
-| `hal_display.h` | Where each channel's tile is on the screen, and the display aspect ratio its picture is fitted inside it at (`aspect_fit`), or stretched. The output modes it can switch to, the one in force, and a switch while running (the screen keeps its size, scaled to the mode). |
+| `hal_display.h` | Where each channel's tile is on the screen, and the display aspect ratio its picture is fitted inside it at (`aspect_fit`), stretched over it, or covering it with the overflow cut off (`aspect_crop`). The output modes it can switch to, the one in force, and a switch while running (the screen keeps its size, scaled to the mode). |
 | `hal_capture.h` | Local inputs: start input N in tile `ch` (the platform shows it itself) and deliver its *encoded* AUs to a callback for recording. |
 | `hal_ui.h` | Create the LVGL display on the graphics layer above the video, and say how the UI makes a tile transparent (a colour key, or alpha). |
 
@@ -404,6 +414,10 @@ adding a platform is covered in [porting.md](porting.md).
   scan, merge, address changes over each protocol with wrong and right
   passwords, a dry run, adding to a channel, auto-add, the rate limit and
   that no password leaks.
+- `onvif`: SOAP requests, UsernameToken and HTTP Digest (published
+  vectors), WS-Discovery probes and their matching, our ProbeMatches as
+  the camera search reads them; each request cut at every length.
+  `onvif_e2e`: `vigild`'s ONVIF server as a client sees it.
 - `theme_tokens`: the generated `theme_tokens.h` and `web/theme.css` match
   `src/ui/theme.json`.
 - `ui_screens`: the UI on an in-memory display, driven through the evdev

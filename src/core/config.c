@@ -286,7 +286,10 @@ int config_init(const char *path)
     int rc = config_load_file(g_path, &c, &errs);
     if (rc == 1) vg_log("%s: not there, using the defaults", g_path);
     else if (rc == 0) vg_log("%s: loaded", g_path);
-    else {
+    schema_errors_t perrs = { 0 };
+    if (rc == 0) {
+        if (config_check_ports(&c, &perrs) < 0) log_errors(g_path, &perrs);
+    } else if (rc < 0) {
         log_errors(g_path, &errs);
         vg_log("%s is invalid; using the defaults (the file is kept)", g_path);
     }
@@ -345,6 +348,39 @@ unsigned config_applied(void)
 }
 
 const char *config_path(void) { return g_path; }
+
+static config_listen_check_fn g_listen_check;
+
+void config_set_listen_check(config_listen_check_fn fn) { g_listen_check = fn; }
+
+/* A changed api.listen, web.listen, onvif_server.port (while ONVIF is on)
+ * or netip_server.port (while NETIP is) that cannot be listened on is refused here, so the API and the UI
+ * say why at once instead of vigild finding out when it applies it. */
+static int check_listens(const vigil_config_t *nc, const vigil_config_t *old, schema_errors_t *errs)
+{
+    if (!g_listen_check) return 0;
+    char onvif_now[8] = "", onvif_was[8] = "", netip_now[8] = "", netip_was[8] = "";
+    if (nc->onvif_server.enabled) snprintf(onvif_now, sizeof onvif_now, "%d", nc->onvif_server.port);
+    if (old->onvif_server.enabled) snprintf(onvif_was, sizeof onvif_was, "%d", old->onvif_server.port);
+    if (nc->netip_server.enabled) snprintf(netip_now, sizeof netip_now, "%d", nc->netip_server.port);
+    if (old->netip_server.enabled) snprintf(netip_was, sizeof netip_was, "%d", old->netip_server.port);
+    const struct { const char *what, *path; const char *now, *was; } l[] = {
+        { "api", "api.listen", nc->api.listen, old->api.listen },
+        { "web", "web.listen", nc->web.listen, old->web.listen },
+        { "onvif", "onvif_server.port", onvif_now, onvif_was },
+        { "netip", "netip_server.port", netip_now, netip_was },
+    };
+    int rc = 0;
+    for (size_t i = 0; i < sizeof l / sizeof l[0]; ++i) {
+        char err[128] = "";
+        if (!strcmp(l[i].now, l[i].was) || !l[i].now[0]) continue;
+        if (g_listen_check(l[i].what, l[i].now, err, sizeof err) < 0) {
+            schema_error(errs, l[i].path, "%s", err[0] ? err : "cannot listen there");
+            rc = -1;
+        }
+    }
+    return rc;
+}
 
 /* A URL sent back exactly as GET showed it (password "***") means "keep
  * the stored one". Matched on the whole redacted URL, not the position,
@@ -424,6 +460,8 @@ config_rc_t config_put_json_at(const char *section, const char *body, size_t len
             if (!sec || sec == &config_schema.sections[i])
                 schema_keep_secrets(&config_schema.sections[i], &nc, &old);
     if (rc == 0) rc = schema_validate(&config_schema, &nc, errs);
+    if (rc == 0) rc = config_check_ports(&nc, errs);
+    if (rc == 0) rc = check_listens(&nc, &old, errs);
     if (rc < 0) {
         pthread_mutex_unlock(&g_write);
         return CONFIG_EINVAL;

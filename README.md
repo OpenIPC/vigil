@@ -34,6 +34,10 @@ are part of the design.
 - **Zero channel**: that screen, live, in a browser at `http://<recorder>/`,
   with its mouse and keyboard, for users given the `remote` permission
   ([docs/api.md](docs/api.md#zero-channel)).
+- **ONVIF server**: VMS and other recorders find the recorder by
+  WS-Discovery and get a profile per camera and stream (media and media2,
+  H.265 too) with its RTSP address, logging in as vigil's users
+  ([docs/onvif.md](docs/onvif.md)).
 - **NETIP server**: Xiongmai's own clients (CMS, VMS, XMEye on the LAN)
   find the recorder by XM's search and show its cameras live, both
   streams, as vigil's users ([docs/api.md](docs/api.md#netip-server)).
@@ -69,6 +73,8 @@ For a board, see its page under [docs/platforms](docs/platforms/).
   protocol sources, HAL and platforms, and how a stream flows through it.
 - [Configuration and HTTP API](docs/api.md): the configuration file, the
   endpoints, the WebSocket, authentication and password redaction.
+- [ONVIF server](docs/onvif.md): what VMS see, logins and permissions,
+  WS-Discovery.
 - [On-screen UI](docs/ui.md): screens, data binding, schema-driven
   settings, design tokens, mouse and keyboard input, headless tests.
 - [Adding a platform](docs/porting.md): what a new SoC family has to
