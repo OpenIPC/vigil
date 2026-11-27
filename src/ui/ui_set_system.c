@@ -216,22 +216,38 @@ static void sync_cb(lv_event_t *e)
     ui_set_follow_job(g->s, id, g->ntp_job, sync_done, g);
 }
 
+/* "YYYY-MM-DD" and "HH:MM[:SS]", all of each, as a local time: a day
+ * the month does not have (February 31) is refused, not taken as one in
+ * the next month. 0, or -1. */
+static int parse_clock(const char *date, const char *clock, time_t *t)
+{
+    int y, mo, d, h, mi, sec = 0, n = -1;
+    if (sscanf(date, "%4d-%2d-%2d%n", &y, &mo, &d, &n) != 3 || n < 0 || date[n]) return -1;
+    n = -1;
+    if (sscanf(clock, "%2d:%2d%n:%2d%n", &h, &mi, &n, &sec, &n) < 2 || n < 0 || clock[n]) return -1;
+    if (y < 1970 || mo < 1 || mo > 12 || d < 1 || h < 0 || h > 23 || mi < 0 || mi > 59 || sec < 0 || sec > 59)
+        return -1;
+    struct tm tm;
+    memset(&tm, 0, sizeof tm);
+    tm.tm_year = y - 1900;
+    tm.tm_mon = mo - 1;
+    tm.tm_mday = d;
+    tm.tm_hour = h;
+    tm.tm_min = mi;
+    tm.tm_sec = sec;
+    tm.tm_isdst = -1;
+    *t = mktime(&tm);
+    return *t == (time_t)-1 || tm.tm_year != y - 1900 || tm.tm_mon != mo - 1 || tm.tm_mday != d ? -1 : 0;
+}
+
 static void set_clock_cb(lv_event_t *e)
 {
     gen_t *g = lv_event_get_user_data(e);
-    struct tm tm;
-    memset(&tm, 0, sizeof tm);
-    if (sscanf(lv_textarea_get_text(g->date_ta), "%d-%d-%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday) != 3 ||
-        sscanf(lv_textarea_get_text(g->clock_ta), "%d:%d:%d", &tm.tm_hour, &tm.tm_min, &tm.tm_sec) < 2 ||
-        tm.tm_mon < 1 || tm.tm_mon > 12 || tm.tm_mday < 1 || tm.tm_mday > 31 || tm.tm_hour > 23 || tm.tm_min > 59 ||
-        tm.tm_sec > 60) {
+    time_t t;
+    if (parse_clock(lv_textarea_get_text(g->date_ta), lv_textarea_get_text(g->clock_ta), &t) < 0) {
         ui_toast(UI_TOAST_BAD, "The date is YYYY-MM-DD, the time HH:MM:SS");
         return;
     }
-    tm.tm_year -= 1900;
-    tm.tm_mon -= 1;
-    tm.tm_isdst = -1;
-    time_t t = mktime(&tm);
     char err[160] = "";
     int rc = MG()->time_set(NULL, NULL, 1, (long long)t, err, sizeof err);
     if (rc < 0) ui_toast(UI_TOAST_BAD, "Clock not set: %s", rc == UI_MGMT_EUNMANAGED ? "vigild does not manage this system" : err);

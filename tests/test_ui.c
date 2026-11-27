@@ -625,6 +625,8 @@ static ui_net_cfg_t g_mg_eth = { .dhcp = 0, .address = "192.168.1.20", .netmask 
                                  .gateway = "192.168.1.1", .dns1 = "192.168.1.1", .dns2 = "8.8.8.8" };
 static char         g_mg_host[64] = "nvr-hall";
 static char         g_mg_zone[64] = "Europe/Berlin", g_mg_tz[96] = "CET-1CEST,M3.5.0,M10.5.0/3";
+static long long    g_mg_clock;         /* the last clock set */
+static int          g_mg_clock_n;
 
 static int  fm_managed(void) { return 1; }
 static void fm_status(ui_net_status_t *st, int wifi)
@@ -953,7 +955,11 @@ static void fm_time_get(ui_time_t *t)
 }
 static int  fm_time_set(const char *zone, const char *tz, int set_clock, long long t, char *err, size_t cap)
 {
-    (void)set_clock; (void)t; (void)err; (void)cap;
+    (void)err; (void)cap;
+    if (set_clock) {
+        g_mg_clock = t;
+        ++g_mg_clock_n;
+    }
     if (zone && *zone) snprintf(g_mg_zone, sizeof g_mg_zone, "%s", zone);
     if (tz && *tz) {
         snprintf(g_mg_tz, sizeof g_mg_tz, "%s", tz);
@@ -2795,6 +2801,30 @@ static void test_system_pages(void)
     run(100);
     CHECK(!strcmp(g_mg_tz, "<+01>-1<+02>,M3.5.0,M10.5.0/3") && !strcmp(g_mg_zone, "custom"), "custom saved: %s",
           g_mg_tz);
+
+    /* Set the clock: a day the month lacks, or more than the fields,
+     * is refused, not set as another day. */
+    lv_obj_t *set = find(LV_SYMBOL_OK "  Set", 0);
+    static const char *const bad[][2] = { { "2026-02-31", "12:00:00" }, { "2026-04-31", "12:00" },
+                                          { "2026-2-28x", "12:00:00" }, { "2026-02-28", "12:00pm" },
+                                          { "2026-02-28", "-1:00" }, { "2026-13-01", "12:00" } };
+    for (size_t i = 0; set && i < sizeof bad / sizeof bad[0]; ++i) {
+        int n = g_mg_clock_n;
+        lv_textarea_set_text(textarea(1), bad[i][0]);
+        lv_textarea_set_text(textarea(2), bad[i][1]);
+        click_obj(set);
+        run(50);
+        CHECK(g_mg_clock_n == n, "the clock not set to %s %s", bad[i][0], bad[i][1]);
+    }
+    lv_textarea_set_text(textarea(1), "2024-02-29");
+    lv_textarea_set_text(textarea(2), "23:59:58");
+    if (set) click_obj(set);
+    run(50);
+    struct tm lt;
+    time_t ct = (time_t)g_mg_clock;
+    localtime_r(&ct, &lt);
+    CHECK(set && g_mg_clock_n && lt.tm_year == 124 && lt.tm_mon == 1 && lt.tm_mday == 29 && lt.tm_hour == 23 &&
+              lt.tm_min == 59 && lt.tm_sec == 58, "the clock set to 2024-02-29 23:59:58");
 
     int jobs = g_mg_jobs;
     lv_obj_t *sync = find(LV_SYMBOL_REFRESH "  Sync now", 0);
