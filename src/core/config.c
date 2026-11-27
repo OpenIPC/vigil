@@ -93,11 +93,41 @@ config_format_t config_format(const char *path)
  * its additional data. A camera URL keeps its shape, only the password in
  * it sealed: "rtsp://admin:enc:v1:...@10.0.0.2/stream". */
 
+/* A sealed value that did not open (no key, another key). Its field in
+ * memory is unknown ("", or the URL without a password); the file keeps
+ * the sealed text as it was, so that saving other settings does not turn
+ * it into no password, and putting the old key back brings it back. Once
+ * the field holds anything else (a password set again, another URL), that
+ * is sealed instead. */
+typedef struct kept {
+    struct kept *next;
+    char        aad[128];           /* the field */
+    char       *mem;                /* its value in memory */
+    char       *file;               /* its value in the file */
+    int         used;               /* written back by the last save */
+} kept_t;
+
 typedef struct {
     int plain;                      /* passwords found in the clear (an older file, a hand edit) */
     int lost;                       /* sealed ones that did not open */
     secret_rc_t why;                /* the first failure */
+    kept_t *kept;                   /* opening: those that did not open; sealing: those to keep */
 } seal_stats_t;
+
+/* The sealed values of the store's file that did not open (config_init). */
+static pthread_mutex_t g_kept_lock = PTHREAD_MUTEX_INITIALIZER;
+static kept_t         *g_kept;
+
+static void kept_free(kept_t *k)
+{
+    while (k) {
+        kept_t *next = k->next;
+        free(k->mem);
+        free(k->file);
+        free(k);
+        k = next;
+    }
+}
 
 /* The password of a URL's credentials: [*b, *e) (the same span
  * schema_redact_url hides). 0 when the URL has one, non-empty. */
@@ -114,11 +144,34 @@ static int url_password(const char *url, size_t *b, size_t *e)
     return 0;
 }
 
+/* Sealing: a field that still holds what a sealed value that did not
+ * open left in memory gets that sealed value back. 1 when it did. */
+static int keep_field(cJSON *v, const char *aad, seal_stats_t *st)
+{
+    for (kept_t *k = st->kept; k; k = k->next) {
+        if (strcmp(k->aad, aad) != 0) continue;
+        if (!cJSON_IsString(v) || strcmp(v->valuestring, k->mem) != 0) return 0;
+        if (!cJSON_SetValuestring(v, k->file)) return -1;
+        k->used = 1;
+        return 1;
+    }
+    return 0;
+}
+
 /* One secret field's value in `o`, sealed (`seal`) or opened in place.
- * -1 only when sealing fails (`*why`). */
+ * -1 (`st->why`) when sealing fails, or there is no memory for an opened
+ * value: a field is never left in the clear when it should be sealed, or
+ * sealed when it should be in the clear. */
 static int seal_field(cJSON *o, const schema_field_t *f, const char *aad, int seal, seal_stats_t *st)
 {
     cJSON *v = cJSON_GetObjectItemCaseSensitive(o, f->key);
+    if (seal && st->kept) {
+        int k = keep_field(v, aad, st);
+        if (k) {
+            if (k < 0) st->why = SECRET_ENOMEM;
+            return k < 0 ? -1 : 0;
+        }
+    }
     if (!cJSON_IsString(v) || !v->valuestring[0]) return 0;
     const char *s = v->valuestring;
     size_t b = 0, e = strlen(s);
@@ -126,9 +179,10 @@ static int seal_field(cJSON *o, const schema_field_t *f, const char *aad, int se
     size_t plen = e - b, cap = SECRET_SEALED_SIZE(plen) + 1;
     char *part = malloc(plen + 1), *res = malloc(cap > plen + 1 ? cap : plen + 1);
     char *text = NULL;
+    kept_t *k = NULL;
     int rc = 0;
     if (!part || !res) {
-        st->why = SECRET_ENOKEY;
+        st->why = SECRET_ENOMEM;
         rc = -1;
         goto out;
     }
@@ -149,6 +203,13 @@ static int seal_field(cJSON *o, const schema_field_t *f, const char *aad, int se
             vg_log("%s: the stored password cannot be read (%s); set it again", aad + 7, secret_strerror(r));
             if (!st->lost++) st->why = r;
             res[0] = 0;
+            k = calloc(1, sizeof *k);
+            if (!k || !(k->file = strdup(s))) {
+                st->why = SECRET_ENOMEM;
+                rc = -1;
+                goto out;
+            }
+            snprintf(k->aad, sizeof k->aad, "%s", aad);
         }
     } else {
         ++st->plain;
@@ -161,9 +222,19 @@ static int seal_field(cJSON *o, const schema_field_t *f, const char *aad, int se
         memcpy(text, s, lead);
         memcpy(text + lead, res, rl);
         strcpy(text + lead + rl, s + e);
-        cJSON_SetValuestring(v, text);
+    }
+    if (!text || (k && !(k->mem = strdup(text))) || !cJSON_SetValuestring(v, text)) {
+        st->why = SECRET_ENOMEM;
+        rc = -1;
+        goto out;
+    }
+    if (k) {
+        k->next = st->kept;
+        st->kept = k;
+        k = NULL;
     }
 out:
+    kept_free(k);
     if (part) secret_wipe(part, plen);
     if (res) secret_wipe(res, strlen(res));
     if (text) secret_wipe(text, strlen(text));
@@ -220,7 +291,11 @@ static int load_file(const char *path, vigil_config_t *c, schema_errors_t *errs,
                                                     : schema_yaml_parse(&config_schema, buf, n, errs);
     free(buf);
     if (!doc) return -1;
-    seal_doc(doc, 0, st);
+    if (seal_doc(doc, 0, st) < 0) {
+        schema_error(errs, "", "out of memory");
+        cJSON_Delete(doc);
+        return -1;
+    }
     /* Not strict: a key this vigild does not know (a newer one wrote the
      * file) is skipped instead of costing every other setting. */
     int rc = schema_from_json(&config_schema, doc, c, 0, errs);
@@ -236,7 +311,9 @@ static int load_file(const char *path, vigil_config_t *c, schema_errors_t *errs,
 int config_load_file(const char *path, vigil_config_t *c, schema_errors_t *errs)
 {
     seal_stats_t st = { 0 };
-    return load_file(path, c, errs, &st);
+    int rc = load_file(path, c, errs, &st);
+    kept_free(st.kept);
+    return rc;
 }
 
 static int write_all(int fd, const char *p, size_t len)
@@ -317,7 +394,26 @@ static char *file_text(const vigil_config_t *c, config_format_t fmt, char *err, 
     cJSON *doc = schema_to_json(&config_schema, c, 0);
     char *text = NULL;
     seal_stats_t st = { 0 };
-    if (doc && seal_doc(doc, 1, &st) < 0) {
+    pthread_mutex_lock(&g_kept_lock);
+    st.kept = g_kept;
+    int sealed = doc ? seal_doc(doc, 1, &st) : 0;
+    if (sealed == 0) {
+        /* A field that holds something else now was set again: its old
+         * sealed value is not brought back by a later save. */
+        for (kept_t **pk = &g_kept; *pk;) {
+            kept_t *k = *pk;
+            if (k->used) {
+                k->used = 0;
+                pk = &k->next;
+            } else {
+                *pk = k->next;
+                k->next = NULL;
+                kept_free(k);
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_kept_lock);
+    if (sealed < 0) {
         char key[300];
         snprintf(err, cap, "cannot seal the passwords: %s (%s)", secret_strerror(st.why),
                  secret_key_path(key, sizeof key));
@@ -419,6 +515,13 @@ int config_init(const char *path)
     int rc = load_file(g_path, &c, &errs, &st);
     if (rc == 1) vg_log("%s: not there, using the defaults", g_path);
     else if (rc == 0) vg_log("%s: loaded", g_path);
+    pthread_mutex_lock(&g_kept_lock);
+    kept_free(g_kept);
+    g_kept = rc == 0 ? st.kept : NULL;
+    pthread_mutex_unlock(&g_kept_lock);
+    if (rc != 0) kept_free(st.kept);
+    if (rc == 0 && st.lost)
+        vg_log("%s: %d password(s) cannot be read; kept sealed in the file until set again", g_path, st.lost);
     if (rc == 0 && st.plain) {
         /* Passwords in the clear (a file from before they were sealed, or
          * typed in by hand): sealed now, not at the next change. */

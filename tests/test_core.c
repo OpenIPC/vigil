@@ -3682,8 +3682,42 @@ static void test_config_seal(void)
               !d.smtp.password[0] && !strcmp(d.smtp.server, "mail.example.org"),
           "no key: passwords unknown, the camera without one: %s", d.cameras[0].url);
     CHECK(access(key, F_OK) < 0, "and no key made by reading");
+
+    /* A save without the key keeps the values that did not open sealed as
+     * they were: a later save of another setting must not empty them, and
+     * the old key put back brings them back. A field set again is sealed
+     * anew. */
+    t = read_file(path);
+    char cam[512] = "", mail[256] = "";
+    const char *cu = t ? strstr(t, "rtsp://admin:enc:v1:") : NULL, *mp = t ? strstr(t, "password: \"enc:v1:") : NULL;
+    if (cu) snprintf(cam, sizeof cam, "%.*s", (int)strcspn(cu, "\""), cu);
+    if (mp) snprintf(mail, sizeof mail, "%.*s", (int)strcspn(mp + 11, "\""), mp + 11);
+    free(t);
+    CHECK(cam[0] && mail[0], "sealed camera and mail passwords in the file");
+    CHECK(config_init(path) == 0, "loaded without the key");
+    memset(&e, 0, sizeof e);
+    const char *smtp1 = "{\"server\": \"mail2.example.org\"}";
+    CHECK(config_put_json("smtp", smtp1, strlen(smtp1), &e) == CONFIG_OK, "another setting saved: %s",
+          e.n ? e.e[0].msg : "");
+    t = read_file(path);
+    CHECK(t && strstr(t, cam) && strstr(t, mail) && strstr(t, "mail2.example.org"),
+          "the sealed values kept as they were:\n%s", t ? t : "");
+    free(t);
+    memset(&e, 0, sizeof e);
+    const char *smtp2 = "{\"password\": \"New-Mail\"}";
+    CHECK(config_put_json("smtp", smtp2, strlen(smtp2), &e) == CONFIG_OK, "the mail password set again: %s",
+          e.n ? e.e[0].msg : "");
+    t = read_file(path);
+    CHECK(t && strstr(t, cam) && !strstr(t, mail) && !strstr(t, "New-Mail"),
+          "that one sealed anew, the camera's still kept:\n%s", t ? t : "");
+    free(t);
+    unlink(key);
     rename(moved, key);
     secret_set_key_path(key);
+    CHECK(config_init(path) == 0, "loaded with the old key back");
+    config_get(&d);
+    CHECK(!strcmp(d.cameras[0].url, "rtsp://admin:Old-Pa55@10.0.0.2/stream"), "the camera's password back: %s",
+          d.cameras[0].url);
     char cmd[200];
     snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
     if (system(cmd)) {}

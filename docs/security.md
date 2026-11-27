@@ -114,7 +114,10 @@ which values it cannot open: those cameras connect without a password
 (and fail to log in), those mail, DDNS and storage passwords are empty,
 and those users cannot log in over RTSP, ONVIF or NETIP ("the stored
 password of 'anna' cannot be read"). A new key is made for what is sealed
-next. Set the cameras' and services' passwords again; users and `root`
+next. The values that did not open stay in the files as they were, sealed,
+through any number of saves of other settings, so putting the old key back
+(in place of the new one) brings them back; a password set again replaces
+its old value. Set the cameras' and services' passwords again; users and `root`
 need only log in once to the API, the web page or the screen (their
 `crypt(3)` hashes are not sealed), or have their passwords set again.
 Moving a recorder's whole configuration to a new board means moving

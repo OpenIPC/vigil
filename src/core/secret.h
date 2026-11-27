@@ -36,6 +36,7 @@ typedef enum {
     SECRET_EAUTH = -3,          /* does not open with this key and field: another key,
                                  * another field's value, or changed */
     SECRET_EFORMAT = -4,        /* not a sealed value, or does not fit `cap` */
+    SECRET_ENOMEM = -5,         /* no memory to put a value in place (config.c) */
 } secret_rc_t;
 
 /* The key file: `path`, or NULL for the default, vigil.key in the

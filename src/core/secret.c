@@ -257,6 +257,7 @@ const char *secret_strerror(secret_rc_t rc)
     case SECRET_EBADKEY: return "the key file (" SECRET_FILE ") is unusable";
     case SECRET_EAUTH:   return "sealed with another key, or for another setting";
     case SECRET_EFORMAT: return "not a sealed value";
+    case SECRET_ENOMEM:  return "out of memory";
     }
     return "?";
 }
