@@ -666,7 +666,8 @@ static int ports_save(void *st)
     for (int i = 0; i < PORTS_N; ++i)
         for (int k = 0; k < i; ++k)
             if (want[i] && want[i] == want[k]) {
-                lv_obj_add_state(p->num[i], LV_STATE_USER_1);
+                /* the one that was changed onto the other's port */
+                lv_obj_add_state(p->num[want[i] != p->port[i] ? i : k], LV_STATE_USER_1);
                 ui_toast(UI_TOAST_BAD, "%s and %s cannot both be on port %d", k_port_name[k], k_port_name[i], want[i]);
                 return -1;
             }
@@ -682,10 +683,9 @@ static int ports_save(void *st)
             int held = 0;
             for (int k = 0; k < PORTS_N; ++k) held |= k != i && p->port[k] == want[i];
             if (held && pass < PORTS_N - 1) continue;
-            if (ports_save_one(p, i, want[i]) < 0) {
-                ports_load(p);
-                return -1;
-            }
+            /* Refused: what was typed stays, marked, with the toast;
+             * the ones saved before it are saved. */
+            if (ports_save_one(p, i, want[i]) < 0) return -1;
             p->port[i] = want[i];
             --left;
         }

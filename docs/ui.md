@@ -220,9 +220,10 @@ or "No modem found". *Ports*: the web server's and the HTTP API's ports
 listens on now, refreshed every second, or why not, or the last move that
 failed; and, under "Services not available yet", the RTSP, ONVIF and NETIP
 ports, with a note that nothing listens on them. Save refuses two on one
-port (marked, named in a toast) and saves one section at a time, those
-moving onto a port another one leaves last; the store refuses a port that
-is taken, with the reason. The web and API ports need the users permission
+port (the one changed is marked, both named in a toast) and saves one
+section at a time, those moving onto a port another one leaves last; the
+store refuses a port that is taken, with the reason, and the port typed
+stays there, marked. The web and API ports need the users permission
 too, as their sections do. *DDNS*, *SMTP*: the form, the last
 update or mail and its result, and "Update now" / "Send test mail" (which
 use the saved settings: with unsaved changes they ask to save first).
