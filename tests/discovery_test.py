@@ -79,6 +79,7 @@ def by_mac(devs):
 
 def main():
     vigild = sys.argv[1]
+    clip = sys.argv[2] if len(sys.argv) > 2 else None
     tmp = tempfile.mkdtemp(prefix="vigil-disc-", dir=os.getcwd())
     api_port = free_port()
     udp = [free_port(socket.SOCK_DGRAM) for _ in range(3)]
@@ -99,6 +100,11 @@ def main():
                          ["--no-udp-set", "--device", "netip@127.0.0.13/02:00:00:00:00:13"],
                          stdout=open(os.path.join(tmp, "fake2.log"), "w"), stderr=subprocess.STDOUT),
     ]
+    netip_port = free_port()
+    if clip:
+        fakes.append(subprocess.Popen([sys.executable, os.path.join(HERE, "netip_server.py"), clip,
+                                       "--port", str(netip_port), "--password", PW],
+                                      stdout=open(os.path.join(tmp, "netip.log"), "w"), stderr=subprocess.STDOUT))
     log_path = os.path.join(tmp, "vigild.log")
     vd = subprocess.Popen([vigild, "-f", cfg, "-t", "120"], stdout=open(log_path, "w"), stderr=subprocess.STDOUT)
     api = Api(api_port)
@@ -216,7 +222,74 @@ def main():
         check(ch == {"02:00:00:00:00:10": 2, "02:00:00:00:00:11": 3, "02:00:00:00:00:12": 4, "02:00:00:00:00:13": 5},
               "devices know their channels: %s" % ch)
 
-        # Refused credentials are counted: 10 a minute (4 above), then 429.
+        # A device entered by hand: tested, then put on a channel.
+        refused = 4
+        if clip:
+            def test(dev):
+                st, doc, raw = api.job("POST", "/api/v1/devices/test", dev)
+                return st, (doc or {}).get("results", [{}])[0], raw
+            nd = {"protocol": "netip", "address": "127.0.0.1", "port": netip_port, "user": "admin",
+                  "password": PW}
+            st, r, raw = test(nd)
+            raw_all += raw
+            check(st == 200 and r.get("ok") and r.get("codec") == "H.264" and r.get("width") == 640 and
+                  r.get("height") == 360 and r.get("url") == "netip://admin:***@127.0.0.1:%d/?ch=0&stream=main" % netip_port,
+                  "test NETIP: H.264 640x360: %s" % r)
+            st, r, raw = test(dict(nd, password="wrong"))
+            raw_all += raw
+            refused += 1
+            check(not r.get("ok") and r.get("error") == "auth", "test NETIP, wrong password: auth: %s" % r)
+            st, r, raw = test(dict(nd, port=free_port()))
+            check(not r.get("ok") and r.get("error") == "unreachable", "test NETIP, nothing there: offline: %s" % r)
+        od = {"protocol": "onvif", "address": "127.0.0.52", "port": tcp[1], "user": "admin", "password": PW}
+        st, doc, raw = api.job("POST", "/api/v1/devices/test", od)
+        raw_all += raw
+        r = doc["results"][0]
+        check(r.get("url") == "rtsp://admin:***@127.0.0.52:554/main?a=1&b=2" and r.get("error") == "unreachable",
+              "test ONVIF: GetStreamUri, then nothing at the RTSP address: %s" % r)
+        st, doc, raw = api.job("POST", "/api/v1/devices/test", dict(od, password="wrong"))
+        r = doc["results"][0]
+        refused += 1
+        check(not r["ok"] and r.get("error") == "auth", "test ONVIF, wrong password: auth: %s" % r)
+        st, doc, raw = api.job("POST", "/api/v1/devices/test", dict(od, address="127.0.0.51", port=tcp[2]))
+        r = doc["results"][0]
+        check(not r["ok"] and r.get("error") == "unsupported" and "not an ONVIF device" in r["message"],
+              "test ONVIF at a Dahua web port: not an ONVIF device: %s" % r)
+        st, doc, raw = api.call("POST", "/api/v1/devices/test", {"protocol": "ftp", "address": "x"})
+        check(st == 400, "unknown protocol: 400 (%d)" % st)
+        st, doc, raw = api.call("POST", "/api/v1/devices/test", {"protocol": "rtsp", "address": "a b"})
+        check(st == 200 and not doc["results"][0]["ok"] and doc["results"][0]["error"] == "invalid",
+              "a bad address: invalid: %s" % doc)
+
+        st, doc, raw = api.job("POST", "/api/v1/channels/6/assign",
+                               {"manual": {"protocol": "rtsp", "address": "cam.example", "port": 8554, "user": "u",
+                                           "password": PW, "main": "/live/ch1", "sub": "rtsp://10.0.0.9/sub"},
+                                "name": "Hand"})
+        raw_all += raw
+        r = doc["results"][0]
+        check(r["ok"] and r["channel"] == 6 and r["url"] == "rtsp://u:***@cam.example:8554/live/ch1" and
+              r["sub_url"] == "rtsp://u:***@10.0.0.9/sub", "assign RTSP by hand to 6: %s" % r)
+        st, doc, raw = api.job("POST", "/api/v1/channels/6/assign",
+                               {"manual": {"protocol": "dahua", "address": "10.0.0.7", "password": PW, "channel": 3}})
+        check(not doc["results"][0]["ok"] and "has a camera" in doc["results"][0]["message"],
+              "an occupied channel is refused")
+        st, doc, raw = api.job("POST", "/api/v1/channels/6/assign",
+                               {"manual": {"protocol": "dahua", "address": "10.0.0.7", "password": PW, "channel": 3},
+                                "replace": True, "name": "Hand"})
+        raw_all += raw
+        r = doc["results"][0]
+        check(r["ok"] and r["url"] == "rtsp://admin:***@10.0.0.7:554/cam/realmonitor?channel=3&subtype=0" and
+              r["sub_url"].endswith("channel=3&subtype=1"), "replace with Dahua channel 3: %s" % r)
+        st, doc, raw = api.job("POST", "/api/v1/channels/7/assign", {"manual": od})
+        raw_all += raw
+        r = doc["results"][0]
+        check(r["ok"] and r["url"] == "rtsp://admin:***@127.0.0.52:554/main?a=1&b=2" and
+              r["sub_url"] == "rtsp://admin:***@127.0.0.52:554/sub?a=1&b=2", "assign ONVIF by hand: %s" % r)
+        st, cams, raw = api.call("GET", "/api/v1/config/cameras")
+        check(len(cams) == 7 and cams[5]["url"].startswith("rtsp://admin:***@10.0.0.7") and cams[5]["name"] == "Hand"
+              and cams[6]["url"].endswith("/main?a=1&b=2"), "the configuration: %s" % cams[5:])
+
+        # Refused credentials are counted: 10 a minute, then 429.
         codes = []
         for _ in range(8):
             st, doc, raw = api.job("POST", "/api/v1/discovery/ip",
@@ -224,7 +297,9 @@ def main():
                                     "password": "wrong"})
             codes.append(st)
             raw_all += raw
-        check(codes[:6] == [200] * 6 and codes[6:] == [429, 429], "refused credentials are rate limited: %s" % codes)
+        ok_n = 10 - refused
+        check(codes[:ok_n] == [200] * ok_n and set(codes[ok_n:]) == {429},
+              "refused credentials are rate limited after %d: %s" % (ok_n, codes))
         st, doc, raw = api.call("POST", "/api/v1/discovery/scan", scan)
         check(st == 202, "a scan is not (%d)" % st)
         time.sleep(2.5)

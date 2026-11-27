@@ -26,7 +26,8 @@
 
 const char *disc_rc_name(disc_rc_t rc)
 {
-    static const char *names[] = { "ok", "auth", "unsupported", "timeout", "unreachable", "protocol", "invalid" };
+    static const char *names[] = { "ok", "auth", "unsupported", "timeout", "unreachable", "protocol", "invalid",
+                                   "codec" };
     return (unsigned)rc < sizeof names / sizeof names[0] ? names[rc] : "error";
 }
 
@@ -301,6 +302,11 @@ static disc_rc_t soap_fail(const disc_http_t *r, const char *what, char *err, si
         disc_xml_text(r->body, r->len, "Text", reason, sizeof reason, NULL);
         if (!reason[0]) disc_xml_text(r->body, r->len, "faultstring", reason, sizeof reason, NULL);
     }
+    if (r->status != 401 && (!r->body || !strstr(r->body, "Envelope"))) {
+        /* A web server, but no SOAP: something else on that port. */
+        snprintf(err, errcap, "%s: not an ONVIF device (HTTP %d)", what, r->status);
+        return DISC_EUNSUPPORTED;
+    }
     if (r->status == 401 || (r->body && (strstr(r->body, "NotAuthorized") || strstr(r->body, "FailedAuthentication")))) {
         snprintf(err, errcap, "%s: not authorized", what);
         return DISC_EAUTH;
@@ -358,9 +364,12 @@ static disc_rc_t soap(onvif_t *o, const char *path, const char *body_xml, int se
     free(env);
     if (rc < 0) {
         snprintf(err, errcap, "%s: %s", what, e2);
-        return strstr(e2, "connect") ? DISC_EUNREACHABLE : DISC_ETIMEOUT;
+        /* "connect: ..." and "cannot resolve": nobody there; otherwise it
+         * answered with nothing usable, or not in time. */
+        if (!strncmp(e2, "connect:", 8) || !strncmp(e2, "cannot resolve", 14)) return DISC_EUNREACHABLE;
+        return strstr(e2, "no answer") ? DISC_ETIMEOUT : DISC_EPROTO;
     }
-    if (r->status != 200 || !r->body) {
+    if (r->status != 200 || !r->body || !strstr(r->body, "Envelope")) {
         disc_rc_t f = soap_fail(r, what, err, errcap);
         free(r->body);
         r->body = NULL;
@@ -417,7 +426,7 @@ int disc_url_with_creds(const char *uri, const char *user, const char *pass, cha
     return n > 0 && (size_t)n < cap ? 0 : -1;
 }
 
-disc_rc_t disc_onvif_stream_uris(const disc_device_t *d, const char *user, const char *pass,
+disc_rc_t disc_onvif_stream_uris(const disc_device_t *d, const char *user, const char *pass, int channel,
                                  char *url, size_t ucap, char *sub, size_t scap, char *err, size_t errcap)
 {
     onvif_t o, m;
@@ -450,14 +459,17 @@ disc_rc_t disc_onvif_stream_uris(const disc_device_t *d, const char *user, const
 
     rc = soap(&m, m.path, "<trt:GetProfiles/>", 1, &r, "GetProfiles", err, errcap);
     if (rc != DISC_OK) return rc;
+    /* Main and sub of channel `channel`: an NVR or encoder lists its
+     * channels' profiles in order, two to a channel. */
     char tokens[2][64];
-    int nt = 0;
+    int nt = 0, seen = 0;
     size_t from = 0;
     while (nt < 2 && disc_xml_attr(r.body, r.len, "Profiles", "token", tokens[nt], sizeof tokens[nt], &from) == 0)
-        if (tokens[nt][0]) ++nt;
+        if (tokens[nt][0] && seen++ >= 2 * channel) ++nt;
     free(r.body);
     if (!nt) {
-        snprintf(err, errcap, "GetProfiles: no media profile");
+        if (channel && seen) snprintf(err, errcap, "GetProfiles: no channel %d (%d profiles)", channel + 1, seen);
+        else snprintf(err, errcap, "GetProfiles: no media profile");
         return DISC_EUNSUPPORTED;
     }
     for (int i = 0; i < nt; ++i) {
@@ -530,7 +542,7 @@ disc_rc_t disc_onvif_set_ip(const disc_device_t *d, const char *ip, const char *
              "<tt:Manual><tt:Address>%s</tt:Address><tt:PrefixLength>%d</tt:PrefixLength></tt:Manual>"
              "<tt:DHCP>false</tt:DHCP></tt:IPv4></tds:NetworkInterface></tds:SetNetworkInterfaces>", tok, ip, prefix);
     rc = soap(&o, o.path, body, 1, &r, "SetNetworkInterfaces", err, errcap);
-    if (rc == DISC_ETIMEOUT) {
+    if (rc == DISC_ETIMEOUT || (rc == DISC_EPROTO && strstr(err, "connection closed"))) {
         /* Some devices switch before they answer. The re-probe says. */
         snprintf(err, errcap, "SetNetworkInterfaces: no answer (the device may have changed already)");
         return DISC_OK;
@@ -582,7 +594,8 @@ static cJSON *rpc2(const disc_device_t *d, const char *path, cJSON *call, disc_r
     wipe(text, strlen(text));
     free(text);
     if (st < 0) {
-        *rc = strstr(e2, "connect") ? DISC_EUNREACHABLE : DISC_ETIMEOUT;
+        *rc = !strncmp(e2, "connect:", 8) || !strncmp(e2, "cannot resolve", 14) ? DISC_EUNREACHABLE
+            : strstr(e2, "no answer") ? DISC_ETIMEOUT : DISC_EPROTO;
         snprintf(err, errcap, "%s: %s", path, e2);
         return NULL;
     }

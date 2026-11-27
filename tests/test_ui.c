@@ -295,8 +295,60 @@ static int fake_disc_autoadd(const char *user, const char *pass, char *err, size
     return id;
 }
 
+static ui_manual_t g_dj_manual;           /* the last device tested or saved by hand */
+static int         g_dj_manual_ch, g_dj_manual_replace;
+
+static int fake_disc_test(const ui_manual_t *mm, char *err, size_t cap)
+{
+    (void)err;
+    (void)cap;
+    g_dj_manual = *mm;
+    int id = fake_job_new(UI_JOB_TEST, 0);
+    ui_disc_res_t *r = &g_dj.r[0];
+    snprintf(r->key, sizeof r->key, "%.23s", mm->host);
+    snprintf(r->ip, sizeof r->ip, "%.15s", mm->host);
+    r->done = 1;
+    if (!strcmp(mm->pass, "wrong")) {
+        snprintf(r->error, sizeof r->error, "%s", mm->kind == UI_MANUAL_ONVIF ? "auth" : "auth");
+        snprintf(r->msg, sizeof r->msg, "%s", mm->kind == UI_MANUAL_NETIP ? "login refused (Ret 203): user/password"
+                                              : "GetCapabilities: not authorized");
+    } else if (!strcmp(mm->host, "10.9.9.9")) {
+        snprintf(r->error, sizeof r->error, "unreachable");
+        snprintf(r->msg, sizeof r->msg, "connect: No route to host");
+    } else {
+        r->ok = 1;
+        snprintf(r->codec, sizeof r->codec, "%s", mm->kind == UI_MANUAL_NETIP ? "H.265" : "H.264");
+        r->width = 1920;
+        r->height = 1080;
+        snprintf(r->msg, sizeof r->msg, "%s 1920x1080", r->codec);
+    }
+    g_dj.n = 1;
+    snprintf(g_dj.msg, sizeof g_dj.msg, "%s", r->ok ? "OK" : r->msg);
+    return id;
+}
+
+static int fake_disc_assign_manual(const ui_manual_t *mm, int channel, const char *name, int replace, char *err,
+                                   size_t cap)
+{
+    (void)name;
+    (void)err;
+    (void)cap;
+    g_dj_manual = *mm;
+    g_dj_manual_ch = channel;
+    g_dj_manual_replace = replace;
+    int id = fake_job_new(UI_JOB_ASSIGN, 0);
+    ui_disc_res_t *r = &g_dj.r[0];
+    r->done = r->ok = 1;
+    r->channel = channel;
+    snprintf(r->msg, sizeof r->msg, "added to channel %d", channel);
+    g_dj.n = 1;
+    return id;
+}
+
 static void fake_discovery(ui_model_t *m)
 {
+    m->disc_test = fake_disc_test;
+    m->disc_assign_manual = fake_disc_assign_manual;
     m->disc_scan = fake_disc_scan;
     m->disc_devices = fake_disc_devices;
     m->disc_job = fake_disc_job;
@@ -1224,7 +1276,7 @@ static void test_channels_discovery(void)
     fake_job_end();
     g_dj_hold = 0;
     run(300);
-    CHECK(find("5 devices", 0) && find("192.168.1.108", 0) && find("On channel 1", 0) && find("New", 0) &&
+    CHECK(find("5 found", 0) && find("192.168.1.108", 0) && find("On channel 1", 0) && find("New", 0) &&
           find("NETIP, ONVIF", 0), "the devices found, with their protocols and status");
     lv_obj_t *dh = find("192.168.1.108", 0);
     int x, y;
@@ -1289,6 +1341,82 @@ static void test_channels_discovery(void)
     CHECK(find("added to channel 3", 1), "added: a toast");
     button(BTN_RIGHT);
     g_dj_devices = 0;
+}
+
+/* Manual add: the page per protocol, Test (OK, an authentication
+ * error), Save into the first empty channel, and asking before replacing. */
+/* The drop-down in the row labelled `label`. */
+static lv_obj_t *dd_near(const char *label)
+{
+    lv_obj_t *dd = NULL;
+    for (lv_obj_t *l = find(label, 0); l && !dd; l = lv_obj_get_parent(l))
+        for (uint32_t i = 0; i < lv_obj_get_child_count(l) && !dd; ++i)
+            if (lv_obj_check_type(lv_obj_get_child(l, (int32_t)i), &lv_dropdown_class)) dd = lv_obj_get_child(l, (int32_t)i);
+    return dd;
+}
+
+static void man_proto(int kind)
+{
+    lv_obj_t *dd = dd_near("Protocol");
+    if (!dd) return;
+    lv_dropdown_set_selected(dd, (uint32_t)kind);
+    lv_obj_send_event(dd, LV_EVENT_VALUE_CHANGED, NULL);
+    run(50);
+}
+
+static void test_channels_manual(void)
+{
+    click_text("CAMERA");
+    click_text("Manual add");
+    CHECK(find("Manual add", 0) && find("Device channel", 0) && !find("Main stream", 0) &&
+          textarea(1) && !strcmp(lv_textarea_get_text(textarea(1)), "34567"), "Manual add: NETIP, port 34567");
+    char sel[32] = "";
+    if (dd_near("Channel")) lv_dropdown_get_selected_str(dd_near("Channel"), sel, sizeof sel);
+    CHECK(!strcmp(sel, "3  empty"), "the first empty channel chosen: %s", sel);
+    lv_textarea_set_text(textarea(0), "192.168.1.30");
+    shot("manual_netip");
+    click_text(LV_SYMBOL_REFRESH "  Test");
+    run(400);
+    CHECK(find("OK: H.265 1920x1080", 1) && !strcmp(g_dj_manual.host, "192.168.1.30") && g_dj_manual.port == 34567,
+          "Test: OK with codec and size");
+    shot("manual_test_ok");
+    lv_textarea_set_text(textarea(3), "wrong");
+    click_text(LV_SYMBOL_REFRESH "  Test");
+    run(400);
+    CHECK(find("Authentication error", 1) && find("login refused", 1), "Test: authentication error");
+    shot("manual_test_auth");
+    man_proto(UI_MANUAL_ONVIF);
+    CHECK(!strcmp(lv_textarea_get_text(textarea(1)), "80"), "ONVIF: port 80");
+    shot("manual_onvif");
+    man_proto(UI_MANUAL_DAHUA);
+    CHECK(!strcmp(lv_textarea_get_text(textarea(1)), "554"), "Dahua: RTSP port 554");
+    man_proto(UI_MANUAL_RTSP);
+    CHECK(find("Main stream", 0) && !find("Device channel", 0), "RTSP: the paths, no channel");
+    lv_textarea_set_text(textarea(3), "pw");
+    lv_textarea_set_text(textarea(5), "/live/main");
+    lv_textarea_set_text(textarea(6), "/live/sub");
+    shot("manual_rtsp");
+    click_text(LV_SYMBOL_SAVE "  Save");
+    run(400);
+    CHECK(g_dj_manual_ch == 3 && !g_dj_manual_replace && g_dj_manual.kind == UI_MANUAL_RTSP &&
+          !strcmp(g_dj_manual.main_path, "/live/main") && !strcmp(g_dj_manual.sub_path, "/live/sub") &&
+          !find("Device channel", 0) && find("Search settings", 1), "Save: channel 3, the paths; the page closes");
+    click_text("Manual add");
+    lv_obj_t *dd = dd_near("Channel");
+    if (dd) lv_dropdown_set_selected(dd, 0);
+    lv_textarea_set_text(textarea(0), "192.168.1.31");
+    click_text(LV_SYMBOL_SAVE "  Save");
+    CHECK(ui_popup_is_open() && find("Channel 1 has a camera. Replace it?", 1), "an occupied channel: asked");
+    shot("manual_replace");
+    lv_obj_t *yes = find_in(lv_layer_top(), "Replace", 0);
+    int x, y;
+    if (yes) {
+        center_of(yes, &x, &y);
+        click_at(x, y);
+    }
+    run(400);
+    CHECK(g_dj_manual_ch == 1 && g_dj_manual_replace, "replaced after asking");
+    button(BTN_RIGHT);
 }
 
 static void test_system(void)
@@ -2922,6 +3050,7 @@ int main(int argc, char **argv)
     test_menu_and_settings();
     test_cameras();
     test_channels_discovery();
+    test_channels_manual();
     test_system();
     test_same_redacted_urls();
     test_stale_and_cancel();

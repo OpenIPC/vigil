@@ -20,7 +20,7 @@ live view                  tiles over the whole screen, clock in a corner
  +-> Main menu             cards: PLAYBACK, AI, ALARM, OPERATION, BACKUP, DISPLAY
       |                    MANAGEMENT: CAMERA, NETWORK, STORAGE, SYSTEM, ACCOUNT
       +-> CAMERA           Channels: cameras found on the network (Search, Add,
-      |    |               Change IP, Mass change, Auto add) and every channel
+      |    |               Change IP, Mass change, Auto add, Manual add) and every channel
       |    |               (Edit, Clear, Add / Replace with a device found)
       |    +-> a camera    form: URL, name, enabled
       +-> NETWORK          settings screen: Ethernet, Wi-Fi, LTE, DDNS, UPnP,
@@ -387,6 +387,21 @@ page starts its jobs through the model (`disc_*` in `ui_model.h`) and
 follows them on a timer, so the screen never waits for the network.
 **Search settings** in the header opens the `discovery` section
 (interfaces, addresses also asked, protocol order).
+
+**Manual add** opens a page for a camera that the search does not find:
+the protocol (NETIP (XMeye), ONVIF, Dahua (DHIP/RTSP), Generic RTSP), the
+address or host name, the port (34567, 80, 554, 554 by protocol; it follows
+a change of protocol until edited), user and password, the device's channel
+(an NVR's or DVR's; not for plain RTSP), and for Generic RTSP the main and
+optional sub-stream, each a path or a whole URL. The target channel is a
+drop-down of every channel with the first empty one chosen; an occupied one
+is asked about before it is replaced. **Test** connects as a channel would
+and says "OK: H.264 1920x1080", or why not in the tiles' words
+(Authentication error, Offline, Unsupported codec, No video, Not an ONVIF
+device) with the device's message under it. **Save** puts the camera there
+(for ONVIF with the stream URIs the camera gives then) and closes the page.
+
+![Manual add, tested](../tests/ui/manual_test_ok.png)
 
 **Channels** (bottom): one row per channel: name, source URL (password
 hidden), protocol, state (as the tiles say it), enabled; **Edit** (the

@@ -73,7 +73,8 @@ if(Python3_FOUND)
   if(TARGET vigil_api)
     # Discovery against fake NETIP, ONVIF and Dahua devices on 127.0.0.x.
     add_test(NAME discovery_e2e
-             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/discovery_test.py $<TARGET_FILE:vigild>)
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/discovery_test.py $<TARGET_FILE:vigild>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
     add_test(NAME api_e2e
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/api_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)

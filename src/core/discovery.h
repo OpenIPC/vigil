@@ -44,7 +44,7 @@ typedef struct {
     int      port[3];               /* where to send: netip, onvif, dhip; 0 = the standard port */
 } disc_scan_opts_t;
 
-typedef enum { DISC_JOB_NONE, DISC_JOB_SCAN, DISC_JOB_IP, DISC_JOB_ASSIGN, DISC_JOB_AUTOADD } disc_job_kind_t;
+typedef enum { DISC_JOB_NONE, DISC_JOB_SCAN, DISC_JOB_IP, DISC_JOB_ASSIGN, DISC_JOB_AUTOADD, DISC_JOB_TEST } disc_job_kind_t;
 
 typedef struct {
     char      key[24];              /* the device: MAC, else address */
@@ -56,7 +56,10 @@ typedef struct {
     int       done;                 /* this item ran (or was planned, dry run) */
     int       reprobed;             /* IP jobs: answered at the new address */
     char      msg[96];
-    char      url[512];             /* ASSIGN/AUTOADD: redacted */
+    char      url[512];             /* ASSIGN/AUTOADD/TEST: redacted */
+    char      sub_url[512];         /* ASSIGN/TEST: redacted; "" none or derived */
+    char      codec[8];             /* TEST: "H.264", "H.265" */
+    int       width, height;        /* TEST: the main stream's picture */
 } disc_result_t;
 
 typedef struct {
@@ -120,6 +123,48 @@ int disc_assign_job(const char *key, int channel, unsigned proto, const char *us
 /* Every device in the table not on a channel yet, into the empty channels
  * in order, with these credentials. */
 int disc_autoadd_job(const char *user, const char *pass);
+
+/* ---- a device entered by hand ------------------------------------------------- */
+
+typedef enum { DISC_MANUAL_NETIP, DISC_MANUAL_ONVIF, DISC_MANUAL_DAHUA, DISC_MANUAL_RTSP } disc_manual_kind_t;
+
+typedef struct {
+    disc_manual_kind_t kind;
+    char host[128];                 /* IPv4 address or host name */
+    int  port;                      /* 0: the protocol's (34567, 80, 554, 554) */
+    char user[64], pass[64];
+    int  dev_channel;               /* 1-based channel of an NVR/DVR; 0 = 1 */
+    char main_path[256];            /* RTSP: path ("/stream1") or a whole rtsp:// URL */
+    char sub_path[256];             /* RTSP: the same for the sub-stream; "" none */
+} disc_manual_t;
+
+/* The protocol's default port: NETIP 34567, ONVIF 80, Dahua 554 (RTSP;
+ * its 37777 is not used), RTSP 554. */
+int disc_manual_port(disc_manual_kind_t kind);
+
+/* "netip", "onvif", "dahua", "rtsp" <-> kind; -1 if unknown. */
+int         disc_manual_kind(const char *name);
+const char *disc_manual_name(disc_manual_kind_t kind);
+
+/* The camera URLs for `m`: fixed forms for NETIP (sub-stream derived:
+ * `sub` "") and Dahua, the paths for RTSP; ONVIF asks the device
+ * (GetProfiles, GetStreamUri), a blocking call. */
+disc_rc_t disc_manual_urls(const disc_manual_t *m, char *url, size_t ucap, char *sub, size_t scap, char *err,
+                           size_t errcap);
+
+/* Connect to `url` as a channel would (NETIP login and stream, RTSP
+ * DESCRIBE, SETUP and PLAY) and wait up to `secs` for the first keyframe:
+ * its codec and picture size. DISC_OK, or DISC_EAUTH / DISC_EUNREACHABLE /
+ * DISC_ECODEC / DISC_ETIMEOUT (no video) / DISC_EPROTO with `err`, the
+ * failure classification the tiles use. Blocking. */
+disc_rc_t disc_test_url(const char *url, int secs, char codec[8], int *width, int *height, char *err,
+                        size_t errcap);
+
+/* Jobs: test `m` (its URLs, then the main stream: one result with codec
+ * and size), and put `m` on `channel` (1-based) with `name`; a channel
+ * that has a camera is refused unless `replace`. */
+int disc_test_job(const disc_manual_t *m);
+int disc_assign_manual_job(const disc_manual_t *m, int channel, const char *name, int replace);
 
 /* Credentials refused by devices are counted: after DISC_AUTH_FAILS in
  * DISC_AUTH_WINDOW seconds, jobs with credentials are refused (errno
