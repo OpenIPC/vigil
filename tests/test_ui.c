@@ -69,6 +69,7 @@ static ui_model_t g_model;
 static int        g_channels = 4;       /* the platform's, as the model says */
 static int        g_shots;              /* --shots: every screen, not the tests */
 static void shots_status(int idx, ui_chan_t *st);
+static void quiet(void);
 static ui_rect_t  g_tiles[UI_MAX_CHANNELS];
 static int        g_tile_calls;
 
@@ -1267,6 +1268,7 @@ static void test_cameras(void)
  * and its apply, auto add, adding one device to a channel. */
 static void test_channels_discovery(void)
 {
+    quiet();
     click_text("CAMERA");
     g_dj_hold = 1;
     click_text(LV_SYMBOL_REFRESH "  Search");
@@ -1366,6 +1368,7 @@ static void man_proto(int kind)
 
 static void test_channels_manual(void)
 {
+    quiet();                                    /* the toasts of the steps before */
     click_text("CAMERA");
     click_text("Manual add");
     CHECK(find("Manual add", 0) && find("Device channel", 0) && !find("Main stream", 0) &&
@@ -1385,8 +1388,15 @@ static void test_channels_manual(void)
     run(400);
     CHECK(find("Authentication error", 1) && find("login refused", 1), "Test: authentication error");
     shot("manual_test_auth");
+    lv_textarea_set_text(textarea(3), "pw");    /* an edit: the result no longer applies */
+    CHECK(!find("Authentication error", 1), "an edited password: the old result goes");
+    click_text(LV_SYMBOL_REFRESH "  Test");
+    run(400);
+    CHECK(find("OK: H.265", 1), "tested again");
+    lv_textarea_set_text(textarea(3), "wrong");
     man_proto(UI_MANUAL_ONVIF);
     CHECK(!strcmp(lv_textarea_get_text(textarea(1)), "80"), "ONVIF: port 80");
+    CHECK(!find("Authentication error", 1) && !find("login refused", 1), "another protocol: the old result goes");
     shot("manual_onvif");
     man_proto(UI_MANUAL_DAHUA);
     CHECK(!strcmp(lv_textarea_get_text(textarea(1)), "554"), "Dahua: RTSP port 554");
@@ -1528,7 +1538,6 @@ static void test_two_mice(lv_indev_t *ptr)
 
 /* ---- the management screens -------------------------------------------------------------- */
 
-static void quiet(void);
 
 /* The left pane's item `label`. */
 static void nav_to(const char *label)

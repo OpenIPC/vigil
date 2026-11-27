@@ -1230,6 +1230,7 @@ typedef struct {
     lv_timer_t    *timer;
     unsigned       job;
     int            saving, kind;
+    int            edited;          /* a field changed since Test was pressed */
     int            target_ch[UI_MAX_CHANNELS];      /* dropdown index -> channel (1-based) */
     int            occupied[UI_MAX_CHANNELS];
     ui_disc_job_t *jb;
@@ -1265,6 +1266,17 @@ static void man_rows(man_t *m)
         "A path (/stream1) or a whole rtsp:// URL for each stream.",
     };
     lv_label_set_text(m->port_hint, hint[m->kind]);
+}
+
+static void man_show(man_t *m, const char *word, const char *detail, lv_color_t col);
+
+/* A field the connection depends on changed: a result shown is about
+ * other details now, and one still to come will be. */
+static void man_edited_cb(lv_event_t *e)
+{
+    man_t *m = lv_event_get_user_data(e);
+    m->edited = 1;
+    if (!m->saving) man_show(m, "", "", UI_C(TEXT2));
 }
 
 static void man_proto_cb(lv_event_t *e)
@@ -1334,6 +1346,7 @@ static void man_poll_cb(lv_timer_t *t)
     M()->disc_job(m->jb);
     const ui_disc_job_t *j = m->jb;
     if (j->id != m->job) return;
+    if (j->running && !m->saving && m->edited) return;
     if (j->running) {
         char s[128];
         snprintf(s, sizeof s, LV_SYMBOL_REFRESH " %s...", j->msg[0] ? j->msg : "working");
@@ -1342,6 +1355,7 @@ static void man_poll_cb(lv_timer_t *t)
     }
     m->job = 0;
     man_busy(m, 0);
+    if (!m->saving && m->edited) return;          /* a test of what was there before */
     const ui_disc_res_t *r = j->n ? &j->r[0] : NULL;
     if (!r) {
         man_show(m, "Error", j->msg, UI_C(BAD));
@@ -1383,6 +1397,7 @@ static void man_test_cb(lv_event_t *e)
     }
     m->job = (unsigned)id;
     m->saving = 0;
+    m->edited = 0;
     man_busy(m, 1);
     man_show(m, LV_SYMBOL_REFRESH " Connecting...", "", UI_C(TEXT2));
 }
@@ -1526,6 +1541,9 @@ static void manual_open(chans_t *c)
     lv_obj_set_width(m->detail, LV_PCT(100));
     lv_label_set_long_mode(m->detail, LV_LABEL_LONG_WRAP);
 
+    lv_obj_t *conn[] = { m->proto, m->host, m->port, m->user, m->pass, m->devch, m->mainp, m->subp };
+    for (size_t i = 0; i < sizeof conn / sizeof conn[0]; ++i)
+        lv_obj_add_event_cb(conn[i], man_edited_cb, LV_EVENT_VALUE_CHANGED, m);
     m->kind = UI_MANUAL_NETIP;
     man_rows(m);
     m->timer = lv_timer_create(man_poll_cb, POLL_MS, m);
