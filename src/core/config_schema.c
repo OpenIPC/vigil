@@ -546,6 +546,18 @@ static const schema_field_t discovery_fields[] = {
               "NETIP names both streams, ONVIF asks the camera, Dahua's RTSP path is fixed." },
 };
 
+static const schema_field_t onvif_server_fields[] = {
+    { .key = "enabled", BOOL(config_onvif_server_t, enabled), .def_int = 1, .live = 1, .label = "On",
+      .help = "Be an ONVIF device for video management software and other recorders: a profile "
+              "for each camera's main and sub-stream with its RTSP address, and WS-Discovery "
+              "so they find this recorder (docs/onvif.md). They log in as vigil's users; the "
+              "video needs the live permission." },
+    { .key = "port", INT(config_onvif_server_t, port), .def_int = 8899, .min = 1, .max = 65535, .live = 1,
+      .label = "Port",
+      .help = "TCP port of its web service, whose device service is /onvif/device_service (port "
+              "80 is the zero channel's). Discovery tells clients which port it is." },
+};
+
 #define N(a) (int)(sizeof(a) / sizeof((a)[0]))
 
 static const schema_section_t sections[] = {
@@ -582,6 +594,7 @@ static const schema_section_t sections[] = {
     OBJECT("web", web, web_fields, "Zero channel"),
     { .key = "discovery", .off = offsetof(vigil_config_t, discovery), .fields = discovery_fields,
       .n_fields = N(discovery_fields), .label = "Camera search" },
+    OBJECT("onvif_server", onvif_server, onvif_server_fields, "ONVIF server"),
 };
 
 const schema_t config_schema = {

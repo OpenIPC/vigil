@@ -314,6 +314,13 @@ the API (`api_disc.c`) and the UI (through `ui_model.h`) start them and
 read their state. Formats, sources and the protocol matrix are in
 `disc_proto.h`, `disc_ops.h` and [api.md](api.md#discovery).
 
+The other way round, the **ONVIF server** (`src/api/onvif.c`,
+[onvif.md](onvif.md)) makes the recorder an ONVIF device for VMS: like
+the API it only reads snapshots (`channels_status` gives each stream's
+codec and size, `config_get`), its wire formats are pure functions in
+`src/core/onvif_proto.c`, and the camera search skips its WS-Discovery
+answers by their endpoint reference (`disc_set_self`).
+
 ## The HAL
 
 | Header | What the platform does |
@@ -392,6 +399,10 @@ adding a platform is covered in [porting.md](porting.md).
   scan, merge, address changes over each protocol with wrong and right
   passwords, a dry run, adding to a channel, auto-add, the rate limit and
   that no password leaks.
+- `onvif`: SOAP requests, UsernameToken and HTTP Digest (published
+  vectors), WS-Discovery probes and their matching, our ProbeMatches as
+  the camera search reads them; each request cut at every length.
+  `onvif_e2e`: `vigild`'s ONVIF server as a client sees it.
 - `theme_tokens`: the generated `theme_tokens.h` and `web/theme.css` match
   `src/ui/theme.json`.
 - `ui_screens`: the UI on an in-memory display, driven through the evdev

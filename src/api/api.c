@@ -135,7 +135,7 @@ static pthread_mutex_t g_auth_lock = PTHREAD_MUTEX_INITIALIZER;
 static fail_entry_t    g_failed[FAIL_ADDRS];
 static unsigned char   g_cache_key[16];     /* random, so the cache is no password hash */
 static cache_entry_t   g_cache[CACHE_N];
-static char            g_why_told[160];     /* last "cannot check" reason logged */
+static char            g_why_told[200];     /* last "cannot check" reason logged */
 
 /* The authorization hook and the request handler of one request run on
  * the same CivetWeb worker thread: the hook leaves who it let in here. */
@@ -193,6 +193,56 @@ static int send_401(struct mg_connection *conn)
  * are refused for a doubling time without looking at the password:
  * crypt() is slow on these CPUs by design, and an attacker must not get to
  * run it at will. */
+/* Seconds `addr` is still locked out for; 0 when it is not. */
+static long locked_out(const char *addr)
+{
+    pthread_mutex_lock(&g_auth_lock);
+    fail_entry_t *fe = fail_entry(addr, 0);
+    time_t wait = fe ? fe->locked_until - mono() : 0;
+    pthread_mutex_unlock(&g_auth_lock);
+    return wait > 0 ? (long)wait : 0;
+}
+
+/* After a login was checked: a success clears the address's failures, a
+ * failure counts (and is answered FAIL_DELAY_S late). Returns 1 or 0. */
+static int login_counted(const char *addr, int ok, const char *why)
+{
+    pthread_mutex_lock(&g_auth_lock);
+    int fails = 0;
+    fail_entry_t *fe = fail_entry(addr, !ok);
+    if (ok) {
+        if (fe) memset(fe, 0, sizeof *fe);
+    } else {
+        fails = ++fe->fails;
+        fe->last = mono();
+        if (fails >= FAIL_FREE) {
+            int s = fails - FAIL_FREE + 1;
+            fe->locked_until = fe->last + (s >= 6 ? LOCKOUT_MAX_S : 1 << s);
+        }
+    }
+    int tell = why[0] && strcmp(why, g_why_told) != 0;
+    if (tell) snprintf(g_why_told, sizeof g_why_told, "%s", why);
+    pthread_mutex_unlock(&g_auth_lock);
+    if (ok) return 1;
+    /* "auth": the API's logins, the zero channel's (web.c) and ONVIF's alike */
+    if (tell) vg_log("auth: cannot check passwords: %s", why);
+    vg_log("auth: login failed from %s (%d in a row)", addr, fails);
+    sleep(FAIL_DELAY_S);
+    return 0;
+}
+
+int api_login_with(const char *addr, const char *user, int (*check)(const char *pass, void *ctx), void *ctx,
+                   unsigned *perms, long *retry_after)
+{
+    *perms = 0;
+    *retry_after = locked_out(addr);
+    if (*retry_after) return -2;
+    char why[200] = "";
+    int ok = users_login_with(user, check, ctx, perms, why, sizeof why) == 1;
+    if (!ok) *perms = 0;
+    return login_counted(addr, ok, why);
+}
+
 int api_login(const char *addr, const char *user, const char *pass, unsigned *perms, long *retry_after)
 {
     vigil_config_t *c = malloc(sizeof *c);
@@ -201,16 +251,9 @@ int api_login(const char *addr, const char *user, const char *pass, unsigned *pe
     config_api_t api = c->api;
     free(c);
     *perms = 0;
-    *retry_after = 0;
+    *retry_after = locked_out(addr);
+    if (*retry_after) return -2;
     time_t now = mono();
-    pthread_mutex_lock(&g_auth_lock);
-    fail_entry_t *fe = fail_entry(addr, 0);
-    time_t wait = fe ? fe->locked_until - now : 0;
-    pthread_mutex_unlock(&g_auth_lock);
-    if (wait > 0) {
-        *retry_after = (long)wait;
-        return -2;
-    }
 
     char why[160] = "";
     int ok = 0;
@@ -247,30 +290,8 @@ int api_login(const char *addr, const char *user, const char *pass, unsigned *pe
         }
     }
 
-    pthread_mutex_lock(&g_auth_lock);
-    int fails = 0;
-    fe = fail_entry(addr, !ok);
-    if (ok) {
-        if (fe) memset(fe, 0, sizeof *fe);
-    } else {
-        fails = ++fe->fails;
-        fe->last = mono();
-        if (fails >= FAIL_FREE) {
-            int s = fails - FAIL_FREE + 1;
-            fe->locked_until = fe->last + (s >= 6 ? LOCKOUT_MAX_S : 1 << s);
-        }
-    }
-    int tell = why[0] && strcmp(why, g_why_told) != 0;
-    if (tell) snprintf(g_why_told, sizeof g_why_told, "%s", why);
-    pthread_mutex_unlock(&g_auth_lock);
-    if (ok) return 1;
-
-    *perms = 0;
-    /* "auth": the API's logins and the zero channel's (web.c) alike */
-    if (tell) vg_log("auth: cannot check passwords: %s", why);
-    vg_log("auth: login failed from %s (%d in a row)", addr, fails);
-    sleep(FAIL_DELAY_S);
-    return 0;
+    if (!ok) *perms = 0;
+    return login_counted(addr, ok, why);
 }
 
 /* CivetWeb's authorization hook for everything under /api: 1 = go on. */

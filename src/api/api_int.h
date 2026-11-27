@@ -37,6 +37,11 @@ unsigned api_perm_needed(const char *method, const char *uri);
  * zero channel's together. api_auth_init first. */
 int  api_login(const char *addr, const char *user, const char *pass, unsigned *perms, long *retry_after);
 void api_auth_init(void);
+/* The same for a login whose password is proved, not sent (ONVIF's
+ * digests): users_login_with's `check`, counted and locked out with the
+ * others. */
+int  api_login_with(const char *addr, const char *user, int (*check)(const char *pass, void *ctx), void *ctx,
+                    unsigned *perms, long *retry_after);
 
 /* Who sent the request being handled on this thread, as the
  * authorization hook found: the user ("" when api.auth is off) and the

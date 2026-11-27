@@ -232,6 +232,9 @@ that says what its users may do. They are kept in `api.users`
 like `vigil.yaml`; passwords are stored as `crypt(3)` hashes (SHA-512,
 `$6$`, with a random salt; SHA-256 or MD5 where the C library has no
 SHA-512) and never leave `vigild`: the API shows `"password_set": true`.
+While the [ONVIF server](onvif.md#logging-in) is on, setting a password
+also stores the user's ONVIF key (the password itself, base64) next to the
+hash: ONVIF's digest logins need it.
 
 Permissions: `live` (live view, status, events), `playback`, `ptz`,
 `cameras` (the camera list, discovery), `storage` (recording, schedule,
@@ -267,7 +270,7 @@ saved over it until it is fixed or removed.
 | `PUT /config` | every permission but `remote` |
 | `/config/cameras`, `discovery` | `cameras` |
 | `/config/record`, `schedule`, `quota`, `nas` | `storage` |
-| `/config/ddns`, `upnp`, `smtp`, `alarm` | `network` |
+| `/config/ddns`, `upnp`, `smtp`, `alarm`, `onvif_server` | `network` |
 | `/config/time`, `ui`, `display` | `system` |
 | `/config/api`, `web` | `users` |
 | `/network/…` | `network` |
@@ -855,6 +858,8 @@ say which device went where.
   `cmake/embed.cmake`); `src/app/kvm.c`, `kvm_enc.c`, `kvm_input.c`,
   `jpeg_enc.c`: its pictures, their changed parts as JPEGs (an encoder of
   its own: libjpeg is not on the firmware) and its input.
+  `src/api/onvif.c`: the [ONVIF server](onvif.md#inside), a third
+  CivetWeb context and the WS-Discovery responder.
   `src/api/api_disc.c`: the discovery endpoints, over
   `src/core/discovery.{h,c}` (the device table and the jobs),
   `src/core/disc_proto.{h,c}` (the searches and their answers, as pure

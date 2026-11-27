@@ -120,6 +120,9 @@ typedef struct {
     /* What each stream brings in, kbit/s of video averaged over 2 s (the
      * access units as received); 0 while it does not run. */
     unsigned   main_kbps, sub_kbps;
+    /* Each stream's own, whether shown or not: [0] main, [1] sub (for the
+     * ONVIF server's profiles). 0 / VG_CODEC_NONE until it is known. */
+    struct { vg_codec_t codec; unsigned width, height, fps; } streams[2];
     char       host[64];
     char       name[32];            /* the configured name, else `title` */
     char       title[32];           /* what the camera calls the channel (NETIP

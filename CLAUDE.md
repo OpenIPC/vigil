@@ -75,7 +75,9 @@ comments; options override the file.
 - `src/api/` — the HTTP/WebSocket API (`docs/api.md`), its password check,
   vigil's users and groups (`users.c`) and the permission table; the zero
   channel's web server on port 80 (`web.c`, pages in `src/api/web/`, built
-  in), which reaches the screen only through `kvm.h`.
+  in), which reaches the screen only through `kvm.h`; the ONVIF server and
+  WS-Discovery responder (`onvif.c`, `docs/onvif.md`; its wire formats in
+  `src/core/onvif_proto.c`).
 - `src/sys/` — looking after the system vigild runs on (`docs/management.md`):
   interfaces, time zone and NTP, host name, disks (with SMART and a surface
   scan), network storage, mail and DDNS through curl, and `mgmt.c`, the jobs and timers both front ends use.

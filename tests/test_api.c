@@ -105,6 +105,9 @@ static char *slurp(const char *path)
     return b;
 }
 
+/* users_login_with's check: is it the password in ctx? */
+static int pass_is(const char *pass, void *ctx) { return !strcmp(pass, (const char *)ctx); }
+
 static void test_users(void)
 {
     char dir[] = "/tmp/vigil-users-XXXXXX", cfg[128], shadow[128], users[128], why[160];
@@ -175,6 +178,16 @@ static void test_users(void)
           users_login("carl", "carlpw", &perms, why, sizeof why) == 0 &&
           users_login("carl", "newpw1", &perms, why, sizeof why) == 1, "password changed");
 
+    /* ONVIF's digests: checked against the password itself, the ONVIF key
+     * written with it while onvif_server is on (the default). */
+    CHECK(users_login_with("carl", pass_is, "newpw1", &perms, why, sizeof why) == 1 && perms == PERM_LIVE,
+          "digest login with the ONVIF key: %s", why);
+    CHECK(users_login_with("carl", pass_is, "carlpw", &perms, why, sizeof why) == 0 && perms == 0,
+          "digest login, wrong password");
+    CHECK(users_login_with("nobody", pass_is, "x", &perms, why, sizeof why) == 0, "digest login, unknown user");
+    CHECK(users_login_with("root", pass_is, "secret", &perms, why, sizeof why) == -1 && strstr(why, "system account"),
+          "the system account has no ONVIF key: %s", why);
+
     /* The file: 0600, commented YAML, hashes only; read back as it was. */
     struct stat st;
     CHECK(stat(users, &st) == 0 && (st.st_mode & 0777) == 0600, "users file is 0600 (%o)", st.st_mode & 0777);
@@ -209,6 +222,20 @@ static void test_users(void)
           "root still gets in");
     CHECK(users_delete("admin", &e) == USERS_OK && users_delete("admin", &e) == USERS_ENOENT, "delete");
     CHECK(users_login("admin", "secret", &perms, why, sizeof why) == 1, "admin is root's again");
+
+    /* With the ONVIF server off, no key is written: such a user is told
+     * to set the password again. */
+    f = fopen(cfg, "w");
+    fprintf(f, "api:\n  user: root\n  shadow: %s\n  users: %s\nonvif_server:\n  enabled: false\n", shadow, users);
+    fclose(f);
+    CHECK(config_init(cfg) == 0, "configuration, ONVIF off");
+    CHECK(users_add("dan", "viewer", "danpw1", 1, &e) == USERS_OK, "add dan");
+    text = slurp(users);
+    CHECK(text && !strstr(text, "ZGFucHcx"), "no ONVIF key for dan");
+    free(text);
+    CHECK(users_login_with("dan", pass_is, "danpw1", &perms, why, sizeof why) == -1 && strstr(why, "no ONVIF key"),
+          "without a key: %s", why);
+    CHECK(users_login("dan", "danpw1", &perms, why, sizeof why) == 1, "dan's password works elsewhere");
 
     /* An invalid file: only root, and nothing is saved over it. */
     f = fopen(users, "w");

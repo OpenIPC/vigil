@@ -343,6 +343,20 @@ int disc_xml_text(const char *xml, size_t len, const char *local, char *out, siz
     return unescape(xml + c0, c1 - c0, out, cap);
 }
 
+int disc_xml_elem(const char *xml, size_t len, const char *local, size_t start, size_t *tag, size_t *c0,
+                  size_t *c1, size_t *after)
+{
+    size_t a0, a1, b0, b1, af;
+    if (find_elem(xml, len, local, start, &a0, &a1, &b0, &b1, &af) < 0) return -1;
+    size_t lt = a0;
+    while (lt > 0 && xml[lt] != '<') --lt;
+    if (tag) *tag = lt;
+    if (c0) *c0 = b0;
+    if (c1) *c1 = b1;
+    if (after) *after = af;
+    return 0;
+}
+
 int disc_xml_attr(const char *xml, size_t len, const char *local, const char *attr, char *out,
                   size_t cap, size_t *from)
 {

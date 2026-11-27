@@ -294,3 +294,15 @@ discovery:
   # answers more than one: NETIP names both streams, ONVIF asks the camera,
   # Dahua's RTSP path is fixed. Default netip,onvif,dhip.
   prefer: "netip,onvif,dhip"
+
+# ONVIF server
+onvif_server:
+  # On: Be an ONVIF device for video management software and other recorders:
+  # a profile for each camera's main and sub-stream with its RTSP address, and
+  # WS-Discovery so they find this recorder (docs/onvif.md). They log in as
+  # vigil's users; the video needs the live permission. Default true.
+  enabled: true
+  # Port: TCP port of its web service, whose device service is
+  # /onvif/device_service (port 80 is the zero channel's). Discovery tells
+  # clients which port it is. 1..65535, default 8899.
+  port: 8899

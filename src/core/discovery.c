@@ -64,6 +64,25 @@ static void wipe(void *p, size_t n)
     while (n--) *w++ = 0;
 }
 
+/* This recorder's own WS-Discovery endpoint (the ONVIF server's): its
+ * answers to our probes are not a camera found. */
+static char g_self_uuid[64];
+
+void disc_set_self(const char *uuid)
+{
+    pthread_mutex_lock(&g_lock);
+    snprintf(g_self_uuid, sizeof g_self_uuid, "%s", uuid ? uuid : "");
+    pthread_mutex_unlock(&g_lock);
+}
+
+static int is_self(const disc_device_t *d)
+{
+    pthread_mutex_lock(&g_lock);
+    int self = g_self_uuid[0] && d->uuid[0] && !strcmp(g_self_uuid, d->uuid);
+    pthread_mutex_unlock(&g_lock);
+    return self;
+}
+
 void disc_set_max_channels(int n)
 {
     if (n > 0) g_max_ch = n < CHANNEL_MAX ? n : CHANNEL_MAX;
@@ -578,7 +597,7 @@ static void scanner_listen(scanner_t *s, int ms, void (*heard)(const disc_device
                 int ok = map[k] == 0 ? disc_netip_parse(buf, (size_t)r, &d)
                        : map[k] == 1 ? disc_onvif_parse((const char *)buf, (size_t)r, &d)
                                      : disc_dhip_parse(buf, (size_t)r, &d);
-                if (ok < 0) continue;
+                if (ok < 0 || (map[k] == 1 && is_self(&d))) continue;
                 /* A reply from a unicast target (or through NAT) gives the
                  * address that answered; devices on another subnet still
                  * report their own. */
