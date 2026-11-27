@@ -263,7 +263,7 @@ saved over it until it is fixed or removed.
 | `/config/cameras`, `discovery` | `cameras` |
 | `/config/record`, `schedule`, `quota`, `nas` | `storage` |
 | `/config/ddns`, `upnp`, `smtp`, `alarm` | `network` |
-| `/config/time`, `ui` | `system` |
+| `/config/time`, `ui`, `display` | `system` |
 | `/config/api` | `users` |
 | `/network/…` | `network` |
 | `/system/…` | `system` |
@@ -337,7 +337,7 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `GET /api/v1/status` | Platform, uptime, configuration generation, one entry per camera. |
 | `GET /api/v1/config` | The configuration in force, passwords redacted. |
 | `PUT /api/v1/config` | Replace the whole configuration. Sections and keys it omits get their defaults. |
-| `GET /api/v1/config/<section>` | One section (`cameras`, `record`, `schedule`, `quota`, `nas`, `ddns`, `upnp`, `smtp`, `alarm`, `time`, `ui`, `api`, `discovery`). |
+| `GET /api/v1/config/<section>` | One section (`cameras`, `record`, `schedule`, `quota`, `nas`, `ddns`, `upnp`, `smtp`, `alarm`, `time`, `ui`, `display`, `api`, `discovery`). |
 | `PUT /api/v1/config/<section>` | Replace one section; the others stay. |
 | `GET /api/v1/schema` | Every setting: type, default, limits, label, help. |
 | `GET /api/v1/ws` | WebSocket: pushed status, events and configuration changes. |

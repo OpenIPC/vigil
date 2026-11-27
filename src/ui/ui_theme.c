@@ -187,7 +187,7 @@ lv_obj_t *ui_icon(lv_obj_t *parent, const lv_image_dsc_t *img, uint32_t rgb)
 
 /* ---- text over the video ------------------------------------------------------------- */
 
-#define HARD_FONTS 4
+#define HARD_FONTS 6
 static struct {
     const lv_font_t *base;
     lv_font_t        font;
@@ -254,15 +254,85 @@ static void outline_ext_cb(lv_event_t *e) { lv_event_set_ext_draw_size(e, 1); }
 
 lv_obj_t *ui_outlined(lv_obj_t *parent, const lv_font_t *font, uint32_t rgb)
 {
+    return ui_osd_text(parent, font, rgb, UI_OSD_OUTLINE);
+}
+
+lv_obj_t *ui_osd_text(lv_obj_t *parent, const lv_font_t *font, uint32_t rgb, ui_osd_bg_t bg)
+{
     lv_obj_t *l = lv_label_create(parent);
     lv_label_set_text(l, "");
-    lv_obj_set_style_text_font(l, ui_hard_font(font), 0);
     lv_obj_set_style_text_color(l, lv_color_hex(rgb), 0);
     lv_obj_remove_flag(l, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(l, outline_draw_cb, LV_EVENT_DRAW_MAIN_BEGIN, NULL);
-    lv_obj_add_event_cb(l, outline_ext_cb, LV_EVENT_REFR_EXT_DRAW_SIZE, NULL);
-    lv_obj_refresh_ext_draw_size(l);
+    if (bg == UI_OSD_BOX) {
+        /* On its own opaque chip the text keeps its soft edges: they
+         * blend with the chip, never with the key. */
+        lv_obj_add_style(l, &ui_st_chip, 0);
+        lv_obj_set_style_text_font(l, font, 0);
+        return l;
+    }
+    lv_obj_set_style_text_font(l, ui_hard_font(font), 0);
+    if (bg == UI_OSD_OUTLINE) {
+        lv_obj_add_event_cb(l, outline_draw_cb, LV_EVENT_DRAW_MAIN_BEGIN, NULL);
+        lv_obj_add_event_cb(l, outline_ext_cb, LV_EVENT_REFR_EXT_DRAW_SIZE, NULL);
+        lv_obj_refresh_ext_draw_size(l);
+    }
     return l;
+}
+
+/* The icons with hard edges, as the hard fonts: every pixel opaque or not
+ * drawn. Made once per icon. */
+#define HARD_ICONS 8
+static struct {
+    const lv_image_dsc_t *base;
+    uint8_t              *px;
+    lv_image_dsc_t        img;
+} g_hard_icon[HARD_ICONS];
+
+static const lv_image_dsc_t *hard_icon(const lv_image_dsc_t *base)
+{
+    int i;
+    for (i = 0; i < HARD_ICONS && g_hard_icon[i].base; ++i)
+        if (g_hard_icon[i].base == base) return &g_hard_icon[i].img;
+    if (i == HARD_ICONS || base->header.cf != LV_COLOR_FORMAT_A8) return base;
+    uint32_t w = base->header.w, h = base->header.h, stride = base->header.stride ? base->header.stride : w;
+    if (!(g_hard_icon[i].px = lv_malloc((size_t)stride * h))) return base;
+    for (uint32_t k = 0; k < stride * h; ++k) g_hard_icon[i].px[k] = base->data[k] >= HARD_CUT ? 0xFF : 0;
+    g_hard_icon[i].base = base;
+    g_hard_icon[i].img = *base;
+    g_hard_icon[i].img.data = g_hard_icon[i].px;
+    g_hard_icon[i].img.data_size = stride * h;
+    return &g_hard_icon[i].img;
+}
+
+static void icon_outline_draw_cb(lv_event_t *e)
+{
+    lv_obj_t *o = lv_event_get_current_target(e);
+    if (lv_obj_has_flag(o, LV_OBJ_FLAG_HIDDEN)) return;
+    lv_draw_image_dsc_t d;
+    lv_draw_image_dsc_init(&d);
+    d.src = lv_image_get_src(o);
+    d.recolor = UI_C(OUTLINE);
+    d.recolor_opa = LV_OPA_COVER;
+    lv_area_t a;
+    lv_obj_get_coords(o, &a);
+    for (int i = 0; i < 8; ++i) {
+        lv_area_t b = a;
+        lv_area_move(&b, k_around[i][0], k_around[i][1]);
+        lv_draw_image(lv_event_get_layer(e), &d, &b);
+    }
+}
+
+lv_obj_t *ui_osd_icon(lv_obj_t *parent, const lv_image_dsc_t *img, uint32_t rgb, ui_osd_bg_t bg)
+{
+    if (bg == UI_OSD_BOX) return ui_icon(parent, img, rgb);
+    lv_obj_t *i = ui_icon(parent, hard_icon(img), rgb);
+    lv_obj_set_user_data(i, (void *)img);
+    if (bg == UI_OSD_OUTLINE) {
+        lv_obj_add_event_cb(i, icon_outline_draw_cb, LV_EVENT_DRAW_MAIN_BEGIN, NULL);
+        lv_obj_add_event_cb(i, outline_ext_cb, LV_EVENT_REFR_EXT_DRAW_SIZE, NULL);
+        lv_obj_refresh_ext_draw_size(i);
+    }
+    return i;
 }
 
 lv_obj_t *ui_outlined_label(lv_obj_t *o) { return o; }

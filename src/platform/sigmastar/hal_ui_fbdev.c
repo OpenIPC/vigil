@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* hal_ui_fbdev.c — the UI layer on SigmaStar: LVGL's fbdev driver on the
  * GOP framebuffer /dev/fb0 (fbdev.ko), above the display's video layer.
- * Tiles are holes keyed out by the GOP's colour key. */
+ * Tiles are holes keyed out by the GOP's colour key. The GOP stretches
+ * the buffer to the output mode (sstar_fb_screen). */
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <fcntl.h>
@@ -17,6 +18,7 @@
 #include "sstarFb.h"
 
 #include "hal_ui.h"
+#include "sstar_fb.h"
 
 #define FB_DEV        "/dev/fb0"
 /* The GOP compares its colour key with the pixel's RGB. */
@@ -26,20 +28,57 @@
 
 static int g_fd = -1;
 
-lv_display_t *hal_ui_create(unsigned w, unsigned h)
+/* The fd stays open for the life of the process, as on hifb. */
+static int fb_open(void)
 {
-    /* fbdev.ko sets the layer up once, at load, from /config/fbdev.ini
-     * (FB_WIDTH/FB_HEIGHT, FB_HWWIN_FORMAT 5 = ARGB8888). Changing it later
-     * with FBIOSET_DISPLAYLAYER_ATTRIBUTES left the scan-out reading the
-     * old geometry (seen in qemu), so the layer is only checked here. The
-     * fd stays open for the life of the process, as on hifb. */
     if (g_fd < 0) {
         g_fd = open(FB_DEV, O_RDWR);
-        if (g_fd < 0) {
-            fprintf(stderr, "open %s: %s\n", FB_DEV, strerror(errno));
-            return NULL;
-        }
+        if (g_fd < 0) fprintf(stderr, "open %s: %s\n", FB_DEV, strerror(errno));
     }
+    return g_fd;
+}
+
+/*
+ * The buffer stays at the size fbdev.ko gave it at load (fbdev.ini's
+ * FB_WIDTH/FB_HEIGHT): changing that with FBIOSET_DISPLAYLAYER_ATTRIBUTES
+ * left the scan-out reading the old geometry (seen in qemu). The screen
+ * (the timing's size, fbdev.ini's FB_TIMMING_*) and the stretch window's
+ * destination are what follows the output: the GOP scales the buffer up
+ * or down to it, in hardware, and fbdev.ko refuses a destination that
+ * does not fit the screen, so both go in one call.
+ */
+int sstar_fb_screen(unsigned w, unsigned h)
+{
+    if (fb_open() < 0) return -1;
+    MI_FB_DisplayLayerAttr_t a;
+    memset(&a, 0, sizeof a);
+    if (ioctl(g_fd, FBIOGET_DISPLAYLAYER_ATTRIBUTES, &a) < 0) {
+        fprintf(stderr, "FBIOGET_DISPLAYLAYER_ATTRIBUTES: %s\n", strerror(errno));
+        return -1;
+    }
+    if (a.u32ScreenWidth == w && a.u32ScreenHeight == h && a.u32dstWidth == w && a.u32dstHeight == h &&
+        !a.u32Xpos && !a.u32YPos)
+        return 0;
+    a.u32Xpos = 0;
+    a.u32YPos = 0;
+    a.u32dstWidth = w;
+    a.u32dstHeight = h;
+    a.u32ScreenWidth = w;
+    a.u32ScreenHeight = h;
+    a.u32SetAttrMask = E_MI_FB_DISPLAYLAYER_ATTR_MASK_SCREEN_SIZE | E_MI_FB_DISPLAYLAYER_ATTR_MASK_DISP_POS |
+                       E_MI_FB_DISPLAYLAYER_ATTR_MASK_DISP_SIZE;
+    if (ioctl(g_fd, FBIOSET_DISPLAYLAYER_ATTRIBUTES, &a) < 0) {
+        fprintf(stderr, "FBIOSET_DISPLAYLAYER_ATTRIBUTES %ux%u: %s\n", w, h, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+lv_display_t *hal_ui_create(unsigned w, unsigned h)
+{
+    /* fbdev.ko sets the layer up once, at load, from fbdev.ini (FB_WIDTH,
+     * FB_HEIGHT, FB_HWWIN_FORMAT 5 = ARGB8888): checked here. */
+    if (fb_open() < 0) return NULL;
     struct fb_var_screeninfo var;
     if (ioctl(g_fd, FBIOGET_VSCREENINFO, &var) < 0) {
         fprintf(stderr, "FBIOGET_VSCREENINFO: %s\n", strerror(errno));

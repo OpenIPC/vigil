@@ -209,8 +209,24 @@ void      ui_display_open(void);
 void      ui_channel_info_open(void);
 /* The live view's layouts (windows per page) the platform can show. */
 int       ui_live_layout_offered(int layout);
-/* Where the clock is ("top right"), or "off". */
-const char *ui_live_clock_corner(void);
+
+/* What the live view draws over the video, as display.* has it: where
+ * (UI_POS_*), how large (0 small .. 3 extra large) and on what
+ * (ui_osd_bg_t, ui_theme.h). The live view follows a change at once. */
+enum { UI_POS_OFF, UI_POS_TL, UI_POS_TC, UI_POS_TR, UI_POS_BL, UI_POS_BC, UI_POS_BR, UI_N_POS };
+#define UI_N_SIZES 4
+#define UI_N_BGS   3
+typedef struct {
+    int clock, clock_size, clock_bg;
+    int name, name_size, name_bg;
+    int icons, icons_bg;
+} ui_osd_t;
+/* The values display.* takes, by index: positions (UI_POS_*), sizes,
+ * backgrounds (ui_osd_bg_t). */
+extern const char *const ui_pos_keys[UI_N_POS];
+extern const char *const ui_size_keys[UI_N_SIZES];
+extern const char *const ui_bg_keys[UI_N_BGS];
+void ui_osd_get(ui_osd_t *o);
 
 /* `tm` in the UI's date and time format (ui.date_format, ui.time_format):
  * "2026-11-26  14:32:05", "26.11.2026  2:32 PM", ... */

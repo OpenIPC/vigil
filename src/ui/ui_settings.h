@@ -48,6 +48,9 @@ void ui_network_open(int first);
 void ui_storage_open(int first);
 void ui_sysset_open(int first);
 void ui_account_open(int first);
+/* Display (ui_set_display.c; ui_display_open in ui_app.h: Output first). */
+enum { UI_DISPLAY_OUTPUT, UI_DISPLAY_CLOCK, UI_DISPLAY_NAMES, UI_DISPLAY_ICONS };
+void ui_display_open_at(int first);
 
 /* Storage's sub-pages, for the context menu's Record. */
 enum { UI_STORAGE_BASIC, UI_STORAGE_SCHEDULE, UI_STORAGE_DISKS, UI_STORAGE_QUOTA, UI_STORAGE_NAS };

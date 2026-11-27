@@ -42,5 +42,9 @@ extern const lv_image_dsc_t ui_icon_nav_nas;    /* 22 px, folder-share.svg */
 extern const lv_image_dsc_t ui_icon_nav_general;    /* 22 px, settings.svg */
 extern const lv_image_dsc_t ui_icon_nav_users;    /* 22 px, users.svg */
 extern const lv_image_dsc_t ui_icon_nav_groups;    /* 22 px, users-group.svg */
+extern const lv_image_dsc_t ui_icon_nav_output;    /* 22 px, device-desktop.svg */
+extern const lv_image_dsc_t ui_icon_nav_clock;    /* 22 px, clock.svg */
+extern const lv_image_dsc_t ui_icon_nav_names;    /* 22 px, device-cctv.svg */
+extern const lv_image_dsc_t ui_icon_nav_icons;    /* 22 px, activity.svg */
 
 #endif /* ICONS_H */

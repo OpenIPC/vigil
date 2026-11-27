@@ -178,11 +178,15 @@ static void *compositor(void *arg)
 
 /* ---- platform ---------------------------------------------------------------- */
 
-int hal_init(unsigned w, unsigned h, unsigned fps)
+/* The screen's size; the connector's mode is DRM's choice (rk_display.c). */
+static vg_mode_t g_mode;
+
+int hal_init(unsigned w, unsigned h, const vg_mode_t *out)
 {
-    (void)fps;
+    (void)out;                                  /* the screen's size */
     for (int i = 0; i < MAX_CH; ++i) pthread_mutex_init(&g_ch[i].lock, NULL);
     if (rk_display_open(w, h) < 0) return -1;
+    g_mode = (vg_mode_t){ w, h, 60 };
     signal(SIGUSR1, on_usr1);
     g_comp_stop = 0;
     if (pthread_create(&g_comp, NULL, compositor, NULL) != 0) {
@@ -349,3 +353,19 @@ void hal_dec_reset(int ch)
 int  hal_cap_start(int in, int ch, hal_cap_cb cb, void *user) { (void)in; (void)ch; (void)cb; (void)user; return -1; }
 void hal_cap_stop(int in) { (void)in; }
 int  hal_cap_signal(int in) { (void)in; return 0; }
+
+/* ---- output mode: the one hal_init started; it does not change ---------------- */
+
+int hal_display_modes(vg_mode_t *out, int max)
+{
+    if (max < 1 || !g_mode.w) return 0;
+    *out = g_mode;
+    return 1;
+}
+
+void hal_display_mode(vg_mode_t *cur) { *cur = g_mode; }
+
+int hal_display_set_mode(const vg_mode_t *m)
+{
+    return m->w == g_mode.w && m->h == g_mode.h && m->hz == g_mode.hz ? 0 : -1;
+}

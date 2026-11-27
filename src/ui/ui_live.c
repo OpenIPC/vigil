@@ -3,10 +3,15 @@
  *
  *   grid              1, 4, 9 or 16 tiles over the whole screen
  *                     (ui_layout.c). A tile is a hole the channel's video
- *                     shows through (hal_ui_hole), with small opaque chips
- *                     on it: the camera's name with REC and motion icons,
- *                     its state ("Connecting...", "No video") or its stream
- *   clock             date and time in one corner (CLOCK_CORNER)
+ *                     shows through (hal_ui_hole), with text and icons on
+ *                     it: the camera's name and the REC and event icons in
+ *                     corners, its state ("Connecting...", "No video") in
+ *                     the middle
+ *   clock             date and time at a corner or an edge's middle
+ *
+ * Where the clock, the names and the icons go, their size and what they
+ * stand on (an outline, nothing, a box) are display.* (ui_osd_get); a
+ * change rebuilds them at once.
  *   navigation bar    over the bottom of the grid: shown when the pointer
  *                     reaches the bottom edge, hidden 3 s after it leaves,
  *                     or pinned
@@ -37,18 +42,16 @@
 #define ARROW_EDGE 80           /* px from the left or right edge that bring up a page arrow */
 #define ARROW_IDLE 2000         /* ms without the pointer moving that put it away */
 
-/* Where the clock is: LV_ALIGN_TOP_LEFT, _TOP_RIGHT, _BOTTOM_LEFT,
- * _BOTTOM_RIGHT, or LV_ALIGN_DEFAULT for none. A constant until the UI
- * has settings of its own. */
-#define CLOCK_CORNER LV_ALIGN_TOP_RIGHT
-
 #define N_EVENT_ICONS 4
+#define NAME_W        200       /* px a name takes at most, for keeping it off the clock */
+#define ICONS_W       140       /* ... the icons, all of them shown */
+#define ICON_PX       20        /* the icons' size (icons.h) */
 
 typedef struct {
     int         ch;
     lv_obj_t   *obj;
-    lv_obj_t   *name;                  /* bottom left, outlined text */
-    lv_obj_t   *icons, *rec;           /* bottom right: REC, then the events */
+    lv_obj_t   *name;                  /* a corner (display.name_position); NULL: none */
+    lv_obj_t   *icons, *rec;           /* a corner: REC, then the events */
     lv_obj_t   *ev[N_EVENT_ICONS];
     lv_obj_t   *mid, *mid_l1, *mid_l2; /* centre: the state when there is no picture, outlined */
     lv_obj_t   *add, *add_caption;     /* centre: a small "+" on an empty slot */
@@ -79,6 +82,7 @@ static struct {
     uint32_t   nav_seen_ms;             /* the pointer was last on the edge or the bar */
     lv_color_t hole;
     lv_opa_t   hole_opa;
+    ui_osd_t   osd;                     /* display.*, as the screen shows it */
 } L;
 
 static int n_channels(void)
@@ -97,15 +101,71 @@ static int layout_offered(int layout)
 
 int ui_live_layout_offered(int layout) { return layout_offered(layout); }
 
-const char *ui_live_clock_corner(void)
+/* ---- display.* --------------------------------------------------------------------- */
+
+const char *const ui_pos_keys[UI_N_POS] = { "off", "top-left", "top-center", "top-right", "bottom-left",
+                                            "bottom-center", "bottom-right" };
+const char *const ui_size_keys[UI_N_SIZES] = { "small", "medium", "large", "xlarge" };
+const char *const ui_bg_keys[UI_N_BGS] = { "outline", "none", "box" };
+
+static int key_index(const char *const *keys, int n, const char *v, int def)
 {
-    switch (CLOCK_CORNER) {
-    case LV_ALIGN_TOP_LEFT:     return "top left";
-    case LV_ALIGN_TOP_RIGHT:    return "top right";
-    case LV_ALIGN_BOTTOM_LEFT:  return "bottom left";
-    case LV_ALIGN_BOTTOM_RIGHT: return "bottom right";
-    default:                    return "off";
+    for (int i = 0; i < n; ++i)
+        if (!strcmp(keys[i], v)) return i;
+    return def;
+}
+
+void ui_osd_get(ui_osd_t *o)
+{
+    *o = (ui_osd_t){ .clock = UI_POS_TR, .clock_size = 1, .clock_bg = UI_OSD_OUTLINE, .name = UI_POS_BL,
+                     .name_size = 1, .name_bg = UI_OSD_OUTLINE, .icons = UI_POS_BR, .icons_bg = UI_OSD_OUTLINE };
+    const ui_model_t *m = ui_model();
+    for (int s = 0; s < m->n_sections; ++s) {
+        if (strcmp(m->sections[s].key, "display")) continue;
+        for (int f = 0; f < m->sections[s].n_fields; ++f) {
+            const char *k = m->sections[s].fields[f].key;
+            char v[24];
+            m->get_value(s, -1, f, v, sizeof v);
+            if (!strcmp(k, "clock_position")) o->clock = key_index(ui_pos_keys, UI_N_POS, v, o->clock);
+            else if (!strcmp(k, "clock_size")) o->clock_size = key_index(ui_size_keys, UI_N_SIZES, v, 1);
+            else if (!strcmp(k, "clock_background")) o->clock_bg = key_index(ui_bg_keys, UI_N_BGS, v, 0);
+            else if (!strcmp(k, "name_position")) o->name = key_index(ui_pos_keys, UI_N_POS, v, o->name);
+            else if (!strcmp(k, "name_size")) o->name_size = key_index(ui_size_keys, UI_N_SIZES, v, 1);
+            else if (!strcmp(k, "name_background")) o->name_bg = key_index(ui_bg_keys, UI_N_BGS, v, 0);
+            else if (!strcmp(k, "icons_position")) o->icons = key_index(ui_pos_keys, UI_N_POS, v, o->icons);
+            else if (!strcmp(k, "icons_background")) o->icons_bg = key_index(ui_bg_keys, UI_N_BGS, v, 0);
+        }
     }
+    /* In a tile there is no middle of an edge, and the icons are always shown. */
+    if (o->name == UI_POS_TC) o->name = UI_POS_TL;
+    if (o->name == UI_POS_BC) o->name = UI_POS_BL;
+    if (o->icons == UI_POS_OFF || o->icons == UI_POS_TC || o->icons == UI_POS_BC) o->icons = UI_POS_BR;
+}
+
+static const lv_font_t *osd_font(int size)
+{
+    switch (size) {
+    case 0:  return VG_FONT_SM_LV;
+    case 1:  return VG_FONT_MD_LV;
+    case 2:  return VG_FONT_LG_LV;
+    default: return VG_FONT_XL_LV;
+    }
+}
+
+static int pos_top(int p) { return p == UI_POS_TL || p == UI_POS_TC || p == UI_POS_TR; }
+static int pos_left(int p) { return p == UI_POS_TL || p == UI_POS_BL; }
+static int pos_right(int p) { return p == UI_POS_TR || p == UI_POS_BR; }
+
+/* `o` at position `p` of its parent, SPACE_SM in from the edges and `dy`
+ * further in, up or down. */
+static void osd_place(lv_obj_t *o, int p, int dy)
+{
+    static const lv_align_t align[UI_N_POS] = { LV_ALIGN_DEFAULT,     LV_ALIGN_TOP_LEFT,   LV_ALIGN_TOP_MID,
+                                                LV_ALIGN_TOP_RIGHT,   LV_ALIGN_BOTTOM_LEFT, LV_ALIGN_BOTTOM_MID,
+                                                LV_ALIGN_BOTTOM_RIGHT };
+    int x = pos_left(p) ? VG_SPACE_SM : pos_right(p) ? -VG_SPACE_SM : 0;
+    int y = pos_top(p) ? VG_SPACE_SM + dy : -VG_SPACE_SM - dy;
+    lv_obj_align(o, align[p], x, y);
 }
 
 /* The settings section with `key`, or -1. */
@@ -118,11 +178,19 @@ static int section_of(const char *key)
 
 /* ---- one tile ----------------------------------------------------------------------- */
 
-static lv_obj_t *chip(lv_obj_t *parent)
+/* A row of icons over the video: on a chip (box), or with room for their
+ * outline around them. */
+static lv_obj_t *icon_row(lv_obj_t *parent, int bg)
 {
     lv_obj_t *c = lv_obj_create(parent);
     ui_plain(c);
-    lv_obj_add_style(c, &ui_st_chip, 0);
+    if (bg == UI_OSD_BOX) {
+        lv_obj_add_style(c, &ui_st_chip, 0);
+        lv_obj_set_style_pad_ver(c, VG_SPACE_XS, 0);
+    } else {
+        lv_obj_set_style_pad_all(c, 1, 0);
+        lv_obj_set_style_pad_column(c, VG_SPACE_SM, 0);
+    }
     lv_obj_set_size(c, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_layout(c, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(c, LV_FLEX_FLOW_ROW);
@@ -157,7 +225,7 @@ static const char *status_text(const ui_chan_t *st, lv_color_t *col, const char 
 static void cell_update(cell_t *c)
 {
     if (c->ch < 0) {                    /* past the platform's channels */
-        show(c->name, 0);
+        if (c->name) show(c->name, 0);
         show(c->icons, 0);
         show(c->mid, 0);
         show(c->add, 0);
@@ -166,9 +234,11 @@ static void cell_update(cell_t *c)
     const ui_chan_t *st = ui_channel(c->ch);
     char buf[64];
     ui_chan_title(c->ch, buf, sizeof buf);
-    ui_outlined_set_text(c->name, buf);
     int empty = st->status == UI_CH_EMPTY;
-    ui_outlined_set_color(c->name, empty ? UI_C(TEXT2) : UI_C(TEXT));
+    if (c->name) {
+        ui_outlined_set_text(c->name, buf);
+        ui_outlined_set_color(c->name, empty ? UI_C(TEXT2) : UI_C(TEXT));
+    }
 
     show(c->rec, st->recording);
     int any = st->recording;
@@ -317,18 +387,21 @@ static void cell_deleted_cb(lv_event_t *e)
     c->flash_timer = NULL;
 }
 
-/* Room the clock takes from a chip about `w` wide at the tile's left
- * edge, at its top (top != 0) or bottom: the chip moves past the clock
- * when the two would overlap. */
-static int clock_offset(const ui_cell_t *g, int top, int w)
+/* How far something about w x h at corner `p` of tile `g` moves in (up
+ * from the bottom, down from the top) to clear the clock, which can be at
+ * any corner of the screen or the middle of its top or bottom edge: 0
+ * when the two do not meet. */
+static int clock_offset(const ui_cell_t *g, int p, int w, int h)
 {
     if (!L.clock) return 0;
     lv_area_t c;
     lv_obj_get_coords(L.clock, &c);
-    int x0 = g->x + VG_SPACE_SM, x1 = x0 + w;
-    if (x1 < c.x1 || x0 > c.x2) return 0;
-    if (top ? !(g->y == 0 && c.y1 < L.sh / 2) : !(g->y + g->h == L.sh && c.y1 > L.sh / 2)) return 0;
-    return lv_obj_get_height(L.clock) + VG_SPACE_SM;
+    int top = pos_top(p);
+    int x0 = pos_left(p) ? g->x + VG_SPACE_SM : g->x + g->w - VG_SPACE_SM - w, x1 = x0 + w;
+    int y0 = top ? g->y + VG_SPACE_SM : g->y + g->h - VG_SPACE_SM - h, y1 = y0 + h;
+    /* the outline reaches a pixel past either */
+    if (x1 + 1 < c.x1 - 1 || x0 - 1 > c.x2 + 1 || y1 + 1 < c.y1 - 1 || y0 - 1 > c.y2 + 1) return 0;
+    return top ? c.y2 + VG_SPACE_XS + 2 - y0 : y1 - (c.y1 - VG_SPACE_XS - 2);
 }
 
 static void cell_build(cell_t *c, const ui_cell_t *g)
@@ -357,22 +430,31 @@ static void cell_build(cell_t *c, const ui_cell_t *g)
 
     int small = g->w < 400;
     c->tiny = g->w < 240;
-    int edge = clock_offset(g, 0, 200);
-    /* Text straight on the video, outlined, no chip: the name, and the
-     * state in the middle. */
-    c->name = ui_outlined(o, small ? VG_FONT_SM_LV : VG_FONT_MD_LV, VG_COLOR_TEXT);
-    lv_obj_align(c->name, LV_ALIGN_BOTTOM_LEFT, VG_SPACE_SM, -VG_SPACE_SM - edge);
-    lv_obj_set_style_max_width(c->name, g->w / 2, 0);
-    lv_label_set_long_mode(c->name, LV_LABEL_LONG_CLIP);
+    const ui_osd_t *osd = &L.osd;
+    /* The name in its corner, a size smaller in a small tile, clear of the
+     * clock. */
+    int name_dy = 0, name_h = 0;
+    if (osd->name != UI_POS_OFF) {
+        const lv_font_t *f = osd_font(osd->name_size - (small && osd->name_size > 0));
+        c->name = ui_osd_text(o, f, VG_COLOR_TEXT, osd->name_bg);
+        lv_obj_set_style_max_width(c->name, g->w / 2, 0);
+        lv_label_set_long_mode(c->name, LV_LABEL_LONG_CLIP);
+        name_h = lv_font_get_line_height(f) + (osd->name_bg == UI_OSD_BOX ? 2 * VG_SPACE_XS : 0);
+        name_dy = clock_offset(g, osd->name, LV_MIN(NAME_W, g->w / 2), name_h);
+        osd_place(c->name, osd->name, name_dy);
+    }
 
-    /* Icons only, small, in the design tokens' colours. */
+    /* Icons only, small, in the design tokens' colours; past the name
+     * when they share its corner. */
     static const lv_image_dsc_t *const ev_img[N_EVENT_ICONS] = { &ui_icon_ev_motion, &ui_icon_ev_human,
                                                                  &ui_icon_ev_face, &ui_icon_ev_vehicle };
-    c->icons = chip(o);
-    lv_obj_set_style_pad_ver(c->icons, VG_SPACE_XS, 0);
-    lv_obj_align(c->icons, LV_ALIGN_BOTTOM_RIGHT, -VG_SPACE_SM, -VG_SPACE_SM);
-    c->rec = ui_icon(c->icons, &ui_icon_rec, VG_COLOR_BAD);
-    for (int i = 0; i < N_EVENT_ICONS; ++i) c->ev[i] = ui_icon(c->icons, ev_img[i], VG_COLOR_WARN);
+    c->icons = icon_row(o, osd->icons_bg);
+    int icons_h = ICON_PX + (osd->icons_bg == UI_OSD_BOX ? 2 * VG_SPACE_XS : 2);
+    int icons_dy = osd->icons == osd->name ? name_dy + name_h + VG_SPACE_XS
+                                           : clock_offset(g, osd->icons, ICONS_W, icons_h);
+    osd_place(c->icons, osd->icons, icons_dy);
+    c->rec = ui_osd_icon(c->icons, &ui_icon_rec, VG_COLOR_BAD, osd->icons_bg);
+    for (int i = 0; i < N_EVENT_ICONS; ++i) c->ev[i] = ui_osd_icon(c->icons, ev_img[i], VG_COLOR_WARN, osd->icons_bg);
 
     c->mid = lv_obj_create(o);
     ui_plain(c->mid);
@@ -437,21 +519,14 @@ static void nav_update(void)
     }
 }
 
-static void set_layout(int layout, int page)
+/* The tiles of L.layout's page L.page, anew; where each channel's goes
+ * into `tiles`. */
+static void cells_build(ui_rect_t *tiles)
 {
-    if (!ui_layout_valid(layout)) return;
-    int n = n_channels(), pages = ui_layout_pages(layout, n);
-    page = (page % pages + pages) % pages;      /* paging wraps around */
-    L.layout = layout;
-    L.page = page;
-    L.fs = 0;
-    L.click_ch = -1;
-
     lv_obj_clean(L.grid);
     ui_cell_t g[UI_LAYOUT_MAX];
-    L.n_cells = ui_layout_cells(L.sw, L.sh, layout, page, n, g);
-    ui_rect_t tiles[UI_MAX_CHANNELS];
-    memset(tiles, 0, sizeof tiles);
+    L.n_cells = ui_layout_cells(L.sw, L.sh, L.layout, L.page, n_channels(), g);
+    memset(tiles, 0, sizeof *tiles * UI_MAX_CHANNELS);
     int sel = 0;
     for (int i = 0; i < L.n_cells; ++i) {
         cell_build(&L.cells[i], &g[i]);
@@ -464,6 +539,20 @@ static void set_layout(int layout, int page)
         ui_gridnav_focus(L.grid, L.cells[sel].obj);
         L.sel_ch = L.cells[sel].ch;
     }
+}
+
+static void set_layout(int layout, int page)
+{
+    if (!ui_layout_valid(layout)) return;
+    int n = n_channels(), pages = ui_layout_pages(layout, n);
+    page = (page % pages + pages) % pages;      /* paging wraps around */
+    L.layout = layout;
+    L.page = page;
+    L.fs = 0;
+    L.click_ch = -1;
+
+    ui_rect_t tiles[UI_MAX_CHANNELS];
+    cells_build(tiles);
     if (ui_model()->show_tiles && !ui_model()->fixed_tiles) ui_model()->show_tiles(tiles, n);
     if (L.nav) nav_update();
 }
@@ -484,23 +573,35 @@ static void summary_cb(lv_observer_t *o, lv_subject_t *s)
     lv_label_set_text_fmt(label, "LIVE %d/%d   REC %d/%d", live, cams, rec, cams);
 }
 
-/* The clock over the video: an opaque chip (a translucent one would show
- * as a pink fringe on a colour-keyed layer). */
+/* The clock over the video, as display.clock_* say: outlined or plain
+ * hard-edged text, or soft text on an opaque chip (never translucent: a
+ * blend with the key colour shows as a pink fringe). Over the grid,
+ * under the page arrows and the navigation bar. */
 static void make_clock(void)
 {
-    if (CLOCK_CORNER == LV_ALIGN_DEFAULT) return;
-    L.clock = lv_obj_create(L.scr);
-    ui_plain(L.clock);
-    lv_obj_add_style(L.clock, &ui_st_chip, 0);
-    lv_obj_set_style_pad_hor(L.clock, VG_SPACE_MD, 0);
-    lv_obj_set_size(L.clock, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-    lv_obj_remove_flag(L.clock, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_t *l = ui_label(L.clock, "", VG_FONT_MD_LV, UI_C(TEXT));
-    lv_label_bind_text(l, &ui_subj_clock, NULL);
-    int dx = CLOCK_CORNER == LV_ALIGN_TOP_LEFT || CLOCK_CORNER == LV_ALIGN_BOTTOM_LEFT ? VG_SPACE_SM : -VG_SPACE_SM;
-    int dy = CLOCK_CORNER == LV_ALIGN_TOP_LEFT || CLOCK_CORNER == LV_ALIGN_TOP_RIGHT ? VG_SPACE_SM : -VG_SPACE_SM;
-    lv_obj_align(L.clock, CLOCK_CORNER, dx, dy);
+    if (L.clock) lv_obj_delete(L.clock);
+    L.clock = NULL;
+    if (L.osd.clock == UI_POS_OFF) return;
+    L.clock = ui_osd_text(L.scr, osd_font(L.osd.clock_size), VG_COLOR_TEXT, L.osd.clock_bg);
+    if (L.osd.clock_bg == UI_OSD_BOX) lv_obj_set_style_pad_hor(L.clock, VG_SPACE_MD, 0);
+    lv_label_bind_text(L.clock, &ui_subj_clock, NULL);
+    osd_place(L.clock, L.osd.clock, 0);
+    lv_obj_move_to_index(L.clock, 1);
     lv_obj_update_layout(L.clock);
+}
+
+/* display.* changed: the clock and the tiles again, the video where it is. */
+static void osd_cb(lv_observer_t *o, lv_subject_t *s)
+{
+    (void)o;
+    (void)s;
+    ui_osd_t n;
+    ui_osd_get(&n);
+    if (!memcmp(&n, &L.osd, sizeof n)) return;
+    L.osd = n;
+    make_clock();
+    ui_rect_t tiles[UI_MAX_CHANNELS];
+    cells_build(tiles);
 }
 
 /* ---- navigation bar ------------------------------------------------------------------------ */
@@ -973,9 +1074,11 @@ lv_obj_t *ui_live_create(void)
      * be transparent too, or it would paint over the video. */
     if (L.hole_opa < LV_OPA_COVER) lv_obj_set_style_bg_opa(L.scr, LV_OPA_TRANSP, 0);
 
+    ui_osd_get(&L.osd);
     make_clock();
     make_arrows();
     make_nav();
     set_layout(n_channels() > 1 && layout_offered(4) ? 4 : 1, 0);
+    lv_subject_add_observer_obj(&ui_subj_config, osd_cb, L.scr, NULL);
     return L.scr;
 }

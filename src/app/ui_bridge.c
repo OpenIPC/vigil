@@ -21,6 +21,7 @@
 #include "discovery.h"
 #include "events.h"
 #include "hal.h"
+#include "hal_display.h"
 #include "ui_bridge.h"
 
 #ifndef VIGIL_VERSION
@@ -546,6 +547,30 @@ static int disc_assign_manual_ui(const ui_manual_t *u, int channel, const char *
     return id;
 }
 
+/* ---- the output ------------------------------------------------------------------- */
+
+static int out_modes(ui_mode_t *out, int max)
+{
+    vg_mode_t v[UI_MODES_MAX];
+    int n = hal_display_modes(v, max < UI_MODES_MAX ? max : UI_MODES_MAX);
+    for (int i = 0; i < n; ++i) out[i] = (ui_mode_t){ (int)v[i].w, (int)v[i].h, (int)v[i].hz };
+    return n;
+}
+
+static void out_mode(ui_mode_t *cur)
+{
+    vg_mode_t v;
+    hal_display_mode(&v);
+    *cur = (ui_mode_t){ (int)v.w, (int)v.h, (int)v.hz };
+}
+
+static int out_set(const ui_mode_t *m)
+{
+    if (m->w <= 0 || m->h <= 0 || m->hz <= 0) return -1;
+    vg_mode_t v = { (unsigned)m->w, (unsigned)m->h, (unsigned)m->hz };
+    return hal_display_set_mode(&v);
+}
+
 int ui_bridge_init(ui_model_t *m)
 {
     if (!g_sections && sections_build() < 0) return -1;
@@ -566,6 +591,9 @@ int ui_bridge_init(ui_model_t *m)
     m->get_value = get_value;
     m->save = save;
     m->system_info = system_info;
+    m->out_modes = out_modes;
+    m->out_mode = out_mode;
+    m->out_set = out_set;
     m->disc_scan = disc_scan_ui;
     m->disc_devices = disc_devices_ui;
     m->disc_job = disc_job_ui;

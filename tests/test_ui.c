@@ -57,6 +57,23 @@ void hal_display_clear_tile(int ch) { (void)ch; }
 int  hal_cap_start(int in, int ch, hal_cap_cb cb, void *user) { (void)in; (void)ch; (void)cb; (void)user; return -1; }
 void hal_cap_stop(int in) { (void)in; }
 int  hal_cap_signal(int in) { (void)in; return 0; }
+/* An output with three modes; switching only notes the new one. */
+static const vg_mode_t k_modes[] = { { 1280, 720, 60 }, { 1920, 1080, 60 }, { 1024, 768, 60 } };
+static vg_mode_t g_mode = { 1280, 720, 60 };
+static int       g_mode_sets;
+int hal_display_modes(vg_mode_t *out, int max)
+{
+    int n = 0;
+    for (; n < 3 && n < max; ++n) out[n] = k_modes[n];
+    return n;
+}
+void hal_display_mode(vg_mode_t *cur) { *cur = g_mode; }
+int  hal_display_set_mode(const vg_mode_t *m)
+{
+    ++g_mode_sets;
+    g_mode = *m;
+    return 0;
+}
 /* Black holes for the tests' references; for the screenshots, the boards'
  * magenta key, replaced by a picture when the screen is written (shot),
  * as the video layer would: what is drawn over the video can be judged,
@@ -966,7 +983,9 @@ static lv_obj_t *textarea(int nth)
 static int icon_shown(lv_obj_t *o, const lv_image_dsc_t *img)
 {
     if (!o) return 0;
-    if (lv_obj_check_type(o, &lv_image_class) && lv_image_get_src(o) == img && visible(o)) return 1;
+    if (lv_obj_check_type(o, &lv_image_class) && visible(o) &&
+        (lv_image_get_src(o) == img || lv_obj_get_user_data(o) == img))     /* a hard-edged copy (ui_osd_icon) */
+        return 1;
     for (uint32_t i = 0; i < lv_obj_get_child_count(o); ++i)
         if (icon_shown(lv_obj_get_child(o, (int32_t)i), img)) return 1;
     return 0;
@@ -1219,7 +1238,7 @@ static void test_context_and_full_screen(void)
     button(BTN_RIGHT);
     button(BTN_RIGHT);
     click_text("Display");
-    CHECK(ui_page_top() && find("top right", 0) && find("1, 4", 0), "Display: clock corner, layouts");
+    CHECK(ui_page_top() && find("Resolution", 0) && find("1280 x 720, 60 Hz", 0), "Display: the output");
     shot("display");
     button(BTN_RIGHT);
     CHECK(!ui_page_top(), "back on the live view");
@@ -1298,7 +1317,7 @@ static void test_menu_and_settings(void)
     CHECK(ui_popup_is_open() && find("Backup is not available yet", 1), "BACKUP: not there yet");
     button(BTN_RIGHT);
     click_text("DISPLAY");
-    CHECK(find("top right", 0), "DISPLAY: the display page");
+    CHECK(find("Resolution", 0), "DISPLAY: the display page");
     button(BTN_RIGHT);
 }
 
@@ -2071,6 +2090,205 @@ static void test_system_pages(void)
     CHECK(find("Main menu", 0), "back in the menu");
 }
 
+/* The live screen's label with `text` (exactly), wherever the UI is. */
+/* The live view's clock (a label on the screen itself; the navigation
+ * bar has one of its own). */
+static lv_obj_t *osd_clock(void)
+{
+    lv_obj_t *f = lv_group_get_focused(ui_live_group()), *scr = f ? lv_obj_get_screen(f) : NULL;
+    for (uint32_t i = 0; scr && i < lv_obj_get_child_count(scr); ++i) {
+        lv_obj_t *o = lv_obj_get_child(scr, (int32_t)i);
+        if (lv_obj_check_type(o, &lv_label_class) && strstr(lv_label_get_text(o), ":32:05")) return o;
+    }
+    return NULL;
+}
+
+/* The live view's first tile (its grid is the screen's first child). */
+static lv_obj_t *first_tile(void)
+{
+    lv_obj_t *grid = lv_obj_get_child(lv_screen_active(), 0);
+    return grid ? lv_obj_get_child(grid, 0) : NULL;
+}
+
+static int put_display(const char *json)
+{
+    schema_errors_t e;
+    memset(&e, 0, sizeof e);
+    int rc = config_put_json("display", json, strlen(json), &e);
+    run(300);                                   /* the generation is polled */
+    return rc;
+}
+
+static void test_display_pages(void)
+{
+    run(VG_DURATION_TOAST);
+    move_to(300, 200);
+    button(BTN_RIGHT);
+    click_text("Display");
+    CHECK(find("Display", 1) && find("Output", 0) && find("Clock", 0) && find("Camera names", 0) &&
+          find("Status icons", 0), "Display: its four parts");
+
+    /* A new resolution, kept: switched, then saved. */
+    int sets = g_mode_sets;
+    dd_pick(nth_of(&lv_dropdown_class, 0), 1);
+    click_text(SAVE);
+    run(100);
+    CHECK(g_mode.w == 1920 && g_mode.h == 1080 && g_mode_sets == sets + 1, "Save: 1920x1080 at once");
+    CHECK(ui_popup_is_open() && find("Keep this resolution (1920 x 1080, 60 Hz)?", 0) &&
+          find("Going back to the old resolution in 15 s.", 0), "asked to keep it, 15 s");
+    vigil_config_t c;
+    config_get(&c);
+    CHECK(!strcmp(c.display.output, "1280x720@60"), "not saved before it is kept: %s", c.display.output);
+    run(3000);
+    CHECK(find("in 12 s", 1), "the countdown");
+    click_text(LV_SYMBOL_OK "  Keep");
+    run(100);
+    config_get(&c);
+    CHECK(!ui_popup_is_open() && !strcmp(c.display.output, "1920x1080@60") && g_mode.w == 1920,
+          "Keep: saved, %s", c.display.output);
+    CHECK(find("1920 x 1080, 60 Hz", 0), "in use: 1920 x 1080");
+
+    /* No answer: the old one comes back by itself, nothing saved. */
+    dd_pick(nth_of(&lv_dropdown_class, 0), 2);
+    click_text(SAVE);
+    run(100);
+    CHECK(g_mode.w == 1024 && ui_popup_is_open(), "1024x768 tried");
+    run(14000);
+    CHECK(g_mode.w == 1024, "still there after 14 s");
+    run(1500);
+    config_get(&c);
+    CHECK(g_mode.w == 1920 && g_mode.h == 1080 && !ui_popup_is_open() && !strcmp(c.display.output, "1920x1080@60"),
+          "15 s without an answer: back to 1920x1080 (%ux%u), %s", g_mode.w, g_mode.h, c.display.output);
+    CHECK(lv_dropdown_get_selected(nth_of(&lv_dropdown_class, 0)) == 1, "the list shows the one in use");
+
+    /* The right button (Esc) on the question: back at once. Undo: the same. */
+    dd_pick(nth_of(&lv_dropdown_class, 0), 0);
+    click_text(SAVE);
+    run(100);
+    CHECK(g_mode.w == 1280, "1280x720 tried");
+    button(BTN_RIGHT);
+    run(100);
+    CHECK(g_mode.w == 1920 && !ui_popup_is_open() && ui_page_top(), "the right button: back to 1920x1080");
+    dd_pick(nth_of(&lv_dropdown_class, 0), 0);
+    click_text(SAVE);
+    run(100);
+    click_text(LV_SYMBOL_REFRESH "  Undo");
+    run(100);
+    CHECK(g_mode.w == 1920 && !ui_popup_is_open(), "Undo: back to 1920x1080");
+    dd_pick(nth_of(&lv_dropdown_class, 0), 0);
+    click_text(SAVE);
+    run(100);
+    click_text(LV_SYMBOL_OK "  Keep");
+    run(100);
+    config_get(&c);
+    CHECK(g_mode.w == 1280 && !strcmp(c.display.output, "1280x720@60"), "back to 1280x720, kept");
+
+    /* The clock: bottom centre, large, on a box; then the format. */
+    click_text("Clock");
+    CHECK(find("Position", 0) && find("Background", 0) && find("Date", 0), "Clock: its settings");
+    dd_pick(nth_of(&lv_dropdown_class, 0), 5);
+    dd_pick(nth_of(&lv_dropdown_class, 1), 2);
+    dd_pick(nth_of(&lv_dropdown_class, 2), 2);
+    dd_pick(nth_of(&lv_dropdown_class, 4), 1);          /* 12-hour */
+    click_text(SAVE);
+    run(300);
+    config_get(&c);
+    CHECK(!strcmp(c.display.clock_position, "bottom-center") && !strcmp(c.display.clock_size, "large") &&
+          !strcmp(c.display.clock_background, "box") && !strcmp(c.ui.time_format, "12h"),
+          "clock saved: %s %s %s %s", c.display.clock_position, c.display.clock_size, c.display.clock_background,
+          c.ui.time_format);
+    lv_obj_t *clk = osd_clock();
+    if (clk) {
+        int x, y;
+        center_of(clk, &x, &y);
+        CHECK(x > W / 2 - 20 && x < W / 2 + 20 && y > H - 40, "the clock at the bottom centre (%d, %d)", x, y);
+        CHECK(lv_obj_get_style_text_font(clk, 0) == VG_FONT_LG_LV && lv_obj_get_style_bg_opa(clk, 0) == LV_OPA_COVER,
+              "large, on an opaque box");
+    } else {
+        CHECK(0, "the clock in 12-hour time on the live view");
+    }
+
+    click_text("Camera names");
+    dd_pick(nth_of(&lv_dropdown_class, 0), 2);          /* top right */
+    dd_pick(nth_of(&lv_dropdown_class, 2), 1);          /* no outline */
+    click_text(SAVE);
+    run(300);
+    click_text("Status icons");
+    dd_pick(nth_of(&lv_dropdown_class, 0), 1);          /* top right: next to the name */
+    dd_pick(nth_of(&lv_dropdown_class, 1), 2);          /* box */
+    click_text(SAVE);
+    run(300);
+    config_get(&c);
+    CHECK(!strcmp(c.display.name_position, "top-right") && !strcmp(c.display.name_background, "none") &&
+          !strcmp(c.display.icons_position, "top-right") && !strcmp(c.display.icons_background, "box"),
+          "names and icons saved");
+    button(BTN_RIGHT);
+    CHECK(!ui_page_top(), "back on the live view");
+    lv_obj_t *gate = find("Gate", 0);
+    if (gate) {
+        int x, y;
+        center_of(gate, &x, &y);
+        CHECK(x > 500 && x < 640 && y < 40, "Gate's name at its tile's top right (%d, %d)", x, y);
+    }
+    lv_obj_t *t = tile("Gate"), *row = NULL;
+    for (uint32_t i = 0; t && i < lv_obj_get_child_count(t); ++i)
+        if (icon_shown(lv_obj_get_child(t, (int32_t)i), &ui_icon_rec)) row = lv_obj_get_child(t, (int32_t)i);
+    if (row && gate) {
+        lv_area_t a, b;
+        lv_obj_get_coords(gate, &a);
+        lv_obj_get_coords(row, &b);
+        CHECK(b.y1 > a.y2 && b.x2 > 600 && lv_obj_get_style_bg_opa(row, 0) == LV_OPA_COVER,
+              "the icons below the name, on a box (%d > %d)", b.y1, a.y2);
+    } else {
+        CHECK(0, "Gate's icons");
+    }
+
+    /* The clock at the top left, the names there too: the first tile's
+     * name moves below the clock, the others stay at the top. */
+    CHECK(put_display("{\"clock_position\":\"top-left\",\"name_position\":\"top-left\"}") == CONFIG_OK,
+          "clock and names top left");
+    clk = osd_clock();
+    lv_obj_t *yard = find("Yard", 0);
+    gate = find("Gate", 0);
+    if (clk && gate && yard) {
+        lv_area_t a, g, y;
+        lv_obj_get_coords(clk, &a);
+        lv_obj_get_coords(gate, &g);
+        lv_obj_get_coords(yard, &y);
+        CHECK(g.y1 > a.y2 && y.y1 < a.y2 && lv_obj_get_style_bg_opa(clk, 0) == LV_OPA_TRANSP,
+              "Gate below the outlined clock (%d > %d), Yard at the top (%d)", g.y1, a.y2, y.y1);
+    } else {
+        CHECK(0, "clock, Gate and Yard");
+    }
+    /* The clock at the top centre, a name at its tile's top right: moved. */
+    CHECK(put_display("{\"clock_position\":\"top-center\",\"clock_size\":\"xlarge\","
+                      "\"name_position\":\"top-right\"}") == CONFIG_OK, "clock top centre");
+    clk = osd_clock();
+    gate = find("Gate", 0);
+    yard = find("Yard", 0);
+    if (clk && gate && yard) {
+        lv_area_t a, g, y;
+        lv_obj_get_coords(clk, &a);
+        lv_obj_get_coords(gate, &g);
+        lv_obj_get_coords(yard, &y);
+        CHECK(a.x1 < 640 && a.x2 > 640 && g.y1 > a.y2 && y.y1 < a.y2, "Gate below it (%d > %d), Yard not (%d)",
+              g.y1, a.y2, y.y1);
+    } else {
+        CHECK(0, "clock, Gate and Yard");
+    }
+    CHECK(put_display("{\"clock_position\":\"off\",\"name_position\":\"off\"}") == CONFIG_OK, "no clock");
+    CHECK(!osd_clock() && !find("Gate", 0) && icon_shown(first_tile(), &ui_icon_rec),
+          "no clock, no names; the icons stay");
+    CHECK(put_display("{}") == CONFIG_OK, "the defaults");
+    clk = osd_clock();
+    CHECK(clk && lv_obj_get_style_bg_opa(clk, 0) == LV_OPA_TRANSP, "an outlined clock by default");
+    const char *fmt = "{\"language\":\"en\",\"date_format\":\"YYYY-MM-DD\",\"time_format\":\"24h\"}";
+    schema_errors_t e;
+    memset(&e, 0, sizeof e);
+    config_put_json("ui", fmt, strlen(fmt), &e);
+    run(300);
+}
+
 static void test_account_pages(void)
 {
     run(VG_DURATION_TOAST);
@@ -2324,7 +2542,7 @@ static void test_keyboard_settings(void)
 
     /* The mouse on another card: the ring moves there, one ring only. */
     click_text("DISPLAY");
-    CHECK(find("top right", 0), "a click on DISPLAY opens it");
+    CHECK(find("Resolution", 0), "a click on DISPLAY opens it");
     key(KEY_ESC);
     lv_obj_t *display = lv_obj_get_parent(lv_obj_get_parent(find("DISPLAY", 0)));
     CHECK(has_focus(display) && !has_focus(backup) && !has_focus(card1), "the clicked card has the ring, alone");
@@ -2911,11 +3129,62 @@ static void shots_status(int idx, ui_chan_t *st)
 
 static void quiet(void) { run(VG_DURATION_TOAST + 100); }
 
+/* Display, its four parts and the resolution question (the page open). */
+static void shots_display(void)
+{
+    shot("display-output");
+    lv_dropdown_open(nth_of(&lv_dropdown_class, 0));
+    shot("display-output-list");
+    lv_dropdown_close(nth_of(&lv_dropdown_class, 0));
+    dd_pick(nth_of(&lv_dropdown_class, 0), 1);
+    click_text(SAVE);
+    run(2000);
+    shot("display-keep");
+    click_text(LV_SYMBOL_REFRESH "  Undo");
+    quiet();
+    click_text("Clock");
+    shot("display-clock");
+    click_text("Camera names");
+    shot("display-names");
+    click_text("Status icons");
+    shot("display-icons");
+    click_text("Output");
+}
+
+/* The live view's text and icons over a picture, as display.* places
+ * and dresses them (the live view shown, 2x2). */
+static void shots_osd(void)
+{
+    static const struct { const char *name, *json; } k[] = {
+        { "osd-default", "{}" },
+        { "osd-clock-top-left-box", "{\"clock_position\":\"top-left\",\"clock_background\":\"box\"}" },
+        { "osd-clock-top-center-xl", "{\"clock_position\":\"top-center\",\"clock_size\":\"xlarge\","
+                                     "\"name_position\":\"top-right\"}" },
+        { "osd-clock-bottom-center-none", "{\"clock_position\":\"bottom-center\",\"clock_size\":\"large\","
+                                          "\"clock_background\":\"none\",\"name_background\":\"none\","
+                                          "\"icons_background\":\"none\"}" },
+        { "osd-all-top-left", "{\"clock_position\":\"top-left\",\"name_position\":\"top-left\","
+                              "\"icons_position\":\"top-left\",\"name_size\":\"large\"}" },
+        { "osd-boxes", "{\"clock_background\":\"box\",\"name_background\":\"box\",\"icons_background\":\"box\"}" },
+        { "osd-names-off-clock-bottom-left", "{\"clock_position\":\"bottom-left\",\"name_position\":\"off\"}" },
+    };
+    g_video_all = 1;
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; ++i) {
+        put_display(k[i].json);
+        lv_obj_invalidate(lv_screen_active());
+        shot(k[i].name);
+    }
+    put_display("{}");
+    lv_obj_invalidate(lv_screen_active());
+    g_video_all = 0;
+}
+
 static int shots_4(void)
 {
     char path[512];
     if (setup(4, k_shots_json, path, sizeof path) < 0) return 1;
     shot("live-2x2");
+    shots_osd();
     move_to(300, 200);
     button(BTN_RIGHT);
     shot("context-menu");
@@ -3061,6 +3330,7 @@ static int shots_4(void)
     button(BTN_RIGHT);
     click_text("DISPLAY");
     shot("display");
+    shots_display();
     button(BTN_RIGHT);
     quiet();
     shots_network();
@@ -3329,6 +3599,7 @@ int main(int argc, char **argv)
     test_storage_pages();
     test_system_pages();
     test_account_pages();
+    test_display_pages();
 
     lv_mem_monitor_t mon;
     lv_mem_monitor(&mon);

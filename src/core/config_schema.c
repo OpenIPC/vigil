@@ -241,6 +241,26 @@ static const char *const languages[] = { "en", NULL };
 static const char *const date_formats[] = { "YYYY-MM-DD", "DD.MM.YYYY", "MM/DD/YYYY", NULL };
 static const char *const time_formats[] = { "24h", "12h", NULL };
 
+/* Every mode any platform drives; each platform offers its own subset
+ * (hal_display_modes) and starts in its default when the one set here is
+ * not among them. */
+static const char *const output_modes[] = { "1280x720@60", "1280x720@50", "1920x1080@60", "1920x1080@50",
+                                            "1920x1080@30", "1024x768@60", "1280x1024@60", "1440x900@60",
+                                            "3840x2160@30", NULL };
+static const char *const clock_positions[] = { "off", "top-left", "top-center", "top-right", "bottom-left",
+                                               "bottom-center", "bottom-right", NULL };
+static const char *const corners_off[] = { "off", "top-left", "top-right", "bottom-left", "bottom-right", NULL };
+static const char *const corners[] = { "top-left", "top-right", "bottom-left", "bottom-right", NULL };
+static const char *const osd_sizes[] = { "small", "medium", "large", "xlarge", NULL };
+static const char *const osd_backgrounds[] = { "outline", "none", "box", NULL };
+
+int config_output_mode(const char *s, unsigned *w, unsigned *h, unsigned *hz)
+{
+    char tail;
+    if (!s || sscanf(s, "%ux%u@%u%c", w, h, hz, &tail) != 3 || !*w || !*h || !*hz) return -1;
+    return 0;
+}
+
 static int check_prefer(const char *v, char *msg, size_t cap)
 {
     if (*v && !disc_proto_bits(v)) {
@@ -428,6 +448,35 @@ static const schema_field_t ui_fields[] = {
       .label = "Log out after (min)", .help = "Without a key or the mouse for this long. 0: never." },
 };
 
+#define OSD_BG_HELP "outline: hard-edged text with a thin dark edge, straight on the video; none: " \
+                    "the text alone; box: on a dark box."
+static const schema_field_t display_fields[] = {
+    { .key = "output", ENUM(config_display_t, output, output_modes), .def_str = "1280x720@60", .live = 1,
+      .label = "Output resolution",
+      .help = "HDMI and VGA, as WIDTHxHEIGHT@HZ. The menus keep their layout, scaled to it; the video "
+              "is shown at the output's own resolution. A mode the board does not drive is ignored." },
+    { .key = "clock_position", ENUM(config_display_t, clock_position, clock_positions), .def_str = "top-right",
+      .live = 1, .label = "Clock",
+      .help = "Where the date and time are on the live view; their format is ui.date_format and "
+              "ui.time_format." },
+    { .key = "clock_size", ENUM(config_display_t, clock_size, osd_sizes), .def_str = "medium", .live = 1,
+      .label = "Clock size", .help = "" },
+    { .key = "clock_background", ENUM(config_display_t, clock_background, osd_backgrounds),
+      .def_str = "outline", .live = 1, .label = "Clock background", .help = OSD_BG_HELP },
+    { .key = "name_position", ENUM(config_display_t, name_position, corners_off), .def_str = "bottom-left",
+      .live = 1, .label = "Camera names", .help = "The corner of each tile with its camera's name." },
+    { .key = "name_size", ENUM(config_display_t, name_size, osd_sizes), .def_str = "medium", .live = 1,
+      .label = "Camera name size", .help = "A size smaller in small tiles." },
+    { .key = "name_background", ENUM(config_display_t, name_background, osd_backgrounds),
+      .def_str = "outline", .live = 1, .label = "Camera name background", .help = OSD_BG_HELP },
+    { .key = "icons_position", ENUM(config_display_t, icons_position, corners), .def_str = "bottom-right",
+      .live = 1, .label = "Status icons",
+      .help = "The corner of each tile with REC and the camera's events; in the names' corner they go "
+              "just above the name (below it at the top)." },
+    { .key = "icons_background", ENUM(config_display_t, icons_background, osd_backgrounds),
+      .def_str = "outline", .live = 1, .label = "Status icons background", .help = OSD_BG_HELP },
+};
+
 static const schema_field_t api_fields[] = {
     { .key = "listen", STR(config_api_t, listen), .def_str = "0.0.0.0:8080", .check = check_listen,
       .label = "Listen on", .help = "IPv4 address and port of the HTTP API, or just the port. "
@@ -492,6 +541,9 @@ static const schema_section_t sections[] = {
     OBJECT("alarm", alarm, alarm_fields, "Alarm center"),
     OBJECT("time", time, time_fields, "Time"),
     OBJECT("ui", ui, ui_fields, "On-screen UI"),
+    { .key = "display", .off = offsetof(vigil_config_t, display), .fields = display_fields,
+      .n_fields = N(display_fields), .label = "Display",
+      .help = "The HDMI/VGA output, and the clock, names and icons over the live view." },
     { .key = "api", .off = offsetof(vigil_config_t, api), .fields = api_fields,
       .n_fields = N(api_fields), .label = "HTTP API" },
     { .key = "discovery", .off = offsetof(vigil_config_t, discovery), .fields = discovery_fields,
