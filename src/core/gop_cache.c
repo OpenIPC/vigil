@@ -13,6 +13,7 @@ static atomic_size_t g_used;
 static size_t        g_budget = GOP_CACHE_BUDGET;
 
 size_t gop_cache_used(void) { return atomic_load(&g_used); }
+size_t gop_cache_budget(void) { return g_budget; }
 void   gop_cache_set_budget(size_t bytes) { g_budget = bytes; }
 
 /* Take `more` bytes of the budget; 0, or -1 when that would exceed it. */

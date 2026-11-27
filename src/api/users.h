@@ -14,6 +14,16 @@
  *       enabled: true
  *       password: "$6$...$..."       (crypt(3); never leaves the process)
  *       onvif: "..."                 (the password, base64: users_login_with)
+ *       netip_password: "tlJwpbo6"   (Xiongmai's hash of it: users_login_netip)
+ *   system:
+ *     netip_password: "..."          (the system account's, learnt at its login)
+ *     shadow: "..."                  (which shadow entry that was)
+ *
+ * The onvif key and netip_password are the password's secrets for clients
+ * that never send the password itself; like the hash, the API never shows
+ * them. Both are written when a password is set (the onvif key only while
+ * onvif_server is on), and filled in at a login with the password when
+ * the account lacks them (users_login).
  *
  * Two groups always exist, whether the file has them or not: "admin"
  * (every permission; cannot be changed or deleted) and "user" (live view
@@ -127,11 +137,21 @@ int users_login(const char *name, const char *pass, unsigned *perms, char *why, 
  * gets the password and says whether the client's proof fits it (1).
  * That needs the password itself, which a crypt(3) hash cannot give:
  * users of the file have an ONVIF key (the password, base64) written
- * with it while onvif_server is on; the system account has none.
+ * with it while onvif_server is on, or at their next login with it then;
+ * the system account has none.
  * Returns as users_login: 1 with `*perms`, 0 refused, -1 cannot be
  * checked (`why`: no key yet, the system account). */
 int users_login_with(const char *name, int (*check)(const char *pass, void *ctx), void *ctx, unsigned *perms,
                      char *why, size_t cap);
+
+/* A login from a NETIP client (src/api/netip_srv.c), which sends only
+ * Xiongmai's 8-character hash of the password (md5_sofia), never the
+ * password: checked against the hash kept with the user's password
+ * (`netip_password`, set with it), or for the system account the one
+ * learnt at its last login with the password (users_login keeps it,
+ * with which shadow entry it belongs to). -1 with `why` when there is
+ * none to check against yet. */
+int users_login_netip(const char *name, const char *xm, unsigned *perms, char *why, size_t cap);
 
 /* A crypt(3) hash of `pass` with a fresh random salt: SHA-512, else
  * SHA-256, else MD5, whichever the C library has. 0, or -1. */

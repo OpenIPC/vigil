@@ -69,7 +69,9 @@ Rules that keep the layers apart:
   the screen's pictures and hands the browser's input on through `kvm.h`,
   which the app implements (`src/app/kvm.c`): the pictures are composed
   from LVGL's flushes and the platform's `hal_display_grab`, the input
-  goes into the evdev reader as one more mouse and keyboard.
+  goes into the evdev reader as one more mouse and keyboard. The NETIP
+  server (`netip_srv.c`) takes the cameras' access units from stream taps
+  (`stream_tap.h`) and passes them on unchanged.
 - A platform provides every HAL function. Functions it cannot support
   return an error, and `hal_caps()` reports what it can do. The core reads
   those capabilities at run time and does not assume them.
@@ -158,6 +160,17 @@ either is dropped until the next keyframe, and a switch to it waits for
 that keyframe. A camera has at most two connections; full screen, the
 display and the recording share the main one. A view change never touches
 the main session, so recording goes on in the same segment.
+
+The same access units go to vigild's own servers, which pass the cameras
+on to other clients (`stream_tap.c`): a server opens a tap on a channel's
+main or sub-stream and its callback gets each AU on the session thread
+(it copies and returns; it must never block the camera). A tap that opens
+mid-GOP gets the GOP so far first, so a client starts at a keyframe at
+once. An open tap keeps its stream's GOP like a tile on screen does, and
+while a server listens (`stream_tap_standby`) every stream's GOP is kept
+as long as the caches hold less than half their budget, so the decoders'
+GOPs come first. A tap outlives its camera's reconnects and goes on at
+the next keyframe.
 
 A decoder the platform cannot give (out of media memory or decoder
 channels) is retried after 10 s, or as soon as another channel closes its
@@ -289,6 +302,8 @@ saves only a mode the user keeps.
 | API writers (4) | one per WebSocket client: writes its messages, so a stalled client stalls only itself |
 | zero channel: CivetWeb master + up to 6 workers | its page, logins and WebSockets (`src/api/web.c`) |
 | zero channel viewers (2) | one per viewer, at nice 10: composes, encodes and sends its pictures (`kvm_next`) |
+| NETIP server: listener | accepts NETIP connections, answers XM's LAN search (`src/api/netip_srv.c`) |
+| NETIP server: one per connection (24 at most) | its requests, and its stream's queue onto the socket; the camera's session thread only copies into that queue |
 | log reader (`-s`) | turns stdout/stderr lines into syslog messages |
 
 ## Sources (camera protocols)

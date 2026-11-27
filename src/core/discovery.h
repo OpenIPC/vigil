@@ -89,6 +89,10 @@ void disc_set_max_channels(int n);
  * the ONVIF server's; NULL or "" none): searches skip its answers. */
 void disc_set_self(const char *uuid);
 
+/* The same for its NETIP server (src/api/netip_srv.c): the serial and TCP
+ * port its search answer gives ("" / 0: none). Any thread. */
+void disc_set_self_netip(const char *serial, int port);
+
 /* Preference order of protocols for a device's URL, "netip,onvif,dhip"
  * (the default: NETIP names both streams without guessing a path; ONVIF
  * asks the device; Dahua's RTSP path is fixed). -1 on an unknown name. */

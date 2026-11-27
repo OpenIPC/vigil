@@ -497,20 +497,20 @@ static void *lte_open(ui_set_t *s, lv_obj_t *pane)
 /* ---- Ports ------------------------------------------------------------------------- */
 
 /* The ports of vigild's servers: the web server (web.listen), the API
- * (api.listen) and ONVIF (onvif_server.port), which move at once when
- * saved (main.c restarts the first two, onvif.c's thread follows its
- * setting; a port that cannot be had is refused by the store, or put
- * back, and said here), and those of the RTSP and NETIP servers vigild
- * does not have yet (rtsp_server.port, netip_server.port), kept for them.
+ * (api.listen), ONVIF (onvif_server.port) and NETIP (netip_server.port),
+ * which move at once when saved (main.c restarts the first two and NETIP,
+ * onvif.c's thread follows its setting; a port that cannot be had is
+ * refused by the store, or put back, and said here), and that of the
+ * RTSP server vigild does not have yet (rtsp_server.port), kept for it.
  * No two on one port. */
 
 #define PORTS_N   5
-#define SERVERS_N 3                     /* the first ones: running servers */
-enum { P_WEB, P_API, P_ONVIF, P_RTSP, P_NETIP };
-static const char *const k_port_sec[PORTS_N] = { "web", "api", "onvif_server", "rtsp_server", "netip_server" };
+#define SERVERS_N 4                     /* the first ones: running servers */
+enum { P_WEB, P_API, P_ONVIF, P_NETIP, P_RTSP };
+static const char *const k_port_sec[PORTS_N] = { "web", "api", "onvif_server", "netip_server", "rtsp_server" };
 static const char *const k_port_key[PORTS_N] = { "listen", "listen", "port", "port", "port" };
-static const char *const k_port_name[PORTS_N] = { "Web server", "HTTP API", "ONVIF", "RTSP", "NETIP" };
-static const int         k_port_server[SERVERS_N] = { UI_SERVER_WEB, UI_SERVER_API, UI_SERVER_ONVIF };
+static const char *const k_port_name[PORTS_N] = { "Web server", "HTTP API", "ONVIF", "NETIP", "RTSP" };
+static const int         k_port_server[SERVERS_N] = { UI_SERVER_WEB, UI_SERVER_API, UI_SERVER_ONVIF, UI_SERVER_NETIP };
 
 typedef struct {
     ui_set_t   *s;
@@ -589,8 +589,9 @@ static void *ports_open(ui_set_t *s, lv_obj_t *pane)
         "The HTTP API (api.listen): apps, scripts, the API's event WebSocket.",
         "ONVIF for video management software and other recorders (onvif_server). 8899 is XM's ONVIF "
         "port; 80, ONVIF's usual one, is the web server's here.",
+        "XM's NETIP for CMS, VMS and XMEye (netip_server); 34567 is XM's. It also answers XM's search "
+        "on UDP 34569.",
         "554 is RTSP's own.",
-        "34567: XM's NETIP, for CMS and VMS software.",
     };
     lv_obj_t *sec = ui_set_section(pane, "Servers");
     int users = ui_allowed(UI_PERM_USERS);
@@ -598,7 +599,7 @@ static void *ports_open(ui_set_t *s, lv_obj_t *pane)
         lv_obj_t *box = ui_set_row(sec, k_port_name[i], helps[i]);
         p->num[i] = ui_set_number(s, box, p->port[i], 1, 65535);
         p->state[i] = ui_set_note(box, "", UI_C(TEXT2));
-        if (i == P_ONVIF) continue;     /* the network permission's, as the rest of this screen */
+        if (i == P_ONVIF || i == P_NETIP) continue;     /* the network permission's, as the rest of this screen */
         if (!p->port[i] || !users) ports_enable(p->num[i], 0);
         if (!p->port[i])
             ui_label(box, i == P_WEB ? "Off: web.listen is empty (System -> Zero channel)."
@@ -611,13 +612,13 @@ static void *ports_open(ui_set_t *s, lv_obj_t *pane)
                     UI_C(TEXT2));
     ui_set_note(pane, "Saved, a server moves to its new port at once; its open connections close (a browser "
                       "showing the zero channel reconnects at the new address; ONVIF clients find the new port "
-                      "by WS-Discovery). A port that cannot be had is refused, and said why.", UI_C(TEXT2));
+                      "by WS-Discovery, XM's clients by their search). A port that cannot be had is refused, "
+                      "and said why.", UI_C(TEXT2));
     lv_obj_t *later = ui_set_section(pane, "Services not available yet");
     for (int i = SERVERS_N; i < PORTS_N; ++i)
         p->num[i] = ui_set_number(s, ui_set_row(later, k_port_name[i], helps[i]), p->port[i], 1, 65535);
-    ui_set_note(pane, LV_SYMBOL_WARNING "  vigild has no RTSP or NETIP server yet: nothing listens on these ports. "
-                                        "They are kept for those servers, and no other server of vigild's may "
-                                        "take them.", UI_C(WARN));
+    ui_set_note(pane, LV_SYMBOL_WARNING "  vigild has no RTSP server yet: nothing listens on its port. It is kept "
+                                        "for that server, and no other server of vigild's may take it.", UI_C(WARN));
     ports_load(p);
     p->timer = lv_timer_create(ports_tick, 1000, p);
     return p;
@@ -936,8 +937,9 @@ static void *qos_open(ui_set_t *s, lv_obj_t *pane)
     q->sec = sec;
     static const char *const labels[QOS_N] = { "Video", "Management", "Cameras", "Alarms and events" };
     static const char *const helps[QOS_N] = {
-        "The zero channel's picture: the WebSocket of the web server (web.listen, port 80).",
-        "The HTTP API, the web pages and logins, the ONVIF service and WS-Discovery, DDNS, camera searches.",
+        "The zero channel's picture (the web server's WebSocket), the NETIP server's live streams.",
+        "The HTTP API, the web pages and logins, the ONVIF service and WS-Discovery, the NETIP server's "
+        "requests and search answers, DDNS, camera searches.",
         "vigild's connections to cameras: RTSP and NETIP control, and the ACKs of the video they send.",
         "The API's event WebSocket, the alarm center's POSTs and the mails.",
     };

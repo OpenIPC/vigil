@@ -30,7 +30,9 @@
 #include "hal_capture.h"
 #include "hal_decoder.h"
 #include "hal_display.h"
+#include "disc_proto.h"
 #include "net.h"
+#include "netip_proto.h"
 #include "qos.h"
 #include "rec_place.h"
 #include "rec_sched.h"
@@ -41,6 +43,7 @@
 #include "schema_yaml.h"
 #include "seg_writer.h"
 #include "sps.h"
+#include "stream_tap.h"
 
 static int g_fail, g_checks;
 #define CHECK(cond, ...) do { ++g_checks; if (!(cond)) { ++g_fail; \
@@ -2271,6 +2274,184 @@ static void test_channel_instant_switch(void)
     g_dec_slots = 0;
 }
 
+/* ---- stream taps: a camera's AUs for vigild's own servers ---------------------- */
+
+#define TAP_LOG 512
+typedef struct {
+    pthread_mutex_t lock;
+    int             n, keys;
+    uint64_t        pts[TAP_LOG];
+    int             key[TAP_LOG];
+    vg_codec_t      codec;
+    unsigned        width;
+    atomic_int      calls;
+} tap_log_t;
+
+static void tap_rec(void *user, const vg_au_t *au, const vg_stream_info_t *si, vg_codec_t codec)
+{
+    tap_log_t *l = user;
+    pthread_mutex_lock(&l->lock);
+    if (l->n < TAP_LOG) {
+        l->pts[l->n] = au->pts_us;
+        l->key[l->n] = au->key;
+        ++l->n;
+    }
+    l->keys += au->key;
+    l->codec = codec;
+    l->width = si->width;
+    pthread_mutex_unlock(&l->lock);
+    atomic_fetch_add(&l->calls, 1);
+}
+
+static void tap_log_init(tap_log_t *l)
+{
+    memset(l, 0, sizeof *l);
+    pthread_mutex_init(&l->lock, NULL);
+}
+
+static int tap_count(tap_log_t *l)
+{
+    pthread_mutex_lock(&l->lock);
+    int n = l->n;
+    pthread_mutex_unlock(&l->lock);
+    return n;
+}
+
+typedef struct {
+    volatile int stop;
+    atomic_int   opens;
+} tap_churn_t;
+
+static void tap_nop(void *user, const vg_au_t *au, const vg_stream_info_t *si, vg_codec_t codec)
+{
+    (void)au; (void)si; (void)codec;
+    atomic_fetch_add((atomic_int *)user, 1);
+}
+
+static void *tap_churn(void *arg)
+{
+    tap_churn_t *c = arg;
+    atomic_int calls = 0;
+    while (!c->stop) {
+        stream_tap_t *t = stream_tap_open(0, rand() & 1, tap_nop, &calls);
+        if (t) atomic_fetch_add(&c->opens, 1);
+        usleep((unsigned)(rand() % 3000));
+        stream_tap_close(t);
+    }
+    return NULL;
+}
+
+static void test_stream_tap(void)
+{
+    vg_stream_info_t si;
+    vg_codec_t codec;
+    tap_log_t a, b;
+    tap_log_init(&a);
+    tap_log_init(&b);
+    CHECK(stream_tap_open(0, 0, tap_rec, &a) == NULL && stream_tap_info(0, 0, &si, &codec) < 0,
+          "no channel: no tap, no stream");
+    CHECK(stream_tap_open(CHANNEL_MAX, 0, tap_rec, &a) == NULL && stream_tap_open(0, 2, tap_rec, &a) == NULL,
+          "out of range: no tap");
+
+    int port = cam_start("majestic_1080p.h265", "testsrc_640x360.h264");
+    if (!port) return;
+    char url[64];
+    snprintf(url, sizeof url, "netip://127.0.0.1:%d/?ch=0&stream=main", port);
+    /* Off screen: the decoders keep no main-stream GOP of their own. */
+    vg_rect_t none[CHANNEL_MAX] = { { 0 } };
+    channels_config_t cc = { .urls = { url }, .n = 1, .seg_secs = 60 };
+    CHECK(channels_start(&cc, none) == 0, "start");
+    WAIT_FOR(stream_tap_info(0, 0, &si, &codec) == 0 && stream_tap_info(0, 1, NULL, NULL) == 0, 5000);
+    CHECK(stream_tap_info(0, 0, &si, &codec) == 0 && codec == VG_CODEC_H265 && si.width == 1920,
+          "main stream: H.265 1920 (%s %u)", vg_codec_name(codec), si.width);
+    CHECK(stream_tap_info(0, 1, &si, &codec) == 0 && codec == VG_CODEC_H264 && si.width == 640,
+          "sub-stream: H.264 640 (%s %u)", vg_codec_name(codec), si.width);
+    stream_tap_ps_t ps;
+    CHECK(stream_tap_params(0, 0, &ps) == 3 && (ps.ps[0][0] >> 1 & 0x3f) == 32 && (ps.ps[1][0] >> 1 & 0x3f) == 33 &&
+              (ps.ps[2][0] >> 1 & 0x3f) == 34, "main: VPS, SPS, PPS");
+    CHECK(stream_tap_params(0, 1, &ps) == 2 && (ps.ps[0][0] & 0x1f) == 7 && (ps.ps[1][0] & 0x1f) == 8,
+          "sub: SPS, PPS");
+    CHECK(stream_tap_keep(0, 0) == TAP_KEEP_NONE, "no tap, no standby: nothing kept for one");
+
+    /* The first tap on the main stream: no GOP kept, it starts at the
+     * next keyframe; then its stream's GOP is kept. */
+    stream_tap_t *ta = stream_tap_open(0, 0, tap_rec, &a);
+    CHECK(ta && stream_tap_keep(0, 0) == TAP_KEEP_MUST, "a tap: its GOP kept");
+    WAIT_FOR(a.keys >= 2, 3000);
+    CHECK(a.n > 0 && a.key[0] && a.codec == VG_CODEC_H265 && a.width == 1920,
+          "the first AU a tap gets is a keyframe, with the stream's codec and size");
+    /* A second tap in the middle of a GOP: the GOP so far, at once. */
+    WAIT_FOR(atomic_load(&g_cam_since_key[0]) >= 8, 2000);
+    pthread_mutex_lock(&a.lock);
+    int a_before = a.n;
+    uint64_t last_key = 0;
+    for (int i = 0; i < a.n; ++i)
+        if (a.key[i]) last_key = a.pts[i];
+    pthread_mutex_unlock(&a.lock);
+    stream_tap_t *tb = stream_tap_open(0, 0, tap_rec, &b);
+    WAIT_FOR(tap_count(&b) > 0, 1000);
+    pthread_mutex_lock(&a.lock);
+    pthread_mutex_lock(&b.lock);
+    CHECK(b.n > 1 && b.key[0] && b.pts[0] == last_key,
+          "a tap opened mid-GOP starts with the GOP so far, at its keyframe (%d AUs)", b.n);
+    int same = 0, from = -1;
+    for (int i = 0; i < a.n && from < 0; ++i)
+        if (a.pts[i] == b.pts[0]) from = i;
+    for (int i = 0; from >= 0 && i < b.n && from + i < a.n; ++i) same += a.pts[from + i] == b.pts[i];
+    CHECK(from >= 0 && from < a_before && same == (b.n < a.n - from ? b.n : a.n - from),
+          "in the order the stream had (%d of %d)", same, b.n);
+    pthread_mutex_unlock(&b.lock);
+    pthread_mutex_unlock(&a.lock);
+
+    /* Closed: never called again. */
+    stream_tap_close(tb);
+    int bc = atomic_load(&b.calls);
+    usleep(200 * 1000);
+    CHECK(atomic_load(&b.calls) == bc, "a closed tap is not called (%d, %d)", bc, atomic_load(&b.calls));
+    stream_tap_close(ta);
+    CHECK(stream_tap_keep(0, 0) == TAP_KEEP_NONE, "the last tap closed: its GOP no longer wanted");
+
+    /* Standing by: the main stream's GOP is kept off screen too, so the
+     * first tap of it starts at once. */
+    stream_tap_standby(1);
+    CHECK(stream_tap_keep(0, 0) == TAP_KEEP_SPARE, "standing by");
+    usleep(600 * 1000);
+    tap_log_t c;
+    tap_log_init(&c);
+    WAIT_FOR(atomic_load(&g_cam_since_key[0]) >= 8, 2000);
+    stream_tap_t *tc = stream_tap_open(0, 0, tap_rec, &c);
+    WAIT_FOR(tap_count(&c) > 0, 1000);
+    CHECK(c.n > 1 && c.key[0], "standing by: the first tap gets the GOP so far (%d AUs)", c.n);
+    stream_tap_close(tc);
+    stream_tap_standby(0);
+
+    /* Taps opened and closed from several threads while the stream runs. */
+    tap_churn_t ch = { 0 };
+    pthread_t th[4];
+    for (int i = 0; i < 4; ++i) pthread_create(&th[i], NULL, tap_churn, &ch);
+    usleep(1000 * 1000);
+    ch.stop = 1;
+    for (int i = 0; i < 4; ++i) pthread_join(th[i], NULL);
+    CHECK(atomic_load(&ch.opens) > 100 && stream_tap_keep(0, 0) == TAP_KEEP_NONE &&
+              stream_tap_keep(0, 1) == TAP_KEEP_NONE, "%d taps opened and closed from 4 threads",
+          atomic_load(&ch.opens));
+
+    /* A tap outlives its channel's stop, and gets nothing after it. */
+    tap_log_t d;
+    tap_log_init(&d);
+    stream_tap_t *td = stream_tap_open(0, 1, tap_rec, &d);
+    WAIT_FOR(tap_count(&d) > 0, 1000);
+    channels_stop();
+    CHECK(stream_tap_info(0, 1, NULL, NULL) < 0 && stream_tap_open(0, 1, tap_rec, &d) == NULL,
+          "stopped: the stream is gone");
+    int dc = atomic_load(&d.calls);
+    usleep(100 * 1000);
+    CHECK(dc > 0 && atomic_load(&d.calls) == dc, "nothing after the stop");
+    stream_tap_close(td);
+    CHECK(gop_cache_used() == 0, "every GOP given back (%zu)", gop_cache_used());
+    cam_stop();
+}
+
 /* A 16:9 camera whose sub-stream is anamorphic D1 (704x576, claiming square
  * pixels): the sub-stream is shown at the main stream's 16:9, before and
  * after a switch to full screen; stretch, at once 0:0; fill, at once at
@@ -2336,6 +2517,124 @@ static void test_netip_title_parse(void)
     }
     CHECK(netip_title_parse("{\"ChannelTitle\":[\"0123456789\xd0\xa1\"]}", 0, out, 12) == 0 &&
               !strcmp(out, "0123456789"), "cut on a character: '%s'", out);
+}
+
+
+/* vigild's NETIP server frames what its stream taps give it
+ * (netip_proto.h); vigil's own NETIP source must read back the same
+ * access units: codec, keyframes, every byte, a 4 MP picture's size bits
+ * in the codec byte, frames split over messages as the server sends them. */
+typedef struct { int n; vg_au_t au[4]; uint8_t *data[4]; } emitted_t;
+
+static void collect(void *user, const vg_au_t *au)
+{
+    emitted_t *e = user;
+    if (e->n >= 4) return;
+    e->au[e->n] = *au;
+    e->data[e->n] = malloc(au->len);
+    memcpy(e->data[e->n], au->data, au->len);
+    e->au[e->n].data = e->data[e->n];
+    ++e->n;
+}
+
+/* As netip_srv.c sends a frame: its header and payload, 8 KiB a message. */
+static void send_frame(source_t *src, const uint8_t *head, size_t hl, const uint8_t *p, size_t len, emitted_t *e)
+{
+    size_t total = hl + len;
+    uint8_t *f = malloc(total);
+    memcpy(f, head, hl);
+    memcpy(f + hl, p, len);
+    for (size_t off = 0; off < total; off += 8192)
+        netip_media_feed(src, f + off, total - off > 8192 ? 8192 : total - off, collect, e);
+    free(f);
+}
+
+static void test_netip_server_proto(void)
+{
+    /* The header. */
+    uint8_t b[NETIP_HDR_LEN];
+    netip_hdr_t h = { .version = 1, .session = 0x1234ABCD, .seq = 7, .total = 3, .cur = 1, .msgid = 1412,
+                      .len = 8192 }, g;
+    netip_hdr_put(b, &h);
+    CHECK(b[0] == 0xff && b[14] == (1412 & 255) && b[15] == 1412 >> 8 && b[12] == 3 && b[16] == 0 && b[17] == 0x20,
+          "header bytes");
+    CHECK(netip_hdr_get(b, &g) == 0 && g.version == 1 && g.session == h.session && g.seq == 7 && g.total == 3 &&
+          g.cur == 1 && g.msgid == 1412 && g.len == 8192, "header round trip");
+    b[0] = 0;
+    CHECK(netip_hdr_get(b, &g) < 0, "not NETIP without 0xFF");
+
+    /* XM's packed time. */
+    struct tm t = { .tm_year = 126, .tm_mon = 10, .tm_mday = 27, .tm_hour = 23, .tm_min = 59, .tm_sec = 58 }, u;
+    netip_time_unpack(netip_time_pack(&t), &u);
+    CHECK(u.tm_year == 126 && u.tm_mon == 10 && u.tm_mday == 27 && u.tm_hour == 23 && u.tm_min == 59 &&
+          u.tm_sec == 58, "time round trip");
+    struct tm doc = { .tm_year = 109, .tm_mon = 1, .tm_mday = 13, .tm_hour = 12, .tm_min = 3, .tm_sec = 12 };
+    CHECK(netip_time_pack(&doc) == (12u | 3u << 6 | 12u << 12 | 13u << 17 | 2u << 22 | 9u << 26), "time layout");
+
+    uint32_t sid;
+    CHECK(netip_session_parse("0x0000000B", &sid) == 0 && sid == 11 && netip_session_parse("x", &sid) < 0,
+          "session ids");
+    CHECK(netip_stream_type("Main") == 0 && netip_stream_type("Extra1") == 1 && netip_stream_type("Extra") == 1 &&
+          netip_stream_type("Sub") == 1 && netip_stream_type("Fourth") < 0, "stream types");
+
+    /* Frames, through source_netip's parser. */
+    uint8_t head[NETIP_FRAME_HEAD];
+    CHECK(netip_frame_head(head, 1, VG_CODEC_NONE, 640, 360, 25, &t, 10) == 0, "no codec, no frame");
+    size_t n = 20000, hl;
+    uint8_t *key = malloc(n), *p = malloc(5000);
+    for (size_t i = 0; i < n; ++i) key[i] = (uint8_t)(i * 7 + 3);
+    memcpy(key, "\0\0\0\1\x40\x01", 6);                /* VPS ... */
+    for (size_t i = 0; i < 5000; ++i) p[i] = (uint8_t)(i * 13 + 1);
+    memcpy(p, "\0\0\0\1\x02\x01", 6);                  /* a TRAIL_R slice */
+    source_t *src = source_create("netip://admin:x@127.0.0.1/", 0);
+    CHECK(src != NULL, "a NETIP source to parse with");
+    if (!src) return;
+    emitted_t e = { 0 };
+    hl = netip_frame_head(head, 1, VG_CODEC_H265, 2560, 1440, 25, &t, (uint32_t)n);
+    CHECK(hl == 16 && head[3] == 0xfc && head[4] == 0x13 && head[5] == 25 && head[6] == (320 & 255) &&
+          head[7] == 180, "a 2560x1440 H.265 I-frame header: codec byte 0x13 (%02x)", head[4]);
+    send_frame(src, head, hl, key, n, &e);
+    hl = netip_frame_head(head, 0, VG_CODEC_H265, 2560, 1440, 25, &t, 5000);
+    CHECK(hl == 8 && head[3] == 0xfd, "a P-frame header");
+    send_frame(src, head, hl, p, 5000, &e);
+    CHECK(e.n == 2 && e.au[0].codec == VG_CODEC_H265 && e.au[0].key && e.au[0].len == n &&
+          !memcmp(e.au[0].data, key, n) && e.au[1].codec == VG_CODEC_H265 && !e.au[1].key &&
+          e.au[1].len == 5000 && !memcmp(e.au[1].data, p, 5000), "H.265 read back as sent (%d)", e.n);
+    for (int i = 0; i < e.n; ++i) free(e.data[i]);
+    memset(&e, 0, sizeof e);
+    hl = netip_frame_head(head, 1, VG_CODEC_H264, 3840, 2160, 30, &t, 9000);
+    CHECK(head[4] == (2 | 1 << 4 | 1 << 6) && head[6] == (480 & 255) && head[7] == (270 & 255),
+          "3840x2160 H.264: 0x%02x", head[4]);
+    key[4] = 0x67;
+    send_frame(src, head, hl, key, 9000, &e);
+    CHECK(e.n == 1 && e.au[0].codec == VG_CODEC_H264 && e.au[0].key && e.au[0].len == 9000 &&
+          !memcmp(e.au[0].data, key, 9000), "H.264 read back as sent");
+    for (int i = 0; i < e.n; ++i) free(e.data[i]);
+    source_destroy(src);
+    free(key);
+    free(p);
+
+    /* The search answer the server gives, as the camera search reads it. */
+    disc_device_t d = { 0 }, r;
+    snprintf(d.ip, sizeof d.ip, "192.168.1.10");
+    snprintf(d.mask, sizeof d.mask, "255.255.255.0");
+    snprintf(d.gateway, sizeof d.gateway, "192.168.1.1");
+    snprintf(d.mac, sizeof d.mac, "02:00:00:00:00:42");
+    snprintf(d.serial, sizeof d.serial, "0000020000000042");
+    snprintf(d.name, sizeof d.name, "nvr");
+    snprintf(d.version, sizeof d.version, "V0.1.0.vigil");
+    d.netip_port = 34567;
+    d.http_port = 80;
+    d.channels = 9;
+    uint8_t pkt[1024];
+    size_t pl = disc_netip_reply(pkt, sizeof pkt, &d);
+    CHECK(pl > 20 && pl <= 1024 && disc_netip_parse(pkt, pl, &r) == 0 && !strcmp(r.ip, "192.168.1.10") &&
+          !strcmp(r.mask, "255.255.255.0") && !strcmp(r.gateway, "192.168.1.1") && !strcmp(r.mac, d.mac) &&
+          !strcmp(r.serial, d.serial) && r.netip_port == 34567 && r.channels == 9 && !strcmp(r.name, "nvr"),
+          "search answer round trip (%zu bytes)", pl);
+    uint8_t q[32];
+    CHECK(disc_netip_is_search(q, disc_netip_search(q, sizeof q)) && !disc_netip_is_search(pkt, pl), "a search");
+    CHECK(disc_netip_reply(pkt, 100, &d) == 0, "too small a buffer");
 }
 
 static int status_is(int ch, ch_state_t want, int *live)
@@ -3159,8 +3458,10 @@ int main(int argc, char **argv)
     test_sub_url();
     test_channel_substream();
     test_channel_instant_switch();
+    test_stream_tap();
     test_channel_aspect();
     test_netip_title_parse();
+    test_netip_server_proto();
     test_channel_stream_states();
     test_camera_slots();
     test_fail_kinds();

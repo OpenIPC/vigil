@@ -70,6 +70,7 @@ add_library(vigil_core STATIC
   src/core/gop_cache.c
   src/core/md5.c
   src/core/net.c
+  src/core/netip_proto.c
   src/core/onvif_proto.c
   src/core/qos.c
   src/core/schema.c
@@ -78,6 +79,7 @@ add_library(vigil_core STATIC
   src/core/rec_place.c
   src/core/rec_sched.c
   src/core/seg_writer.c
+  src/core/stream_tap.c
   src/core/sps.c
   src/core/source/rtp_depay.c
   src/core/source/rtsp_client.c

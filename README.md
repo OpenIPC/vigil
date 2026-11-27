@@ -38,6 +38,9 @@ are part of the design.
   WS-Discovery and get a profile per camera and stream (media and media2,
   H.265 too) with its RTSP address, logging in as vigil's users
   ([docs/onvif.md](docs/onvif.md)).
+- **NETIP server**: Xiongmai's own clients (CMS, VMS, XMEye on the LAN)
+  find the recorder by XM's search and show its cameras live, both
+  streams, as vigil's users ([docs/api.md](docs/api.md#netip-server)).
 
 ## Platforms
 

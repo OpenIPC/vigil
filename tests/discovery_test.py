@@ -90,7 +90,8 @@ def main():
     cfg = os.path.join(tmp, "vigil.yaml")
     with open(cfg, "w") as f:
         f.write("cameras:\n  - url: \"rtsp://admin:keep@127.0.0.99/x\"\n    name: Old\n"
-                "api:\n  listen: \"127.0.0.1:%d\"\n  auth: false\n" % api_port)
+                "api:\n  listen: \"127.0.0.1:%d\"\n  auth: false\n"
+                "netip_server:\n  enabled: false\n" % api_port)
     common = ["--ports", ",".join(map(str, udp)), "--tcp-ports", ",".join(map(str, tcp)), "--password", PW]
     fakes = [
         subprocess.Popen([sys.executable, os.path.join(HERE, "fake_discovery.py")] + common +

@@ -5,9 +5,11 @@
  * its IP header; vigild marks the sockets it owns, one class per kind of
  * traffic:
  *
- *   QOS_VIDEO       the zero channel's picture (web.c's WebSocket)
+ *   QOS_VIDEO       the zero channel's picture (web.c's WebSocket), the
+ *                   NETIP server's live streams (netip_srv.c)
  *   QOS_MANAGEMENT  the HTTP API, the web pages and logins, the ONVIF
- *                   service and WS-Discovery, DDNS, camera searches
+ *                   service and WS-Discovery, the NETIP server's requests
+ *                   and search answers, DDNS, camera searches
  *   QOS_CAMERA      vigild's connections to cameras: RTSP and NETIP
  *                   control, and the ACKs of the video they send
  *   QOS_ALARM       events: the API's event WebSocket, the alarm center's
