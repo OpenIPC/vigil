@@ -11,6 +11,8 @@
 
 #include "config.h"
 #include "disc_proto.h"
+#include "overscan.h"
+#include "picture.h"
 #include "seg_writer.h"
 #include "source.h"
 
@@ -449,6 +451,10 @@ static const schema_field_t ui_fields[] = {
       .label = "Log out after (min)", .help = "Without a key or the mouse for this long. 0: never." },
 };
 
+#define MARGIN_HELP "Shrinks everything on HDMI and VGA (the video, the menus, the pointer) by this " \
+                    "much from the edge, black around it: for a TV that cuts off the picture's edges " \
+                    "(overscan). A percentage of the output's height (left and right: of its width), so it " \
+                    "holds at every resolution."
 #define OSD_BG_HELP "outline: hard-edged text with a thin dark edge, straight on the video; none: " \
                     "the text alone; box: on a dark box."
 static const schema_field_t display_fields[] = {
@@ -481,6 +487,26 @@ static const schema_field_t display_fields[] = {
               "just above the name (below it at the top)." },
     { .key = "icons_background", ENUM(config_display_t, icons_background, osd_backgrounds),
       .def_str = "outline", .live = 1, .label = "Status icons background", .help = OSD_BG_HELP },
+    /* the output's margins, picture and sound */
+    { .key = "margin_top", INT(config_display_t, margin_top), .def_int = 0, .min = 0, .max = OVERSCAN_MAX_PCT,
+      .live = 1, .label = "Top margin (%)", .help = MARGIN_HELP },
+    { .key = "margin_bottom", INT(config_display_t, margin_bottom), .def_int = 0, .min = 0,
+      .max = OVERSCAN_MAX_PCT, .live = 1, .label = "Bottom margin (%)", .help = "As margin_top, at the bottom edge." },
+    { .key = "margin_left", INT(config_display_t, margin_left), .def_int = 0, .min = 0, .max = OVERSCAN_MAX_PCT,
+      .live = 1, .label = "Left margin (%)", .help = "As margin_top, at the left edge (% of the width)." },
+    { .key = "margin_right", INT(config_display_t, margin_right), .def_int = 0, .min = 0,
+      .max = OVERSCAN_MAX_PCT, .live = 1, .label = "Right margin (%)", .help = "As margin_top, at the right edge." },
+    { .key = "picture", ENUM(config_display_t, picture, picture_presets), .def_str = "standard", .live = 1,
+      .label = "Picture",
+      .help = "HDMI and VGA: standard (as the display starts), bright (luma up, mid-tones lifted: "
+              "gamma 0.8), soft (less contrast, colour and sharpening), vivid (more contrast and "
+              "colour, gamma 1.1). Where the board has no such controls it is ignored." },
+    { .key = "hdmi_volume", INT(config_display_t, hdmi_volume), .def_int = 80, .min = 0, .max = 100, .live = 1,
+      .label = "HDMI volume",
+      .help = "0..100, the sound the HDMI output carries. Where the board has no sound on HDMI "
+              "(or nothing plays yet) it is kept for when there is." },
+    { .key = "hdmi_mute", BOOL(config_display_t, hdmi_mute), .def_int = 0, .live = 1, .label = "HDMI mute",
+      .help = "" },
 };
 
 static const schema_field_t api_fields[] = {

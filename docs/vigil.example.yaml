@@ -228,6 +228,31 @@ display:
   # straight on the video; none: the text alone; box: on a dark box. One of:
   # outline, none, box. Default outline.
   icons_background: outline
+  # Top margin (%): Shrinks everything on HDMI and VGA (the video, the menus,
+  # the pointer) by this much from the edge, black around it: for a TV that
+  # cuts off the picture's edges (overscan). A percentage of the output's
+  # height (left and right: of its width), so it holds at every resolution.
+  # 0..10, default 0.
+  margin_top: 0
+  # Bottom margin (%): As margin_top, at the bottom edge. 0..10, default 0.
+  margin_bottom: 0
+  # Left margin (%): As margin_top, at the left edge (% of the width). 0..10,
+  # default 0.
+  margin_left: 0
+  # Right margin (%): As margin_top, at the right edge. 0..10, default 0.
+  margin_right: 0
+  # Picture: HDMI and VGA: standard (as the display starts), bright (luma up,
+  # mid-tones lifted: gamma 0.8), soft (less contrast, colour and sharpening),
+  # vivid (more contrast and colour, gamma 1.1). Where the board has no such
+  # controls it is ignored. One of: standard, bright, soft, vivid. Default
+  # standard.
+  picture: standard
+  # HDMI volume: 0..100, the sound the HDMI output carries. Where the board
+  # has no sound on HDMI (or nothing plays yet) it is kept for when there is.
+  # 0..100, default 80.
+  hdmi_volume: 80
+  # HDMI mute. Default false.
+  hdmi_mute: false
 
 # HTTP API
 api:

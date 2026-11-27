@@ -9,6 +9,11 @@
  * comes back, so a monitor that cannot show the new one gets its picture
  * back by itself. Only a kept mode is saved (display.output).
  *
+ * Below it, where the board has them (ui_model_t.out_adj_caps): the
+ * picture preset, the margins (overscan) and the HDMI volume, each put in
+ * force as it changes (a slider while it is dragged) and saved at once (a
+ * slider when it is let go), without the page's Save.
+ *
  * Clock, Camera names, Status icons, Video: drop-downs of display.* (and
  * the clock's format, ui.date_format and ui.time_format, which System ->
  * General also sets); the live view follows a save at once. */
@@ -26,7 +31,7 @@
 
 /* ---- saving fields of an object section ------------------------------------------- */
 
-#define SEC_FIELDS_MAX 16
+#define SEC_FIELDS_MAX 32
 
 /* Section `key` with the fields in `keys` set to `vals` (n of them), the
  * others as stored. 0, or -1 with a toast. */
@@ -63,6 +68,8 @@ static void stored(const char *sec_key, const char *key, char *out, size_t cap)
 }
 
 static int dd_sel(lv_obj_t *d) { return (int)lv_dropdown_get_selected(d); }
+
+static void adj_open(ui_set_t *s, lv_obj_t *pane);
 
 /* ---- Output --------------------------------------------------------------------------- */
 
@@ -211,6 +218,7 @@ static void *out_open(ui_set_t *s, lv_obj_t *pane)
         ui_set_note(pane, o->n ? "This board's output has one resolution." : "This board has no display output.",
                     UI_C(TEXT2));
     }
+    adj_open(s, pane);
     g_out = o;
     out_load(o);
     return o;
@@ -253,6 +261,246 @@ static void out_close(void *st)
 {
     if (g_out == st) g_out = NULL;
     free(st);
+}
+
+/* ---- Output: picture, margins, HDMI sound (in force as they change, saved at once) ---- */
+
+#define MARGIN_MAX 10                   /* display.margin_*: % (OVERSCAN_MAX_PCT) */
+static const char *const k_margin_keys[4] = { "margin_top", "margin_bottom", "margin_left", "margin_right" };
+static const char *const k_margin_names[4] = { "Top", "Bottom", "Left", "Right" };
+static const char *const k_picture_keys[] = { "standard", "bright", "soft", "vivid" };
+#define N_PICTURES 4
+
+typedef struct {
+    lv_obj_t *margin[4], *margin_val[4];
+    int       margin0[4];               /* as stored */
+    lv_obj_t *picture;
+    int       picture0;
+    lv_obj_t *volume, *volume_val, *mute;
+    int       volume0, mute0;
+} adj_t;
+
+static adj_t *g_adj;                    /* while the Output sub-page is open */
+
+static int stored_int(const char *key, int def)
+{
+    char v[16];
+    stored("display", key, v, sizeof v);
+    return *v ? atoi(v) : def;
+}
+
+static void adj_label(lv_obj_t *l, int v, const char *unit)
+{
+    if (l) lv_label_set_text_fmt(l, "%d%s", v, unit);
+}
+
+static void adj_load(adj_t *a)
+{
+    for (int i = 0; i < 4 && a->margin[0]; ++i) {
+        a->margin0[i] = stored_int(k_margin_keys[i], 0);
+        lv_slider_set_value(a->margin[i], a->margin0[i], LV_ANIM_OFF);
+        adj_label(a->margin_val[i], a->margin0[i], " %");
+    }
+    if (a->picture) {
+        char v[16];
+        stored("display", "picture", v, sizeof v);
+        a->picture0 = 0;
+        for (int k = 0; k < N_PICTURES; ++k)
+            if (!strcmp(v, k_picture_keys[k])) a->picture0 = k;
+        lv_dropdown_set_selected(a->picture, (uint32_t)a->picture0);
+    }
+    if (a->volume) {
+        a->volume0 = stored_int("hdmi_volume", 80);
+        char v[16];
+        stored("display", "hdmi_mute", v, sizeof v);
+        a->mute0 = !strcmp(v, "1");
+        lv_slider_set_value(a->volume, a->volume0, LV_ANIM_OFF);
+        adj_label(a->volume_val, a->volume0, "");
+        if (a->mute0) lv_obj_add_state(a->mute, LV_STATE_CHECKED);
+        else lv_obj_remove_state(a->mute, LV_STATE_CHECKED);
+    }
+}
+
+/* What the page shows, in force (not saved). */
+static void adj_preview_margins(const adj_t *a)
+{
+    if (ui_model()->out_margins)
+        ui_model()->out_margins(lv_slider_get_value(a->margin[0]), lv_slider_get_value(a->margin[1]),
+                                lv_slider_get_value(a->margin[2]), lv_slider_get_value(a->margin[3]));
+}
+
+static void adj_preview_volume(const adj_t *a)
+{
+    if (ui_model()->out_volume)
+        ui_model()->out_volume(lv_slider_get_value(a->volume), lv_obj_has_state(a->mute, LV_STATE_CHECKED));
+}
+
+/* The stored values back in force and on the page (a save that failed). */
+static void adj_revert(adj_t *a)
+{
+    adj_load(a);
+    if (a->margin[0]) adj_preview_margins(a);
+    if (a->picture && ui_model()->out_picture) ui_model()->out_picture(k_picture_keys[a->picture0]);
+    if (a->volume) adj_preview_volume(a);
+}
+
+static void margins_save(adj_t *a)
+{
+    char buf[4][8];
+    const char *vals[4];
+    int changed = 0;
+    for (int i = 0; i < 4; ++i) {
+        int v = lv_slider_get_value(a->margin[i]);
+        changed |= v != a->margin0[i];
+        snprintf(buf[i], sizeof buf[i], "%d", v);
+        vals[i] = buf[i];
+    }
+    if (!changed) return;
+    if (save_fields("display", k_margin_keys, vals, 4) < 0) adj_revert(a);
+    else for (int i = 0; i < 4; ++i) a->margin0[i] = lv_slider_get_value(a->margin[i]);
+}
+
+static void volume_save(adj_t *a)
+{
+    int v = lv_slider_get_value(a->volume), m = lv_obj_has_state(a->mute, LV_STATE_CHECKED);
+    if (v == a->volume0 && m == a->mute0) return;
+    char vb[8];
+    snprintf(vb, sizeof vb, "%d", v);
+    const char *keys[2] = { "hdmi_volume", "hdmi_mute" }, *vals[2] = { vb, m ? "1" : "0" };
+    if (save_fields("display", keys, vals, 2) < 0) {
+        adj_revert(a);
+        return;
+    }
+    a->volume0 = v;
+    a->mute0 = m;
+}
+
+/* A slider moved: in force now; saved now from the keyboard, when it is
+ * let go from the mouse (released, or dragged off). */
+static void margin_cb(lv_event_t *e)
+{
+    adj_t *a = g_adj;
+    if (!a) return;
+    lv_obj_t *sl = lv_event_get_target(e);
+    if (lv_event_get_code(e) == LV_EVENT_VALUE_CHANGED) {
+        for (int i = 0; i < 4; ++i) adj_label(a->margin_val[i], lv_slider_get_value(a->margin[i]), " %");
+        adj_preview_margins(a);
+        if (lv_obj_has_state(sl, LV_STATE_PRESSED)) return;
+    }
+    margins_save(a);
+}
+
+static void margins_reset_cb(lv_event_t *e)
+{
+    (void)e;
+    adj_t *a = g_adj;
+    if (!a) return;
+    for (int i = 0; i < 4; ++i) {
+        lv_slider_set_value(a->margin[i], 0, LV_ANIM_OFF);
+        adj_label(a->margin_val[i], 0, " %");
+    }
+    adj_preview_margins(a);
+    margins_save(a);
+}
+
+static void picture_cb(lv_event_t *e)
+{
+    (void)e;
+    adj_t *a = g_adj;
+    if (!a) return;
+    int sel = dd_sel(a->picture);
+    if (sel < 0 || sel >= N_PICTURES || sel == a->picture0) return;
+    if (ui_model()->out_picture) ui_model()->out_picture(k_picture_keys[sel]);
+    const char *k = "picture", *v = k_picture_keys[sel];
+    if (save_fields("display", &k, &v, 1) < 0) adj_revert(a);
+    else a->picture0 = sel;
+}
+
+static void volume_cb(lv_event_t *e)
+{
+    adj_t *a = g_adj;
+    if (!a) return;
+    lv_obj_t *t = lv_event_get_target(e);
+    if (lv_event_get_code(e) == LV_EVENT_VALUE_CHANGED) {
+        adj_label(a->volume_val, lv_slider_get_value(a->volume), "");
+        adj_preview_volume(a);
+        if (t == a->volume && lv_obj_has_state(t, LV_STATE_PRESSED)) return;
+    }
+    volume_save(a);
+}
+
+static void adj_deleted_cb(lv_event_t *e)
+{
+    adj_t *a = lv_event_get_user_data(e);
+    if (g_adj == a) g_adj = NULL;
+    free(a);
+}
+
+/* A slider 0..max with its value beside it, in `box`. */
+static lv_obj_t *adj_slider(ui_set_t *s, lv_obj_t *box, int max, lv_obj_t **val, lv_event_cb_t cb)
+{
+    lv_obj_t *h = ui_set_hbox(box);
+    lv_obj_set_height(h, VG_SIZE_BUTTON);            /* centred on the row's label, as a drop-down is */
+    lv_obj_t *sl = lv_slider_create(h);
+    lv_slider_set_range(sl, 0, max);
+    lv_obj_set_width(sl, 300);
+    lv_obj_set_style_margin_hor(sl, VG_SPACE_MD, 0);
+    ui_focus_style(sl);
+    lv_group_add_obj(ui_set_group(s), sl);
+    *val = ui_label(h, "", VG_FONT_MD_LV, UI_C(TEXT));
+    lv_obj_set_width(*val, 64);
+    lv_obj_add_event_cb(sl, cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(sl, cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(sl, cb, LV_EVENT_PRESS_LOST, NULL);
+    return sl;
+}
+
+static void adj_open(ui_set_t *s, lv_obj_t *pane)
+{
+    const ui_model_t *m = ui_model();
+    unsigned caps = m->out_adj_caps ? m->out_adj_caps() : 0;
+    if (!caps) return;
+    adj_t *a = calloc(1, sizeof *a);
+    if (!a) return;
+    lv_obj_t *first = NULL;
+    if (caps & UI_OUT_PICTURE) {
+        lv_obj_t *sect = first = ui_set_section(pane, "Picture");
+        lv_obj_t *box = ui_set_row(sect, "Preset",
+                                   "HDMI and VGA, at once. Standard: as the display starts. Bright: brighter, "
+                                   "the mid-tones lifted. Soft: less contrast, colour and sharpening. Vivid: "
+                                   "stronger colour and contrast.");
+        a->picture = ui_set_dropdown(s, box, "Standard\nBright\nSoft\nVivid", 0, 320);
+        lv_obj_add_event_cb(a->picture, picture_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    }
+    if (caps & UI_OUT_MARGINS) {
+        lv_obj_t *sect = ui_set_section(pane, "Margins (overscan)");
+        if (!first) first = sect;
+        for (int i = 0; i < 4; ++i) {
+            lv_obj_t *box = ui_set_row(sect, k_margin_names[i], NULL);
+            a->margin[i] = adj_slider(s, box, MARGIN_MAX, &a->margin_val[i], margin_cb);
+        }
+        lv_obj_t *box = ui_set_row(sect, "",
+                                   "For a TV that cuts off the edges of the picture: move each edge in until "
+                                   "it shows whole. The video, the menus and the pointer all shrink into what "
+                                   "is left, black around it; % of the output, so it holds at every resolution. "
+                                   "Saved as you let go.");
+        lv_obj_t *reset = ui_set_button(s, box, LV_SYMBOL_REFRESH, "No margins");
+        lv_obj_add_event_cb(reset, margins_reset_cb, LV_EVENT_CLICKED, NULL);
+    }
+    if (caps & UI_OUT_AUDIO) {
+        lv_obj_t *sect = ui_set_section(pane, "Sound (HDMI)");
+        if (!first) first = sect;
+        lv_obj_t *box = ui_set_row(sect, "Volume", NULL);
+        a->volume = adj_slider(s, box, 100, &a->volume_val, volume_cb);
+        box = ui_set_row(sect, "Mute", NULL);
+        a->mute = ui_set_switch(s, box, 0);
+        lv_obj_add_event_cb(a->mute, volume_cb, LV_EVENT_VALUE_CHANGED, NULL);
+        ui_set_note(sect, "Nothing plays on HDMI yet: the cameras' sound is not decoded. The volume is "
+                          "set on the output and kept for when it does.", UI_C(TEXT2));
+    }
+    g_adj = a;
+    lv_obj_add_event_cb(first, adj_deleted_cb, LV_EVENT_DELETE, a);
+    adj_load(a);
 }
 
 /* ---- Clock, Camera names, Status icons: drop-downs of display.* and ui.* ------------- */

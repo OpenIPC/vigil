@@ -28,6 +28,7 @@
 #include "hal_capture.h"
 #include "hal_decoder.h"
 #include "hal_display.h"
+#include "hal_audio.h"
 #include "hal_ui.h"
 #include "input_evdev.h"
 #include "ui_app.h"
@@ -48,7 +49,8 @@ static int g_fail, g_checks;
 /* ---- a platform: four decoders, a UI layer with black (video) holes -------------------- */
 
 static const hal_caps_t g_caps = { .name = "test", .display = 1, .decoder = 1, .dec_max_w = 1920,
-                                   .dec_max_h = 1080, .max_channels = 4 };
+                                   .dec_max_h = 1080, .max_channels = 4,
+                                   .margins = 1, .picture = 1, .audio_out = 1 };
 const hal_caps_t *hal_caps(void) { return &g_caps; }
 int  hal_dec_open(int ch, vg_codec_t c, const vg_stream_info_t *si) { (void)ch; (void)c; (void)si; return -1; }
 int  hal_dec_send(int ch, const vg_au_t *au) { (void)ch; (void)au; return -1; }
@@ -77,6 +79,29 @@ int  hal_display_set_mode(const vg_mode_t *m)
     g_mode = *m;
     return 0;
 }
+/* The output's adjustments: what the Display page put in force last. */
+static vg_margins_t g_margins;
+static vg_picture_t g_picture = { 50, 50, 50, 50, 50, 100 };
+static unsigned     g_volume = 80;
+static int          g_mute, g_margin_sets;
+int hal_display_set_margins(const vg_margins_t *m)
+{
+    ++g_margin_sets;
+    g_margins = *m;
+    return 0;
+}
+int hal_display_set_picture(const vg_picture_t *p)
+{
+    g_picture = *p;
+    return 0;
+}
+int hal_audio_set_volume(unsigned volume, int mute)
+{
+    g_volume = volume;
+    g_mute = mute;
+    return 0;
+}
+
 /* Black holes for the tests' references; for the screenshots, the boards'
  * magenta key, replaced by a picture when the screen is written (shot),
  * as the video layer would: what is drawn over the video can be judged,
@@ -2693,6 +2718,64 @@ static void test_display_pages(void)
     run(100);
     config_get(&c);
     CHECK(g_mode.w == 1280 && !strcmp(c.display.output, "1280x720@60"), "back to 1280x720, kept");
+
+    /* The picture, the margins and the HDMI sound: in force and saved as
+     * they change, without Save. */
+    CHECK(find("Picture", 0) && find("Margins (overscan)", 0) && find("Sound (HDMI)", 0),
+          "Output: picture, margins, sound");
+    dd_pick(nth_of(&lv_dropdown_class, 1), 1);          /* Bright */
+    config_get(&c);
+    CHECK(!strcmp(c.display.picture, "bright") && g_picture.gamma == 80 && g_picture.luma == 54,
+          "Bright: in force and saved (%s, gamma %u)", c.display.picture, g_picture.gamma);
+    lv_obj_t *sl = nth_of(&lv_slider_class, 0);         /* top */
+    if (sl) {
+        lv_obj_add_state(sl, LV_STATE_PRESSED);         /* dragged: in force, not saved */
+        lv_slider_set_value(sl, 4, LV_ANIM_OFF);
+        lv_obj_send_event(sl, LV_EVENT_VALUE_CHANGED, NULL);
+        config_get(&c);
+        CHECK(g_margins.top == 4 && c.display.margin_top == 0 && find("4 %", 0), "dragged: 4 %% shown, not saved");
+        lv_obj_remove_state(sl, LV_STATE_PRESSED);
+        lv_obj_send_event(sl, LV_EVENT_RELEASED, NULL);
+        run(50);
+        config_get(&c);
+        CHECK(c.display.margin_top == 4, "let go: saved (%d)", c.display.margin_top);
+    } else {
+        CHECK(0, "the margins' sliders");
+    }
+    sl = nth_of(&lv_slider_class, 3);                   /* right, from the keyboard: saved at once */
+    if (sl) {
+        lv_slider_set_value(sl, 2, LV_ANIM_OFF);
+        lv_obj_send_event(sl, LV_EVENT_VALUE_CHANGED, NULL);
+        run(50);
+        config_get(&c);
+        CHECK(g_margins.right == 2 && g_margins.top == 4 && c.display.margin_right == 2,
+              "a key: in force and saved (%u, %d)", g_margins.right, c.display.margin_right);
+    }
+    sl = nth_of(&lv_slider_class, 4);                   /* volume */
+    lv_obj_t *mute = nth_of(&lv_switch_class, 0);
+    if (sl && mute) {
+        lv_slider_set_value(sl, 55, LV_ANIM_OFF);
+        lv_obj_send_event(sl, LV_EVENT_VALUE_CHANGED, NULL);
+        lv_obj_add_state(mute, LV_STATE_CHECKED);
+        lv_obj_send_event(mute, LV_EVENT_VALUE_CHANGED, NULL);
+        run(50);
+        config_get(&c);
+        CHECK(g_volume == 55 && g_mute && c.display.hdmi_volume == 55 && c.display.hdmi_mute,
+              "volume 55, muted: in force and saved (%u %d, %d %d)", g_volume, g_mute, c.display.hdmi_volume, c.display.hdmi_mute);
+    } else {
+        CHECK(0, "the volume slider and mute");
+    }
+    if (mute) lv_obj_scroll_to_view_recursive(mute, LV_ANIM_OFF);
+    shot("display_output");
+    lv_obj_t *none = find(LV_SYMBOL_REFRESH "  No margins", 0);
+    CHECK(none, "No margins");
+    if (none) click_obj(none);
+    run(50);
+    config_get(&c);
+    CHECK(overscan_none(&g_margins) && !c.display.margin_top && !c.display.margin_right, "No margins: all 0");
+    dd_pick(nth_of(&lv_dropdown_class, 1), 0);          /* back to Standard */
+    config_get(&c);
+    CHECK(!strcmp(c.display.picture, "standard") && g_picture.gamma == 100, "Standard again");
 
     /* The clock: bottom centre, large, on a box; then the format. */
     click_text("Clock");

@@ -9,6 +9,8 @@
 #define HAL_DISPLAY_H
 
 #include "vg_types.h"
+#include "overscan.h"
+#include "picture.h"
 
 /* Place channel `ch`'s video at `r` (screen pixels): the picture fitted
  * inside it at the ratio hal_display_set_aspect gave (aspect_fit), on the
@@ -51,5 +53,21 @@ void hal_display_grab_keep(int on);
  * is), as the decoders put it out: BT.601 video range (Y 16..235).
  * 0, or -1 where the platform cannot (nothing drawn). Any thread. */
 int  hal_display_grab(const hal_pic_t *pic);
+
+/* ---- the output's adjustments (Display -> Output) ------------------------------------ */
+
+/* Margins around everything the output shows (overscan.h): the tiles, the
+ * UI layer and the pointer drawn inside the inner rectangle
+ * (overscan_inner of the output, kept as the output mode changes), black
+ * around it. The screen's coordinates do not change; the zero channel's
+ * picture (hal_display_grab) stays the whole screen. 0, or -1 where the
+ * platform cannot (hal_caps()->margins 0). The main thread (it may redraw
+ * the UI). */
+int  hal_display_set_margins(const vg_margins_t *m);
+
+/* The colour controls and gamma of what goes out on HDMI and VGA
+ * (picture.h); kept across output modes. 0, or -1 where the platform has
+ * none (hal_caps()->picture 0). */
+int  hal_display_set_picture(const vg_picture_t *p);
 
 #endif /* HAL_DISPLAY_H */

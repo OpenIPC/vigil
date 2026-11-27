@@ -26,6 +26,11 @@ typedef struct {
                                  * decodes only the channels with a tile on
                                  * screen, and frees a channel's decoder when
                                  * its tile goes (recording carries on) */
+    /* The output's adjustments (Display -> Output); 0: the call is a
+     * no-op returning -1, and the UI hides the control. */
+    int      margins;           /* hal_display_set_margins */
+    int      picture;           /* hal_display_set_picture */
+    int      audio_out;         /* hal_audio_set_volume reaches the HDMI sound */
 } hal_caps_t;
 
 /* Bring up the media system and the display: a w x h screen (the UI's

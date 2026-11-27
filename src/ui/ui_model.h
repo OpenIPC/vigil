@@ -516,6 +516,17 @@ typedef struct ui_model {
 
     /* The management pages (NULL: none in this build). */
     const ui_mgmt_t *mgmt;
+
+    /* The output's adjustments (Display -> Output): what the board has
+     * (UI_OUT_* bits; 0 or NULL: none), and each put in force now, not
+     * saved, for the page's preview (display.margin_*, display.picture,
+     * display.hdmi_volume and hdmi_mute save them). 0, or -1. */
+    unsigned (*out_adj_caps)(void);
+    int  (*out_margins)(int top, int bottom, int left, int right);     /* % of the output */
+    int  (*out_picture)(const char *preset);
+    int  (*out_volume)(int volume, int mute);
 } ui_model_t;
+
+enum { UI_OUT_MARGINS = 1u, UI_OUT_PICTURE = 2u, UI_OUT_AUDIO = 4u };
 
 #endif /* UI_MODEL_H */
