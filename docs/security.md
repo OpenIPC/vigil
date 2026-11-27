@@ -57,8 +57,9 @@ board's owner.
 
 Two weaker spots remain by design: an XM client logs in with an
 8-character hash of the password that is as good as the password on this
-board's NETIP server, and HTTP Basic (the API, ONVIF's `PasswordText`)
-sends the password itself; both cross the network unencrypted. Use them on
+board's NETIP server, and HTTP Basic (the API, ONVIF's `PasswordText`) and
+the zero channel's login form send the password itself; all of them cross
+the network unencrypted (vigild's web servers have no TLS yet). Use them on
 a trusted network.
 
 ## One password, every protocol

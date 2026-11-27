@@ -385,7 +385,10 @@ sets a session cookie (`HttpOnly`, `SameSite=Strict`, 12 hours at most,
 ended by `POST /logout` or when the shadow or users file changes); the
 login form and the WebSocket must come from the recorder's own page
 (`Origin`), and the pages may not be framed (`X-Frame-Options`, a
-`Content-Security-Policy` without inline scripts).
+`Content-Security-Policy` without inline scripts). Like the API it has no
+TLS: the password and then the cookie cross the network in clear, so
+anyone who can watch the traffic can take the session. Use it on a
+trusted network, or behind a TLS proxy or an SSH tunnel.
 
 **What they may do** is what someone at the monitor may do. With
 `ui.login` off (the default) that is everything; with it on, the menus ask
