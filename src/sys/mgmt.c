@@ -28,7 +28,7 @@
 
 typedef enum {
     J_NET, J_WIFI, J_NTP_SYNC, J_NTP_CHECK, J_NTP_DAEMON, J_DDNS, J_SMTP_TEST, J_MAIL, J_ALARM,
-    J_FORMAT, J_MOUNT, J_UNMOUNT, J_NAS_TEST, J_NAS_MOUNT,
+    J_FORMAT, J_MOUNT, J_UNMOUNT, J_NAS_TEST, J_NAS_MOUNT, J_SMART,
 } jkind_t;
 
 /* Two queues, so a format that takes minutes does not hold up an NTP
@@ -89,7 +89,7 @@ static const char *kind_name(jkind_t k)
 {
     static const char *const n[] = { "network", "wifi", "ntp-sync", "ntp-check", "ntp-daemon", "ddns",
                                      "smtp-test", "mail", "alarm", "format", "mount", "unmount",
-                                     "nas-test", "nas-mount" };
+                                     "nas-test", "nas-mount", "smart" };
     return n[k];
 }
 
@@ -125,7 +125,7 @@ static int submit(slot_t *proto)
     s->pub.msg[0] = 0;
     s->pub.started = s->pub.finished = 0;
     s->queue = s->kind == J_NTP_SYNC || s->kind == J_NTP_CHECK || s->kind == J_DDNS || s->kind == J_SMTP_TEST ||
-               s->kind == J_MAIL || s->kind == J_ALARM ? Q_IO : Q_SLOW;
+               s->kind == J_MAIL || s->kind == J_ALARM || s->kind == J_SMART ? Q_IO : Q_SLOW;
     int id = s->pub.id;
     pthread_cond_broadcast(&g_wake);
     pthread_mutex_unlock(&g_lock);
@@ -150,6 +150,9 @@ static void cfg_get(vigil_config_t **c)
     *c = malloc(sizeof **c);
     if (*c) config_get(*c);
 }
+
+static int  smart_job(const char *name, char *msg, size_t cap);
+static const char *disk_of(const char *name);
 
 /* ---- running a job ------------------------------------------------------------------ */
 
@@ -316,6 +319,9 @@ static int run_job(slot_t *s, char *msg, size_t cap)
         vg_log("mgmt: unmount %s: %s", s->a, err);
         return rc;
     }
+    case J_SMART:
+        rc = smart_job(s->a, msg, cap);
+        return rc;
     case J_NAS_TEST: {
         vigil_config_t *c;
         cfg_get(&c);
@@ -583,6 +589,8 @@ void mgmt_stop(void)
     g_stop = 1;
     pthread_cond_broadcast(&g_wake);
     pthread_mutex_unlock(&g_lock);
+    /* A surface scan is stopped, not waited for: it can take a day. */
+    scan_shutdown();
     /* A job under way (a format) is waited for: stopping halfway through
      * would leave the disk without a filesystem. */
     for (int q = 0; q < Q_N; ++q) pthread_join(g_workers[q], NULL);
@@ -827,6 +835,14 @@ static int disk_job(jkind_t kind, const char *name, const char *fs, char *err, s
         snprintf(err, cap, "%s is busy with another change", name);
         return MGMT_EBUSY;
     }
+    /* A scan reads the disk under the format; a written one has no
+     * filesystem left to mount. */
+    int scan = scan_active(disk_of(name));
+    if (scan >= 0 && (kind == J_FORMAT || scan == SCAN_WRITE)) {
+        snprintf(err, cap, "a surface scan (%s) of %s is under way: stop it first", scan_mode_name(scan),
+                 disk_of(name));
+        return MGMT_EBUSY;
+    }
     int id = submit(&j);
     if (id < 0) {
         snprintf(err, cap, "too many changes under way");
@@ -883,3 +899,248 @@ int mgmt_nas_test(void)
     slot_t j = { .kind = J_NAS_TEST };
     return submit(&j);
 }
+
+/* ---- disk maintenance ---------------------------------------------------------------- */
+
+#define SMART_CACHE 4
+
+/* The last SMART read of the last few disks, for the screen (a job
+ * reads, the page shows what it read) and the scan's confirmation. */
+static struct {
+    char         name[32];
+    time_t       when;
+    smart_info_t info;
+} g_smart[SMART_CACHE];
+
+/* The disk a device is on: sda1 -> sda (per the disk list; a name that
+ * is not a partition is its own). Returns a static buffer. */
+static const char *disk_of(const char *name)
+{
+    static __thread char out[32];
+    snprintf(out, sizeof out, "%s", name ? name : "");
+    sys_disk_t *d = calloc(SYS_DISK_MAX, sizeof *d);
+    int n = d ? sys_disk_list(d, SYS_DISK_MAX, NULL) : 0;
+    for (int i = 0; i < n; ++i)
+        if (d[i].is_part && !strcmp(d[i].name, out)) snprintf(out, sizeof out, "%s", d[i].parent);
+    free(d);
+    return out;
+}
+
+/* `name` is a whole disk with a medium: 0, else -1 with err. */
+static int whole_disk(const char *name, sys_disk_t *out, char *err, size_t cap)
+{
+    if (!name || !*name || strchr(name, '/')) {
+        snprintf(err, cap, "no such disk");
+        return -1;
+    }
+    sys_disk_t *d = calloc(SYS_DISK_MAX, sizeof *d);
+    int n = d ? mgmt_disks(d, SYS_DISK_MAX) : 0, rc = -1;
+    for (int i = 0; i < n; ++i) {
+        if (strcmp(d[i].name, name)) continue;
+        if (d[i].is_part) snprintf(err, cap, "%.31s is a partition: choose its disk, %.31s", name, d[i].parent);
+        else if (!d[i].size) snprintf(err, cap, "%.31s has no medium", name);
+        else {
+            if (out) *out = d[i];
+            rc = 0;
+        }
+        break;
+    }
+    if (rc && !err[0]) snprintf(err, cap, "there is no disk %.31s", name);
+    free(d);
+    return rc;
+}
+
+static void smart_keep(const char *name, const smart_info_t *info)
+{
+    pthread_mutex_lock(&g_lock);
+    int k = 0;
+    for (int i = 0; i < SMART_CACHE; ++i) {
+        if (!strcmp(g_smart[i].name, name)) {
+            k = i;
+            break;
+        }
+        if (g_smart[i].when < g_smart[k].when) k = i;
+    }
+    snprintf(g_smart[k].name, sizeof g_smart[k].name, "%s", name);
+    g_smart[k].info = *info;
+    g_smart[k].when = time(NULL);
+    pthread_mutex_unlock(&g_lock);
+}
+
+int mgmt_smart_cached(const char *name, smart_info_t *out, time_t *when)
+{
+    int rc = -1;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < SMART_CACHE && name; ++i)
+        if (g_smart[i].when && !strcmp(g_smart[i].name, name)) {
+            if (out) *out = g_smart[i].info;
+            if (when) *when = g_smart[i].when;
+            rc = 0;
+        }
+    pthread_mutex_unlock(&g_lock);
+    return rc;
+}
+
+int mgmt_smart(const char *name, smart_info_t *out, char *err, size_t cap)
+{
+    err[0] = 0;
+    if (!sys_managed()) return MGMT_EUNMANAGED;
+    if (whole_disk(name, NULL, err, cap) < 0) return MGMT_EINVAL;
+    smart_read(name, out);
+    smart_keep(name, out);
+    return MGMT_OK;
+}
+
+static int smart_job(const char *name, char *msg, size_t cap)
+{
+    smart_info_t *s = malloc(sizeof *s);
+    if (!s) {
+        snprintf(msg, cap, "out of memory");
+        return -1;
+    }
+    smart_read(name, s);
+    smart_keep(name, s);
+    snprintf(msg, cap, "SMART of %s read: %s", name, s->available ? smart_verdict_name(s->verdict) : "not available");
+    free(s);
+    return 0;
+}
+
+int mgmt_smart_job(const char *name, char *err, size_t cap)
+{
+    err[0] = 0;
+    if (!sys_managed()) return MGMT_EUNMANAGED;
+    if (whole_disk(name, NULL, err, cap) < 0) return MGMT_EINVAL;
+    slot_t j = { .kind = J_SMART };
+    snprintf(j.a, sizeof j.a, "%s", name);
+    snprintf(j.pub.target, sizeof j.pub.target, "%s", name);
+    int id = submit(&j);
+    if (id < 0) {
+        snprintf(err, cap, "too many changes under way");
+        return MGMT_EBUSY;
+    }
+    return id;
+}
+
+int mgmt_selftest(const char *name, int type, char *err, size_t cap)
+{
+    err[0] = 0;
+    if (!sys_managed()) return MGMT_EUNMANAGED;
+    if (whole_disk(name, NULL, err, cap) < 0) return MGMT_EINVAL;
+    if (smart_selftest(name, type, err, cap) < 0) return MGMT_EFAIL;
+    vg_log("mgmt: %s self-test of %s", type == 0 ? "aborted the" : type == 1 ? "short" : "extended", name);
+    if (type) events_push(0, "disk %s: %s self-test started", name, type == 1 ? "short" : "extended");
+    return MGMT_OK;
+}
+
+static void scan_done(const scan_status_t *st)
+{
+    vg_log("mgmt: %s", st->msg);
+    unsigned long long ranges = (unsigned long long)st->n_bad + st->bad_more;
+    events_push(0, "disk %s: surface scan (%s) %s, %llu bad range%s", st->disk, scan_mode_name(st->mode),
+                st->state == SCAN_DONE ? "done" : st->state == SCAN_STOPPED ? "stopped" : "failed", ranges,
+                ranges == 1 ? "" : "s");
+}
+
+/* Is the recording directory on `dev` (/mnt/<dev>, as automount.sh and
+ * vigild mount)? */
+static int records_on(const char *path, const char *dev)
+{
+    char m[64];
+    int n = snprintf(m, sizeof m, "/mnt/%s", dev);
+    return path[0] && !strncmp(path, m, (size_t)n) && (path[n] == 0 || path[n] == '/');
+}
+
+int mgmt_scan_start(const char *name, int mode, unsigned long long start, unsigned long long end,
+                    unsigned block, const char *confirm, char *err, size_t cap)
+{
+    err[0] = 0;
+    if (!sys_managed()) return MGMT_EUNMANAGED;
+    if (mode < SCAN_READ || mode > SCAN_WRITE) {
+        snprintf(err, cap, "the mode is read, verify or write");
+        return MGMT_EINVAL;
+    }
+    sys_disk_t disk;
+    if (whole_disk(name, &disk, err, cap) < 0) return MGMT_EINVAL;
+    char mnts[8][128];
+    int nm = sys_disk_mounts(name, mnts, 8);
+    if (mode == SCAN_WRITE) {
+        if (!confirm || strcmp(confirm, name)) {
+            snprintf(err, cap, "type the disk's name (%.31s) to confirm that everything on it is erased", name);
+            return MGMT_EINVAL;
+        }
+        if (disk.system) {
+            snprintf(err, cap, "%.31s holds the system", name);
+            return MGMT_EINVAL;
+        }
+        if (disk.ro) {
+            snprintf(err, cap, "%.31s is read-only", name);
+            return MGMT_EINVAL;
+        }
+        if (nm) {
+            snprintf(err, cap, "%.127s is mounted: unmount %.31s first", mnts[0], name);
+            return MGMT_EINVAL;
+        }
+        /* Not mounted now, but recording would come back to it with
+         * the disk: the directory goes elsewhere first. */
+        vigil_config_t *c;
+        cfg_get(&c);
+        int rec = 0;
+        sys_disk_t *d = calloc(SYS_DISK_MAX, sizeof *d);
+        int n = d ? sys_disk_list(d, SYS_DISK_MAX, NULL) : 0;
+        for (int i = 0; c && i < n && !rec; ++i)
+            if (!strcmp(d[i].name, name) || !strcmp(d[i].parent, name)) rec = records_on(c->record.path, d[i].name);
+        free(d);
+        free(c);
+        if (rec) {
+            snprintf(err, cap, "the recording directory is on %.31s: choose another one first", name);
+            return MGMT_EINVAL;
+        }
+    }
+    /* Not under a format or another change of the same disk. */
+    char targets[JOBS][32];
+    int nt = 0, busy = 0;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < JOBS; ++i)
+        if (g_jobs[i].pub.id && g_jobs[i].pub.state < JOB_DONE &&
+            (g_jobs[i].kind == J_FORMAT || g_jobs[i].kind == J_MOUNT || g_jobs[i].kind == J_UNMOUNT))
+            snprintf(targets[nt++], 32, "%s", g_jobs[i].pub.target);
+    pthread_mutex_unlock(&g_lock);
+    for (int i = 0; i < nt; ++i) busy |= !strcmp(disk_of(targets[i]), name);
+    if (busy) {
+        snprintf(err, cap, "%.31s is busy with another change", name);
+        return MGMT_EBUSY;
+    }
+    if (scan_active(NULL) >= 0) {
+        scan_status_t *st = malloc(sizeof *st);
+        if (st) scan_status(st);
+        snprintf(err, cap, "a surface scan of %.31s is under way", st ? st->disk : "a disk");
+        free(st);
+        return MGMT_EBUSY;
+    }
+    scan_req_t r = { .mode = mode, .start = start, .end = end, .block = block, .idle = nm > 0, .done = scan_done };
+    snprintf(r.disk, sizeof r.disk, "%s", name);
+    snprintf(r.model, sizeof r.model, "%s", disk.model);
+    smart_info_t *si = malloc(sizeof *si);
+    if (si && mgmt_smart_cached(name, si, NULL) == 0 && si->available) {
+        snprintf(r.model, sizeof r.model, "%s", si->model);
+        snprintf(r.serial, sizeof r.serial, "%s", si->serial);
+    }
+    free(si);
+    if (scan_start(&r, err, cap) < 0) return strstr(err, "under way") ? MGMT_EBUSY : MGMT_EINVAL;
+    scan_status_t *st = malloc(sizeof *st);
+    if (st) {
+        scan_status(st);
+        vg_log("mgmt: surface scan (%s) of %s started, LBA %llu..%llu, %u sectors a block%s", scan_mode_name(mode),
+               name, (unsigned long long)st->start, (unsigned long long)st->end, st->block,
+               nm ? ", at idle I/O priority" : "");
+        free(st);
+    }
+    events_push(0, "disk %s: surface scan (%s) started", name, scan_mode_name(mode));
+    return MGMT_OK;
+}
+
+void mgmt_scan_status(scan_status_t *st) { scan_status(st); }
+
+int mgmt_scan_pause(int on) { return scan_pause(on) < 0 ? MGMT_EINVAL : MGMT_OK; }
+
+int mgmt_scan_stop(void) { return scan_stop() < 0 ? MGMT_EINVAL : MGMT_OK; }

@@ -24,7 +24,14 @@
     "icon_alarm":     "#F25C3B",
     "icon_operation": "#2FC98A",
     "icon_backup":    "#F5A623",
-    "icon_display":   "#3BC4D8"
+    "icon_display":   "#3BC4D8",
+    "scan_5":    "#3A414D",
+    "scan_20":   "#5C6573",
+    "scan_50":   "#8E98A6",
+    "scan_150":  "#19BE6B",
+    "scan_500":  "#FF9900",
+    "scan_slow": "#ED4014",
+    "scan_err":  "#4C6FFF"
   },
   "space": { "xs": 4, "sm": 8, "md": 12, "lg": 16, "xl": 24 },
   "radius": { "sm": 4, "md": 8, "lg": 12 },

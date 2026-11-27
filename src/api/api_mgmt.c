@@ -508,6 +508,205 @@ static int disks(struct mg_connection *conn, const char *m)
     return send_json(conn, 200, doc);
 }
 
+/* ---- disk maintenance ---------------------------------------------------------------------- */
+
+static const char *level_name(int l) { return l == SMART_FAIL ? "failing" : l == SMART_WARN ? "warning" : "good"; }
+
+static void add_or_null(cJSON *o, const char *k, int have, double v)
+{
+    if (have) cJSON_AddNumberToObject(o, k, v);
+    else cJSON_AddNullToObject(o, k);
+}
+
+static const char *sata_speed(int gen) { return gen == 3 ? "6.0 Gb/s" : gen == 2 ? "3.0 Gb/s" : "1.5 Gb/s"; }
+
+static cJSON *smart_json(const char *name, const smart_info_t *s)
+{
+    cJSON *d = cJSON_CreateObject();
+    cJSON_AddStringToObject(d, "disk", name);
+    cJSON_AddBoolToObject(d, "available", s->available);
+    cJSON_AddStringToObject(d, "why", s->why);
+    cJSON_AddStringToObject(d, "verdict", smart_verdict_name(s->verdict));
+    cJSON_AddStringToObject(d, "reason", s->reason);
+    cJSON_AddStringToObject(d, "transport", s->transport);
+    if (!s->available) return d;
+    cJSON_AddStringToObject(d, "model", s->model);
+    cJSON_AddStringToObject(d, "serial", s->serial);
+    cJSON_AddStringToObject(d, "firmware", s->firmware);
+    cJSON_AddNumberToObject(d, "sectors", (double)s->sectors);
+    cJSON_AddNumberToObject(d, "sector_size", s->sector_size);
+    cJSON_AddNumberToObject(d, "physical_sector_size", s->phys_sector_size);
+    cJSON_AddNumberToObject(d, "capacity", (double)s->sectors * s->sector_size);
+    if (s->rpm == 1) cJSON_AddStringToObject(d, "rotation", "ssd");
+    else add_or_null(d, "rotation", s->rpm > 1, s->rpm);
+    if (s->sata_max) {
+        cJSON *l = cJSON_AddObjectToObject(d, "sata");
+        cJSON_AddStringToObject(l, "max", sata_speed(s->sata_max));
+        if (s->sata_cur) cJSON_AddStringToObject(l, "current", sata_speed(s->sata_cur));
+        else cJSON_AddNullToObject(l, "current");
+    } else {
+        cJSON_AddNullToObject(d, "sata");
+    }
+    cJSON_AddBoolToObject(d, "smart_supported", s->smart_supported);
+    cJSON_AddBoolToObject(d, "smart_enabled", s->smart_enabled);
+    if (s->health < 0) cJSON_AddNullToObject(d, "health");
+    else cJSON_AddStringToObject(d, "health", s->health ? "passed" : "failing");
+    add_or_null(d, "temperature", s->temp >= 0, s->temp);
+    add_or_null(d, "power_on_hours", s->hours >= 0, (double)s->hours);
+    cJSON *t = cJSON_AddObjectToObject(d, "self_test");
+    char txt[64];
+    smart_test_status_text((uint8_t)(s->test_status << 4 | s->test_remaining / 10), txt, sizeof txt);
+    cJSON_AddBoolToObject(t, "supported", s->selftest_supported);
+    cJSON_AddBoolToObject(t, "running", s->test_status == 15);
+    cJSON_AddStringToObject(t, "status", s->has_data ? txt : "");
+    cJSON_AddNumberToObject(t, "remaining", s->test_remaining);
+    cJSON_AddNumberToObject(t, "short_minutes", s->short_min);
+    cJSON_AddNumberToObject(t, "extended_minutes", s->ext_min);
+    cJSON *a = cJSON_AddArrayToObject(d, "attributes");
+    for (int i = 0; i < s->n_attrs; ++i) {
+        const smart_attr_t *x = &s->attrs[i];
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "id", x->id);
+        cJSON_AddStringToObject(o, "name", x->name);
+        cJSON_AddBoolToObject(o, "prefailure", x->flags & 1);
+        cJSON_AddNumberToObject(o, "value", x->value);
+        cJSON_AddNumberToObject(o, "worst", x->worst);
+        cJSON_AddNumberToObject(o, "threshold", x->thresh);
+        cJSON_AddNumberToObject(o, "raw", (double)x->raw);
+        cJSON_AddStringToObject(o, "raw_text", x->raw_text);
+        cJSON_AddStringToObject(o, "level", level_name(x->level));
+        cJSON_AddBoolToObject(o, "critical", x->critical);
+        cJSON_AddStringToObject(o, "note", x->note);
+        cJSON_AddItemToArray(a, o);
+    }
+    cJSON *lg = cJSON_AddArrayToObject(d, "self_test_log");
+    for (int i = 0; i < s->n_tests; ++i) {
+        const smart_test_t *x = &s->tests[i];
+        cJSON *o = cJSON_CreateObject();
+        smart_test_status_text(x->status, txt, sizeof txt);
+        cJSON_AddStringToObject(o, "type", smart_test_type_text(x->type));
+        cJSON_AddStringToObject(o, "status", txt);
+        cJSON_AddBoolToObject(o, "failed", (x->status >> 4) >= 3 && (x->status >> 4) <= 8);
+        cJSON_AddNumberToObject(o, "hours", x->hours);
+        cJSON_AddNumberToObject(o, "lba", x->lba);
+        cJSON_AddItemToArray(lg, o);
+    }
+    return d;
+}
+
+static int smart_req(struct mg_connection *conn, const char *m, const char *name)
+{
+    if (!get(m)) return method_not_allowed(conn, "GET, HEAD");
+    smart_info_t *s = malloc(sizeof *s);
+    if (!s) return send_error(conn, 500, "out of memory", NULL);
+    char err[256];
+    int rc = mgmt_smart(name, s, err, sizeof err);
+    if (rc != MGMT_OK) {
+        free(s);
+        return answer(conn, rc, "name", err);
+    }
+    cJSON *d = smart_json(name, s);
+    free(s);
+    return send_json(conn, 200, d);
+}
+
+static unsigned long long jull(const cJSON *o, const char *k, int *bad)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, k);
+    if (!v || cJSON_IsNull(v)) return 0;
+    if (!cJSON_IsNumber(v) || v->valuedouble < 0 || v->valuedouble > 9007199254740992.0) {
+        *bad = 1;
+        return 0;
+    }
+    return (unsigned long long)v->valuedouble;
+}
+
+static cJSON *scan_json(const scan_status_t *st)
+{
+    static const char *const CLASSES[SCAN_NCLASS] = { "lt5", "lt20", "lt50", "lt150", "lt500", "ge500", "error" };
+    cJSON *d = cJSON_CreateObject();
+    cJSON_AddStringToObject(d, "state", scan_state_name(st->state));
+    if (st->state == SCAN_IDLE) return d;
+    cJSON_AddStringToObject(d, "disk", st->disk);
+    cJSON_AddStringToObject(d, "model", st->model);
+    cJSON_AddStringToObject(d, "serial", st->serial);
+    cJSON_AddStringToObject(d, "mode", scan_mode_name(st->mode));
+    cJSON_AddBoolToObject(d, "read_instead", st->read_instead);
+    cJSON_AddNumberToObject(d, "start", (double)st->start);
+    cJSON_AddNumberToObject(d, "end", (double)st->end);
+    cJSON_AddNumberToObject(d, "block", st->block);
+    cJSON_AddNumberToObject(d, "sector_size", st->sector);
+    cJSON_AddNumberToObject(d, "pass", st->pass);
+    cJSON_AddNumberToObject(d, "passes", st->passes);
+    cJSON_AddNumberToObject(d, "lba", (double)st->lba);
+    cJSON_AddNumberToObject(d, "blocks_done", (double)st->blocks_done);
+    cJSON_AddNumberToObject(d, "blocks_total", (double)st->blocks_total);
+    cJSON_AddNumberToObject(d, "progress",
+                            st->blocks_total ? (double)st->blocks_done * 100.0 / (double)st->blocks_total : 0);
+    cJSON_AddNumberToObject(d, "mbps", st->mbps);
+    cJSON_AddNumberToObject(d, "elapsed", (double)st->elapsed);
+    add_or_null(d, "eta", st->eta >= 0, (double)st->eta);
+    add_time(d, "started", st->started);
+    add_time(d, "finished", st->finished);
+    cJSON_AddStringToObject(d, "message", st->msg);
+    cJSON *c = cJSON_AddObjectToObject(d, "counts");
+    for (int i = 0; i < SCAN_NCLASS; ++i) cJSON_AddNumberToObject(c, CLASSES[i], (double)st->counts[i]);
+    cJSON *b = cJSON_AddArrayToObject(d, "bad");
+    for (int i = 0; i < st->n_bad; ++i) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddNumberToObject(o, "lba", (double)st->bad[i].lba);
+        cJSON_AddNumberToObject(o, "count", (double)st->bad[i].count);
+        cJSON_AddItemToArray(b, o);
+    }
+    cJSON_AddNumberToObject(d, "bad_more", (double)st->bad_more);
+    /* One digit a cell: 0 not yet, 1..7 the classes above. */
+    char *map = malloc((size_t)st->cells + 1);
+    if (map) {
+        for (int i = 0; i < st->cells; ++i) map[i] = (char)('0' + st->map[i]);
+        map[st->cells] = 0;
+        cJSON_AddStringToObject(d, "map", map);
+        free(map);
+    }
+    return d;
+}
+
+static int scan_req(struct mg_connection *conn, const char *m, const char *action)
+{
+    if (!*action) {
+        if (get(m)) {
+            scan_status_t *st = malloc(sizeof *st);
+            if (!st) return send_error(conn, 500, "out of memory", NULL);
+            mgmt_scan_status(st);
+            cJSON *d = scan_json(st);
+            free(st);
+            return send_json(conn, 200, d);
+        }
+        if (!is(m, "POST")) return method_not_allowed(conn, "GET, HEAD, POST");
+        cJSON *b = body_json(conn);
+        if (!b) return 400;
+        int bad = 0;
+        unsigned long long start = jull(b, "start", &bad), end = jull(b, "end", &bad), block = jull(b, "block", &bad);
+        int mode = scan_mode_parse(jstr(b, "mode", "read"));
+        char disk[32], confirm[32], err[256] = "";
+        snprintf(disk, sizeof disk, "%s", jstr(b, "disk", ""));
+        snprintf(confirm, sizeof confirm, "%s", jstr(b, "confirm", ""));
+        cJSON_Delete(b);
+        if (bad || block > SCAN_BLOCK_MAX) return bad_request(conn, bad ? "start" : "block", "not a valid number");
+        if (mode < 0) return bad_request(conn, "mode", "read, verify or write");
+        int rc = mgmt_scan_start(disk, mode, start, end, (unsigned)block, confirm, err, sizeof err);
+        return answer(conn, rc, strstr(err, "type the") ? "confirm" : strstr(err, "range") ? "start"
+                                : strstr(err, "block") ? "block" : "disk", err);
+    }
+    if (!is(m, "POST")) return method_not_allowed(conn, "POST");
+    int rc;
+    if (!strcmp(action, "/pause")) rc = mgmt_scan_pause(1);
+    else if (!strcmp(action, "/resume")) rc = mgmt_scan_pause(0);
+    else if (!strcmp(action, "/stop")) rc = mgmt_scan_stop();
+    else return send_error(conn, 404, "not found", NULL);
+    if (rc != MGMT_OK) return send_error(conn, 409, "no surface scan is running", NULL);
+    return answer(conn, MGMT_OK, NULL, NULL);
+}
+
 /* /api/v1/disks/<name>/<action> */
 static int disk_action(struct mg_connection *conn, const char *m, const char *rest)
 {
@@ -517,7 +716,18 @@ static int disk_action(struct mg_connection *conn, const char *m, const char *re
         return send_error(conn, 404, "not found", NULL);
     snprintf(name, sizeof name, "%.*s", (int)(slash - rest), rest);
     snprintf(action, sizeof action, "%s", slash + 1);
+    if (!strcmp(action, "smart")) return smart_req(conn, m, name);
     if (!is(m, "POST")) return method_not_allowed(conn, "POST");
+    if (!strcmp(action, "selftest")) {
+        cJSON *b = body_json(conn);
+        if (!b) return 400;
+        const char *t = jstr(b, "type", "short");
+        int type = !strcmp(t, "short") ? 1 : !strcmp(t, "extended") ? 2 : !strcmp(t, "abort") ? 0 : -1;
+        cJSON_Delete(b);
+        if (type < 0) return bad_request(conn, "type", "short, extended or abort");
+        char err[256] = "";
+        return answer(conn, mgmt_selftest(name, type, err, sizeof err), "name", err);
+    }
     char err[256] = "";
     int rc;
     if (!strcmp(action, "format")) {
@@ -614,6 +824,7 @@ int api_mgmt_request(struct mg_connection *conn, const char *uri, const char *m)
     if (!strncmp(uri, "/api/v1/disks/", 14)) return disk_action(conn, m, uri + 14);
     if (!strcmp(uri, "/api/v1/storage/nas")) return nas(conn, m, 0);
     if (!strcmp(uri, "/api/v1/storage/nas/test")) return nas(conn, m, 1);
+    if (!strncmp(uri, "/api/v1/storage/scan", 20) && (!uri[20] || uri[20] == '/')) return scan_req(conn, m, uri + 20);
     if (!strncmp(uri, "/api/v1/jobs/", 13)) return job(conn, m, uri + 13);
     return 0;
 }

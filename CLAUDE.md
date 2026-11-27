@@ -70,8 +70,8 @@ comments; options override the file.
 - `src/api/` — the HTTP/WebSocket API (`docs/api.md`), its password check,
   vigil's users and groups (`users.c`) and the permission table.
 - `src/sys/` — looking after the system vigild runs on (`docs/management.md`):
-  interfaces, time zone and NTP, host name, disks, network storage, mail and
-  DDNS through curl, and `mgmt.c`, the jobs and timers both front ends use.
+  interfaces, time zone and NTP, host name, disks (with SMART and a surface
+  scan), network storage, mail and DDNS through curl, and `mgmt.c`, the jobs and timers both front ends use.
   Linux, outside the POSIX-only core; every file and command goes through
   `sys.h` (a root prefix and replaceable actions), so `test_sys` runs it all
   on a fake system.

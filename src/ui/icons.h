@@ -37,6 +37,7 @@ extern const lv_image_dsc_t ui_icon_nav_p2p;    /* 22 px, cloud-off.svg */
 extern const lv_image_dsc_t ui_icon_nav_basic;    /* 22 px, device-floppy.svg */
 extern const lv_image_dsc_t ui_icon_nav_schedule;    /* 22 px, calendar-time.svg */
 extern const lv_image_dsc_t ui_icon_nav_disks;    /* 22 px, server-2.svg */
+extern const lv_image_dsc_t ui_icon_nav_maint;    /* 22 px, stethoscope.svg */
 extern const lv_image_dsc_t ui_icon_nav_quota;    /* 22 px, chart-pie.svg */
 extern const lv_image_dsc_t ui_icon_nav_nas;    /* 22 px, folder-share.svg */
 extern const lv_image_dsc_t ui_icon_nav_general;    /* 22 px, settings.svg */

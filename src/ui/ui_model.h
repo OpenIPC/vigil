@@ -256,6 +256,69 @@ typedef struct {
     char state[24];
 } ui_disk_t;
 
+/* Disk Maintenance: a disk's SMART (sys_smart.h), as the page shows it. */
+enum { UI_SMART_GOOD, UI_SMART_WARN, UI_SMART_FAIL, UI_SMART_UNKNOWN };
+#define UI_SMART_ATTRS 30
+#define UI_SMART_TESTS 8
+
+typedef struct {
+    int  id, value, worst, thresh;
+    int  level;                     /* UI_SMART_GOOD / WARN / FAIL */
+    int  critical;
+    char name[32], raw[40], note[96];
+} ui_smart_attr_t;
+
+typedef struct {
+    char type[24], status[48];
+    int  hours, failed;
+    unsigned long long lba;
+} ui_smart_test_t;
+
+typedef struct {
+    int  available;                 /* the drive answered */
+    char transport[24], model[44], serial[24], firmware[12];
+    unsigned long long bytes;
+    int  rpm;                       /* 0 unknown, 1 solid state */
+    int  sata_max, sata_cur;        /* SATA generation 1..3, 0 unknown */
+    int  smart_enabled;
+    int  health;                    /* the drive's own check: 1 passed, 0 failing, -1 unknown */
+    int  temp;                      /* °C, -1 */
+    long hours;                     /* power on, -1 */
+    int  verdict;                   /* UI_SMART_* */
+    char reason[200];
+    int  test_supported, test_running, test_remaining, short_min, ext_min;
+    char test_status[48];
+    int  n_attrs;
+    ui_smart_attr_t attrs[UI_SMART_ATTRS];
+    int  n_tests;                   /* newest first */
+    ui_smart_test_t tests[UI_SMART_TESTS];
+    long long read_at;
+} ui_smart_t;
+
+/* The surface scan (sys_scan.h): one at a time, in vigild. */
+enum { UI_SCAN_READ, UI_SCAN_VERIFY, UI_SCAN_WRITE };
+enum { UI_SCAN_IDLE, UI_SCAN_RUNNING, UI_SCAN_PAUSED, UI_SCAN_DONE, UI_SCAN_STOPPED, UI_SCAN_FAILED };
+#define UI_SCAN_CLASSES 7           /* < 5, < 20, < 50, < 150, < 500, >= 500 ms, error */
+#define UI_SCAN_MAP     2000
+#define UI_SCAN_BAD     16
+
+typedef struct {
+    int    state, mode, read_instead;
+    char   disk[32], model[64], serial[24];
+    unsigned long long start, end, lba, blocks_done, blocks_total;
+    unsigned long long counts[UI_SCAN_CLASSES];
+    unsigned block, sector;
+    int    pass, passes;
+    double mbps;
+    long   elapsed, eta;            /* s; eta -1 unknown */
+    char   msg[200];
+    int    n_bad;
+    unsigned long long bad_more;    /* ranges not listed */
+    unsigned long long bad_lba[UI_SCAN_BAD], bad_count[UI_SCAN_BAD];
+    int    cells;
+    unsigned char map[UI_SCAN_MAP]; /* 0 not yet, 1 + class */
+} ui_scan_t;
+
 /* A time zone as fields (minutes east of UTC; rules: month 1..12, week
  * 1..5 (5 = last), weekday 0..6 (0 = Sunday), minutes after midnight). */
 typedef struct {
@@ -324,6 +387,19 @@ typedef struct {
     int  (*disk_format)(const char *name, const char *fs, const char *confirm, char *err, size_t cap);
     int  (*disk_mount)(const char *name, char *err, size_t cap);
     int  (*disk_unmount)(const char *name, char *err, size_t cap);
+
+    /* disk maintenance: SMART (smart_read is a job; smart_get the last
+     * read, 0, or -1 before one), self-tests (1 short, 2 extended, 0
+     * abort), the surface scan (scan_start 0 or < 0 with err; Write
+     * needs `confirm` = the disk's name) */
+    int  (*smart_read)(const char *disk, char *err, size_t cap);
+    int  (*smart_get)(const char *disk, ui_smart_t *out);
+    int  (*selftest)(const char *disk, int type, char *err, size_t cap);
+    int  (*scan_start)(const char *disk, int mode, unsigned long long start, unsigned long long end,
+                       unsigned block, const char *confirm, char *err, size_t cap);
+    void (*scan_get)(ui_scan_t *out);
+    int  (*scan_pause)(int on);
+    int  (*scan_stop)(void);
 
     /* time and name */
     void        (*time_get)(ui_time_t *t);

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* ui_set_storage.c — Storage: Basic, Schedule, Disk Manager, Disk Quota,
- * Network Storage (docs/management.md).
+/* ui_set_storage.c — Storage: Basic, Schedule, Disk Manager, Disk
+ * Maintenance (ui_set_maint.c), Disk Quota, Network Storage
+ * (docs/management.md).
  *
  *   Basic            record.on_full, the segment length in minutes (the
  *                    file keeps seconds), the recording directory with the
@@ -8,7 +9,8 @@
  *   Schedule         a week per camera, half hours, painted on one grid
  *                    object (drawn, not 336 widgets: the LVGL heap is 1 MiB)
  *   Disk Manager     the disks and partitions, Format (the name typed to
- *                    confirm), Mount, Unmount; refreshed every 2 s
+ *                    confirm), Mount, Unmount, a surface scan under way;
+ *                    refreshed every 2 s
  *   Disk Quota       per camera: the most gigabytes and days
  *   Network Storage  what the kernel can mount, the nas form, Test, and
  *                    "Record here"
@@ -689,9 +691,9 @@ typedef struct {
     ui_set_t   *s;
     ui_disk_t   d[DISKS];
     int         n;
-    lv_obj_t   *table, *job;
+    lv_obj_t   *table, *job, *scan;
     lv_obj_t   *fmt, *fmt_title, *fmt_fs, *fmt_name, *fmt_go;
-    char        target[32];
+    char        target[32], scan_disk[32];
     lv_timer_t *timer;
 } disks_t;
 
@@ -716,6 +718,17 @@ static void refresh(disks_t *dk, int force)
     ui_disk_t now[DISKS];
     memset(now, 0, sizeof now);
     int n = MG() && MG()->disks ? MG()->disks(now, DISKS) : 0;
+    /* A surface scan under way: a line above the table, and its disk's
+     * state says so. */
+    char line[200], sd[32];
+    ui_maint_scan_line(line, sizeof line, sd, sizeof sd);
+    lv_label_set_text(dk->scan, line);
+    if (line[0]) lv_obj_remove_flag(dk->scan, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(dk->scan, LV_OBJ_FLAG_HIDDEN);
+    if (strcmp(sd, dk->scan_disk)) {
+        snprintf(dk->scan_disk, sizeof dk->scan_disk, "%s", sd);
+        force = 1;
+    }
     if (!force && n == dk->n && !memcmp(now, dk->d, sizeof now[0] * (size_t)n)) return;
     memcpy(dk->d, now, sizeof now);
     dk->n = n;
@@ -873,6 +886,7 @@ static void disks_build(disks_t *dk)
         col(r, avail, 80, UI_C(TEXT));
         col(r, d->mnt[0] ? d->mnt : "-", 110, UI_C(TEXT));
         const char *st = d->state[0] ? d->state : (has_parts(dk, d->name) ? "" : "-");
+        if (!d->is_part && dk->scan_disk[0] && !strcmp(d->name, dk->scan_disk)) st = "scanning";
         col(r, st, 100, state_color(st));
         int whole_parts = !d->is_part && has_parts(dk, d->name);
         int can_format = !d->system && !(!d->is_part && has_system_part(dk, d->name));
@@ -910,6 +924,8 @@ static void *disks_open(ui_set_t *s, lv_obj_t *pane)
     if (!managed())
         ui_set_note(pane, LV_SYMBOL_WARNING "  vigild does not manage this system (it is not OpenIPC "
                                             "firmware): the disks are shown, not changed.", UI_C(WARN));
+    dk->scan = ui_set_note(pane, "", UI_C(WARN));
+    lv_obj_add_flag(dk->scan, LV_OBJ_FLAG_HIDDEN);
     lv_obj_t *panel = ui_set_section(pane, NULL);
     lv_obj_set_style_pad_hor(panel, VG_SPACE_SM, 0);
     dk->table = lv_obj_create(panel);
@@ -1198,7 +1214,7 @@ static void nas_close(void *st)
 
 /* ---- the screen ------------------------------------------------------------------------ */
 
-static ui_set_item_t g_items[5];
+static ui_set_item_t g_items[6];
 
 void ui_storage_open(int first)
 {
@@ -1206,9 +1222,10 @@ void ui_storage_open(int first)
         { TR(S_BASIC), &ui_icon_nav_basic, basic_open, basic_dirty, basic_save, basic_cancel, basic_close },
         { TR(S_SCHEDULE), &ui_icon_nav_schedule, sched_open, sched_dirty, sched_save, sched_cancel, free_st },
         { TR(S_DISK_MANAGER), &ui_icon_nav_disks, disks_open, NULL, NULL, NULL, disks_close },
+        { TR(S_DISK_MAINT), &ui_icon_nav_maint, ui_maint_open, NULL, NULL, NULL, ui_maint_close },
         { TR(S_DISK_QUOTA), &ui_icon_nav_quota, quota_open, quota_dirty, quota_save, quota_cancel, free_st },
         { TR(S_NET_STORAGE), &ui_icon_nav_nas, nas_open, nas_dirty, nas_save, nas_cancel, nas_close },
     };
     memcpy(g_items, items, sizeof items);
-    ui_settings_open(TR(S_STORAGE), g_items, 5, first);
+    ui_settings_open(TR(S_STORAGE), g_items, 6, first);
 }

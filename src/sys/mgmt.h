@@ -31,6 +31,8 @@
 
 #include "sys_disk.h"
 #include "sys_net.h"
+#include "sys_scan.h"
+#include "sys_smart.h"
 #include "sys_time.h"
 
 enum {
@@ -165,5 +167,31 @@ int mgmt_disk_unmount(const char *name, char *err, size_t cap);
 /* Mount the network storage settings in force at a test directory, write
  * and read a file, unmount: a job. */
 int mgmt_nas_test(void);
+
+/* ---- disk maintenance: SMART and the surface scan ------------------------------------ */
+
+/* SMART of a whole disk (not a partition), read now: it blocks for as
+ * long as the drive takes (a sleeping disk spins up first). The result
+ * is also kept for mgmt_smart_cached. MGMT_OK (the drive may still have
+ * answered "not available": out->verdict), or an error with `err`. */
+int mgmt_smart(const char *name, smart_info_t *out, char *err, size_t cap);
+/* The same as a job, for the screen: its id. */
+int mgmt_smart_job(const char *name, char *err, size_t cap);
+/* The last SMART read of `name`: 0 and when it was read, -1 when none. */
+int mgmt_smart_cached(const char *name, smart_info_t *out, time_t *when);
+/* A self-test: 1 short, 2 extended, 0 abort. MGMT_OK or an error. */
+int mgmt_selftest(const char *name, int type, char *err, size_t cap);
+
+/* A surface scan of whole disk `name` (sys_scan.h). Write erases the
+ * disk: it needs `confirm` to be the disk's name again, no partition of
+ * it mounted, the recording directory elsewhere and not the system's
+ * disk. Read and Verify of a mounted disk run at the idle I/O priority.
+ * end 0: the end of the disk; block 0: 256 sectors. MGMT_OK, or
+ * MGMT_EINVAL / MGMT_EBUSY (another scan, a format) with `err`. */
+int  mgmt_scan_start(const char *name, int mode, unsigned long long start, unsigned long long end,
+                     unsigned block, const char *confirm, char *err, size_t cap);
+void mgmt_scan_status(scan_status_t *st);
+int  mgmt_scan_pause(int on);       /* MGMT_OK, MGMT_EINVAL when no scan runs */
+int  mgmt_scan_stop(void);
 
 #endif /* MGMT_H */

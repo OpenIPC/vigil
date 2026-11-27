@@ -91,10 +91,13 @@ target_link_libraries(vigil_core PUBLIC cjson vigil_yaml Threads::Threads)
 add_library(vigil_sys STATIC
   src/sys/mgmt.c
   src/sys/sys.c
+  src/sys/sys_ata.c
   src/sys/sys_net.c
   src/sys/sys_curl.c
   src/sys/sys_disk.c
   src/sys/sys_nas.c
+  src/sys/sys_scan.c
+  src/sys/sys_smart.c
   src/sys/sys_time.c)
 target_include_directories(vigil_sys PUBLIC src/sys)
 target_link_libraries(vigil_sys PUBLIC vigil_core)
@@ -112,7 +115,7 @@ target_compile_definitions(vigil_platform PRIVATE ${VIGIL_PLATFORM_DEFS})
 set(VIGILD_SOURCES src/app/main.c src/app/frontend_common.c)
 # The UI (src/ui: LVGL and hal_ui.h only) as a library: vigild links it on
 # platforms with a display, the host build for its screenshot tests.
-set(VIGIL_UI_SOURCES src/ui/ui_app.c src/ui/ui_channels.c src/ui/icons.c src/ui/ui_cursor.c src/ui/ui_form.c src/ui/ui_i18n.c src/ui/ui_settings.c src/ui/ui_set_network.c src/ui/ui_set_storage.c
+set(VIGIL_UI_SOURCES src/ui/ui_app.c src/ui/ui_channels.c src/ui/icons.c src/ui/ui_cursor.c src/ui/ui_form.c src/ui/ui_i18n.c src/ui/ui_settings.c src/ui/ui_set_network.c src/ui/ui_set_storage.c src/ui/ui_set_maint.c
     src/ui/ui_set_system.c src/ui/ui_set_account.c src/ui/ui_set_display.c
     src/ui/ui_layout.c src/ui/ui_live.c src/ui/ui_menu.c src/ui/ui_osk.c src/ui/ui_session.c src/ui/ui_system.c src/ui/ui_theme.c)
 if(VIGIL_HAS_UI OR (BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING))

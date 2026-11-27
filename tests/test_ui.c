@@ -94,6 +94,7 @@ static ui_model_t g_model;
 static int        g_channels = 4;       /* the platform's, as the model says */
 static void shots_status(int idx, ui_chan_t *st);
 static void quiet(void);
+static lv_obj_t *nth_of(const lv_obj_class_t *cls, int nth);
 static ui_rect_t  g_tiles[UI_MAX_CHANNELS];
 static int        g_tile_calls;
 
@@ -668,6 +669,154 @@ static int  fm_disk_format(const char *name, const char *fs, const char *confirm
     return ++g_mg_jobs;
 }
 static int  fm_disk_act(const char *name, char *err, size_t cap) { (void)name; (void)err; (void)cap; return ++g_mg_jobs; }
+
+/* Disk Maintenance: sda a WD Purple with a few remapped and pending
+ * sectors and a loose cable (what sys_smart makes of such a drive), sdb
+ * a USB stick without SMART; a scan as the fixture says. */
+static int       g_mg_selftest = -1;
+static ui_scan_t g_mg_scan;
+static int  fm_smart_read(const char *disk, char *err, size_t cap)
+{
+    (void)disk, (void)err, (void)cap;
+    return ++g_mg_jobs;
+}
+static int  fm_smart_get(const char *disk, ui_smart_t *o)
+{
+    memset(o, 0, sizeof *o);
+    o->read_at = 1795000000;
+    o->temp = -1;
+    o->hours = -1;
+    o->health = -1;
+    if (strcmp(disk, "sda")) {
+        o->verdict = UI_SMART_UNKNOWN;
+        snprintf(o->reason, sizeof o->reason, "SMART not available: %s does not pass ATA commands (a USB stick, "
+                 "a memory card, or a USB enclosure without SAT)", disk);
+        return 0;
+    }
+    static const ui_smart_attr_t A[] = {
+        { 1, 200, 200, 51, 0, 0, "Raw read error rate", "0", "" },
+        { 3, 172, 169, 21, 0, 0, "Spin-up time", "2383 ms", "" },
+        { 4, 100, 100, 0, 0, 0, "Start/stop count", "312", "" },
+        { 5, 199, 199, 140, 1, 1, "Reallocated sectors", "24", "Sectors moved to spares: the surface is wearing" },
+        { 7, 200, 200, 0, 0, 0, "Seek error rate", "0", "" },
+        { 9, 78, 78, 0, 0, 0, "Power-on hours", "16234 h", "" },
+        { 10, 100, 100, 0, 0, 1, "Spin retry count", "0", "" },
+        { 12, 100, 100, 0, 0, 0, "Power cycles", "310", "" },
+        { 192, 200, 200, 0, 0, 0, "Power-off retracts", "41", "" },
+        { 193, 200, 200, 0, 0, 0, "Load/unload cycles", "1043", "" },
+        { 194, 113, 102, 0, 0, 0, "Temperature", "38 C (min 20, max 45)", "" },
+        { 196, 199, 199, 0, 1, 1, "Reallocation events", "6", "Times the drive moved sectors to spares" },
+        { 197, 200, 200, 0, 1, 1, "Current pending sectors", "8",
+          "Unreadable sectors waiting to be remapped: data on them may be lost" },
+        { 198, 100, 253, 0, 0, 1, "Offline uncorrectable", "0", "" },
+        { 199, 200, 200, 0, 1, 1, "Interface CRC errors", "3", "Usually the cable or the connection, not the disk" },
+        { 200, 100, 253, 0, 0, 0, "Multi-zone error rate", "0", "" },
+    };
+    o->available = 1;
+    snprintf(o->transport, sizeof o->transport, "SATA");
+    snprintf(o->model, sizeof o->model, "WDC WD10PURZ-85U8XY0");
+    snprintf(o->serial, sizeof o->serial, "WD-WCC4J5HZ3V7K");
+    snprintf(o->firmware, sizeof o->firmware, "01.01A01");
+    o->bytes = 1000204886016ull;
+    o->rpm = 5400;
+    o->sata_max = 3;
+    o->sata_cur = 3;
+    o->smart_enabled = 1;
+    o->health = 1;
+    o->temp = 38;
+    o->hours = 16234;
+    o->verdict = UI_SMART_WARN;
+    snprintf(o->reason, sizeof o->reason, "24 reallocated sectors, 6 reallocation events, 8 pending sectors, ...");
+    o->test_supported = 1;
+    o->short_min = 2;
+    o->ext_min = 124;
+    snprintf(o->test_status, sizeof o->test_status, "Completed without error");
+    o->n_attrs = (int)(sizeof A / sizeof A[0]);
+    memcpy(o->attrs, A, sizeof A);
+    o->n_tests = 2;
+    o->tests[0] = (ui_smart_test_t){ "Short", "Completed without error", 16230, 0, 0 };
+    o->tests[1] = (ui_smart_test_t){ "Extended", "Aborted by host", 16101, 0, 0 };
+    return 0;
+}
+static int  fm_selftest(const char *disk, int type, char *err, size_t cap)
+{
+    (void)disk, (void)err, (void)cap;
+    g_mg_selftest = type;
+    return 0;
+}
+/* A read of sda a third of the way: mostly fast, a few slow blocks and
+ * two bad patches, as a tired disk shows. */
+static void fm_scan_fixture(int mode, const char *disk, int state, int done_cells)
+{
+    ui_scan_t *s = &g_mg_scan;
+    memset(s, 0, sizeof *s);
+    s->state = state;
+    s->mode = mode;
+    snprintf(s->disk, sizeof s->disk, "%s", disk);
+    snprintf(s->model, sizeof s->model, "%s", strcmp(disk, "sda") ? "SanDisk Ultra" : "WDC WD10PURZ-85U8XY0");
+    s->end = strcmp(disk, "sda") ? 62333952ull : 1953525168ull;
+    s->block = 256;
+    s->sector = 512;
+    s->pass = s->passes = 1;
+    s->cells = UI_SCAN_MAP;
+    s->blocks_total = (s->end + 255) / 256;
+    s->blocks_done = s->blocks_total * (unsigned long long)done_cells / UI_SCAN_MAP;
+    s->lba = s->blocks_done * 256;
+    unsigned long long per = s->blocks_total / UI_SCAN_MAP;
+    unsigned r = 12345;
+    for (int i = 0; i < done_cells; ++i) {
+        r = r * 1103515245u + 12345u;
+        unsigned v = (r >> 16) % 1000;
+        int c = v < 860 ? 0 : v < 950 ? 1 : v < 985 ? 2 : v < 995 ? 3 : 4;
+        if (i >= 412 && i < 418) c = 5;
+        if (i == 415 || i == 416 || i == 571) c = 6;
+        s->map[i] = (unsigned char)(c + 1);
+    }
+    for (int c = 0; c < UI_SCAN_CLASSES; ++c) s->counts[c] = 0;
+    s->counts[0] = s->blocks_done * 86 / 100;
+    s->counts[1] = s->blocks_done * 9 / 100;
+    s->counts[2] = s->blocks_done * 35 / 1000;
+    s->counts[3] = s->blocks_done / 100;
+    s->counts[4] = 214;
+    s->counts[5] = 31;
+    s->counts[6] = 3;
+    s->counts[0] = s->blocks_done - s->counts[1] - s->counts[2] - s->counts[3] - 214 - 31 - 3;
+    s->mbps = 112.4;
+    s->elapsed = 1520;
+    s->eta = 3100;
+    snprintf(s->msg, sizeof s->msg, "%s", mode == UI_SCAN_READ ? "sda1 is mounted: reading at the idle I/O priority"
+                                                               : "Pass 1 of 2: writing the pattern");
+    s->n_bad = 2;
+    s->bad_lba[0] = 415 * per * 256;
+    s->bad_count[0] = 512;
+    s->bad_lba[1] = 571 * per * 256 + 1024;
+    s->bad_count[1] = 256;
+}
+static int  fm_scan_start(const char *disk, int mode, unsigned long long start, unsigned long long end,
+                          unsigned block, const char *confirm, char *err, size_t cap)
+{
+    (void)start, (void)end, (void)block;
+    if (mode == UI_SCAN_WRITE && (!confirm || strcmp(confirm, disk))) {
+        snprintf(err, cap, "type the disk's name (%s) to confirm that everything on it is erased", disk);
+        return UI_MGMT_EINVAL;
+    }
+    fm_scan_fixture(mode, disk, UI_SCAN_RUNNING, mode == UI_SCAN_WRITE ? 20 : 740);
+    return 0;
+}
+static void fm_scan_get(ui_scan_t *o) { *o = g_mg_scan; }
+static int  fm_scan_pause(int on)
+{
+    if (g_mg_scan.state != UI_SCAN_RUNNING && g_mg_scan.state != UI_SCAN_PAUSED) return UI_MGMT_EINVAL;
+    g_mg_scan.state = on ? UI_SCAN_PAUSED : UI_SCAN_RUNNING;
+    return 0;
+}
+static int  fm_scan_stop(void)
+{
+    if (g_mg_scan.state != UI_SCAN_RUNNING && g_mg_scan.state != UI_SCAN_PAUSED) return UI_MGMT_EINVAL;
+    g_mg_scan.state = UI_SCAN_STOPPED;
+    snprintf(g_mg_scan.msg, sizeof g_mg_scan.msg, "read of sda stopped: 3 errors in 2 bad ranges, 245 slow (>= 150 ms)");
+    return 0;
+}
 static void fm_time_get(ui_time_t *t)
 {
     memset(t, 0, sizeof *t);
@@ -875,6 +1024,13 @@ static void fake_mgmt(ui_model_t *m)
     g_mg.disk_format = fm_disk_format;
     g_mg.disk_mount = fm_disk_act;
     g_mg.disk_unmount = fm_disk_act;
+    g_mg.smart_read = fm_smart_read;
+    g_mg.smart_get = fm_smart_get;
+    g_mg.selftest = fm_selftest;
+    g_mg.scan_start = fm_scan_start;
+    g_mg.scan_get = fm_scan_get;
+    g_mg.scan_pause = fm_scan_pause;
+    g_mg.scan_stop = fm_scan_stop;
     g_mg.time_get = fm_time_get;
     g_mg.time_set = fm_time_set;
     g_mg.ntp_set = fm_ntp_set;
@@ -1915,6 +2071,97 @@ static void test_storage_pages(void)
     CHECK(g_mg_formatted && find("/mnt/sdb1", 0), "formatted: mounted at /mnt/sdb1");
     g_mg_formatted = 0;
 
+    /* Disk Maintenance: SMART of sda, the verdict and the highlighted rows. */
+    nav_to("Disk Maintenance");
+    run(1500);
+    CHECK(find(LV_SYMBOL_WARNING "  Warning", 0) && find("24 reallocated sectors", 1) &&
+          find("WD-WCC4J5HZ3V7K", 0) && find("Current pending sectors", 0) && find("Usually the cable", 1) &&
+          !find(SAVE, 0), "SMART: the verdict, the identity, the attributes");
+    lv_obj_t *pend = find("Current pending sectors", 0);
+    CHECK(pend && lv_obj_get_style_bg_opa(lv_obj_get_parent(pend), 0) > 0, "the pending row is highlighted");
+    CHECK(find("Aborted by host", 0) && find("Last: Completed without error (Short)", 0), "the self-test log");
+    shot("storage_maint");
+    click_text("Short test (2 min)");
+    CHECK(g_mg_selftest == 1, "a short self-test asked for");
+    /* The surface scan: Read starts at once, the map and the counts. */
+    click_text("Surface scan");
+    CHECK(find("No scan yet", 0) && find(LV_SYMBOL_PLAY "  Start", 0), "Surface scan: nothing yet");
+    click_text(LV_SYMBOL_PLAY "  Start");
+    run(1200);
+    CHECK(g_mg_scan.state == UI_SCAN_RUNNING && find("Read of sda", 1) && find("37.0%", 1) &&
+          find(LV_SYMBOL_PAUSE "  Pause", 0) && find("Bad blocks (LBA ranges):", 1), "a read under way: %s",
+          g_mg_scan.msg);
+    shot("storage_maint_scan");
+    click_text(LV_SYMBOL_PAUSE "  Pause");
+    run(1200);
+    CHECK(g_mg_scan.state == UI_SCAN_PAUSED && find(LV_SYMBOL_PLAY "  Resume", 0), "paused");
+    click_text(LV_SYMBOL_PLAY "  Resume");
+    click_text(LV_SYMBOL_STOP "  Stop");
+    run(1200);
+    CHECK(g_mg_scan.state == UI_SCAN_STOPPED && find(LV_SYMBOL_PLAY "  Start", 0) && find("stopped", 1),
+          "stopped: Start again");
+    /* Leaving and coming back: a scan under way opens on its map; the
+     * Disk Manager shows it too. */
+    fm_scan_fixture(UI_SCAN_READ, "sda", UI_SCAN_RUNNING, 740);
+    nav_to("Disk Manager");
+    run(2200);
+    CHECK(find("Surface scan (Read) of sda under way: 37.0%, 2 bad ranges", 1) && find("scanning", 0),
+          "Disk Manager: the scan");
+    nav_to("Disk Maintenance");
+    run(1200);
+    CHECK(find(LV_SYMBOL_STOP "  Stop", 0) && find("Read of sda", 1), "back on the scan under way");
+    click_text(LV_SYMBOL_STOP "  Stop");
+    run(1200);
+    /* Write: sdb, the question names it, its name typed. */
+    lv_obj_t *ddisk = NULL;
+    for (int i = 0; !ddisk; ++i) {
+        lv_obj_t *o = nth_of(&lv_dropdown_class, i);
+        if (!o) break;
+        if (strstr(lv_dropdown_get_options(o), "sdb")) ddisk = o;
+    }
+    CHECK(ddisk != NULL, "the disk drop-down");
+    if (ddisk) {
+        lv_dropdown_set_selected(ddisk, 1);
+        lv_obj_send_event(ddisk, LV_EVENT_VALUE_CHANGED, NULL);
+    }
+    run(1200);
+    lv_obj_t *mode = NULL;
+    for (int i = 0; !mode; ++i) {
+        lv_obj_t *o = nth_of(&lv_dropdown_class, i);
+        if (!o) break;
+        if (strstr(lv_dropdown_get_options(o), "Write")) mode = o;
+    }
+    CHECK(mode != NULL, "the mode drop-down");
+    if (mode) {
+        lv_dropdown_set_selected(mode, UI_SCAN_WRITE);
+        lv_obj_send_event(mode, LV_EVENT_VALUE_CHANGED, NULL);
+    }
+    click_text(LV_SYMBOL_PLAY "  Start");
+    lv_obj_t *erase = find(LV_SYMBOL_TRASH "  Erase and test", 0);
+    CHECK(find("Erase this disk and test it?", 1) && find("SanDisk Ultra, serial unknown", 1) && erase &&
+          lv_obj_has_state(lv_obj_get_parent(erase), LV_STATE_DISABLED), "the write question; Erase disabled");
+    lv_obj_t *nm = NULL;
+    for (int i = 0; (nm = textarea(i)) != NULL; ++i)
+        if (!strcmp(lv_textarea_get_placeholder_text(nm), "sdb")) break;
+    CHECK(nm != NULL, "the name field");
+    if (nm) lv_textarea_set_text(nm, "sdb");
+    CHECK(erase && !lv_obj_has_state(lv_obj_get_parent(erase), LV_STATE_DISABLED), "the name typed: enabled");
+    shot("storage_maint_write");
+    if (erase) {
+        int ex, ey;
+        center_of(erase, &ex, &ey);
+        click_at(ex, ey);
+    }
+    run(1200);
+    CHECK(g_mg_scan.state == UI_SCAN_RUNNING && g_mg_scan.mode == UI_SCAN_WRITE && find("Write of sdb", 1),
+          "write under way");
+    fm_scan_stop();
+    run(1200);
+    click_text("SMART");
+    run(1200);
+    CHECK(find("SMART not available", 1) && find("A USB stick or a memory card", 1), "sdb: no SMART, said so");
+    memset(&g_mg_scan, 0, sizeof g_mg_scan);
+
     nav_to("Disk Quota");
     lv_obj_t *gb = textarea(0);
     CHECK(gb && find("Max size (GB)", 0), "Disk Quota: a row per camera");
@@ -1940,10 +2187,61 @@ static void test_storage_pages(void)
     button(BTN_RIGHT);
 }
 
+/* Disk Maintenance: SMART scrolled to the attributes, a scan under way
+ * (the map), the Disk Manager meanwhile, the write question, a stick
+ * without SMART. */
+static void shots_maint(void)
+{
+    nav_to("Disk Maintenance");
+    run(1500);
+    lv_obj_t *at = find("Attributes", 0);
+    if (at) lv_obj_scroll_to_view_recursive(at, LV_ANIM_OFF);
+    shot("storage-maint-smart-attributes");
+    fm_scan_fixture(UI_SCAN_READ, "sda", UI_SCAN_RUNNING, 740);
+    nav_to("Disk Manager");
+    run(2200);
+    shot("storage-disks-scanning");
+    nav_to("Disk Maintenance");
+    run(1500);
+    shot("storage-maint-scan");
+    lv_obj_t *bad = find("Bad blocks (LBA ranges):", 1);
+    if (bad) lv_obj_scroll_to_view_recursive(bad, LV_ANIM_OFF);
+    shot("storage-maint-scan-bottom");
+    fm_scan_stop();
+    run(1200);
+    lv_obj_t *dd = nth_of(&lv_dropdown_class, 0);
+    if (dd) {
+        lv_dropdown_set_selected(dd, 1);
+        lv_obj_send_event(dd, LV_EVENT_VALUE_CHANGED, NULL);
+    }
+    run(1500);
+    click_text("SMART");
+    run(300);
+    shot("storage-maint-nosmart");
+    click_text("Surface scan");
+    run(300);
+    for (int i = 0;; ++i) {
+        lv_obj_t *o = nth_of(&lv_dropdown_class, i);
+        if (!o) break;
+        if (strstr(lv_dropdown_get_options(o), "Write")) {
+            lv_dropdown_set_selected(o, UI_SCAN_WRITE);
+            lv_obj_send_event(o, LV_EVENT_VALUE_CHANGED, NULL);
+        }
+    }
+    click_text(LV_SYMBOL_PLAY "  Start");
+    lv_obj_t *nm = NULL;
+    for (int i = 0; (nm = textarea(i)) != NULL; ++i)
+        if (!strcmp(lv_textarea_get_placeholder_text(nm), "sdb")) break;
+    if (nm) lv_textarea_set_text(nm, "sdb");
+    shot("storage-maint-write-confirm");
+    memset(&g_mg_scan, 0, sizeof g_mg_scan);
+}
+
 static void shots_storage(void)
 {
-    static const char *const items[] = { "Basic", "Schedule", "Disk Manager", "Disk Quota", "Network Storage" };
-    shots_settings("STORAGE", "storage", items, 5);
+    static const char *const items[] = { "Basic", "Schedule", "Disk Manager", "Disk Maintenance", "Disk Quota",
+                                         "Network Storage" };
+    shots_settings("STORAGE", "storage", items, 6);
     click_text("STORAGE");
     nav_to("Schedule");
     lv_obj_t *grid = sched_grid();
@@ -1974,6 +2272,7 @@ static void shots_storage(void)
     if (name) lv_textarea_set_text(name, "sdb1");
     shot("storage-disks-format");
     click_text(LV_SYMBOL_CLOSE "  Cancel");
+    shots_maint();
     quiet();
     button(BTN_RIGHT);
 }

@@ -30,6 +30,7 @@
     X(S_BASIC, "Basic") \
     X(S_SCHEDULE, "Schedule") \
     X(S_DISK_MANAGER, "Disk Manager") \
+    X(S_DISK_MAINT, "Disk Maintenance") \
     X(S_DISK_QUOTA, "Disk Quota") \
     X(S_NET_STORAGE, "Network Storage") \
     X(S_GENERAL, "General") \
