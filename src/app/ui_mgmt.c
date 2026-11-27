@@ -15,7 +15,11 @@
 #include "sys_nas.h"
 #include "ui_bridge.h"
 #ifdef VIGIL_HAVE_USERS
+#include "api.h"
+#include "onvif.h"
+#include "rtsp_server.h"
 #include "users.h"
+#include "web.h"
 #endif
 
 #define ETH "eth0"
@@ -521,6 +525,18 @@ static void system_user(char *buf, size_t cap)
 
 static int power(int reboot) { return mgmt_power_request(reboot ? MGMT_POWER_REBOOT : MGMT_POWER_OFF); }
 
+#ifdef VIGIL_HAVE_USERS
+static void listening(int server, ui_listen_t *out)
+{
+    memset(out, 0, sizeof *out);
+    int (*fn)(char *, size_t, char *, size_t) = server == UI_SERVER_API     ? api_listening
+                                                : server == UI_SERVER_ONVIF ? onvif_listening
+                                                : server == UI_SERVER_RTSP  ? rtsp_server_listening
+                                                                            : web_listening;
+    out->on = fn(out->listen, sizeof out->listen, out->why, sizeof out->why);
+}
+#endif
+
 static const ui_mgmt_t g_mgmt = {
     .managed = managed,
     .eth_get = eth_get, .eth_apply = eth_apply, .net_pending = net_pending, .net_confirm = net_confirm,
@@ -539,7 +555,7 @@ static const ui_mgmt_t g_mgmt = {
 #ifdef VIGIL_HAVE_USERS
     .users_gen = users_gen, .users = users_, .groups = groups_, .perm_names = users_perm_names,
     .n_perms = PERM_N, .user_add = user_add, .user_update = user_update, .user_delete = user_delete,
-    .group_set = group_set, .group_delete = group_delete, .login = login_,
+    .group_set = group_set, .group_delete = group_delete, .login = login_, .listening = listening,
 #endif
     .system_user = system_user, .power = power,
 };

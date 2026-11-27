@@ -248,7 +248,8 @@ display:
 # HTTP API
 api:
   # Listen on: IPv4 address and port of the HTTP API, or just the port. Empty:
-  # no API. Takes effect when vigild starts. Default 0.0.0.0:8080.
+  # no API. A change moves it at once (Network -> Ports); a port that is taken
+  # is refused. Default 0.0.0.0:8080.
   listen: "0.0.0.0:8080"
   # Require a password: HTTP Basic authentication: vigil's users (api.users),
   # or the system account. Turning it off lets anyone on the network change
@@ -274,30 +275,13 @@ web:
   # password. Default true.
   enabled: true
   # Listen on: IPv4 address and port of its web server, or just the port.
-  # Empty: off. Takes effect when vigild starts. Default 0.0.0.0:80.
+  # Empty: off. A change moves it at once (Network -> Ports); a port that is
+  # taken is refused. Default 0.0.0.0:80.
   listen: "0.0.0.0:80"
   # Pictures a second, at most: Fewer when nothing moves, the network or the
   # browser is slower, or encoding would take more than half a CPU core.
   # 1..30, default 15.
   fps: 15
-
-# RTSP server
-rtsp_server:
-  # On: The cameras' streams to other clients (a VMS, VLC, another recorder)
-  # at rtsp://<this recorder>/ch1/main and /ch1/sub, as the cameras send them
-  # (docs/rtsp.md). Default true.
-  enabled: true
-  # Port: Its TCP port; RTP over UDP goes from a pair of ports from 6970 up.
-  # 1..65535, default 554.
-  port: 554
-  # Require a password: Digest authentication against vigil's users; their
-  # group needs the live permission. Off: anyone on the network can watch
-  # every camera. Default true.
-  auth: true
-  # Clients at once, at most: Clients being sent a stream at the same time.
-  # Clients of one stream share its buffer (2 to 4 MiB for a main stream, less
-  # for a sub-stream). 1..32, default 8.
-  max_clients: 8
 
 # Camera search
 discovery:
@@ -324,3 +308,52 @@ onvif_server:
   # /onvif/device_service (port 80 is the zero channel's). Discovery tells
   # clients which port it is. 1..65535, default 8899.
   port: 8899
+
+# QoS: DSCP marking of vigild's packets, so that the network can prioritise
+# them.
+qos:
+  # QoS type: DSCP marking of the packets vigild sends, for switches and
+  # routers that queue by it. off: nothing marked (DSCP 0); standard: video
+  # AF41 (34), management CS2 (16), cameras AF41 (34), alarms AF21 (18);
+  # custom: the values below. One of: off, standard, custom. Default off.
+  type: "off"
+  # Video DSCP: With type custom: the zero channel's picture (web.listen's
+  # WebSocket). 0..63, default 34.
+  video: 34
+  # Management DSCP: With type custom: the HTTP API, the web pages and logins,
+  # the ONVIF service and its WS-Discovery, DDNS, camera searches. 0..63,
+  # default 16.
+  management: 16
+  # Camera DSCP: With type custom: vigild's connections to cameras, RTSP and
+  # NETIP control and the ACKs of their video; a connection open when this
+  # changes is marked at once. 0..63, default 34.
+  camera: 34
+  # Alarm DSCP: With type custom: events, the API's event WebSocket, the alarm
+  # center's POSTs and mails (curl 8.9 or later marks those). 0..63, default
+  # 18.
+  alarm: 18
+
+# RTSP server
+rtsp_server:
+  # On: The cameras' streams to other clients (a VMS, VLC, another recorder)
+  # at rtsp://<this recorder>/ch1/main and /ch1/sub, as the cameras send them
+  # (docs/rtsp.md). Default true.
+  enabled: true
+  # Port: Its TCP port; RTP over UDP goes from a pair of ports from 6970 up.
+  # 1..65535, default 554.
+  port: 554
+  # Require a password: Digest authentication against vigil's users; their
+  # group needs the live permission. Off: anyone on the network can watch
+  # every camera. Default true.
+  auth: true
+  # Clients at once, at most: Clients being sent a stream at the same time.
+  # Clients of one stream share its buffer (2 to 4 MiB for a main stream, less
+  # for a sub-stream). 1..32, default 8.
+  max_clients: 8
+
+# NETIP server
+netip_server:
+  # NETIP port: XM's NETIP (CMS, VMS), as XM recorders have it. vigild has no
+  # NETIP server yet: the port is kept for it, and no other of vigild's
+  # servers may take it. 1..65535, default 34567.
+  port: 34567

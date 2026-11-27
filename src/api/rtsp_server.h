@@ -26,8 +26,14 @@
 int  rtsp_server_start(void);
 void rtsp_server_stop(void);
 /* After a new configuration is applied (main thread): a new port or
- * enabled restarts it; auth and max_clients are read as they change. */
+ * enabled restarts it (a port that cannot be had after all: back on the
+ * old one, the setting put back); auth and max_clients are read as they
+ * change. */
 void rtsp_server_apply(void);
+/* As api_listening (api.h): 1 while it listens, with `listen` what on and
+ * `why` the last move that failed ("" if none); 0 with `why` it does not
+ * (off, the port in use, ...). Any thread. */
+int  rtsp_server_listening(char *listen, size_t cap, char *why, size_t wcap);
 
 /* ---- exposed for tests ------------------------------------------------- */
 

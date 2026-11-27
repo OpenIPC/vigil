@@ -497,9 +497,10 @@ static const schema_field_t display_fields[] = {
 };
 
 static const schema_field_t api_fields[] = {
-    { .key = "listen", STR(config_api_t, listen), .def_str = "0.0.0.0:8080", .check = check_listen,
+    { .key = "listen", STR(config_api_t, listen), .def_str = "0.0.0.0:8080", .check = check_listen, .live = 1,
       .label = "Listen on", .help = "IPv4 address and port of the HTTP API, or just the port. "
-                                    "Empty: no API. Takes effect when vigild starts." },
+                                    "Empty: no API. A change moves it at once (Network -> Ports); a port "
+                                    "that is taken is refused." },
     { .key = "auth", BOOL(config_api_t, auth), .def_int = 1, .live = 1,
       .label = "Require a password",
       .help = "HTTP Basic authentication: vigil's users (api.users), or the system account. "
@@ -522,9 +523,10 @@ static const schema_field_t web_fields[] = {
       .help = "This screen, with its mouse and keyboard, in a browser at http://<this recorder>/ "
               "(docs/api.md, Zero channel). Only users whose group has the remote permission "
               "(admin) get in, and nobody until such an account has a password." },
-    { .key = "listen", STR(config_web_t, listen), .def_str = "0.0.0.0:80", .check = check_listen,
+    { .key = "listen", STR(config_web_t, listen), .def_str = "0.0.0.0:80", .check = check_listen, .live = 1,
       .label = "Listen on", .help = "IPv4 address and port of its web server, or just the port. "
-                                    "Empty: off. Takes effect when vigild starts." },
+                                    "Empty: off. A change moves it at once (Network -> Ports); a port "
+                                    "that is taken is refused." },
     { .key = "fps", INT(config_web_t, fps), .def_int = 15, .min = 1, .max = 30, .live = 1,
       .label = "Pictures a second, at most",
       .help = "Fewer when nothing moves, the network or the browser is slower, or encoding would "
@@ -575,6 +577,86 @@ static const schema_field_t onvif_server_fields[] = {
               "80 is the zero channel's). Discovery tells clients which port it is." },
 };
 
+/* ---- QoS ------------------------------------------------------------------------- */
+
+static const char *const qos_types[] = { "off", "standard", "custom", NULL };
+
+/* The defaults are the "standard" preset (RFC 4594's classes): AF41 for
+ * video, as surveillance video is usually queued; CS2 (OAM) for
+ * management; AF21 (low-latency data) for alarms and events. */
+#define DSCP(K, M, D, L, H) { .key = K, INT(config_qos_t, M), .def_int = D, .min = 0, .max = QOS_DSCP_MAX, \
+                              .live = 1, .label = L, .help = H }
+static const schema_field_t qos_fields[] = {
+    { .key = "type", ENUM(config_qos_t, type, qos_types), .def_str = "off", .live = 1, .label = "QoS type",
+      .help = "DSCP marking of the packets vigild sends, for switches and routers that queue by it. "
+              "off: nothing marked (DSCP 0); standard: video AF41 (34), management CS2 (16), cameras "
+              "AF41 (34), alarms AF21 (18); custom: the values below." },
+    DSCP("video", video, 34, "Video DSCP",
+         "With type custom: the zero channel's picture (web.listen's WebSocket)."),
+    DSCP("management", management, 16, "Management DSCP",
+         "With type custom: the HTTP API, the web pages and logins, the ONVIF service and its "
+         "WS-Discovery, DDNS, camera searches."),
+    DSCP("camera", camera, 34, "Camera DSCP",
+         "With type custom: vigild's connections to cameras, RTSP and NETIP control and the ACKs of "
+         "their video; a connection open when this changes is marked at once."),
+    DSCP("alarm", alarm, 18, "Alarm DSCP",
+         "With type custom: events, the API's event WebSocket, the alarm center's POSTs and mails "
+         "(curl 8.9 or later marks those)."),
+};
+
+void config_to_qos(const vigil_config_t *c, int dscp[QOS_CLASSES])
+{
+    const config_qos_t *q = &c->qos;
+    int custom[QOS_CLASSES] = { [QOS_VIDEO] = q->video, [QOS_MANAGEMENT] = q->management,
+                                [QOS_CAMERA] = q->camera, [QOS_ALARM] = q->alarm };
+    static const char *const keys[QOS_CLASSES] = { [QOS_VIDEO] = "video", [QOS_MANAGEMENT] = "management",
+                                                   [QOS_CAMERA] = "camera", [QOS_ALARM] = "alarm" };
+    for (int k = 0; k < QOS_CLASSES; ++k) {
+        if (!strcmp(q->type, "custom")) dscp[k] = custom[k];
+        else if (!strcmp(q->type, "standard")) {
+            dscp[k] = 0;
+            for (size_t f = 0; f < sizeof qos_fields / sizeof qos_fields[0]; ++f)
+                if (!strcmp(qos_fields[f].key, keys[k])) dscp[k] = qos_fields[f].def_int;
+        } else dscp[k] = 0;
+    }
+}
+
+/* ---- ports of vigild's servers ---------------------------------------------------- */
+
+#define SERVER_PORT(NAME, WHAT, DEF, HELP) \
+    static const schema_field_t NAME[] = { \
+        { .key = "port", INT(config_server_t, port), .def_int = DEF, .min = 1, .max = 65535, .live = 1, \
+          .label = WHAT " port", .help = HELP " vigild has no " WHAT " server yet: the port is kept for it, " \
+                                         "and no other of vigild's servers may take it." } }
+SERVER_PORT(netip_server_fields, "NETIP", 34567, "XM's NETIP (CMS, VMS), as XM recorders have it.");
+
+int config_listen_port(const char *listen)
+{
+    if (!*listen) return 0;
+    const char *colon = strrchr(listen, ':');
+    char *end;
+    long p = strtol(colon ? colon + 1 : listen, &end, 10);
+    return *end || p < 1 || p > 65535 ? -1 : (int)p;
+}
+
+int config_check_ports(const vigil_config_t *c, schema_errors_t *errs)
+{
+    const struct { const char *path; int port; } p[] = {
+        { "web.listen", config_listen_port(c->web.listen) }, { "api.listen", config_listen_port(c->api.listen) },
+        { "rtsp_server.port", c->rtsp_server.port }, { "onvif_server.port", c->onvif_server.port },
+        { "netip_server.port", c->netip_server.port },
+    };
+    int rc = 0;
+    for (size_t i = 1; i < sizeof p / sizeof p[0]; ++i)
+        for (size_t k = 0; k < i; ++k)
+            if (p[i].port > 0 && p[i].port == p[k].port) {
+                schema_error(errs, p[i].path, "port %d is %s's already", p[i].port, p[k].path);
+                rc = -1;
+                break;
+            }
+    return rc;
+}
+
 #define N(a) (int)(sizeof(a) / sizeof((a)[0]))
 
 static const schema_section_t sections[] = {
@@ -609,10 +691,13 @@ static const schema_section_t sections[] = {
     { .key = "api", .off = offsetof(vigil_config_t, api), .fields = api_fields,
       .n_fields = N(api_fields), .label = "HTTP API" },
     OBJECT("web", web, web_fields, "Zero channel"),
-    OBJECT("rtsp_server", rtsp_server, rtsp_server_fields, "RTSP server"),
     { .key = "discovery", .off = offsetof(vigil_config_t, discovery), .fields = discovery_fields,
       .n_fields = N(discovery_fields), .label = "Camera search" },
     OBJECT("onvif_server", onvif_server, onvif_server_fields, "ONVIF server"),
+    { .key = "qos", .off = offsetof(vigil_config_t, qos), .fields = qos_fields, .n_fields = N(qos_fields),
+      .label = "QoS", .help = "DSCP marking of vigild's packets, so that the network can prioritise them." },
+    OBJECT("rtsp_server", rtsp_server, rtsp_server_fields, "RTSP server"),
+    OBJECT("netip_server", netip_server, netip_server_fields, "NETIP server"),
 };
 
 const schema_t config_schema = {

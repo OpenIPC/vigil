@@ -38,10 +38,13 @@
 #include <unistd.h>
 
 #include "auth.h"
+#include "cJSON.h"
 #include "channel.h"
 #include "config.h"
+#include "events.h"
 #include "log.h"
 #include "md5.h"
+#include "qos.h"
 #include "rtsp_server.h"
 #include "sha1.h"
 #include "stream_tap.h"
@@ -432,6 +435,7 @@ static void session_end(rs_conn_t *c, const char *why)
                c->user[0] ? " " : "", c->user, c->ch + 1, stream_name(c->sub), why, (long)(mono() - c->play_at),
                (unsigned long long)(c->bytes >> 10), c->drops);
     rs_stream_t *st = c->st;
+    if (c->tcp && c->play_at) qos_mark(c->fd, QOS_MANAGEMENT, 1);
     c->st = NULL;
     c->playing = 0;
     c->session[0] = 0;
@@ -450,6 +454,7 @@ static void conn_close(int i, const char *why)
     rs_conn_t *c = g_conns[i];
     if (!c) return;
     session_end(c, why);
+    qos_forget(c->fd);
     close(c->fd);
     free(c->out);
     free(c);
@@ -1022,6 +1027,8 @@ static void do_play(rs_conn_t *c, const char *url, const char *cseq)
     reply(c, 200, "OK", cseq, extra, NULL, 0);
     if (!c->playing) {
         c->playing = 1;
+        /* Interleaved: the connection is the video now. */
+        if (c->tcp) qos_mark(c->fd, QOS_VIDEO, 1);
         if (!c->play_at) {
             c->play_at = mono();
             vg_log("rtsp: %s%s%s plays CH%d %s over %s", c->addr, c->user[0] ? " " : "", c->user, c->ch + 1,
@@ -1291,7 +1298,10 @@ static void *server_thread(void *arg)
 
 static void close_fd(int *fd)
 {
-    if (*fd >= 0) close(*fd);
+    if (*fd >= 0) {
+        qos_forget(*fd);
+        close(*fd);
+    }
     *fd = -1;
 }
 
@@ -1323,39 +1333,49 @@ static void random_key(void)
     for (size_t i = 0; i < sizeof g_key; ++i) g_key[i] = (unsigned char)('!' + g_key[i] % 90);
 }
 
-int rtsp_server_start(void)
-{
-    static int locks_made;
-    if (!locks_made) {
-        for (int i = 0; i < CHANNEL_MAX * 2; ++i) pthread_mutex_init(&g_streams[i].lock, NULL);
-        locks_made = 1;
-    }
-    vigil_config_t *cfg = malloc(sizeof *cfg);
-    if (!cfg) return -1;
-    g_cfg_gen = config_get(cfg);
-    config_rtsp_server_t rs = cfg->rtsp_server;
-    free(cfg);
-    g_enabled = rs.enabled;
-    g_port = rs.port;
-    g_auth = rs.auth;
-    g_max = rs.max_clients;
-    if (!rs.enabled) {
-        vg_log("rtsp: off (rtsp_server.enabled)");
-        return 0;
-    }
-    random_key();
+/* What runs, for rtsp_server_listening (Network -> Ports). */
+static pthread_mutex_t g_state_lock = PTHREAD_MUTEX_INITIALIZER;
+static int             g_listening;
+static char            g_listen_on[24], g_why[160];
 
+static void set_state(int on, const char *why)
+{
+    pthread_mutex_lock(&g_state_lock);
+    g_listening = on;
+    if (on) snprintf(g_listen_on, sizeof g_listen_on, "0.0.0.0:%d", g_port);
+    else g_listen_on[0] = 0;
+    snprintf(g_why, sizeof g_why, "%s", why);
+    pthread_mutex_unlock(&g_state_lock);
+}
+
+int rtsp_server_listening(char *listen, size_t cap, char *why, size_t wcap)
+{
+    pthread_mutex_lock(&g_state_lock);
+    int on = g_listening;
+    if (listen && cap) snprintf(listen, cap, "%s", g_listen_on);
+    if (why && wcap) snprintf(why, wcap, "%s", g_why);
+    pthread_mutex_unlock(&g_state_lock);
+    return on;
+}
+
+/* Serve on `port`: 0, or -1 with `err` (nothing runs then). */
+static int serve(int port, int auth, char *err, size_t cap)
+{
+    g_port = port;
     g_lfd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     int one = 1;
-    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons((uint16_t)rs.port),
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons((uint16_t)port),
                              .sin_addr.s_addr = htonl(INADDR_ANY) };
     if (g_lfd >= 0) setsockopt(g_lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     if (g_lfd < 0 || bind(g_lfd, (struct sockaddr *)&a, sizeof a) < 0 || listen(g_lfd, 16) < 0) {
-        vg_log("rtsp: cannot listen on port %d: %s; running without the RTSP server", rs.port, strerror(errno));
+        snprintf(err, cap, "port %d: %s", port, strerror(errno));
         close_fd(&g_lfd);
         return -1;
     }
     fcntl(g_lfd, F_SETFL, fcntl(g_lfd, F_GETFL) | O_NONBLOCK);
+    /* Requests are management; a connection becomes video at its PLAY,
+     * and the UDP ports carry only RTP and RTCP. */
+    qos_mark(g_lfd, QOS_MANAGEMENT, 1);
     for (int p = UDP_PORT_FIRST; p < UDP_PORT_FIRST + 200; p += 2) {
         g_udp[0] = udp_bind(p);
         g_udp[1] = g_udp[0] >= 0 ? udp_bind(p + 1) : -1;
@@ -1366,12 +1386,11 @@ int rtsp_server_start(void)
         close_fd(&g_udp[0]);
     }
     if (g_udp[0] < 0) vg_log("rtsp: no UDP port pair free from %d; RTP over TCP only", UDP_PORT_FIRST);
+    for (int u = 0; u < 2; ++u)
+        if (g_udp[u] >= 0) qos_mark(g_udp[u], QOS_VIDEO, 1);
     if (pipe(g_wake) < 0) {
-        vg_log("rtsp: no pipe: %s", strerror(errno));
-        close_fd(&g_lfd);
-        close_fd(&g_udp[0]);
-        close_fd(&g_udp[1]);
-        return -1;
+        snprintf(err, cap, "no pipe: %s", strerror(errno));
+        goto fail;
     }
     for (int i = 0; i < 2; ++i) {
         fcntl(g_wake[i], F_SETFL, fcntl(g_wake[i], F_GETFL) | O_NONBLOCK);
@@ -1380,25 +1399,27 @@ int rtsp_server_start(void)
     atomic_store(&g_wake_pending, 0);
     g_stop = 0;
     if (pthread_create(&g_thread, NULL, server_thread, NULL) != 0) {
-        vg_log("rtsp: cannot start its thread");
-        close_fd(&g_lfd);
-        close_fd(&g_udp[0]);
-        close_fd(&g_udp[1]);
-        close_fd(&g_wake[0]);
-        close_fd(&g_wake[1]);
-        return -1;
+        snprintf(err, cap, "cannot start its thread");
+        goto fail;
     }
     g_up = 1;
     stream_tap_standby(1);
     if (g_udp[0] >= 0)
-        vg_log("rtsp: listening on port %d (RTP/UDP from %d-%d)%s", rs.port, g_udp_port, g_udp_port + 1,
-               rs.auth ? "" : " WITHOUT authentication (rtsp_server.auth is off)");
+        vg_log("rtsp: listening on port %d (RTP/UDP from %d-%d)%s", port, g_udp_port, g_udp_port + 1,
+               auth ? "" : " WITHOUT authentication (rtsp_server.auth is off)");
     else
-        vg_log("rtsp: listening on port %d%s", rs.port, rs.auth ? "" : " WITHOUT authentication (rtsp_server.auth is off)");
+        vg_log("rtsp: listening on port %d%s", port, auth ? "" : " WITHOUT authentication (rtsp_server.auth is off)");
     return 0;
+fail:
+    close_fd(&g_lfd);
+    close_fd(&g_udp[0]);
+    close_fd(&g_udp[1]);
+    close_fd(&g_wake[0]);
+    close_fd(&g_wake[1]);
+    return -1;
 }
 
-void rtsp_server_stop(void)
+static void unserve(void)
 {
     if (!g_up) return;
     g_stop = 1;
@@ -1413,14 +1434,97 @@ void rtsp_server_stop(void)
     close_fd(&g_wake[1]);
 }
 
-void rtsp_server_apply(void)
+static int read_section(config_rtsp_server_t *rs)
 {
     vigil_config_t *cfg = malloc(sizeof *cfg);
-    if (!cfg) return;
-    config_get(cfg);
-    config_rtsp_server_t rs = cfg->rtsp_server;
+    if (!cfg) return -1;
+    g_cfg_gen = config_get(cfg);
+    *rs = cfg->rtsp_server;
     free(cfg);
+    return 0;
+}
+
+int rtsp_server_start(void)
+{
+    static int locks_made;
+    if (!locks_made) {
+        for (int i = 0; i < CHANNEL_MAX * 2; ++i) pthread_mutex_init(&g_streams[i].lock, NULL);
+        locks_made = 1;
+        random_key();
+    }
+    config_rtsp_server_t rs;
+    if (read_section(&rs) < 0) return -1;
+    g_enabled = rs.enabled;
+    g_port = rs.port;
+    g_auth = rs.auth;
+    g_max = rs.max_clients;
+    if (!rs.enabled) {
+        vg_log("rtsp: off (rtsp_server.enabled)");
+        set_state(0, "off: rtsp_server.enabled is off");
+        return 0;
+    }
+    char err[160];
+    if (serve(rs.port, rs.auth, err, sizeof err) < 0) {
+        vg_log("rtsp: cannot listen: %s; running without the RTSP server", err);
+        set_state(0, err);
+        return -1;
+    }
+    set_state(1, "");
+    return 0;
+}
+
+void rtsp_server_stop(void)
+{
+    unserve();
+    set_state(0, "stopped");
+}
+
+/* The port setting back to what runs (`port`), so the file says it. */
+static void put_port_back(int port)
+{
+    char *json = config_get_json("rtsp_server", 0);
+    cJSON *doc = json ? cJSON_Parse(json) : NULL;
+    free(json);
+    if (!doc) return;
+    cJSON_ReplaceItemInObjectCaseSensitive(doc, "port", cJSON_CreateNumber(port));
+    char *body = cJSON_PrintUnformatted(doc);
+    schema_errors_t errs = { 0 };
+    if (!body || config_put_json("rtsp_server", body, strlen(body), &errs) != CONFIG_OK)
+        vg_log("rtsp_server.port: cannot put %d back: %s", port, errs.n ? errs.e[0].msg : "out of memory");
+    free(body);
+    cJSON_Delete(doc);
+}
+
+void rtsp_server_apply(void)
+{
+    config_rtsp_server_t rs;
+    if (read_section(&rs) < 0) return;
     if (rs.enabled == g_enabled && (!rs.enabled || rs.port == g_port)) return;
-    rtsp_server_stop();
-    rtsp_server_start();
+    int was_on = g_up, was_port = g_port;
+    unserve();
+    g_enabled = rs.enabled;
+    g_auth = rs.auth;
+    g_max = rs.max_clients;
+    if (!rs.enabled) {
+        vg_log("rtsp: off (rtsp_server.enabled)");
+        set_state(0, "off: rtsp_server.enabled is off");
+        return;
+    }
+    char err[160];
+    if (serve(rs.port, rs.auth, err, sizeof err) == 0) {
+        vg_log("rtsp: now on port %d", rs.port);
+        set_state(1, "");
+        return;
+    }
+    /* The port was taken since the store checked it: back where it was. */
+    vg_log("rtsp_server.port %d: %s", rs.port, err);
+    events_push(0, "rtsp port: %.24s", err);
+    char why[200];
+    snprintf(why, sizeof why, "port %d refused: %s", rs.port, err);
+    if (was_on && serve(was_port, rs.auth, err, sizeof err) == 0) {
+        set_state(1, why);
+        put_port_back(was_port);
+    } else {
+        set_state(0, why);
+    }
 }

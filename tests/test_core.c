@@ -31,6 +31,7 @@
 #include "hal_decoder.h"
 #include "hal_display.h"
 #include "net.h"
+#include "qos.h"
 #include "rec_place.h"
 #include "rec_sched.h"
 #include "rtp_depay.h"
@@ -2996,6 +2997,215 @@ static void test_secrets(void)
 }
 
 /* display: the output mode and what the live view draws over the video. */
+/* ---- QoS (DSCP marking) ------------------------------------------------------------- */
+
+static int sock_tos(int fd)
+{
+    int v = -1;
+    socklen_t l = sizeof v;
+    return getsockopt(fd, IPPROTO_IP, IP_TOS, &v, &l) < 0 ? -1 : v;
+}
+
+static void test_qos_config(void)
+{
+    CHECK(qos_tos(0) == 0 && qos_tos(34) == 136 && qos_tos(46) == 184 && qos_tos(63) == 252 &&
+          qos_tos(64) == -1 && qos_tos(-1) == -1, "DSCP -> TOS: << 2, ECN bits 0, 0..63 only");
+    CHECK(!strcmp(qos_dscp_name(34), "AF41") && !strcmp(qos_dscp_name(46), "EF") &&
+          !strcmp(qos_dscp_name(16), "CS2") && !strcmp(qos_dscp_name(0), "CS0") && !qos_dscp_name(5),
+          "DSCP names");
+
+    vigil_config_t c;
+    config_defaults(&c);
+    int d[QOS_CLASSES];
+    config_to_qos(&c, d);
+    CHECK(!strcmp(c.qos.type, "off") && !d[QOS_VIDEO] && !d[QOS_MANAGEMENT] && !d[QOS_CAMERA] && !d[QOS_ALARM],
+          "qos defaults: off, DSCP 0 everywhere");
+    snprintf(c.qos.type, sizeof c.qos.type, "standard");
+    c.qos.video = 7;                    /* ignored unless custom */
+    config_to_qos(&c, d);
+    CHECK(d[QOS_VIDEO] == 34 && d[QOS_MANAGEMENT] == 16 && d[QOS_CAMERA] == 34 && d[QOS_ALARM] == 18,
+          "standard: AF41, CS2, AF41, AF21: %d %d %d %d", d[0], d[1], d[2], d[3]);
+    snprintf(c.qos.type, sizeof c.qos.type, "custom");
+    c.qos.management = 0;
+    c.qos.camera = 63;
+    config_to_qos(&c, d);
+    CHECK(d[QOS_VIDEO] == 7 && d[QOS_MANAGEMENT] == 0 && d[QOS_CAMERA] == 63 && d[QOS_ALARM] == 18,
+          "custom: the fields");
+
+    const schema_section_t *sec = schema_section(&config_schema, "qos");
+    schema_errors_t e = { 0 };
+    cJSON *j = cJSON_Parse("{\"type\":\"custom\",\"video\":64}");
+    CHECK(sec && schema_section_from_json(&config_schema, sec, j, &c, 1, &e) < 0 &&
+          !strcmp(e.e[0].path, "qos.video"), "video 64: refused (%s %s)", e.n ? e.e[0].path : "", e.n ? e.e[0].msg : "");
+    cJSON_Delete(j);
+    memset(&e, 0, sizeof e);
+    j = cJSON_Parse("{\"type\":\"custom\",\"alarm\":-1}");
+    CHECK(sec && schema_section_from_json(&config_schema, sec, j, &c, 1, &e) < 0, "alarm -1: refused");
+    cJSON_Delete(j);
+    memset(&e, 0, sizeof e);
+    j = cJSON_Parse("{\"type\":\"wfq\"}");
+    CHECK(sec && schema_section_from_json(&config_schema, sec, j, &c, 1, &e) < 0, "an unknown type: refused");
+    cJSON_Delete(j);
+    memset(&e, 0, sizeof e);
+    j = cJSON_Parse("{\"type\":\"custom\",\"video\":46,\"management\":0,\"camera\":63}");
+    CHECK(sec && schema_section_from_json(&config_schema, sec, j, &c, 1, &e) == 0 && c.qos.video == 46 &&
+          c.qos.camera == 63 && c.qos.alarm == 18, "custom 46/0/63: accepted, alarm its default");
+    cJSON_Delete(j);
+}
+
+/* What qos_set and the markers do to real sockets: read back with
+ * getsockopt(IP_TOS). */
+static void test_qos_sockets(void)
+{
+    int l = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    socklen_t al = sizeof a;
+    if (l < 0 || bind(l, (struct sockaddr *)&a, sizeof a) < 0 || listen(l, 4) < 0 ||
+        getsockname(l, (struct sockaddr *)&a, &al) < 0) {
+        fprintf(stderr, "qos socket test: no listener, skipped\n");
+        return;
+    }
+    int port = ntohs(a.sin_port);
+    int dscp[QOS_CLASSES] = { [QOS_VIDEO] = 34, [QOS_MANAGEMENT] = 16, [QOS_CAMERA] = 26, [QOS_ALARM] = 18 };
+    qos_set(dscp);
+    CHECK(qos_mark_listeners(port, QOS_MANAGEMENT) == 1 && sock_tos(l) == 64, "the listener: CS2 (TOS %d)",
+          sock_tos(l));
+
+    char err[64];
+    int c = net_connect("127.0.0.1", port, 2000, NULL, err, sizeof err);
+    int s = c >= 0 ? accept(l, NULL, NULL) : -1;
+    CHECK(c >= 0 && sock_tos(c) == 26 << 2, "net_connect: the camera class, AF31 (TOS %d)", sock_tos(c));
+    CHECK(s >= 0 && sock_tos(s) == 64, "accepted: the listener's class (TOS %d)", sock_tos(s));
+
+    /* the server's end found by its peer, as a WebSocket after its upgrade */
+    struct sockaddr_in ca;
+    socklen_t cal = sizeof ca;
+    getsockname(c, (struct sockaddr *)&ca, &cal);
+    CHECK(qos_mark_peer(port, "127.0.0.1", ntohs(ca.sin_port), QOS_VIDEO) == 0 && sock_tos(s) == 34 << 2,
+          "by its peer: video (TOS %d)", sock_tos(s));
+    CHECK(qos_mark_peer(port, "127.0.0.2", ntohs(ca.sin_port), QOS_VIDEO) < 0, "no such peer");
+
+    /* a change marks the tracked ones again, each by its class */
+    int dscp2[QOS_CLASSES] = { [QOS_VIDEO] = 46, [QOS_MANAGEMENT] = 8, [QOS_CAMERA] = 0, [QOS_ALARM] = 0 };
+    int n = qos_set(dscp2);
+    CHECK(n >= 3 && sock_tos(l) == 32 && sock_tos(s) == 184 && sock_tos(c) == 0,
+          "qos_set: %d marked again; listener %d, video %d, camera %d", n, sock_tos(l), sock_tos(s), sock_tos(c));
+
+    /* a closed fd whose number is reused by another socket is left alone */
+    close(c);
+    int u = socket(AF_INET, SOCK_DGRAM, 0);
+    CHECK(u == c || u != c, "(fd %d reused as %d)", c, u);
+    int dscp3[QOS_CLASSES] = { [QOS_CAMERA] = 10 };
+    qos_set(dscp3);
+    CHECK(u != c || sock_tos(u) == 0, "a reused fd: not marked (TOS %d)", sock_tos(u));
+
+    /* IPv6: the traffic class */
+    int s6 = socket(AF_INET6, SOCK_STREAM, 0);
+    if (s6 >= 0) {
+        int tc = -1;
+        socklen_t tl = sizeof tc;
+        CHECK(qos_apply(s6, 46) == 0 && getsockopt(s6, IPPROTO_IPV6, IPV6_TCLASS, &tc, &tl) == 0 && tc == 184,
+              "IPv6: IPV6_TCLASS %d", tc);
+        close(s6);
+    }
+    CHECK(qos_apply(l, 64) < 0, "64: refused");
+    int zero[QOS_CLASSES] = { 0 };
+    qos_set(zero);
+    qos_forget(l);
+    if (u >= 0) close(u);
+    if (s >= 0) close(s);
+    close(l);
+}
+
+/* ---- ports of vigild's servers ---------------------------------------------------- */
+
+static char g_lc_what[8], g_lc_listen[64];
+static int fake_listen_check(const char *what, const char *listen, char *err, size_t cap)
+{
+    snprintf(g_lc_what, sizeof g_lc_what, "%s", what);
+    snprintf(g_lc_listen, sizeof g_lc_listen, "%s", listen);
+    if (config_listen_port(listen) == 81) {
+        snprintf(err, cap, "port 81 is in use");
+        return -1;
+    }
+    return 0;
+}
+
+static void test_ports(void)
+{
+    CHECK(config_listen_port("0.0.0.0:80") == 80 && config_listen_port("8080") == 8080 &&
+          config_listen_port("") == 0 && config_listen_port("x") == -1 && config_listen_port("1.2.3.4:") == -1,
+          "the port of a listen setting");
+    vigil_config_t c;
+    config_defaults(&c);
+    schema_errors_t e = { 0 };
+    CHECK(c.rtsp_server.port == 554 && c.onvif_server.port == 8899 && c.netip_server.port == 34567 &&
+          config_check_ports(&c, &e) == 0, "defaults: 80, 8080, 554, 8899, 34567, no clash");
+    c.onvif_server.port = 80;
+    CHECK(config_check_ports(&c, &e) < 0 && !strcmp(e.e[0].path, "onvif_server.port") &&
+          strstr(e.e[0].msg, "web.listen"), "ONVIF on 80: the web server's (%s)", e.n ? e.e[0].msg : "");
+    config_defaults(&c);
+    memset(&e, 0, sizeof e);
+    snprintf(c.api.listen, sizeof c.api.listen, "554");
+    CHECK(config_check_ports(&c, &e) < 0 && !strcmp(e.e[0].path, "rtsp_server.port"), "API on 554: RTSP's");
+    config_defaults(&c);
+    memset(&e, 0, sizeof e);
+    c.web.listen[0] = 0;
+    c.netip_server.port = 80;
+    CHECK(config_check_ports(&c, &e) == 0, "an empty web.listen holds no port");
+
+    /* through the store: a clash, a listen the check refuses, then a good one */
+    char dir[] = "/tmp/vigil-ports-XXXXXX", path[128];
+    if (!mkdtemp(dir)) return;
+    snprintf(path, sizeof path, "%s/vigil.yaml", dir);
+    write_file(path, "web:\n  listen: \"0.0.0.0:80\"\n");
+    config_init(path);
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("netip_server", "{\"port\":80}", 11, &e) == CONFIG_EINVAL && e.n &&
+          !strcmp(e.e[0].path, "netip_server.port"), "PUT NETIP onto the web server's port: refused");
+    config_set_listen_check(fake_listen_check);
+    memset(&e, 0, sizeof e);
+    const char *w81 = "{\"listen\":\"0.0.0.0:81\"}";
+    CHECK(config_put_json("web", w81, strlen(w81), &e) == CONFIG_EINVAL && !strcmp(e.e[0].path, "web.listen") &&
+          strstr(e.e[0].msg, "in use") && !strcmp(g_lc_what, "web"), "web.listen onto a port in use: refused, why");
+    const char *o81 = "{\"enabled\":true,\"port\":81}", *o81off = "{\"enabled\":false,\"port\":81}";
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("onvif_server", o81, strlen(o81), &e) == CONFIG_EINVAL &&
+          !strcmp(e.e[0].path, "onvif_server.port") && !strcmp(g_lc_what, "onvif") && !strcmp(g_lc_listen, "81"),
+          "onvif_server.port onto a port in use: refused (%s)", e.n ? e.e[0].msg : "");
+    g_lc_what[0] = 0;
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("onvif_server", o81off, strlen(o81off), &e) == CONFIG_OK && !g_lc_what[0],
+          "ONVIF off: its port is not tried");
+    g_lc_what[0] = 0;
+    const char *api_same = "{\"listen\":\"0.0.0.0:8080\"}";
+    memset(&e, 0, sizeof e);
+    CHECK(config_put_json("api", api_same, strlen(api_same), &e) == CONFIG_OK && !g_lc_what[0],
+          "api.listen unchanged: not asked");
+    const char *w82 = "{\"listen\":\"0.0.0.0:82\"}";
+    vigil_config_t now;
+    CHECK(config_put_json("web", w82, strlen(w82), &e) == CONFIG_OK && !strcmp(g_lc_listen, "0.0.0.0:82") &&
+          (config_get(&now), !strcmp(now.web.listen, "0.0.0.0:82")), "web.listen to a free port: saved");
+    config_set_listen_check(NULL);
+
+    /* net_listen_check: a port this process listens on is in use */
+    int l = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    socklen_t al = sizeof a;
+    if (l >= 0 && bind(l, (struct sockaddr *)&a, sizeof a) == 0 && listen(l, 1) == 0 &&
+        getsockname(l, (struct sockaddr *)&a, &al) == 0) {
+        char lst[32], err[160] = "";
+        snprintf(lst, sizeof lst, "127.0.0.1:%d", ntohs(a.sin_port));
+        CHECK(net_listen_check(lst, err, sizeof err) < 0 && strstr(err, "in use"), "a port in use: %s", err);
+        close(l);
+        CHECK(net_listen_check(lst, err, sizeof err) == 0, "free again: %s", err);
+        CHECK(net_listen_check("1.2.3.4:x", err, sizeof err) < 0 && net_listen_check("10.0.0.1x:80", err, sizeof err) < 0,
+              "not listen settings");
+    }
+    unlink(path);
+    rmdir(dir);
+}
+
 static void test_display_config(void)
 {
     vigil_config_t c;
@@ -3138,6 +3348,9 @@ int main(int argc, char **argv)
     test_rec_policies();
     test_secrets();
     test_display_config();
+    test_qos_config();
+    test_qos_sockets();
+    test_ports();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

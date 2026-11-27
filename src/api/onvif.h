@@ -11,5 +11,8 @@
  * turned off. 0, or -1 when the thread cannot start (logged). */
 int  onvif_start(void);
 void onvif_stop(void);
+/* As api_listening (api.h): what the ONVIF web service listens on now,
+ * or why it does not. */
+int  onvif_listening(char *listen, size_t cap, char *why, size_t wcap);
 
 #endif /* ONVIF_H */

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* ui_set_network.c — Network: Ethernet, Wi-Fi, LTE, DDNS, UPnP, SMTP,
- * Alarm center, P2P (docs/management.md).
+/* ui_set_network.c — Network: Ethernet, Wi-Fi, LTE, Ports, DDNS, UPnP,
+ * SMTP, Alarm center, QoS, P2P (docs/management.md).
  *
  * Ethernet and Wi-Fi change the system through the model's management
  * calls (jobs); an Ethernet change is undone unless "Keep" is pressed
@@ -494,6 +494,224 @@ static void *lte_open(ui_set_t *s, lv_obj_t *pane)
     return NULL;
 }
 
+/* ---- Ports ------------------------------------------------------------------------- */
+
+/* The ports of vigild's servers: the web server (web.listen), the API
+ * (api.listen), ONVIF (onvif_server.port) and RTSP (rtsp_server.port),
+ * which move at once when saved (main.c restarts the first two and RTSP,
+ * onvif.c's thread follows its setting; a port that cannot be had is
+ * refused by the store, or put back, and said here), and that of the
+ * NETIP server vigild does not have yet (netip_server.port), kept for it.
+ * No two on one port. */
+
+#define PORTS_N   5
+#define SERVERS_N 4                     /* the first ones: running servers */
+enum { P_WEB, P_API, P_ONVIF, P_RTSP, P_NETIP };
+static const char *const k_port_sec[PORTS_N] = { "web", "api", "onvif_server", "rtsp_server", "netip_server" };
+static const char *const k_port_key[PORTS_N] = { "listen", "listen", "port", "port", "port" };
+static const char *const k_port_name[PORTS_N] = { "Web server", "HTTP API", "ONVIF", "RTSP", "NETIP" };
+static const int         k_port_server[SERVERS_N] = { UI_SERVER_WEB, UI_SERVER_API, UI_SERVER_ONVIF,
+                                                      UI_SERVER_RTSP };
+
+typedef struct {
+    ui_set_t   *s;
+    char        stored[PORTS_N][64];    /* the setting as stored: "0.0.0.0:80", "554" */
+    int         port[PORTS_N];          /* its port; 0: off (an empty listen) */
+    lv_obj_t   *num[PORTS_N], *state[SERVERS_N];
+    lv_timer_t *timer;
+} ports_t;
+
+static int listen_port(const char *v)
+{
+    const char *colon = strrchr(v, ':');
+    return *v ? atoi(colon ? colon + 1 : v) : 0;
+}
+
+static int sec_field(int sec, const char *key)
+{
+    const ui_section_t *u = &ui_model()->sections[sec];
+    for (int f = 0; f < u->n_fields; ++f)
+        if (!strcmp(u->fields[f].key, key)) return f;
+    return -1;
+}
+
+static void ports_state(ports_t *p)
+{
+    for (int i = 0; i < SERVERS_N; ++i) {
+        if (!p->state[i]) continue;
+        ui_listen_t l;
+        if (!MG() || !MG()->listening) {
+            lv_label_set_text(p->state[i], "");
+            continue;
+        }
+        MG()->listening(k_port_server[i], &l);
+        if (l.on && l.why[0]) lv_label_set_text_fmt(p->state[i], LV_SYMBOL_WARNING "  Listening on %s; %s", l.listen, l.why);
+        else if (l.on) lv_label_set_text_fmt(p->state[i], LV_SYMBOL_OK "  Listening on %s", l.listen);
+        else lv_label_set_text_fmt(p->state[i], LV_SYMBOL_WARNING "  Not listening: %s", l.why[0] ? l.why : "not started");
+        lv_obj_set_style_text_color(p->state[i], l.on && !l.why[0] ? UI_C(OK) : UI_C(WARN), 0);
+    }
+}
+
+static void ports_tick(lv_timer_t *t) { ports_state(lv_timer_get_user_data(t)); }
+
+static void ports_load(ports_t *p)
+{
+    for (int i = 0; i < PORTS_N; ++i) {
+        int sec = ui_set_section_index(k_port_sec[i]), f = sec < 0 ? -1 : sec_field(sec, k_port_key[i]);
+        p->stored[i][0] = 0;
+        if (f >= 0) ui_model()->get_value(sec, -1, f, p->stored[i], sizeof p->stored[i]);
+        p->port[i] = listen_port(p->stored[i]);
+        if (!p->num[i]) continue;
+        lv_obj_remove_state(p->num[i], LV_STATE_USER_1);
+        char t[8];
+        snprintf(t, sizeof t, "%d", p->port[i]);
+        lv_textarea_set_text(p->num[i], t);
+    }
+    ports_state(p);
+}
+
+static void ports_enable(lv_obj_t *num, int on)
+{
+    lv_obj_t *box = lv_obj_get_parent(num);
+    for (uint32_t i = 0; i < lv_obj_get_child_count(box); ++i) {
+        if (on) lv_obj_remove_state(lv_obj_get_child(box, (int32_t)i), LV_STATE_DISABLED);
+        else lv_obj_add_state(lv_obj_get_child(box, (int32_t)i), LV_STATE_DISABLED);
+    }
+}
+
+static void *ports_open(ui_set_t *s, lv_obj_t *pane)
+{
+    ports_t *p = calloc(1, sizeof *p);
+    if (!p) return NULL;
+    p->s = s;
+    ports_load(p);
+    static const char *const helps[PORTS_N] = {
+        "The zero channel: this screen in a browser (web.listen). 80 is HTTP's own port.",
+        "The HTTP API (api.listen): apps, scripts, the API's event WebSocket.",
+        "ONVIF for video management software and other recorders (onvif_server). 8899 is XM's ONVIF "
+        "port; 80, ONVIF's usual one, is the web server's here.",
+        "The cameras' streams to players, VMS and other recorders (rtsp_server). 554 is RTSP's own; "
+        "RTP over UDP goes from a pair of ports from 6970 up.",
+        "34567: XM's NETIP, for CMS and VMS software.",
+    };
+    lv_obj_t *sec = ui_set_section(pane, "Servers");
+    int users = ui_allowed(UI_PERM_USERS);
+    for (int i = 0; i < SERVERS_N; ++i) {
+        lv_obj_t *box = ui_set_row(sec, k_port_name[i], helps[i]);
+        p->num[i] = ui_set_number(s, box, p->port[i], 1, 65535);
+        p->state[i] = ui_set_note(box, "", UI_C(TEXT2));
+        if (i == P_ONVIF) continue;     /* the network permission's, as the rest of this screen */
+        if (!p->port[i] || !users) ports_enable(p->num[i], 0);
+        if (!p->port[i])
+            ui_label(box, i == P_WEB ? "Off: web.listen is empty (System -> Zero channel)."
+                                      : "Off: api.listen is empty (System -> HTTP API).",
+                     VG_FONT_SM_LV, UI_C(TEXT2));
+    }
+    if (!users)
+        ui_set_note(pane, "Changing the web server's, the API's and RTSP's ports needs the users permission, as "
+                          "their sections (api, web, rtsp_server: who gets in) do.",
+                    UI_C(TEXT2));
+    ui_set_note(pane, "Saved, a server moves to its new port at once; its open connections close (a browser "
+                      "showing the zero channel reconnects at the new address; ONVIF clients find the new port "
+                      "by WS-Discovery). A port that cannot be had is refused, and said why.", UI_C(TEXT2));
+    lv_obj_t *later = ui_set_section(pane, "Services not available yet");
+    for (int i = SERVERS_N; i < PORTS_N; ++i)
+        p->num[i] = ui_set_number(s, ui_set_row(later, k_port_name[i], helps[i]), p->port[i], 1, 65535);
+    ui_set_note(pane, LV_SYMBOL_WARNING "  vigild has no NETIP server yet: nothing listens on this port. It is "
+                                        "kept for that server, and no other server of vigild's may take it.",
+                UI_C(WARN));
+    ports_load(p);
+    p->timer = lv_timer_create(ports_tick, 1000, p);
+    return p;
+}
+
+static int ports_dirty(void *st)
+{
+    ports_t *p = st;
+    for (int i = 0; i < PORTS_N; ++i)
+        if (p->port[i] && ui_set_number_get(p->num[i]) != p->port[i]) return 1;
+    return 0;
+}
+
+/* `stored` with its port replaced: "0.0.0.0:80" -> "0.0.0.0:8081", "554" -> "8554". */
+static void with_port(const char *stored, int port, char *out, size_t cap)
+{
+    const char *colon = strrchr(stored, ':');
+    if (colon) snprintf(out, cap, "%.*s:%d", (int)(colon - stored), stored, port);
+    else snprintf(out, cap, "%d", port);
+}
+
+static int ports_save_one(ports_t *p, int i, int port)
+{
+    int sec = ui_set_section_index(k_port_sec[i]);
+    if (sec < 0) return -1;
+    const ui_section_t *u = &ui_model()->sections[sec];
+    char buf[16][192];
+    const char *v[16];
+    if (u->n_fields > 16) return -1;
+    for (int f = 0; f < u->n_fields; ++f) {
+        ui_model()->get_value(sec, -1, f, buf[f], sizeof buf[f]);
+        if (!strcmp(u->fields[f].key, k_port_key[i])) with_port(p->stored[i], port, buf[f], sizeof buf[f]);
+        v[f] = buf[f];
+    }
+    unsigned gen = ui_model()->config_generation ? ui_model()->config_generation() : 0;
+    ui_errors_t errs;
+    memset(&errs, 0, sizeof errs);
+    ui_save_rc_t rc = ui_model()->save(sec, 1, v, NULL, gen, &errs);
+    if (rc == UI_SAVE_OK || rc == UI_SAVE_UNSYNCED) return 0;
+    lv_obj_add_state(p->num[i], LV_STATE_USER_1);
+    ui_toast(UI_TOAST_BAD, "%s port not saved: %s", k_port_name[i], errs.n ? errs.e[0].msg : "the settings changed meanwhile");
+    return -1;
+}
+
+static int ports_save(void *st)
+{
+    ports_t *p = st;
+    int want[PORTS_N];
+    for (int i = 0; i < PORTS_N; ++i) {
+        lv_obj_remove_state(p->num[i], LV_STATE_USER_1);
+        want[i] = p->port[i] ? ui_set_number_get(p->num[i]) : 0;
+    }
+    for (int i = 0; i < PORTS_N; ++i)
+        for (int k = 0; k < i; ++k)
+            if (want[i] && want[i] == want[k]) {
+                /* the one that was changed onto the other's port */
+                lv_obj_add_state(p->num[want[i] != p->port[i] ? i : k], LV_STATE_USER_1);
+                ui_toast(UI_TOAST_BAD, "%s and %s cannot both be on port %d", k_port_name[k], k_port_name[i], want[i]);
+                return -1;
+            }
+    /* One section at a time, each checked against the others as stored:
+     * first those whose new port no other holds now, so that moving one
+     * onto a port another leaves works. Swapping two takes a free port in
+     * between. */
+    int left = 0;
+    for (int i = 0; i < PORTS_N; ++i) left += want[i] != p->port[i];
+    for (int pass = 0; left && pass < PORTS_N; ++pass)
+        for (int i = 0; i < PORTS_N; ++i) {
+            if (want[i] == p->port[i]) continue;
+            int held = 0;
+            for (int k = 0; k < PORTS_N; ++k) held |= k != i && p->port[k] == want[i];
+            if (held && pass < PORTS_N - 1) continue;
+            /* Refused: what was typed stays, marked, with the toast;
+             * the ones saved before it are saved. */
+            if (ports_save_one(p, i, want[i]) < 0) return -1;
+            p->port[i] = want[i];
+            --left;
+        }
+    ports_load(p);
+    ui_toast(UI_TOAST_OK, "Ports saved");
+    return 0;
+}
+
+static void ports_cancel(void *st) { ports_load(st); }
+
+static void ports_close(void *st)
+{
+    ports_t *p = st;
+    lv_timer_delete(p->timer);
+    free(p);
+}
+
 /* ---- services: a form of vigil.yaml and the service's state --------------------------- */
 
 typedef struct {
@@ -603,6 +821,198 @@ static void svc_close(void *st)
     free(st);
 }
 
+/* ---- QoS --------------------------------------------------------------------------- */
+
+/* vigil.yaml's `qos`: the type, and a DSCP per traffic class. "standard"
+ * is the fields' defaults (the schema's), shown greyed; "custom", the
+ * fields themselves. Saved like a form: through the store, applied at
+ * once (main.c marks the open sockets again). */
+
+#define QOS_N 4
+static const char *const k_qos_keys[QOS_N] = { "video", "management", "camera", "alarm" };
+static const char *const k_qos_types[] = { "off", "standard", "custom" };
+
+typedef struct {
+    int       sec;                  /* the section's index in the model */
+    int       type;                 /* stored: index in k_qos_types */
+    int       val[QOS_N], def[QOS_N];   /* stored custom values; the defaults */
+    lv_obj_t *type_dd, *classes, *classes_title, *off_note;
+    lv_obj_t *num[QOS_N], *name[QOS_N];
+} qos_t;
+
+/* The common names of DSCP values (RFC 2474, 2597, 3246, 5865, 8622). */
+static const char *dscp_name(int v)
+{
+    static const char *const af[] = { "AF11", "AF12", "AF13", "AF21", "AF22", "AF23",
+                                      "AF31", "AF32", "AF33", "AF41", "AF42", "AF43" };
+    static const char *const cs[] = { "CS0 (best effort)", "CS1", "CS2", "CS3", "CS4", "CS5", "CS6", "CS7" };
+    if (v % 8 == 0 && v >= 0 && v <= 56) return cs[v / 8];
+    if (v >= 10 && v <= 38 && v % 2 == 0 && (v % 8) != 0 && (v % 8) <= 6) return af[(v / 8 - 1) * 3 + (v % 8) / 2 - 1];
+    if (v == 46) return "EF";
+    if (v == 44) return "VOICE-ADMIT";
+    if (v == 1) return "LE (lower effort)";
+    return "";
+}
+
+static int qos_field(const qos_t *q, const char *key)
+{
+    const ui_section_t *u = &ui_model()->sections[q->sec];
+    for (int f = 0; f < u->n_fields; ++f)
+        if (!strcmp(u->fields[f].key, key)) return f;
+    return -1;
+}
+
+static void qos_name_cb(lv_event_t *ev)
+{
+    lv_obj_t *name = lv_event_get_user_data(ev);
+    lv_obj_t *ta = lv_event_get_target(ev);
+    lv_label_set_text(name, dscp_name(ui_set_number_get(ta)));
+}
+
+static void qos_set_num(qos_t *q, int k, int v)
+{
+    char t[8];
+    snprintf(t, sizeof t, "%d", v);
+    lv_textarea_set_text(q->num[k], t);
+    lv_label_set_text(q->name[k], dscp_name(v));
+}
+
+/* The rows as the type chosen shows them. */
+static void show_if(lv_obj_t *o, int shown)
+{
+    if (shown) lv_obj_remove_flag(o, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void qos_show(qos_t *q, int type)
+{
+    show_if(q->classes, type != 0);
+    show_if(q->classes_title, type != 0);
+    show_if(q->off_note, type == 0);
+    for (int k = 0; k < QOS_N; ++k) {
+        qos_set_num(q, k, type == 1 ? q->def[k] : q->val[k]);
+        lv_obj_t *box = lv_obj_get_parent(q->num[k]);
+        for (uint32_t i = 0; i < lv_obj_get_child_count(box); ++i) {
+            lv_obj_t *c = lv_obj_get_child(box, (int32_t)i);
+            if (type == 2) lv_obj_remove_state(c, LV_STATE_DISABLED);
+            else lv_obj_add_state(c, LV_STATE_DISABLED);
+        }
+    }
+}
+
+static void qos_type_cb(lv_event_t *ev)
+{
+    qos_t *q = lv_event_get_user_data(ev);
+    qos_show(q, (int)lv_dropdown_get_selected(q->type_dd));
+}
+
+static void qos_load(qos_t *q)
+{
+    const ui_section_t *u = &ui_model()->sections[q->sec];
+    char v[32];
+    int f = qos_field(q, "type");
+    q->type = 0;
+    if (f >= 0) {
+        ui_model()->get_value(q->sec, -1, f, v, sizeof v);
+        for (int i = 0; i < 3; ++i)
+            if (!strcmp(v, k_qos_types[i])) q->type = i;
+    }
+    for (int k = 0; k < QOS_N; ++k) {
+        f = qos_field(q, k_qos_keys[k]);
+        q->val[k] = q->def[k] = 0;
+        if (f < 0) continue;
+        ui_model()->get_value(q->sec, -1, f, v, sizeof v);
+        q->val[k] = atoi(v);
+        q->def[k] = u->fields[f].def ? atoi(u->fields[f].def) : 0;
+    }
+    lv_dropdown_set_selected(q->type_dd, (uint32_t)q->type);
+    qos_show(q, q->type);
+}
+
+static void *qos_open(ui_set_t *s, lv_obj_t *pane)
+{
+    int sec = ui_set_section_index("qos");
+    if (sec < 0) return NULL;
+    qos_t *q = calloc(1, sizeof *q);
+    if (!q) return NULL;
+    q->sec = sec;
+    static const char *const labels[QOS_N] = { "Video", "Management", "Cameras", "Alarms and events" };
+    static const char *const helps[QOS_N] = {
+        "The zero channel's picture: the WebSocket of the web server (web.listen, port 80).",
+        "The HTTP API, the web pages and logins, the ONVIF service and WS-Discovery, DDNS, camera searches.",
+        "vigild's connections to cameras: RTSP and NETIP control, and the ACKs of the video they send.",
+        "The API's event WebSocket, the alarm center's POSTs and the mails.",
+    };
+    lv_obj_t *sec_o = ui_set_section(pane, "QoS (DSCP marking)");
+    q->type_dd = ui_set_dropdown(s, ui_set_row(sec_o, "QoS type",
+                                               "Marks the packets vigild sends with a DSCP class, for switches "
+                                               "and routers that queue by it."),
+                                 "Off\nStandard (RFC 4594)\nCustom", 0, 320);
+    lv_obj_add_event_cb(q->type_dd, qos_type_cb, LV_EVENT_VALUE_CHANGED, q);
+    q->off_note = ui_set_note(pane, "Nothing is marked: every packet goes with DSCP 0 (best effort).", UI_C(TEXT2));
+    q->classes = ui_set_section(pane, "DSCP per traffic class");
+    q->classes_title = lv_obj_get_child(pane, lv_obj_get_index(q->classes) - 1);
+    for (int k = 0; k < QOS_N; ++k) {
+        q->num[k] = ui_set_number(s, ui_set_row(q->classes, labels[k], helps[k]), 0, 0, 63);
+        q->name[k] = ui_label(lv_obj_get_parent(q->num[k]), "", VG_FONT_MD_LV, UI_C(TEXT));
+        lv_obj_add_event_cb(q->num[k], qos_name_cb, LV_EVENT_VALUE_CHANGED, q->name[k]);
+    }
+    ui_set_note(pane, "Applied at once to new connections, to the cameras' sessions and to open WebSockets; an "
+                      "open web page or API connection keeps its old mark until it reconnects. Only vigild's own "
+                      "packets are marked, not other programs' (sshd, ntpd).", UI_C(TEXT2));
+    qos_load(q);
+    return q;
+}
+
+static int qos_dirty(void *st)
+{
+    qos_t *q = st;
+    if (!q) return 0;
+    int type = (int)lv_dropdown_get_selected(q->type_dd);
+    if (type != q->type) return 1;
+    if (type != 2) return 0;
+    for (int k = 0; k < QOS_N; ++k)
+        if (ui_set_number_get(q->num[k]) != q->val[k]) return 1;
+    return 0;
+}
+
+static int qos_save(void *st)
+{
+    qos_t *q = st;
+    if (!q) return 0;
+    const ui_section_t *u = &ui_model()->sections[q->sec];
+    int type = (int)lv_dropdown_get_selected(q->type_dd);
+    char buf[8][32];
+    const char *v[8];
+    if (u->n_fields > 8) return -1;
+    for (int f = 0; f < u->n_fields; ++f) {
+        ui_model()->get_value(q->sec, -1, f, buf[f], sizeof buf[f]);
+        if (!strcmp(u->fields[f].key, "type")) snprintf(buf[f], sizeof buf[f], "%s", k_qos_types[type]);
+        /* Only "custom" takes the numbers: the others keep the stored ones
+         * for when it is chosen again. */
+        for (int k = 0; k < QOS_N && type == 2; ++k)
+            if (!strcmp(u->fields[f].key, k_qos_keys[k]))
+                snprintf(buf[f], sizeof buf[f], "%d", ui_set_number_get(q->num[k]));
+        v[f] = buf[f];
+    }
+    unsigned gen = ui_model()->config_generation ? ui_model()->config_generation() : 0;
+    ui_errors_t errs;
+    memset(&errs, 0, sizeof errs);
+    ui_save_rc_t rc = ui_model()->save(q->sec, 1, v, NULL, gen, &errs);
+    if (rc != UI_SAVE_OK && rc != UI_SAVE_UNSYNCED) {
+        ui_toast(UI_TOAST_BAD, "Not saved: %s", errs.n ? errs.e[0].msg : "the settings changed meanwhile");
+        return -1;
+    }
+    ui_toast(UI_TOAST_OK, "QoS: %s", type == 0 ? "off" : "applied");
+    qos_load(q);
+    return 0;
+}
+
+static void qos_cancel(void *st)
+{
+    if (st) qos_load(st);
+}
+
 /* ---- P2P --------------------------------------------------------------------------- */
 
 static void *p2p_open(ui_set_t *s, lv_obj_t *pane)
@@ -619,7 +1029,7 @@ static void *p2p_open(ui_set_t *s, lv_obj_t *pane)
 
 static void free_st(void *st) { free(st); }
 
-static ui_set_item_t g_items[8];
+static ui_set_item_t g_items[10];
 
 void ui_network_open(int first)
 {
@@ -627,12 +1037,14 @@ void ui_network_open(int first)
         { TR(S_ETHERNET), &ui_icon_nav_ethernet, eth_open, eth_dirty, eth_save, eth_cancel, eth_close },
         { TR(S_WIFI), &ui_icon_nav_wifi, wifi_open, wifi_dirty, wifi_save, wifi_cancel, free_st },
         { TR(S_LTE), &ui_icon_nav_lte, lte_open, NULL, NULL, NULL, NULL },
+        { TR(S_PORTS), &ui_icon_nav_ports, ports_open, ports_dirty, ports_save, ports_cancel, ports_close },
         { TR(S_DDNS), &ui_icon_nav_ddns, ddns_open, svc_dirty, svc_save, svc_cancel, svc_close },
         { TR(S_UPNP), &ui_icon_nav_upnp, upnp_open, svc_dirty, svc_save, svc_cancel, svc_close },
         { TR(S_SMTP), &ui_icon_nav_smtp, smtp_open, svc_dirty, svc_save, svc_cancel, svc_close },
         { TR(S_ALARM_CENTER), &ui_icon_nav_alarm, alarm_open, svc_dirty, svc_save, svc_cancel, svc_close },
+        { TR(S_QOS), &ui_icon_nav_qos, qos_open, qos_dirty, qos_save, qos_cancel, free_st },
         { TR(S_P2P), &ui_icon_nav_p2p, p2p_open, NULL, NULL, NULL, NULL },
     };
     memcpy(g_items, items, sizeof items);
-    ui_settings_open(TR(S_NETWORK), g_items, 8, first);
+    ui_settings_open(TR(S_NETWORK), g_items, (int)(sizeof items / sizeof items[0]), first);
 }

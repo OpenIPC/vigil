@@ -107,7 +107,16 @@ watch every camera (logged as `WITHOUT authentication`).
 
 All of them apply while `vigild` runs: a new port or `enabled` restarts the
 server (its clients reconnect), `auth` and `max_clients` count for the next
-request.
+request. The port is one of [Network -> Ports](api.md#ports): no other of
+vigild's servers may have it, a new one is tried before it is saved, and
+the page shows what the server listens on, or why it does not. Changing
+the section needs the `users` permission, as `api` and `web` do: `auth`
+decides who sees every camera.
+
+**QoS** ([`qos`](api.md#qos-dscp-marking)): requests are marked
+`management`; the video, `video`: RTP and RTCP over UDP from the start, an
+interleaved connection from its `PLAY` (back to `management` at its
+`TEARDOWN`).
 
 ## Inside
 

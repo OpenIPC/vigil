@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "qos.h"
 #include "sys.h"
 #include "sys_curl.h"
 #include "sys_fake.h"
@@ -81,5 +82,17 @@ void test_sys_curl(void)
     CHECK(http_post_json("http://10.0.0.5:8000/alarm", "{\"a\":1}", msg, sizeof msg) == 0 &&
           strstr(fake_stdin, "url = \"http://10.0.0.5:8000/alarm\"") && strstr(fake_stdin, "data-binary = \"@") &&
           strstr(fake_stdin, "Content-Type: application/json") && tmp_files() == 0, "alarm POST:\n%s", fake_stdin);
+    CHECK(!strstr(fake_stdin, "ip-tos"), "QoS off: no ip-tos (an older curl still works)");
+
+    /* QoS: the alarm class for the alarm center and mail, management for DDNS */
+    int dscp[QOS_CLASSES] = { [QOS_MANAGEMENT] = 16, [QOS_ALARM] = 18 };
+    qos_set(dscp);
+    http_post_json("http://10.0.0.5:8000/alarm", "{}", msg, sizeof msg);
+    CHECK(strstr(fake_stdin, "ip-tos = 72\n") != NULL, "alarm POST: AF21 as ip-tos 72:\n%s", fake_stdin);
+    fake_answer("curl", 0, "good 203.0.113.5");
+    ddns_update(&d, msg, sizeof msg);
+    CHECK(strstr(fake_stdin, "ip-tos = 64\n") != NULL, "DDNS: CS2 as ip-tos 64:\n%s", fake_stdin);
+    int zero[QOS_CLASSES] = { 0 };
+    qos_set(zero);
     fake_done();
 }

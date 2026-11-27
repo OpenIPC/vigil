@@ -6,9 +6,11 @@
 
 #include <stddef.h>
 
+#include "qos.h"
 #include "schema.h"
 
 struct mg_connection;
+struct mg_context;
 typedef struct cJSON cJSON;
 
 /* Answers; each returns the status sent. send_json takes `doc`. */
@@ -54,5 +56,20 @@ int api_users_request(struct mg_connection *conn, const char *uri, const char *m
 
 /* /api/v1/discovery..., /api/v1/channels/N/assign (api_disc.c). */
 int api_disc_request(struct mg_connection *conn, const char *uri, const char *method);
+
+/* QoS (qos.h): mark a server's listeners, whose new connections inherit
+ * the class; mark one connection (a WebSocket after its upgrade).
+ * CivetWeb does not hand out its sockets: they are found by address. */
+void api_qos_listeners(const struct mg_context *ctx, qos_class_t c);
+void api_qos_conn(const struct mg_connection *conn, qos_class_t c);
+
+/* The servers' state for api_listening, web_listening and onvif_listening
+ * (`srv` 0: the API, 1: the web server, 2: ONVIF): what one listens on
+ * ("": nothing) and why not; after a restart (api_restart, web_restart)
+ * to `listen`, whether it failed, and whether the move was asked for (it
+ * clears an old failure) or is a way back (it keeps it); `err` gets the
+ * failure's reason. */
+void api_server_state(int srv, const char *listen, const char *why);
+void api_server_moved(int srv, const char *listen, int failed, int requested, char *err, size_t cap);
 
 #endif /* API_INT_H */

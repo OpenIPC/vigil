@@ -700,6 +700,20 @@ static int  fm_nas_support(const char *type, char *why, size_t cap)
 }
 static int  fm_nas_mounted(void) { return 0; }
 static int  fm_curl(void) { return 1; }
+static int  g_mg_move_failed;           /* the API's last move failed */
+static void fm_listening(int server, ui_listen_t *out)
+{
+    memset(out, 0, sizeof *out);
+    out->on = 1;
+    snprintf(out->listen, sizeof out->listen, "%s",
+             server == UI_SERVER_WEB     ? "0.0.0.0:80"
+             : server == UI_SERVER_ONVIF ? "0.0.0.0:8899"
+             : server == UI_SERVER_RTSP  ? "0.0.0.0:554"
+                                         : "0.0.0.0:8080");
+    if (server == UI_SERVER_API && g_mg_move_failed)
+        snprintf(out->why, sizeof out->why, "could not move to '0.0.0.0:81': port 81 is in use (another program, "
+                                            "or another of vigild's servers)");
+}
 static int  fm_job(int id, ui_mjob_t *j)
 {
     memset(j, 0, sizeof *j);
@@ -1098,6 +1112,7 @@ static void fake_mgmt(ui_model_t *m)
     g_mg.nas_support = fm_nas_support;
     g_mg.nas_mounted = fm_nas_mounted;
     g_mg.curl = fm_curl;
+    g_mg.listening = fm_listening;
     g_mg.job = fm_job;
     g_mg.disks = fm_disks;
     g_mg.disk_formats = fm_formats;
@@ -1569,10 +1584,11 @@ static void test_menu_and_settings(void)
     CHECK(find("Main menu", 0), "back from the form");
 
     click_text("NETWORK");
-    CHECK(find("Ethernet", 0) && find("Alarm center", 0) && find("P2P", 0), "NETWORK: the network screen");
+    CHECK(find("Ethernet", 0) && find("Ports", 0) && find("Alarm center", 0) && find("QoS", 0) && find("P2P", 0),
+          "NETWORK: the network screen");
     button(BTN_RIGHT);
     open_form("api");
-    CHECK(find("applies after restart", 1), "non-live setting marked");
+    CHECK(!find("applies after restart", 1), "api.listen applies at once: no restart mark");
     click_text("Listen on");                    /* the label: no keyboard */
     lv_obj_t *listen = textarea(0);
     int x, y;
@@ -2137,6 +2153,32 @@ static void test_network_pages(void)
     CHECK(!strcmp(g_mg_lte_profile, "rndis-e3372h") && find("next boot", 1), "Use this profile: wlandev");
     g_mg_modem = 0;
     g_mg_lte_profile[0] = 0;
+    nav_to("Ports");
+    lv_obj_t *pw = textarea(0), *pa = textarea(1), *po = textarea(2), *pr = textarea(3);
+    CHECK(pw && pa && po && pr && !strcmp(lv_textarea_get_text(pw), "80") &&
+          !strcmp(lv_textarea_get_text(pa), "8080") && !strcmp(lv_textarea_get_text(po), "8899") &&
+          !strcmp(lv_textarea_get_text(pr), "554") && find("Listening on 0.0.0.0:80", 1) &&
+          find("Listening on 0.0.0.0:8899", 1) && find("Listening on 0.0.0.0:554", 1) &&
+          find("Services not available yet", 0) && find("nothing listens on this port", 1),
+          "Ports: web 80, API 8080, ONVIF 8899, RTSP 554, what each listens on, the service to come");
+    if (po) lv_textarea_set_text(po, "80");
+    click_text(SAVE);
+    run(100);
+    vigil_config_t pc;
+    config_get(&pc);
+    CHECK(find("cannot both be on port 80", 1) && po && lv_obj_has_state(po, LV_STATE_USER_1) &&
+          pc.onvif_server.port == 8899, "two on port 80: refused, marked, nothing saved");
+    if (po) lv_textarea_set_text(po, "8000");
+    if (pw) lv_textarea_set_text(pw, "8081");
+    click_text(SAVE);
+    run(100);
+    config_get(&pc);
+    CHECK(pc.onvif_server.port == 8000 && !strcmp(pc.web.listen, "0.0.0.0:8081") && find("Ports saved", 1),
+          "Ports saved, the address kept: web %s, ONVIF %d", pc.web.listen, pc.onvif_server.port);
+    g_mg_move_failed = 1;
+    run(1100);
+    CHECK(find("could not move to '0.0.0.0:81'", 1), "a failed move: said on the page");
+    g_mg_move_failed = 0;
     nav_to("DDNS");
     CHECK(find("Update now", 1) && find("good 203.0.113.7", 1), "DDNS: the form and the last update");
     lv_obj_t *host = textarea(0);
@@ -2155,6 +2197,32 @@ static void test_network_pages(void)
     click_text("Send test mail");
     run(800);
     CHECK(find("done", 1), "test mail: the job's result");
+    nav_to("QoS");
+    lv_obj_t *qdd = nth_of(&lv_dropdown_class, 0);
+    lv_obj_t *video = textarea(0);
+    CHECK(qdd && lv_dropdown_get_selected(qdd) == 0 && find("Nothing is marked", 1) && !find("Video", 1),
+          "QoS: off, no classes shown");
+    if (qdd) {
+        lv_dropdown_set_selected(qdd, 1);
+        lv_obj_send_event(qdd, LV_EVENT_VALUE_CHANGED, NULL);
+    }
+    run(50);
+    video = textarea(0);
+    CHECK(find("Video", 1) && video && !strcmp(lv_textarea_get_text(video), "34") &&
+          lv_obj_has_state(video, LV_STATE_DISABLED) && find("AF41", 0), "QoS standard: the preset, greyed");
+    if (qdd) {
+        lv_dropdown_set_selected(qdd, 2);
+        lv_obj_send_event(qdd, LV_EVENT_VALUE_CHANGED, NULL);
+    }
+    run(50);
+    if (video) lv_textarea_set_text(video, "46");
+    run(50);
+    CHECK(video && !lv_obj_has_state(video, LV_STATE_DISABLED) && find("EF", 0), "QoS custom: editable, named");
+    click_text(SAVE);
+    run(100);
+    config_get(&c);
+    CHECK(!strcmp(c.qos.type, "custom") && c.qos.video == 46 && c.qos.management == 16,
+          "QoS saved through the store: %s %d %d", c.qos.type, c.qos.video, c.qos.management);
     nav_to("P2P");
     CHECK(find("P2P is not available", 0), "P2P: said so");
     button(BTN_RIGHT);
@@ -2181,10 +2249,32 @@ static void shots_settings(const char *tile, const char *prefix, const char *con
 
 static void shots_network(void)
 {
-    static const char *const items[] = { "Ethernet", "Wi-Fi", "LTE", "DDNS", "UPnP", "SMTP", "Alarm center", "P2P" };
-    shots_settings("NETWORK", "network", items, 8);
+    static const char *const items[] = { "Ethernet", "Wi-Fi", "LTE", "Ports", "DDNS", "UPnP", "SMTP", "Alarm center",
+                                         "QoS", "P2P" };
+    shots_settings("NETWORK", "network", items, (int)(sizeof items / sizeof items[0]));
     g_mg_wifi = 1;
     click_text("NETWORK");
+    nav_to("QoS");
+    for (int t = 1; t <= 2; ++t) {
+        lv_obj_t *qdd = nth_of(&lv_dropdown_class, 0);
+        if (qdd) {
+            lv_dropdown_set_selected(qdd, (uint32_t)t);
+            lv_obj_send_event(qdd, LV_EVENT_VALUE_CHANGED, NULL);
+        }
+        if (t == 2 && textarea(0)) lv_textarea_set_text(textarea(0), "46");
+        shot(t == 1 ? "network-qos-standard" : "network-qos-custom");
+    }
+    click_text("Cancel");
+    run(50);
+    nav_to("Ports");
+    if (textarea(2)) lv_textarea_set_text(textarea(2), "80");
+    click_text(SAVE);
+    shot("network-ports-clash");
+    click_text("Cancel");
+    g_mg_move_failed = 1;
+    run(1100);
+    shot("network-ports-failed");
+    g_mg_move_failed = 0;
     nav_to("Wi-Fi");
     shot("network-wifi-adapter");
     click_text("Scan");
