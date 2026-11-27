@@ -226,6 +226,7 @@ static char     g_api_listen[64];
 
 static void apply_config(void)
 {
+    if (mgmt_power_pending() != MGMT_POWER_NONE) g_stop = 1;    /* reboot or shutdown: stop first */
     if (config_generation() == g_applied_gen) return;
     static vigil_config_t c;            /* channels_config_t points into it */
     unsigned gen = config_get(&c);
@@ -398,6 +399,8 @@ int main(int argc, char **argv)
     }
     hal_shutdown();
     vg_log("stopped");
+    /* Reboot or shutdown asked for (UI, API): after the clean stop. */
+    if (mgmt_power_pending() != MGMT_POWER_NONE) mgmt_power_run(mgmt_power_pending());
     log_to_syslog_stop();
     return rc;
 }

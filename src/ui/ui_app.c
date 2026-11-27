@@ -147,6 +147,7 @@ static void formats_sync(void)
     unsigned gen = g_model->config_generation ? g_model->config_generation() : 0;
     if (gen == g_fmt_gen && gen) return;
     g_fmt_gen = gen;
+    int login = 0, idle = 0;
     for (int i = 0; i < g_model->n_sections; ++i) {
         const ui_section_t *sec = &g_model->sections[i];
         if (strcmp(sec->key, "ui") != 0) continue;
@@ -156,8 +157,11 @@ static void formats_sync(void)
             if (!strcmp(sec->fields[f].key, "date_format")) snprintf(g_datefmt, sizeof g_datefmt, "%.15s", v);
             else if (!strcmp(sec->fields[f].key, "time_format")) snprintf(g_timefmt, sizeof g_timefmt, "%.7s", v);
             else if (!strcmp(sec->fields[f].key, "language")) ui_i18n_set(v);
+            else if (!strcmp(sec->fields[f].key, "login")) login = !strcmp(v, "1");
+            else if (!strcmp(sec->fields[f].key, "idle_logout")) idle = atoi(v);
         }
     }
+    ui_session_config(login, idle);
 }
 
 void ui_format_datetime(const struct tm *tm, int seconds, char *buf, size_t cap)
@@ -253,6 +257,16 @@ lv_obj_t *ui_popup_open(const lv_point_t *at, int w)
     g_popup_group = lv_group_create();
     focus_sync();
     return panel;
+}
+
+void ui_popup_focus_add(lv_obj_t *o)
+{
+    if (g_popup_group) lv_group_add_obj(g_popup_group, o);
+}
+
+void ui_popup_focus_obj(lv_obj_t *o)
+{
+    if (g_popup_group && lv_obj_get_group(o) == g_popup_group) lv_group_focus_obj(o);
 }
 
 void ui_popup_focus(lv_obj_t *cont, lv_obj_t *first, lv_gridnav_ctrl_t ctrl)
@@ -837,4 +851,5 @@ void ui_app_create(const ui_model_t *m)
     focus_sync();
     ui_app_refresh();
     lv_timer_create(refresh_cb, REFRESH_MS, NULL);
+    ui_session_init();
 }

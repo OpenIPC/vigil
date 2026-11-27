@@ -17,6 +17,7 @@
  */
 #include <string.h>
 
+#include "ui_app.h"
 #include "ui_osk.h"
 #include "ui_theme.h"
 
@@ -208,6 +209,9 @@ void ui_osk_show(lv_obj_t *kb, lv_obj_t *ta, int numeric)
     if (x < VG_SPACE_SM) x = VG_SPACE_SM;
     if (y + h > sh - VG_SPACE_SM) y = a.y1 - gap - h;
     if (y < 0) y = 0;
+    /* Over the live view (the login), square: a rounded corner's soft
+     * edge over a tile would blend with the key colour. */
+    lv_obj_set_style_radius(kb, ui_page_top() ? VG_RADIUS_MD : 0, 0);
     lv_obj_set_align(kb, LV_ALIGN_TOP_LEFT);      /* lv_keyboard aligns itself to the bottom */
     lv_obj_set_pos(kb, x, y);
     lv_obj_remove_flag(o->catcher, LV_OBJ_FLAG_HIDDEN);

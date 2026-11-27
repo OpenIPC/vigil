@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* ui_theme.c — styles from the design tokens (see ui_theme.h). */
 #include <stdio.h>
+#include <string.h>
 
 #include "ui_theme.h"
 
@@ -182,6 +183,98 @@ lv_obj_t *ui_icon(lv_obj_t *parent, const lv_image_dsc_t *img, uint32_t rgb)
     lv_obj_remove_flag(i, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(i, LV_OBJ_FLAG_CLICK_FOCUSABLE);
     return i;
+}
+
+/* ---- text over the video ------------------------------------------------------------- */
+
+#define HARD_FONTS 4
+static struct {
+    const lv_font_t *base;
+    lv_font_t        font;
+} g_hard[HARD_FONTS];
+
+/* Above this a glyph pixel is drawn, fully: 4-bpp anti-aliasing levels
+ * cut at a little under half keep the strokes as thick as they look. */
+#define HARD_CUT 0x70
+
+static const void *hard_bitmap(lv_font_glyph_dsc_t *g, lv_draw_buf_t *buf)
+{
+    /* fmt_txt fills `buf` with A8 (whatever the font's bpp) and returns it. */
+    lv_draw_buf_t *out = (lv_draw_buf_t *)lv_font_get_bitmap_fmt_txt(g, buf);
+    if (!out) return NULL;
+    uint32_t stride = out->header.stride;
+    uint8_t *p = out->data;
+    for (uint32_t y = 0; y < g->box_h; ++y)
+        for (uint32_t x = 0; x < g->box_w; ++x) p[y * stride + x] = p[y * stride + x] >= HARD_CUT ? 0xFF : 0;
+    return out;
+}
+
+const lv_font_t *ui_hard_font(const lv_font_t *base)
+{
+    int i;
+    for (i = 0; i < HARD_FONTS && g_hard[i].base; ++i)
+        if (g_hard[i].base == base) return &g_hard[i].font;
+    if (i == HARD_FONTS) return base;
+    g_hard[i].base = base;
+    g_hard[i].font = *base;
+    g_hard[i].font.get_glyph_bitmap = hard_bitmap;
+    g_hard[i].font.fallback = NULL;
+    return &g_hard[i].font;
+}
+
+/* Eight dark copies a pixel away in each direction, drawn before the
+ * label draws its text: one object, not nine (64 tiles of them would not
+ * fit LVGL's heap). */
+static const signed char k_around[8][2] = { { -1, -1 }, { 0, -1 }, { 1, -1 }, { -1, 0 },
+                                            { 1, 0 },   { -1, 1 }, { 0, 1 },  { 1, 1 } };
+
+static void outline_draw_cb(lv_event_t *e)
+{
+    lv_obj_t *l = lv_event_get_current_target(e);
+    const char *text = lv_label_get_text(l);
+    if (!text || !*text) return;
+    lv_layer_t *layer = lv_event_get_layer(e);
+    lv_draw_label_dsc_t d;
+    lv_draw_label_dsc_init(&d);
+    lv_obj_init_draw_label_dsc(l, LV_PART_MAIN, &d);
+    d.color = UI_C(OUTLINE);
+    d.text = text;
+    if (lv_label_get_long_mode(l) == LV_LABEL_LONG_WRAP) d.flag |= LV_TEXT_FLAG_NONE;
+    else d.flag |= LV_TEXT_FLAG_EXPAND;
+    lv_area_t a;
+    lv_obj_get_content_coords(l, &a);
+    for (int i = 0; i < 8; ++i) {
+        lv_area_t b = a;
+        lv_area_move(&b, k_around[i][0], k_around[i][1]);
+        lv_draw_label(layer, &d, &b);
+    }
+}
+
+static void outline_ext_cb(lv_event_t *e) { lv_event_set_ext_draw_size(e, 1); }
+
+lv_obj_t *ui_outlined(lv_obj_t *parent, const lv_font_t *font, uint32_t rgb)
+{
+    lv_obj_t *l = lv_label_create(parent);
+    lv_label_set_text(l, "");
+    lv_obj_set_style_text_font(l, ui_hard_font(font), 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(rgb), 0);
+    lv_obj_remove_flag(l, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(l, outline_draw_cb, LV_EVENT_DRAW_MAIN_BEGIN, NULL);
+    lv_obj_add_event_cb(l, outline_ext_cb, LV_EVENT_REFR_EXT_DRAW_SIZE, NULL);
+    lv_obj_refresh_ext_draw_size(l);
+    return l;
+}
+
+lv_obj_t *ui_outlined_label(lv_obj_t *o) { return o; }
+
+void ui_outlined_set_text(lv_obj_t *o, const char *text)
+{
+    if (strcmp(lv_label_get_text(o), text)) lv_label_set_text(o, text);
+}
+
+void ui_outlined_set_color(lv_obj_t *o, lv_color_t c)
+{
+    lv_obj_set_style_text_color(o, c, 0);
 }
 
 /* Discs with hard edges, made once per size. */

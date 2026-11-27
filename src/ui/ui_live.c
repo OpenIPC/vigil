@@ -27,6 +27,7 @@
 #include "hal_ui.h"
 #include "icons.h"
 #include "ui_app.h"
+#include "ui_i18n.h"
 #include "ui_settings.h"
 #include "ui_layout.h"
 #include "ui_theme.h"
@@ -46,11 +47,11 @@
 typedef struct {
     int         ch;
     lv_obj_t   *obj;
-    lv_obj_t   *name_chip, *name;      /* bottom left */
+    lv_obj_t   *name;                  /* bottom left, outlined text */
     lv_obj_t   *icons, *rec;           /* bottom right: REC, then the events */
     lv_obj_t   *ev[N_EVENT_ICONS];
-    lv_obj_t   *mid, *mid_l1, *mid_l2; /* centre: the state, when there is no picture */
-    lv_obj_t   *add;                   /* centre: "+" on an empty slot */
+    lv_obj_t   *mid, *mid_l1, *mid_l2; /* centre: the state when there is no picture, outlined */
+    lv_obj_t   *add, *add_caption;     /* centre: a small "+" on an empty slot */
     lv_obj_t   *flash;
     lv_timer_t *flash_timer;
     int         tiny;                  /* small tile: one line of state, a smaller "+" */
@@ -142,21 +143,21 @@ static const char *status_text(const ui_chan_t *st, lv_color_t *col, const char 
     *col = UI_C(BAD);
     *detail = "";
     switch (st->status) {
-    case UI_CH_DISABLED:   *col = UI_C(TEXT2); return "Disabled";
-    case UI_CH_CONNECTING: *col = UI_C(WARN); return "Connecting...";
-    case UI_CH_LIVE:       *col = UI_C(WARN); return "No decoder";      /* live, nothing to show it */
-    case UI_CH_NO_VIDEO:   return "No video";
-    case UI_CH_OFFLINE:    return "Offline";
-    case UI_CH_AUTH:       return "Authentication error";
-    case UI_CH_CODEC:      return "Unsupported codec";
-    default:               *detail = st->state; return "No video";
+    case UI_CH_DISABLED:   *col = UI_C(TEXT2); return TR(S_ST_DISABLED);
+    case UI_CH_CONNECTING: *col = UI_C(WARN); return TR(S_ST_CONNECTING);
+    case UI_CH_LIVE:       *col = UI_C(WARN); return TR(S_ST_NO_DECODER);  /* live, nothing to show it */
+    case UI_CH_NO_VIDEO:   return TR(S_ST_NO_VIDEO);
+    case UI_CH_OFFLINE:    return TR(S_ST_OFFLINE);
+    case UI_CH_AUTH:       return TR(S_ST_AUTH);
+    case UI_CH_CODEC:      return TR(S_ST_CODEC);
+    default:               *detail = st->state; return TR(S_ST_NO_VIDEO);
     }
 }
 
 static void cell_update(cell_t *c)
 {
     if (c->ch < 0) {                    /* past the platform's channels */
-        show(c->name_chip, 0);
+        show(c->name, 0);
         show(c->icons, 0);
         show(c->mid, 0);
         show(c->add, 0);
@@ -165,9 +166,9 @@ static void cell_update(cell_t *c)
     const ui_chan_t *st = ui_channel(c->ch);
     char buf[64];
     ui_chan_title(c->ch, buf, sizeof buf);
-    lv_label_set_text(c->name, buf);
+    ui_outlined_set_text(c->name, buf);
     int empty = st->status == UI_CH_EMPTY;
-    lv_obj_set_style_text_color(c->name, empty ? UI_C(TEXT2) : UI_C(TEXT), 0);
+    ui_outlined_set_color(c->name, empty ? UI_C(TEXT2) : UI_C(TEXT));
 
     show(c->rec, st->recording);
     int any = st->recording;
@@ -178,15 +179,16 @@ static void cell_update(cell_t *c)
     show(c->icons, any);
 
     show(c->add, empty);
+    if (!empty) show(c->add_caption, 0);
     if (empty || (st->status == UI_CH_LIVE && !st->no_decoder)) {
         show(c->mid, 0);
         return;
     }
     lv_color_t col;
     const char *detail;
-    lv_label_set_text(c->mid_l1, status_text(st, &col, &detail));
-    lv_obj_set_style_text_color(c->mid_l1, col, 0);
-    lv_label_set_text(c->mid_l2, detail);
+    ui_outlined_set_text(c->mid_l1, status_text(st, &col, &detail));
+    ui_outlined_set_color(c->mid_l1, col);
+    ui_outlined_set_text(c->mid_l2, detail);
     show(c->mid_l2, *detail && !c->tiny);
     show(c->mid, 1);
 }
@@ -220,16 +222,50 @@ static void toggle_full_screen(int ch)
 static void full_screen_async(void *ch) { toggle_full_screen((int)(intptr_t)ch); }
 
 /* Channels -> a new camera on channel `ch` (after the click's event). */
-static void add_async(void *ch)
+static void add_now(void *ch)
 {
     int sec = section_of("cameras");
     if (sec >= 0) ui_form_open_slot(sec, (int)(intptr_t)ch);
+}
+
+static void add_async(void *ch) { ui_with_perm(UI_PERM_CAMERAS, add_now, ch); }
+
+static void channels_now(void *u)
+{
+    (void)u;
+    ui_channels_open();
+}
+
+static void record_now(void *u)
+{
+    (void)u;
+    ui_storage_open(UI_STORAGE_BASIC);
+}
+
+static void display_now(void *u)
+{
+    (void)u;
+    ui_display_open();
 }
 
 static void add_click_cb(lv_event_t *e)
 {
     cell_t *c = lv_event_get_user_data(e);
     if (c->ch >= 0) lv_async_call(add_async, (void *)(intptr_t)c->ch);
+}
+
+/* "Add camera" under the "+": while the pointer is on it, or the
+ * keyboard on its tile. */
+static void add_caption(cell_t *c, int on)
+{
+    show(c->add_caption, on && c->ch >= 0 && ui_channel(c->ch)->status == UI_CH_EMPTY);
+}
+
+static void add_hover_cb(lv_event_t *e)
+{
+    cell_t *c = lv_event_get_user_data(e);
+    add_caption(c, lv_event_get_code(e) == LV_EVENT_HOVER_OVER ||
+                       (lv_obj_has_state(c->obj, LV_STATE_FOCUSED) && ui_keyboard_in_use()));
 }
 
 static void cell_click_cb(lv_event_t *e)
@@ -270,7 +306,8 @@ static void flash_done_cb(lv_timer_t *t)
 static void cell_focused_cb(lv_event_t *e)
 {
     cell_t *c = lv_event_get_user_data(e);
-    L.sel_ch = c->ch;
+    if (lv_event_get_code(e) == LV_EVENT_FOCUSED) L.sel_ch = c->ch;
+    add_caption(c, lv_event_get_code(e) == LV_EVENT_FOCUSED && ui_keyboard_in_use());
 }
 
 static void cell_deleted_cb(lv_event_t *e)
@@ -314,15 +351,17 @@ static void cell_build(cell_t *c, const ui_cell_t *g)
     lv_obj_add_style(o, &ui_st_focus_in, LV_STATE_FOCUSED);
     lv_obj_add_event_cb(o, cell_click_cb, LV_EVENT_CLICKED, c);
     lv_obj_add_event_cb(o, cell_focused_cb, LV_EVENT_FOCUSED, c);
+    lv_obj_add_event_cb(o, cell_focused_cb, LV_EVENT_DEFOCUSED, c);
     lv_obj_add_event_cb(o, cell_deleted_cb, LV_EVENT_DELETE, c);
     c->obj = o;
 
     int small = g->w < 400;
     c->tiny = g->w < 240;
     int edge = clock_offset(g, 0, 200);
-    c->name_chip = chip(o);
-    lv_obj_align(c->name_chip, LV_ALIGN_BOTTOM_LEFT, VG_SPACE_SM, -VG_SPACE_SM - edge);
-    c->name = ui_label(c->name_chip, "", small ? VG_FONT_SM_LV : VG_FONT_MD_LV, UI_C(TEXT));
+    /* Text straight on the video, outlined, no chip: the name, and the
+     * state in the middle. */
+    c->name = ui_outlined(o, small ? VG_FONT_SM_LV : VG_FONT_MD_LV, VG_COLOR_TEXT);
+    lv_obj_align(c->name, LV_ALIGN_BOTTOM_LEFT, VG_SPACE_SM, -VG_SPACE_SM - edge);
     lv_obj_set_style_max_width(c->name, g->w / 2, 0);
     lv_label_set_long_mode(c->name, LV_LABEL_LONG_CLIP);
 
@@ -335,25 +374,34 @@ static void cell_build(cell_t *c, const ui_cell_t *g)
     c->rec = ui_icon(c->icons, &ui_icon_rec, VG_COLOR_BAD);
     for (int i = 0; i < N_EVENT_ICONS; ++i) c->ev[i] = ui_icon(c->icons, ev_img[i], VG_COLOR_WARN);
 
-    c->mid = chip(o);
+    c->mid = lv_obj_create(o);
+    ui_plain(c->mid);
+    ui_inert(c->mid);
+    lv_obj_set_size(c->mid, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(c->mid, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_layout(c->mid, LV_LAYOUT_FLEX);
     lv_obj_set_flex_align(c->mid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_all(c->mid, c->tiny ? VG_SPACE_XS : VG_SPACE_MD, 0);
     lv_obj_set_style_pad_row(c->mid, VG_SPACE_XS, 0);
     lv_obj_center(c->mid);
-    c->mid_l1 = ui_label(c->mid, "", c->tiny ? VG_FONT_SM_LV : small ? VG_FONT_MD_LV : VG_FONT_LG_LV, UI_C(TEXT2));
-    c->mid_l2 = ui_label(c->mid, "", VG_FONT_SM_LV, UI_C(TEXT2));
+    c->mid_l1 = ui_outlined(c->mid, c->tiny ? VG_FONT_SM_LV : small ? VG_FONT_MD_LV : VG_FONT_LG_LV, VG_COLOR_TEXT2);
+    c->mid_l2 = ui_outlined(c->mid, VG_FONT_SM_LV, VG_COLOR_TEXT);
     lv_obj_set_style_max_width(c->mid_l2, g->w - 4 * VG_SPACE_LG, 0);
     lv_obj_set_style_text_align(c->mid_l2, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(c->mid_l2, LV_LABEL_LONG_WRAP);
 
-    /* An empty slot: a large "+" that adds a camera on this channel. Two
-     * sizes rendered: LVGL does not scale A8 images. */
-    c->add = ui_disc_button(o, small ? 52 : 88);
+    /* An empty slot: a small "+" that adds a camera on this channel, with
+     * "Add camera" under it while it is hovered or its tile focused. */
+    c->add = ui_disc_button(o, VG_SIZE_ADD_DISC);
     lv_obj_center(c->add);
     lv_obj_add_event_cb(c->add, add_click_cb, LV_EVENT_CLICKED, c);
-    lv_obj_center(ui_icon(c->add, small ? &ui_icon_add_sm : &ui_icon_add, VG_COLOR_TEXT2));
+    lv_obj_add_event_cb(c->add, add_hover_cb, LV_EVENT_HOVER_OVER, c);
+    lv_obj_add_event_cb(c->add, add_hover_cb, LV_EVENT_HOVER_LEAVE, c);
+    lv_obj_center(ui_icon(c->add, &ui_icon_add, VG_COLOR_TEXT));
     lv_obj_add_flag(c->add, LV_OBJ_FLAG_HIDDEN);
+    c->add_caption = ui_outlined(o, VG_FONT_SM_LV, VG_COLOR_TEXT);
+    ui_outlined_set_text(c->add_caption, TR(S_ADD_CAMERA));
+    lv_obj_align(c->add_caption, LV_ALIGN_CENTER, 0, VG_SIZE_ADD_DISC / 2 + VG_SPACE_MD);
+    lv_obj_add_flag(c->add_caption, LV_OBJ_FLAG_HIDDEN);
 
     c->flash = lv_obj_create(o);
     ui_plain(c->flash);
@@ -458,7 +506,7 @@ static void make_clock(void)
 /* ---- navigation bar ------------------------------------------------------------------------ */
 
 enum { ACT_MENU = 1, ACT_PREV, ACT_NEXT, ACT_PIN, ACT_FULL, ACT_CONTEXT, ACT_ESC, ACT_CHANNELS, ACT_RECORD,
-       ACT_DISPLAY, ACT_LAYOUT = 100 };
+       ACT_DISPLAY, ACT_EXIT, ACT_LAYOUT = 100 };
 
 
 static void nav_show(int show)
@@ -483,13 +531,16 @@ static void do_action(int act, int ch)
         ui_menu_open();
         break;
     case ACT_CHANNELS:
-        ui_channels_open();
+        ui_with_perm(UI_PERM_CAMERAS, channels_now, NULL);
         break;
     case ACT_RECORD:
-        ui_storage_open(UI_STORAGE_BASIC);
+        ui_with_perm(UI_PERM_STORAGE, record_now, NULL);
         break;
     case ACT_DISPLAY:
-        ui_display_open();
+        ui_with_perm(UI_PERM_SYSTEM, display_now, NULL);
+        break;
+    case ACT_EXIT:
+        ui_exit_open();
         break;
     case ACT_PREV:
     case ACT_NEXT:
@@ -752,8 +803,8 @@ static void split_key_cb(lv_event_t *e)
     if (lv_event_get_key(e) == LV_KEY_RIGHT && !ui_popup_sub_is_open()) split_open(lv_event_get_target(e));
 }
 
-/* Main menu, Channels, Playback, Record, PTZ, Display, Split: nothing
- * else (full screen is a double click or Enter, pages the edge arrows or
+/* Main menu, Channels, Playback, Record, PTZ, Display, Split, Exit:
+ * nothing else (full screen is a double click or Enter, pages the edge arrows or
  * PgUp/PgDn, pinning the bar its own button). */
 void ui_live_context_menu(const lv_point_t *at)
 {
@@ -771,6 +822,7 @@ void ui_live_context_menu(const lv_point_t *at)
         lv_obj_add_event_cb(split, split_click_cb, LV_EVENT_CLICKED, NULL);
         lv_obj_add_event_cb(split, split_key_cb, LV_EVENT_KEY, NULL);
     }
+    menu_item(panel, LV_SYMBOL_POWER, TR(S_EXIT), ACT_EXIT, -1);
     /* Left and Right go to the item (Right opens Split). */
     ui_popup_focus(panel, NULL, LV_GRIDNAV_CTRL_ROLLOVER | LV_GRIDNAV_CTRL_VERTICAL_MOVE_ONLY);
     ui_popup_place(at);

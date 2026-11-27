@@ -603,6 +603,13 @@ int api_mgmt_request(struct mg_connection *conn, const char *uri, const char *m)
     }
     if (!strcmp(uri, "/api/v1/system/zones")) return zones(conn, m);
     if (!strcmp(uri, "/api/v1/system/hostname")) return hostname(conn, m);
+    if (!strcmp(uri, "/api/v1/system/reboot") || !strcmp(uri, "/api/v1/system/shutdown")) {
+        if (!is(m, "POST")) return method_not_allowed(conn, "POST");
+        /* Answered first; the main loop then stops vigild cleanly
+         * (recordings closed) and reboots or powers off. */
+        return answer(conn, mgmt_power_request(strstr(uri, "reboot") ? MGMT_POWER_REBOOT : MGMT_POWER_OFF),
+                      NULL, NULL);
+    }
     if (!strcmp(uri, "/api/v1/disks")) return disks(conn, m);
     if (!strncmp(uri, "/api/v1/disks/", 14)) return disk_action(conn, m, uri + 14);
     if (!strcmp(uri, "/api/v1/storage/nas")) return nas(conn, m, 0);

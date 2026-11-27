@@ -279,6 +279,12 @@ typedef struct {
     int      builtin, editable, members;
 } ui_group_t;
 
+/* Permissions, users.h's PERM_* bits (the bridge asserts they agree). */
+enum {
+    UI_PERM_LIVE = 1u << 0, UI_PERM_PLAYBACK = 1u << 1, UI_PERM_PTZ = 1u << 2, UI_PERM_CAMERAS = 1u << 3,
+    UI_PERM_STORAGE = 1u << 4, UI_PERM_NETWORK = 1u << 5, UI_PERM_SYSTEM = 1u << 6, UI_PERM_USERS = 1u << 7,
+};
+
 typedef struct {
     int (*managed)(void);           /* vigild may change this system */
 
@@ -341,6 +347,15 @@ typedef struct {
     int (*group_set)(const char *name, unsigned perms, int create, char *field, size_t fcap, char *err,
                      size_t cap);
     int (*group_delete)(const char *name, char *err, size_t cap);
+
+    /* the on-screen login: 1 with *perms, 0 wrong user or password, -1
+     * when it cannot be checked (`why`) */
+    int  (*login)(const char *name, const char *pass, unsigned *perms, char *why, size_t cap);
+    /* the system account (api.user), which always logs in */
+    void (*system_user)(char *buf, size_t cap);
+    /* Exit: reboot (1) or power off (0), after vigild stops cleanly; 0, or
+     * < 0 on a system vigild does not manage */
+    int  (*power)(int reboot);
 } ui_mgmt_t;
 
 typedef struct ui_model {

@@ -33,6 +33,8 @@ static const char *const k_wdays[] = { "Sunday", "Monday", "Tuesday", "Wednesday
                                        "Saturday" };
 static const char *const k_datefmts[] = { "YYYY-MM-DD", "DD.MM.YYYY", "MM/DD/YYYY" };
 static const char *const k_timefmts[] = { "24h", "12h" };
+static const char *const k_idle_values[] = { "0", "5", "10", "15", "30", "60" };
+static const char *const k_idle_names[] = { "Never", "5 minutes", "10 minutes", "15 minutes", "30 minutes", "1 hour" };
 
 static void off_text(int east, char *out, size_t cap)
 {
@@ -89,9 +91,9 @@ typedef struct {
     ui_tz_rule_t rule0;
     char         servers0[256];
     int          ui_sec;
-    char         lang0[16], date0[16], time0[8];
+    char         lang0[16], date0[16], time0[8], login0[4], idle0[8];
     lv_obj_t    *host_ta, *host_err;
-    lv_obj_t    *lang_dd, *datefmt_dd, *timefmt_dd;
+    lv_obj_t    *lang_dd, *datefmt_dd, *timefmt_dd, *login_sw, *idle_dd;
     lv_obj_t    *now, *date_ta, *clock_ta;
     lv_obj_t    *zone_dd, *zone_desc, *custom, *off_dd, *dst_sw, *dst_box, *dstoff_dd;
     lv_obj_t    *rule_dd[2][3], *rule_ta[2], *preview;
@@ -271,6 +273,11 @@ static void load(gen_t *g)
     ui_value(g->ui_sec, "language", g->lang0, sizeof g->lang0);
     ui_value(g->ui_sec, "date_format", g->date0, sizeof g->date0);
     ui_value(g->ui_sec, "time_format", g->time0, sizeof g->time0);
+    ui_value(g->ui_sec, "login", g->login0, sizeof g->login0);
+    ui_value(g->ui_sec, "idle_logout", g->idle0, sizeof g->idle0);
+    if (!strcmp(g->login0, "1")) lv_obj_add_state(g->login_sw, LV_STATE_CHECKED);
+    else lv_obj_remove_state(g->login_sw, LV_STATE_CHECKED);
+    lv_dropdown_set_selected(g->idle_dd, (uint32_t)index_of(k_idle_values, 6, g->idle0));
     int li = 0;
     for (int i = 0; ui_i18n_code(i); ++i)
         if (!strcmp(ui_i18n_code(i), g->lang0)) li = i;
@@ -441,6 +448,14 @@ static void *gen_open(ui_set_t *s, lv_obj_t *pane)
     g->ntp_job = ui_label(box, "", VG_FONT_SM_LV, UI_C(TEXT2));
     g->sync_lbl = ui_set_note(lv_obj_get_parent(box), "", UI_C(TEXT2));
 
+    sec = ui_set_section(pane, TR(S_LOG_IN));
+    g->login_sw = ui_set_switch(s, ui_set_row(sec, "Log in on screen",
+                                              "The menus and settings ask for a user and its password "
+                                              "(Account); the live view stays. The system account always "
+                                              "logs in, so nobody is locked out."), 0);
+    g->idle_dd = dd_of(s, ui_set_row(sec, "Log out after", "Without a key or the mouse for this long."),
+                       k_idle_names, 6, 0, 240);
+
     load(g);
     now_text(g);
     g->timer = lv_timer_create(tick, 1000, g);
@@ -454,7 +469,9 @@ static int ui_dirty(gen_t *g)
 {
     const char *lang = ui_i18n_code(dd_sel(g->lang_dd));
     return strcmp(lang ? lang : "en", g->lang0) || strcmp(k_datefmts[dd_sel(g->datefmt_dd)], g->date0) ||
-           strcmp(k_timefmts[dd_sel(g->timefmt_dd)], g->time0);
+           strcmp(k_timefmts[dd_sel(g->timefmt_dd)], g->time0) ||
+           strcmp(lv_obj_has_state(g->login_sw, LV_STATE_CHECKED) ? "1" : "0", g->login0) ||
+           strcmp(k_idle_values[dd_sel(g->idle_dd)], g->idle0);
 }
 
 static int zone_dirty(gen_t *g)
@@ -515,6 +532,9 @@ static int gen_save(void *st)
             if (!strcmp(k, "language")) snprintf(vals[f], sizeof vals[f], "%s", ui_i18n_code(dd_sel(g->lang_dd)));
             else if (!strcmp(k, "date_format")) snprintf(vals[f], sizeof vals[f], "%s", k_datefmts[dd_sel(g->datefmt_dd)]);
             else if (!strcmp(k, "time_format")) snprintf(vals[f], sizeof vals[f], "%s", k_timefmts[dd_sel(g->timefmt_dd)]);
+            else if (!strcmp(k, "login"))
+                snprintf(vals[f], sizeof vals[f], "%s", lv_obj_has_state(g->login_sw, LV_STATE_CHECKED) ? "1" : "0");
+            else if (!strcmp(k, "idle_logout")) snprintf(vals[f], sizeof vals[f], "%s", k_idle_values[dd_sel(g->idle_dd)]);
             v[f] = vals[f];
         }
         ui_errors_t errs;

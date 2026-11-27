@@ -51,12 +51,9 @@ static const card_t k_cards[] = {
       FN_DISPLAY },
 };
 
-static void open_fn(int fn, const char *later)
+static void open_now(void *arg)
 {
-    if (later) {
-        ui_not_yet(later);
-        return;
-    }
+    int fn = (int)(intptr_t)arg;
     if (fn == FN_CAMERA) {
         ui_channels_open();
     } else if (fn == FN_NETWORK) {
@@ -72,6 +69,27 @@ static void open_fn(int fn, const char *later)
     } else if (fn == FN_DISPLAY) {
         ui_display_open();
     }
+}
+
+/* What each needs with the on-screen login on (users.h's permissions). */
+static unsigned perm_of(int fn)
+{
+    switch (fn) {
+    case FN_CAMERA:  return UI_PERM_CAMERAS;
+    case FN_NETWORK: return UI_PERM_NETWORK;
+    case FN_STORAGE: return UI_PERM_STORAGE;
+    case FN_ACCOUNT: return UI_PERM_USERS;
+    default:         return UI_PERM_SYSTEM;     /* System, Operation, Display */
+    }
+}
+
+static void open_fn(int fn, const char *later)
+{
+    if (later) {
+        ui_not_yet(later);
+        return;
+    }
+    ui_with_perm(perm_of(fn), open_now, (void *)(intptr_t)fn);
 }
 
 static void card_cb(lv_event_t *e)
@@ -206,8 +224,19 @@ static void top_bar(ui_page_t *p)
     ui_icon(bar, &ui_icon_account, VG_COLOR_TEXT2);
 }
 
+static void menu_now(void *u)
+{
+    (void)u;
+    ui_menu_open();
+}
+
 void ui_menu_open(void)
 {
+    /* With the on-screen login on, the menu is for someone logged in. */
+    if (!ui_allowed(0)) {
+        ui_with_perm(0, menu_now, NULL);
+        return;
+    }
     ui_page_t *p = ui_page_push_plain();
     if (!p) return;
     lv_obj_set_style_bg_color(p->body, UI_C(MENU_TOP), 0);
