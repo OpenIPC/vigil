@@ -80,6 +80,12 @@ static secret_rc_t read_key(const char *path)
     ssize_t n = read(fd, text, sizeof text);
     struct stat st;
     int mode_ok = fstat(fd, &st) == 0 && !(st.st_mode & 077);
+    /* Ours but readable by others (a restore, a copy with cp): made 0600
+     * again rather than refused, which would lose every password. */
+    if (!mode_ok && st.st_uid == geteuid() && fchmod(fd, 0600) == 0) {
+        vg_log("%s: was readable by others than its owner; made 0600", path);
+        mode_ok = 1;
+    }
     close(fd);
     secret_rc_t rc = SECRET_EBADKEY;
     if (n >= 2 * SECRET_KEY_LEN && (n == 2 * SECRET_KEY_LEN || text[2 * SECRET_KEY_LEN] == '\n') &&

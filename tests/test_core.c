@@ -3563,6 +3563,10 @@ static void test_secret_cipher(const char *keydir)
     free(k);
     CHECK(strlen(buf) + 1 == SECRET_SEALED_SIZE(9), "SECRET_SEALED_SIZE is exact for 9 bytes (%zu)", strlen(buf));
     CHECK(secret_open("t:a", buf, out, sizeof out) == SECRET_OK && !strcmp(out, "pass word"), "round trip");
+    chmod(key, 0644);
+    secret_set_key_path(key);
+    CHECK(secret_open("t:a", buf, out, sizeof out) == SECRET_OK && stat(key, &st) == 0 &&
+              (st.st_mode & 0777) == 0600, "a key readable by others is read, and made 0600 again");
     char again[256];
     secret_seal("t:a", "pass word", again, sizeof again);
     CHECK(strcmp(again, buf) != 0, "a fresh nonce each time");

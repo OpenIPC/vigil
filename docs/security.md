@@ -21,7 +21,9 @@ in vigil's files: they are written where the firmware keeps them
 
 `vigil.key` is 32 random bytes from `/dev/urandom`, written the first time
 vigild starts (or seals a password before that: `vigild -w`),
-mode 0600, never replaced. A key file that is there but unusable (not 64
+mode 0600, never replaced. One found readable by others (copied back
+with `cp`, restored from an archive) is made 0600 again when vigild owns
+it, and logged otherwise. A key file that is there but unusable (not 64
 hex digits) is left alone and logged; nothing new can be sealed until it is
 fixed or removed.
 
