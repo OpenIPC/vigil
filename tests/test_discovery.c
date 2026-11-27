@@ -428,6 +428,80 @@ static void test_devices(void)
     disc_set_prefer("netip,onvif,dhip");
 }
 
+/* ---- the table, filled as answers come ------------------------------------------------- */
+
+static int find_ip(const disc_device_t *t, int n, const char *ip)
+{
+    for (int i = 0; i < n; ++i)
+        if (!strcmp(t[i].ip, ip)) return i;
+    return -1;
+}
+
+/* Answers one by one, as a scan hears them: each new device at the end,
+ * the same device over another protocol merged into its entry (which stays
+ * where it is), an answer saying nothing new not counted as a change. */
+static void test_table(void)
+{
+    disc_device_t t[4];
+    int n = 0;
+    disc_device_t xm = { .ip = "10.0.0.5", .mac = "aa:bb:cc:dd:ee:01", .protos = DISC_NETIP, .netip_port = 34567,
+                         .vendor = "Xiongmai", .seen = 1, .dhcp = -1, .scan = 3 };
+    disc_device_t dh = { .ip = "10.0.0.7", .mac = "aa:bb:cc:dd:ee:02", .protos = DISC_DHIP, .vendor = "Dahua",
+                         .seen = 1, .dhcp = -1, .scan = 3 };
+    disc_device_t ov = { .ip = "10.0.0.5", .protos = DISC_ONVIF, .http_port = 8899, .vendor = "Acme",
+                         .xaddr = "http://10.0.0.5:8899/onvif/device_service", .seen = 2, .dhcp = -1, .scan = 3 };
+    CHECK(disc_table_add(t, &n, 4, &xm) == 1 && n == 1, "first answer: a device");
+    CHECK(disc_table_add(t, &n, 4, &dh) == 1 && n == 2 && !strcmp(t[1].ip, "10.0.0.7"), "second: at the end");
+    CHECK(disc_table_add(t, &n, 4, &ov) == 1 && n == 2 && t[0].protos == (DISC_NETIP | DISC_ONVIF) &&
+          !strcmp(t[0].vendor, "Acme") && t[0].http_port == 8899 && !strcmp(t[0].mac, "aa:bb:cc:dd:ee:01"),
+          "the same camera over ONVIF: one entry, in its place, protocols %u", t[0].protos);
+    xm.seen = 9;
+    CHECK(disc_table_add(t, &n, 4, &xm) == 0 && n == 2 && t[0].seen == 9, "heard again, nothing new: no change");
+    xm.scan = 4;
+    CHECK(disc_table_add(t, &n, 4, &xm) == 1 && t[0].scan == 4, "heard by the next scan: a change");
+    disc_device_t ov0 = ov;
+    ov0.scan = 0;                                   /* an address change's re-probe */
+    CHECK(disc_table_add(t, &n, 4, &ov0) == 0 && t[0].scan == 4, "not a scan's answer: the scan it was heard by stays");
+
+    /* ONVIF first (no MAC: keyed by address), then NETIP with the MAC. */
+    n = 0;
+    disc_device_t a = { .ip = "10.0.0.9", .protos = DISC_ONVIF, .seen = 1, .dhcp = -1 };
+    disc_device_t b = { .ip = "10.0.0.8", .mac = "aa:bb:cc:dd:ee:08", .protos = DISC_NETIP, .seen = 1, .dhcp = -1 };
+    disc_device_t c = { .ip = "10.0.0.9", .mac = "aa:bb:cc:dd:ee:09", .protos = DISC_NETIP, .seen = 2, .dhcp = -1 };
+    disc_table_add(t, &n, 4, &a);
+    disc_table_add(t, &n, 4, &b);
+    CHECK(disc_table_add(t, &n, 4, &c) == 1 && n == 2 && find_ip(t, n, "10.0.0.9") == 0 &&
+          !strcmp(t[0].mac, "aa:bb:cc:dd:ee:09") && t[0].protos == (DISC_NETIP | DISC_ONVIF),
+          "the MAC learned later: still one entry, still first");
+
+    /* A device moved to an address an old MAC-less entry still has: that
+     * entry is folded in and taken out, the rest keeping their order. */
+    n = 0;
+    disc_device_t m1 = { .ip = "10.0.0.20", .mac = "aa:bb:cc:dd:ee:20", .protos = DISC_NETIP, .seen = 1, .dhcp = -1 };
+    disc_device_t old = { .ip = "10.0.0.30", .protos = DISC_ONVIF, .seen = 1, .dhcp = -1 };
+    disc_device_t m3 = { .ip = "10.0.0.40", .mac = "aa:bb:cc:dd:ee:40", .protos = DISC_DHIP, .seen = 1, .dhcp = -1 };
+    disc_device_t moved = { .ip = "10.0.0.30", .mac = "aa:bb:cc:dd:ee:20", .protos = DISC_NETIP, .seen = 5, .dhcp = -1 };
+    disc_table_add(t, &n, 4, &m1);
+    disc_table_add(t, &n, 4, &old);
+    disc_table_add(t, &n, 4, &m3);
+    CHECK(disc_table_add(t, &n, 4, &moved) == 1 && n == 2 && !strcmp(t[0].ip, "10.0.0.30") &&
+          t[0].protos == (DISC_NETIP | DISC_ONVIF) && !strcmp(t[1].ip, "10.0.0.40"), "moved: %d entries", n);
+
+    /* Full: the one heard least recently goes, the order otherwise kept. */
+    n = 0;
+    for (int i = 0; i < 4; ++i) {
+        disc_device_t d = { .protos = DISC_NETIP, .seen = 10 + i, .dhcp = -1 };
+        snprintf(d.ip, sizeof d.ip, "10.0.1.%d", i);
+        if (i == 2) d.seen = 1;
+        disc_table_add(t, &n, 4, &d);
+    }
+    disc_device_t e = { .ip = "10.0.1.9", .protos = DISC_NETIP, .seen = 20, .dhcp = -1 };
+    CHECK(disc_table_add(t, &n, 4, &e) == 1 && n == 4 && find_ip(t, n, "10.0.1.2") < 0 &&
+          !strcmp(t[2].ip, "10.0.1.3") && !strcmp(t[3].ip, "10.0.1.9"), "full: the oldest out, the rest in order");
+    int none = 0;
+    CHECK(disc_table_add(t, &none, 0, &e) == 0 && none == 0, "no room at all: nothing");
+}
+
 /* ---- credentials ------------------------------------------------------------------------ */
 
 static void test_creds(void)
@@ -512,6 +586,7 @@ int main(int argc, char **argv)
     test_onvif();
     test_dhip();
     test_devices();
+    test_table();
     test_creds();
     test_manual();
     printf("%d checks, %d failed\n", g_checks, g_fail);

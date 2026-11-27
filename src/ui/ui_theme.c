@@ -139,6 +139,18 @@ void ui_plain(lv_obj_t *o)
     lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
 }
 
+void ui_scrollbar(lv_obj_t *o)
+{
+    lv_obj_set_scrollbar_mode(o, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_width(o, 6, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(o, 3, LV_PART_SCROLLBAR);
+    lv_obj_set_style_pad_right(o, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_pad_ver(o, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(o, UI_C(TEXT2), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(o, LV_OPA_60, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(o, LV_OPA_COVER, LV_PART_SCROLLBAR | LV_STATE_SCROLLED);
+}
+
 lv_obj_t *ui_btn(lv_obj_t *parent, const char *symbol, const char *text)
 {
     lv_obj_t *b = lv_button_create(parent);

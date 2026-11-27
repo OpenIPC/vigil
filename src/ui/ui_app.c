@@ -120,6 +120,23 @@ void ui_inert(lv_obj_t *o)
     lv_obj_remove_flag(o, LV_OBJ_FLAG_CLICK_FOCUSABLE);
 }
 
+#define WHEEL_PX 72                 /* a notch: two table rows */
+
+void ui_app_wheel(int steps)
+{
+    lv_point_t p;
+    if (!steps || !ui_pointer(&p)) return;
+    /* A popup on the top layer covers the screen: only it scrolls. */
+    lv_obj_t *o = lv_indev_search_obj(lv_layer_top(), &p);
+    if (!o || o == lv_layer_top()) o = lv_indev_search_obj(lv_screen_active(), &p);
+    for (; o; o = lv_obj_get_parent(o)) {
+        if (!lv_obj_has_flag(o, LV_OBJ_FLAG_SCROLLABLE) || !(lv_obj_get_scroll_dir(o) & LV_DIR_VER)) continue;
+        if ((steps > 0 ? lv_obj_get_scroll_top(o) : lv_obj_get_scroll_bottom(o)) <= 0) continue;
+        lv_obj_scroll_by_bounded(o, 0, steps * WHEEL_PX, LV_ANIM_OFF);
+        return;
+    }
+}
+
 int ui_pointer(lv_point_t *p)
 {
     if (!g_pointer) return 0;

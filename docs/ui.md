@@ -70,9 +70,12 @@ recorded):
 
 The **"+"** of an empty slot, a 36-pixel disc with "Add camera" under it
 while it is hovered or its tile has the keyboard (a click, or Enter on its
-tile) opens the
-camera form for that channel ("Cameras 7: new"); saving puts the camera at
-that position, the slots before it staying empty. There is a tile for
+tile) opens the Channels page, as the context menu's Channels does (and
+with the same `cameras` permission), with that channel marked and scrolled
+into view: a device found goes straight there (Add, or "Add checked" on
+its row), Manual add offers it first, and its row's Add opens the camera
+form for it ("Cameras 7: new"); saving puts the camera at that position,
+the slots before it staying empty. There is a tile for
 every channel the platform shows (`hal_caps()->max_channels`), paged by
 the layout. A tile flashes when its camera has an event.
 
@@ -171,7 +174,9 @@ little lighter (`card`, `card_hover`).
 **Pages.** Every other page has a header with Back, its title, its
 actions (Save, Cancel, Add) and the clock. Back is the header button, the
 **right mouse button** or **Esc**, which go back one level (closing the
-on-screen keyboard or a question first).
+on-screen keyboard or a question first). The **mouse wheel** scrolls the
+list or page under the pointer (`ui_app_wheel`; LVGL's pointer has no
+wheel), two table rows a notch; lists that can scroll show a scroll bar.
 
 ### Settings screens
 
@@ -453,10 +458,23 @@ The page CAMERA and the context menu's **Channels** open
 (`ui_channels.c`) has two panes, as an NVR's camera page does.
 
 **Search** (top): the protocol (all, NETIP, ONVIF, DHIP), **Search**
-(its progress beside it), and a table of the devices found: a check box,
-address, port, MAC, vendor and model, the protocols that answered, and
-"New" or "On channel N" (the channel whose camera URL points at that
-address). A device row's **Add to...** opens a small menu of the empty
+(its progress and how many have answered beside it), and a table of the
+devices found: a check box, address, port, MAC, vendor and model, the
+protocols that answered, and "New" or "On channel N" (the channel whose
+camera URL points at that address). Devices show **as they answer**: the
+page polls the model's generation (`disc_gen`, moved by the core with each
+answer that tells something new) and reads the devices only when it moved.
+A row keeps its place while the list fills: a device already listed stays
+where it is (a camera answering NETIP and later ONVIF is one row whose
+protocols grow), a new one goes to the end, and rows are updated in place,
+so the row under the pointer or the keyboard's focus does not move. A new
+search starts from the list sorted by address; devices an earlier search
+found are dimmed, "No answer", until they answer this one. While it runs,
+Search is **Stop** (the search ends, keeping what it found), and the list
+stays usable: Add, Add to..., Replace, and the Change IP, Mass change,
+Auto add and Manual add pages stop it first (discovery runs one job at a
+time). The two panes share the page 3:2, each table scrolling inside
+(wheel, drag, or the keyboard's focus). A device row's **Add to...** opens a small menu of the empty
 channels. The buttons act on the checked devices: **Add** puts each on
 the next empty channel, **Change IP...** (one device) and **Mass
 change...** (the checked ones, or all) open a page with the address, mask,
@@ -478,7 +496,8 @@ address or host name, the port (34567, 80, 554, 554 by protocol; it follows
 a change of protocol until edited), user and password, the device's channel
 (an NVR's or DVR's; not for plain RTSP), and for Generic RTSP the main and
 optional sub-stream, each a path or a whole URL. The target channel is a
-drop-down of every channel with the first empty one chosen; an occupied one
+drop-down of every channel with the first empty one chosen (or the channel
+the page was opened for); an occupied one
 is asked about before it is replaced. **Test** connects as a channel would
 and says "OK: H.264 1920x1080", or why not in the tiles' words
 (Authentication error, Offline, Unsupported codec, No video, Not an ONVIF
@@ -493,7 +512,10 @@ camera form), **Clear** (asks, then empties the slot), **Add** on an
 empty one (the camera form, or with one device checked, that device), and
 with one device checked, **Replace** on the others.
 
+![A search running: the first two devices](../tests/ui/channels_searching.png)
 ![Search results, one device checked](../tests/ui/channels_results.png)
+![34 devices, scrolled to the end](../tests/ui/channels_scroll_bottom.png)
+![Opened from channel 4's "+"](../tests/ui/tile_add_channels.png)
 ![Mass change preview](../tests/ui/channels_mass_preview.png)
 
 ### The on-screen keyboard

@@ -10,7 +10,10 @@ scanner's code for them is the same past the send), changes addresses
 over each protocol (NETIP broadcast set, NETIP over TCP, ONVIF, Dahua
 RPC2) with wrong and right passwords, previews a mass change, adds one
 device to a channel and the rest with auto-add, and checks that no
-password shows in an answer or the log.
+password shows in an answer or the log. Slow devices (answering 0.2 s to
+2.5 s late) show in GET /api/v1/discovery while the scan runs, one camera
+answering two protocols as one entry whose protocols grow; a scan can be
+stopped.
 """
 import json
 import os
@@ -100,6 +103,18 @@ def main():
                          ["--no-udp-set", "--device", "netip@127.0.0.13/02:00:00:00:00:13"],
                          stdout=open(os.path.join(tmp, "fake2.log"), "w"), stderr=subprocess.STDOUT),
     ]
+    # Slow devices on ports of their own: .21 answers NETIP at once-ish and
+    # ONVIF later, .22 after a second, .23 near the end of a 4 s scan.
+    udp3 = [free_port(socket.SOCK_DGRAM) for _ in range(3)]
+    tcp3 = [free_port() for _ in range(3)]
+    fakes.append(subprocess.Popen(
+        [sys.executable, os.path.join(HERE, "fake_discovery.py"), "--ports", ",".join(map(str, udp3)),
+         "--tcp-ports", ",".join(map(str, tcp3)),
+         "--device", "netip,onvif@127.0.0.21/02:00:00:00:00:21", "--device", "dhip@127.0.0.22/02:00:00:00:00:22",
+         "--device", "onvif@127.0.0.23/02:00:00:00:00:23",
+         "--delay", "netip@127.0.0.21=0.2", "--delay", "onvif@127.0.0.21=1.6", "--delay", "127.0.0.22=1.0",
+         "--delay", "127.0.0.23=2.5"],
+        stdout=open(os.path.join(tmp, "fake3.log"), "w"), stderr=subprocess.STDOUT))
     netip_port = free_port()
     if clip:
         fakes.append(subprocess.Popen([sys.executable, os.path.join(HERE, "netip_server.py"), clip,
@@ -291,6 +306,46 @@ def main():
         st, cams, raw = api.call("GET", "/api/v1/config/cameras")
         check(len(cams) == 7 and cams[5]["url"].startswith("rtsp://admin:***@10.0.0.7") and cams[5]["name"] == "Hand"
               and cams[6]["url"].endswith("/main?a=1&b=2"), "the configuration: %s" % cams[5:])
+
+        # Results while the scan runs: polled, they grow device by device.
+        slow = {"targets": ["127.0.0.21", "127.0.0.22", "127.0.0.23"], "broadcast": False, "seconds": 4,
+                "ports": {"netip": udp3[0], "onvif": udp3[1], "dhip": udp3[2]}}
+        st, doc, raw = api.call("POST", "/api/v1/discovery/scan", slow)
+        check(st == 202 and doc["running"] and doc.get("found") == 0, "slow scan started: %s" % doc)
+        seen, t0 = [], time.time()
+        while time.time() - t0 < 8:
+            st, doc, raw = api.call("GET", "/api/v1/discovery")
+            mine = {d["mac"]: d["protocols"] for d in doc["devices"] if d["answered"]}
+            seen.append((round(time.time() - t0, 2), doc["running"], doc["job"]["found"], doc["generation"],
+                         doc["count"], mine))
+            if not doc["running"]:
+                break
+            time.sleep(0.1)
+        for s_ in seen:
+            print("     %5.2f s running=%s found=%d gen=%d count=%d %s" % s_)
+        partial = [s_ for s_ in seen if s_[1] and 0 < s_[2] < 3]
+        check(partial and all(len(s_[5]) == s_[2] for s_ in seen), "partial results while running, found = answered")
+        check([s_[2] for s_ in seen] == sorted(s_[2] for s_ in seen) and seen[-1][2] == 3 and not seen[-1][1],
+              "found grows to 3, then the scan ends: %s" % [s_[2] for s_ in seen])
+        p21 = [s_[5].get("02:00:00:00:00:21") for s_ in seen if "02:00:00:00:00:21" in s_[5]]
+        check(p21 and p21[0] == ["netip"] and p21[-1] == ["netip", "onvif"],
+              "one camera, two protocols: one entry whose protocols grow: %s" % p21)
+        gens = [s_[3] for s_ in seen]
+        check(gens == sorted(gens) and gens[-1] > gens[0], "the generation moves with them: %s" % gens)
+        first = [s_[0] for s_ in seen if "02:00:00:00:00:23" in s_[5]]
+        check(first and first[0] > 2.0 and seen[-1][0] > first[0], "the slowest shows up late (%s s)" % first[:1])
+        check(seen[-1][4] == len(by_mac(doc["devices"])) == 7, "count: %d" % seen[-1][4])
+
+        # Stop: the scan ends now, keeping what it heard.
+        st, doc, raw = api.call("POST", "/api/v1/discovery/scan", dict(slow, seconds=10))
+        time.sleep(0.6)
+        st, doc, raw = api.call("POST", "/api/v1/discovery/stop")
+        check(st == 200 and not doc["running"] and doc["message"].endswith("stopped") and doc["found"] == 1,
+              "stopped after 0.6 s: %d %s" % (st, doc))
+        st, doc, raw = api.call("POST", "/api/v1/discovery/stop")
+        check(st == 409, "nothing to stop: 409 (%d)" % st)
+        st, doc, raw = api.call("GET", "/api/v1/discovery/stop")
+        check(st == 405, "GET stop: 405 (%d)" % st)
 
         # Refused credentials are counted: 10 a minute, then 429.
         codes = []

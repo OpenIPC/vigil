@@ -7,8 +7,9 @@
  * (letter keys and Enter) one LVGL keypad: plugging in a second mouse or
  * keyboard just works, and a device plugged in later is found by a rescan
  * every 2 s (no udev on these boards). The left button (or a touch)
- * clicks; the right button calls hooks.right, which LVGL's own evdev
- * driver cannot do: it reports only BTN_MOUSE/BTN_TOUCH, and no keys. The
+ * clicks; the right button calls hooks.right and the wheel hooks.wheel,
+ * which LVGL's own evdev driver cannot do: it reports only
+ * BTN_MOUSE/BTN_TOUCH, and no keys. The
  * pointer is drawn by LVGL (ui_cursor.c), shown while a pointer is there.
  *
  * Keys are translated here, with a US layout: Shift, Caps Lock (letters
@@ -83,6 +84,8 @@ static struct {
     press_t       queue[QUEUE_MAX]; /* button changes not yet given to LVGL */
     int           q_head, q_len;
     int           right;            /* right presses not yet handled */
+    int           wheel;            /* wheel notches not yet handled */
+    int           wheel_queued;
     key_t_        keys[KEYS_MAX];   /* key presses not yet given to LVGL */
     int           k_head, k_len;
     uint32_t      k_last;           /* the key LVGL saw last */
@@ -310,6 +313,7 @@ static int dev_drain(dev_t_ *d)
             if (e->type == EV_REL && d->ptr) {
                 if (e->code == REL_X) g.x = clamp(g.x + e->value, 0, g.w - 1);
                 else if (e->code == REL_Y) g.y = clamp(g.y + e->value, 0, g.h - 1);
+                else if (e->code == REL_WHEEL) g.wheel = clamp(g.wheel + e->value, -100, 100);
             } else if (e->type == EV_ABS && d->ptr) {
                 if (e->code == ABS_X) g.x = scale(e->value, d->min_x, d->max_x, g.w);
                 else if (e->code == ABS_Y) g.y = scale(e->value, d->min_y, d->max_y, g.h);
@@ -339,12 +343,24 @@ static void right_cb(void *arg)
     if (g.hooks.right) g.hooks.right();
 }
 
+static void wheel_cb(void *arg)
+{
+    (void)arg;
+    int steps = g.wheel;
+    g.wheel = g.wheel_queued = 0;
+    if (steps && g.hooks.wheel) g.hooks.wheel(steps);
+}
+
 static void read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     (void)indev;
     poll_devices();
     /* Not from inside LVGL's input processing: back may change screens. */
     for (; g.right; --g.right) lv_async_call(right_cb, NULL);
+    if (g.wheel && !g.wheel_queued) {
+        g.wheel_queued = 1;                     /* the notches since, in one call */
+        lv_async_call(wheel_cb, NULL);
+    }
     if (g.q_len) {
         press_t p = g.queue[g.q_head];
         g.q_head = (g.q_head + 1) % QUEUE_MAX;

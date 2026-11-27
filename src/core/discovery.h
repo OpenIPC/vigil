@@ -14,9 +14,11 @@
  * (all that are up, not loopback, by default), to 255.255.255.255 out of
  * each of them, to the multicast groups (ONVIF, DHIP), and to any unicast
  * targets (hosts on routed subnets, or test responders), then listens for
- * the rest of its time. Answers are merged by MAC (else by address) into
- * the device table; an entry not heard from for DISC_TTL seconds is
- * dropped.
+ * the rest of its time. Each answer is merged by MAC (else by address)
+ * into the device table the moment it is parsed (disc_table_add), so the
+ * table can be shown while the scan runs: disc_generation() moves with
+ * every change, and a reader takes a new disc_devices() snapshot only
+ * then. An entry not heard from for DISC_TTL seconds is dropped.
  *
  * Credentials come with each request, are used for that job and wiped
  * after it; they are stored only as part of a camera URL when a device is
@@ -68,6 +70,7 @@ typedef struct {
     int             running;
     int             dry_run;
     int             progress;       /* 0..100 */
+    int             found;          /* SCAN: devices that answered it so far */
     char            msg[96];        /* what it does now, or how it ended */
     int             n;
     disc_result_t   r[DISC_JOB_MAX];
@@ -97,6 +100,15 @@ int disc_device_channel(const disc_device_t *d);
 /* Forget every device. */
 void disc_clear(void);
 
+/* Moves whenever the table changes (a device heard for the first time or
+ * telling something new, merged, dropped, a scan starting); a poller
+ * takes a snapshot only when it moved. */
+unsigned disc_generation(void);
+
+/* The id of the last scan job (0: none yet); devices whose `scan` is not
+ * this one have not answered it (yet). */
+unsigned disc_last_scan(void);
+
 /* Snapshot of the current (or last) job. */
 void disc_job_get(disc_job_t *out);
 
@@ -104,6 +116,11 @@ void disc_job_get(disc_job_t *out);
  * disc_auth_wait) ------------------------------------------------------------ */
 
 int disc_scan(const disc_scan_opts_t *o);
+
+/* End a running scan now, keeping what it heard. Its id, or -1 if no scan
+ * runs (another job is not stopped: an address change half done is
+ * worse than one not started). */
+int disc_scan_stop(void);
 
 /* Change the addresses of `n` devices. Items without an ip get the next
  * free one from `start` (skipping addresses that answer ARP or ping, our

@@ -47,6 +47,11 @@ void ui_app_set_keypad(lv_indev_t *indev);
  * opening on text fields. */
 uint32_t ui_app_key(uint32_t key, unsigned mods);
 
+/* The mouse wheel, `steps` notches (> 0: up): what is under the pointer
+ * scrolls (the nearest list or page that can go that way), not what has
+ * the focus. */
+void ui_app_wheel(int steps);
+
 /* `n` keyboards are plugged in; with none, the UI is for the mouse again
  * (no focus shown, the on-screen keyboard back). */
 void ui_app_keyboards(int n);
@@ -241,5 +246,8 @@ const char *ui_chan_status_word(const ui_chan_t *st);
 /* Channels: the cameras found on the network and the channels, in two
  * panes (ui_channels.c); what "Channels" and CAMERA open. */
 void ui_channels_open(void);
+/* ... opened for channel `ch` (0-based; an empty tile's "+"): its row
+ * marked and in view, Add and Manual add putting a camera there. */
+void ui_channels_open_at(int ch);
 
 #endif /* UI_APP_H */

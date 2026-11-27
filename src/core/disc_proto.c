@@ -595,6 +595,53 @@ void disc_merge(disc_device_t *d, const disc_device_t *in)
         copy(d->vendor, sizeof d->vendor, in->vendor);
     d->protos |= in->protos;
     if (in->seen > d->seen) d->seen = in->seen;
+    if (in->scan > d->scan) d->scan = in->scan;      /* scan ids only grow */
+}
+
+/* Equal but for the time last heard (field by field: padding is not
+ * copied reliably). */
+static int same_news(const disc_device_t *a, const disc_device_t *b)
+{
+#define S(f) (strcmp(a->f, b->f) == 0)
+#define N(f) (a->f == b->f)
+    return S(mac) && S(ip) && S(mask) && S(gateway) && N(dhcp) && N(protos) && N(netip_port) && N(http_port) &&
+           N(rtsp_port) && N(dh_port) && N(channels) && S(vendor) && S(model) && S(name) && S(serial) &&
+           S(version) && S(xaddr) && S(uuid) && S(iface) && N(scan);
+#undef S
+#undef N
+}
+
+int disc_table_add(disc_device_t *tab, int *n, int max, const disc_device_t *in)
+{
+    int i;
+    for (i = 0; i < *n; ++i)
+        if (disc_same(&tab[i], in)) break;
+    if (i == *n) {
+        if (max < 1) return 0;
+        if (*n >= max) {                        /* full: the one heard least recently goes */
+            int old = 0;
+            for (int j = 1; j < *n; ++j)
+                if (tab[j].seen < tab[old].seen) old = j;
+            memmove(&tab[old], &tab[old + 1], (size_t)(*n - old - 1) * sizeof *tab);
+            --*n;
+        }
+        tab[(*n)++] = *in;
+        return 1;
+    }
+    disc_device_t before = tab[i];
+    disc_merge(&tab[i], in);
+    int changed = !same_news(&before, &tab[i]);
+    /* The address changed hands: another entry still claiming it without
+     * a MAC is the same device, heard before its MAC was. */
+    for (int j = 0; j < *n; ++j)
+        if (j != i && !tab[j].mac[0] && !strcmp(tab[j].ip, tab[i].ip)) {
+            disc_merge(&tab[i], &tab[j]);
+            memmove(&tab[j], &tab[j + 1], (size_t)(*n - j - 1) * sizeof *tab);
+            --*n;
+            changed = 1;
+            break;
+        }
+    return changed;
 }
 
 int disc_cred_ok(const char *s, int is_user)

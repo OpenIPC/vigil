@@ -81,6 +81,7 @@ typedef struct {
     char     uuid[64];              /* WS-Discovery endpoint reference */
     char     iface[16];             /* where it was heard */
     time_t   seen;                  /* monotonic seconds */
+    unsigned scan;                  /* the scan job that heard it last; 0 none */
 } disc_device_t;
 
 /* "netip", "onvif", "dhip". */
@@ -153,6 +154,15 @@ int disc_same(const disc_device_t *a, const disc_device_t *b);
 /* Fold what `in` says into `d` (same device): fields `d` lacks, the
  * protocols, the newest address and time. */
 void disc_merge(disc_device_t *d, const disc_device_t *in);
+
+/* One answer into a table of `*n` devices (at most `max`): merged into
+ * the entry of the same device, else appended at the end (the entry heard
+ * least recently goes when the table is full). An entry without a MAC
+ * that turns out to be the device just heard (its address) is folded in
+ * and removed, the others keeping their order. 1 if the table changed in
+ * anything but the time last heard, else 0: a caller can show a device
+ * as its answers arrive and redraw only when there is news. */
+int disc_table_add(disc_device_t *tab, int *n, int max, const disc_device_t *in);
 
 /* Text that can go into a camera URL as user or password: no ':' (user),
  * '@', '/', '?', '#', white space, control characters, quotes or '\'. */

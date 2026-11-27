@@ -432,6 +432,10 @@ static int disc_devices_ui(ui_disc_dev_t *out, int max)
 {
     disc_device_t *d = malloc(DISC_MAX * sizeof *d);
     if (!d) return 0;
+    /* The settings' snapshot for every device's "on channel N", not a copy
+     * per device: the screen asks again each time a scan hears news. */
+    const vigil_config_t *c = cfg();
+    unsigned last = disc_last_scan();
     int n = disc_devices(d, DISC_MAX);
     if (n > max) n = max;
     for (int i = 0; i < n; ++i) {
@@ -447,11 +451,20 @@ static int disc_devices_ui(ui_disc_dev_t *out, int max)
         snprintf(u->name, sizeof u->name, "%s", d[i].name);
         u->protos = d[i].protos;
         u->port = d[i].protos & DISC_NETIP ? d[i].netip_port : d[i].http_port;
-        u->channel = disc_device_channel(&d[i]);
+        for (int k = 0; k < c->n_cameras && d[i].ip[0] && !u->channel; ++k) {
+            char host[128];
+            disc_url_host(c->cameras[k].url, host, sizeof host);
+            if (!strcmp(host, d[i].ip)) u->channel = k + 1;
+        }
+        u->stale = last && d[i].scan != last;
     }
     free(d);
     return n;
 }
+
+static unsigned disc_gen_ui(void) { return disc_generation(); }
+
+static int disc_stop_ui(void) { return disc_scan_stop(); }
 
 static void disc_job_ui(ui_disc_job_t *out)
 {
@@ -464,6 +477,7 @@ static void disc_job_ui(ui_disc_job_t *out)
     out->running = j->running;
     out->dry_run = j->dry_run;
     out->progress = j->progress;
+    out->found = j->found;
     snprintf(out->msg, sizeof out->msg, "%s", j->msg);
     out->n = j->n;
     for (int i = 0; i < j->n; ++i) {
@@ -601,6 +615,8 @@ int ui_bridge_init(ui_model_t *m)
     m->out_set = out_set;
     m->disc_scan = disc_scan_ui;
     m->disc_devices = disc_devices_ui;
+    m->disc_gen = disc_gen_ui;
+    m->disc_stop = disc_stop_ui;
     m->disc_job = disc_job_ui;
     m->disc_ip = disc_ip_ui;
     m->disc_assign = disc_assign_ui;

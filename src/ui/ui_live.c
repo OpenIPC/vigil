@@ -291,12 +291,10 @@ static void toggle_full_screen(int ch)
 /* After the click's event: the new layout deletes the tile clicked. */
 static void full_screen_async(void *ch) { toggle_full_screen((int)(intptr_t)ch); }
 
-/* Channels -> a new camera on channel `ch` (after the click's event). */
-static void add_now(void *ch)
-{
-    int sec = section_of("cameras");
-    if (sec >= 0) ui_form_open_slot(sec, (int)(intptr_t)ch);
-}
+/* An empty tile's "+": Channels, as the context menu opens it, with this
+ * channel marked, so a camera found can go straight there (after the
+ * click's event). */
+static void add_now(void *ch) { ui_channels_open_at((int)(intptr_t)ch); }
 
 static void add_async(void *ch) { ui_with_perm(UI_PERM_CAMERAS, add_now, ch); }
 

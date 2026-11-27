@@ -2,7 +2,9 @@
 /* api_disc.c — the discovery endpoints (docs/api.md, "Discovery"):
  *
  *   POST /api/v1/discovery/scan        start a scan
- *   GET  /api/v1/discovery             the devices found, and the job
+ *   POST /api/v1/discovery/stop        end a running scan now
+ *   GET  /api/v1/discovery             the devices found (so far, while a
+ *                                      scan runs), and the job
  *   GET  /api/v1/discovery/job         the current or last job
  *   POST /api/v1/discovery/ip          change addresses (dry_run: the plan)
  *   POST /api/v1/discovery/autoadd     every new device into the empty channels
@@ -91,7 +93,7 @@ static cJSON *protos_json(unsigned bits)
     return a;
 }
 
-static cJSON *device_json(const disc_device_t *d, time_t now)
+static cJSON *device_json(const disc_device_t *d, time_t now, unsigned last_scan)
 {
     cJSON *o = cJSON_CreateObject();
     if (!o) return NULL;
@@ -116,6 +118,7 @@ static cJSON *device_json(const disc_device_t *d, time_t now)
     if (d->xaddr[0]) cJSON_AddStringToObject(o, "onvif", d->xaddr);
     cJSON_AddStringToObject(o, "interface", d->iface);
     cJSON_AddNumberToObject(o, "age", (double)(now - d->seen));
+    cJSON_AddBoolToObject(o, "answered", last_scan && d->scan == last_scan);
     int ch = disc_device_channel(d);
     if (ch) cJSON_AddNumberToObject(o, "channel", ch);
     else cJSON_AddNullToObject(o, "channel");
@@ -149,6 +152,7 @@ static cJSON *job_json(const disc_job_t *j)
     cJSON_AddBoolToObject(o, "running", j->running);
     if (j->kind == DISC_JOB_IP) cJSON_AddBoolToObject(o, "dry_run", j->dry_run);
     cJSON_AddNumberToObject(o, "progress", j->progress);
+    if (j->kind == DISC_JOB_SCAN) cJSON_AddNumberToObject(o, "found", j->found);
     cJSON_AddStringToObject(o, "message", j->msg);
     cJSON *rs = cJSON_AddArrayToObject(o, "results");
     for (int i = 0; i < j->n && rs; ++i) {
@@ -466,11 +470,17 @@ static int list_devices(struct mg_connection *conn)
         cJSON_Delete(doc);
         return send_error(conn, 500, "out of memory", NULL);
     }
+    /* The generation first: a client that sees it move polls again and
+     * misses nothing that changed while this answer was made. */
+    unsigned gen = disc_generation(), last = disc_last_scan();
     int n = disc_devices(list, DISC_MAX);
     time_t now = mono();
     cJSON *arr = cJSON_AddArrayToObject(doc, "devices");
-    for (int i = 0; i < n && arr; ++i) cJSON_AddItemToArray(arr, device_json(&list[i], now));
+    for (int i = 0; i < n && arr; ++i) cJSON_AddItemToArray(arr, device_json(&list[i], now, last));
+    cJSON_AddNumberToObject(doc, "count", n);
+    cJSON_AddNumberToObject(doc, "generation", gen);
     disc_job_get(j);
+    cJSON_AddBoolToObject(doc, "running", j->running);
     cJSON_AddItemToObject(doc, "job", job_json(j));
     free(list);
     free(j);
@@ -487,6 +497,12 @@ int api_disc_request(struct mg_connection *conn, const char *uri, const char *m)
             return list_devices(conn);
         }
         return method_not_allowed(conn, "GET, HEAD, DELETE");
+    }
+    if (!strcmp(uri, "/api/v1/discovery/stop")) {
+        if (!post) return method_not_allowed(conn, "POST");
+        int id = disc_scan_stop();
+        if (id < 0) return send_error(conn, 409, "no scan is running", NULL);
+        return answer_job(conn, (unsigned)id, 2000);    /* it ends within its 200 ms poll */
     }
     if (!strcmp(uri, "/api/v1/discovery/job")) {
         if (!get) return method_not_allowed(conn, "GET, HEAD");

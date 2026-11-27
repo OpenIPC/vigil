@@ -146,6 +146,7 @@ typedef struct {
     unsigned protos;                /* UI_DISC_* that answered */
     int      port;                  /* of the first protocol it would be added with */
     int      channel;               /* 1-based channel whose camera is this address; 0 none */
+    int      stale;                 /* not heard by the last search (heard by one before) */
 } ui_disc_dev_t;
 
 typedef enum { UI_JOB_NONE, UI_JOB_SCAN, UI_JOB_IP, UI_JOB_ASSIGN, UI_JOB_AUTOADD, UI_JOB_TEST } ui_job_kind_t;
@@ -166,6 +167,7 @@ typedef struct {
     unsigned      id;               /* 0: none yet */
     ui_job_kind_t kind;
     int           running, dry_run, progress;
+    int           found;            /* SCAN: devices that answered it so far */
     char          msg[96];
     int           n;
     ui_disc_res_t r[UI_DISC_MAX];
@@ -493,6 +495,12 @@ typedef struct ui_model {
      * last one. Credentials go to that job only. */
     int  (*disc_scan)(unsigned protos, char *err, size_t cap);
     int  (*disc_devices)(ui_disc_dev_t *out, int max);      /* by address */
+    /* Moves whenever disc_devices would answer something new (a scan
+     * fills the table as devices answer); NULL: ask disc_devices on every
+     * poll while a scan runs. */
+    unsigned (*disc_gen)(void);
+    /* End the running scan now, keeping what it found; -1 if none runs. */
+    int  (*disc_stop)(void);
     void (*disc_job)(ui_disc_job_t *job);
     int  (*disc_ip)(const ui_disc_ip_t *items, int n, const char *start, const char *mask, const char *gw,
                     const char *user, const char *pass, int dry_run, char *err, size_t cap);
