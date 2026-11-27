@@ -518,6 +518,15 @@ static const schema_field_t web_fields[] = {
               "take more than half a CPU core." },
 };
 
+static const schema_field_t netip_server_fields[] = {
+    { .key = "enabled", BOOL(config_netip_server_t, enabled), .def_int = 1, .live = 1, .label = "On",
+      .help = "Xiongmai's own clients (CMS, VMS, XMEye on the LAN) see this recorder as an XM one: "
+              "they find it by its search and play the cameras' live streams, as vigil's users "
+              "with the live permission. Nothing can be changed through it." },
+    { .key = "port", INT(config_netip_server_t, port), .def_int = 34567, .min = 1, .max = 65535,
+      .live = 1, .label = "TCP port", .help = "NETIP's port, 34567 on XM devices." },
+};
+
 static const schema_field_t discovery_fields[] = {
     { .key = "interfaces", STR(config_discovery_t, interfaces), .def_str = "", .live = 1,
       .check = check_ifaces, .label = "Search on interfaces",
@@ -567,6 +576,9 @@ static const schema_section_t sections[] = {
     { .key = "api", .off = offsetof(vigil_config_t, api), .fields = api_fields,
       .n_fields = N(api_fields), .label = "HTTP API" },
     OBJECT("web", web, web_fields, "Zero channel"),
+    { .key = "netip_server", .off = offsetof(vigil_config_t, netip_server), .fields = netip_server_fields,
+      .n_fields = N(netip_server_fields), .label = "NETIP server",
+      .help = "The cameras over Xiongmai's NETIP (DVRIP), for XM's clients (docs/api.md, NETIP server)." },
     { .key = "discovery", .off = offsetof(vigil_config_t, discovery), .fields = discovery_fields,
       .n_fields = N(discovery_fields), .label = "Camera search" },
 };

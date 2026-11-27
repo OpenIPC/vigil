@@ -265,6 +265,17 @@ web:
   # 1..30, default 15.
   fps: 15
 
+# NETIP server: The cameras over Xiongmai's NETIP (DVRIP), for XM's clients
+# (docs/api.md, NETIP server).
+netip_server:
+  # On: Xiongmai's own clients (CMS, VMS, XMEye on the LAN) see this recorder
+  # as an XM one: they find it by its search and play the cameras' live
+  # streams, as vigil's users with the live permission. Nothing can be changed
+  # through it. Default true.
+  enabled: true
+  # TCP port: NETIP's port, 34567 on XM devices. 1..65535, default 34567.
+  port: 34567
+
 # Camera search
 discovery:
   # Search on interfaces: Network interfaces to search for cameras on,

@@ -98,6 +98,16 @@ size_t disc_netip_search(uint8_t *buf, size_t cap);
  * not one (another msgid, our own search echoed, malformed). */
 int disc_netip_parse(const uint8_t *pkt, size_t len, disc_device_t *d);
 
+/* A search (msgid 1530), as a device hears it: 1 or 0. */
+int disc_netip_is_search(const uint8_t *pkt, size_t len);
+
+/* The answer of a device that is `d` (ip, mask, gateway, mac, netip_port,
+ * http_port, serial, name, version, channels) to a search: msgid 1531,
+ * as disc_netip_parse reads it; no DeviceType, which XM devices leave
+ * out. Returns its length, 0 if it does not fit `cap` (an XM search tool
+ * reads 1 KiB) or `d` has no address. */
+size_t disc_netip_reply(uint8_t *buf, size_t cap, const disc_device_t *d);
+
 /* The broadcast set (msgid 1532) for device `d` (its MAC and ports) to
  * ip/mask/gw, with the sofia hash of `pass`. Returns the length, 0 if it
  * does not fit `cap` or `d` has no MAC. */

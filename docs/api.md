@@ -377,6 +377,97 @@ the UI as one more absolute pointer and keyboard of the evdev reader
 keyboard's, and the monitor shows the remote pointer; a viewer that goes
 lets go of whatever it held.
 
+## NETIP server
+
+`vigild` also speaks Xiongmai's NETIP (DVRIP), as an XM recorder does, so
+that XM's own clients — CMS / VMS on a PC, XMEye on a phone on the same
+LAN (not its cloud P2P) — find it and show its cameras live. It is on by
+default: `netip_server.enabled`, on `netip_server.port` (TCP 34567, XM's),
+with its own threads (`src/api/netip_srv.c`); a change to either applies
+at once. A build without the API has none, since it logs in as the API's
+users.
+
+**Who gets in.** vigil's users and the system account, with their own
+passwords. XM's clients never send the password, only XM's 8-character
+hash of it (an MD5 folded into 62 letters and digits), which cannot be
+checked against the `crypt(3)` hash vigil keeps. So vigil keeps XM's hash
+too, as `netip_password` next to `password` in the users file
+(`api.users`, mode 0600): it is set with the password (API, UI), and for
+a user made before there was one, and for the system account (whose
+password is in `/etc/shadow`), learnt the next time that account logs in
+with its password to the API, the web page or the UI. Until then such an
+account cannot log in over NETIP (the log says why). The system account's
+hash is tied to its shadow entry: after `passwd` it is forgotten until
+the next login. XM's hash is weak (any 8-character string with the same
+fold logs in, and the hash is all a client needs), so the LAN is where
+this server belongs: five wrong logins from one address lock that address
+out for a minute (`Ret 205`). A wrong password or user answers `Ret 203`
+and ends the connection.
+
+**What they may do.** Live view of every camera, main stream (`Main`)
+and sub-stream (`Extra1`), for users whose group has the `live`
+permission (others get `Ret 107` to their claim). Everything else is
+read-only: configuration writes, PTZ, time setting, user management,
+upgrades get `Ret 107`. Playback, two-way audio, alarms and snapshots are
+not there.
+
+| Message | Answer |
+|---|---|
+| 1000 login | `Ret`, `SessionID`, `AliveInterval` 20, `ChannelNum` (the channels), `"DeviceType "` `DVR` (with the space, as XM devices send it), `ExtraChannel` 0 |
+| 1002 logout | `Ret 100`, the connection and its media connections end |
+| 1006 keepalive | `Ret 100`; a logged-in connection without one for 60 s ends |
+| 1020 `SystemInfo` | `DigChannel` = the channels, `VideoInChannel` 0, `SerialNo` (16 hex digits from the first interface's MAC), `HardWare` `OpenIPC <platform>`, `SoftWareVersion` `V<version>.vigil`; `WorkState` (video loss, motion, recording per channel), `StorageInfo` (empty) |
+| 1042 / 1044 config | `ChannelTitle`, `General.General`, `General.Location`, `General`, `NetWork.NetCommon`, `Simplify.Encode` (codec, resolution and frame rate of both streams), `SystemInfo`; any other name `Ret 607` |
+| 1048 `ChannelTitle` | the channels' names (the configured name, else the camera's own) |
+| 1360 `SystemFunction` | a minimal one: two streams, nothing else; other abilities `Ret 607` |
+| 1452 `OPTimeQuery` | the local time, `YYYY-MM-DD hh:mm:ss` |
+| 1413 / 1410 `OPMonitor` | live view, below |
+| 1040, 1046, 1400, 1450, 1460, 1476-1488, 1500, 1502, 1520, 1532, 1540, 1590 | `Ret 107`: read-only |
+| anything else | `Ret 100` and nothing else, so a client does not wait; logged once |
+
+Replies carry the request's msgid + 1 and its sequence number. Each kind
+of request it does not serve is logged once (`netip server: ...`).
+
+**Live view.** A client claims a stream (1413, `OPMonitor` `Claim`,
+`Channel` from 0, `StreamType` `Main` or `Extra1`) and starts it (1410,
+`Start`), as XM devices take it, in either of two ways:
+
+- *XM's clients* (CMS, XMEye): the claim on a **new** connection that never
+  logs in, with the session's id in its header, and the start on the
+  logged-in one, which answers it (1411); the media go to the claiming
+  connection. A start may come before its claim. A `Stop` closes the
+  media connection; so does the session's logout or loss.
+- *python-dvr, vigil's own NETIP source*: claim and start on the logged-in
+  connection, the media on it right after the start, which gets no answer
+  (a reply among the media would be read as a frame).
+
+The media are 1412 messages of at most 8 KiB, the channel in the
+header's byte 12, sequence numbers from 1. Each picture is an XM frame:
+`00 00 01 FC` and a 16-byte header for a keyframe (codec 2 H.264 / 3
+H.265 in the low nibble of its byte, bits 8-9 of width/8 and height/8 in
+its high bits, the frame rate, width/8, height/8, XM's packed local time,
+the length), `00 00 01 FD` and the length for the others; the payload is
+the camera's access unit as vigil records it (Annex-B, a keyframe with
+its parameter sets), never re-encoded. A stream starts at a keyframe.
+Each stream has its own queue (1 MiB for a main stream, 256 KiB for a
+sub-stream; 16 streams and 6 MiB at most, claims beyond get `Ret 103`): a
+client that falls behind loses pictures up to the next keyframe that fits,
+and never slows the cameras, the recording or the other clients.
+
+**The LAN search.** On UDP 34569 it answers XM's search (msgid 1530) as XM
+devices do, with `NetWork.NetCommon`: the address, mask, gateway and MAC
+of the interface the search came in on, `TCPPort`, `HostName`, `SN`,
+`ChannelNum` and `Version`, sent to the broadcast address, port 34569,
+where XM's tools listen (and back to the asker when it asked from another
+port, as vigil's own search does when it asks one address). At most 20
+answers a second. vigil's own camera search hears its own answer and
+leaves it out (the same serial and port); another vigil lists it as a
+NETIP device.
+
+Not verified with XM's own CMS / VMS or XMEye: they are tested only
+through what python-dvr and vigil's own NETIP source do (`ctest -R
+netip_server_e2e`).
+
 ## Passwords in camera URLs
 
 Camera URLs carry their passwords (`rtsp://admin:12345@…`). The API never

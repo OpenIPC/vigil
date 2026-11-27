@@ -8,7 +8,8 @@
  *   -> channels_start (one thread per camera: source -> decode + record)
  *   -> mgmt_start (the management pages' jobs and timers: network
  *      rollback, NTP, DDNS, network storage, alarm center, mail)
- *   -> api_start (HTTP/WebSocket API on its own threads, if configured)
+ *   -> api_start (HTTP/WebSocket API on its own threads, if configured),
+ *      netip_server_start (the cameras for XM's clients, netip_srv.h)
  *   -> frontend_run (LVGL quad view, or status lines when headless); on
  *      this thread, a configuration the API saved is applied
  *      (channels_apply)
@@ -24,6 +25,7 @@
 #include <unistd.h>
 
 #include "api.h"
+#include "netip_srv.h"
 #include "channel.h"
 #include "config.h"
 #include "events.h"
@@ -267,6 +269,7 @@ static void apply_config(void)
         vg_log("configuration %u applied", gen);
         events_push(0, "config applied");
     }
+    netip_server_apply(&c.netip_server);
     if (strcmp(c.api.listen, g_api_listen) != 0)
         vg_log("api.listen is now '%s'; it takes effect when vigild starts again", c.api.listen);
     if (strcmp(c.web.listen, g_web_listen) != 0)
@@ -422,7 +425,9 @@ int main(int argc, char **argv)
         disc_set_max_channels(caps->max_channels);
         api_start();                    /* failing to start it is logged, not fatal */
         web_start();                    /* the same */
+        netip_server_start(&running.netip_server, caps->name);     /* the same */
         rc = frontend_run(run_secs, &g_stop, apply_config) < 0 ? 1 : 0;
+        netip_server_stop();
         web_stop();
         api_stop();
         disc_shutdown();

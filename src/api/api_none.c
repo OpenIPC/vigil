@@ -3,6 +3,7 @@
 #include "api.h"
 #include "config.h"
 #include "log.h"
+#include "netip_srv.h"
 #include "web.h"
 
 int api_start(void)
@@ -24,3 +25,15 @@ int web_start(void)
 }
 
 void web_stop(void) {}
+
+int netip_server_start(const config_netip_server_t *cfg, const char *platform)
+{
+    (void)platform;
+    if (cfg->enabled) vg_log("netip_server.enabled is on, but this vigild is built without the API, "
+                             "whose users it logs in");
+    return 0;
+}
+
+void netip_server_stop(void) {}
+
+void netip_server_apply(const config_netip_server_t *cfg) { (void)cfg; }

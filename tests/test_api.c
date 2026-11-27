@@ -13,6 +13,7 @@
 #include "auth.h"
 #include "config.h"
 #include "hal_capture.h"
+#include "md5.h"
 #include "users.h"
 
 /* The configuration's URL check links the capture source; it never runs. */
@@ -174,6 +175,31 @@ static void test_users(void)
     CHECK(users_update("carl", "viewer", -1, "newpw1", &e) == USERS_OK &&
           users_login("carl", "carlpw", &perms, why, sizeof why) == 0 &&
           users_login("carl", "newpw1", &perms, why, sizeof why) == 1, "password changed");
+
+    /* NETIP clients send Xiongmai's hash of the password: the one set
+     * with the password, and the system account's learnt at its login. */
+    char xm[9];
+    md5_sofia("annapw", xm);
+    CHECK(users_login_netip("anna", xm, &perms, why, sizeof why) == 1 && perms == PERM_LIVE, "anna over NETIP");
+    md5_sofia("wrong", xm);
+    CHECK(users_login_netip("anna", xm, &perms, why, sizeof why) == 0 && perms == 0, "anna over NETIP, wrong");
+    md5_sofia("newpw1", xm);
+    CHECK(users_login_netip("carl", xm, &perms, why, sizeof why) == 1, "carl's new password over NETIP");
+    md5_sofia("carlpw", xm);
+    CHECK(users_login_netip("carl", xm, &perms, why, sizeof why) == 0, "not carl's old one");
+    md5_sofia("secret", xm);
+    CHECK(users_login_netip("root", xm, &perms, why, sizeof why) == 1 && perms == PERM_ALL,
+          "root over NETIP, learnt at its login: %s", why);
+    CHECK(users_login_netip("nobody", xm, &perms, why, sizeof why) == 0, "unknown over NETIP");
+    f = fopen(shadow, "w");
+    fprintf(f, "root:$6$other$abc:19000:0:99999:7:::\n");
+    fclose(f);
+    CHECK(users_login_netip("root", xm, &perms, why, sizeof why) == -1 && strstr(why, "changed"),
+          "root's password changed (passwd): its NETIP hash is forgotten: %s", why);
+    f = fopen(shadow, "w");
+    fprintf(f, "root:" SHA512_SECRET ":19000:0:99999:7:::\n");
+    fclose(f);
+    CHECK(users_login_netip("root", xm, &perms, why, sizeof why) == 1, "and back");
 
     /* The file: 0600, commented YAML, hashes only; read back as it was. */
     struct stat st;

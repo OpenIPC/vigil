@@ -70,6 +70,7 @@ add_library(vigil_core STATIC
   src/core/gop_cache.c
   src/core/md5.c
   src/core/net.c
+  src/core/netip_proto.c
   src/core/schema.c
   src/core/schema_yaml.c
   src/core/sha1.c

@@ -193,6 +193,63 @@ int disc_netip_parse(const uint8_t *pkt, size_t len, disc_device_t *d)
     return rc;
 }
 
+int disc_netip_is_search(const uint8_t *pkt, size_t len)
+{
+    return len >= 20 && pkt[0] == 0xff && (pkt[14] | pkt[15] << 8) == DISC_NETIP_SEARCH;
+}
+
+size_t disc_netip_reply(uint8_t *buf, size_t cap, const disc_device_t *d)
+{
+    char hip[16], hmask[16] = "0x00000000", hgw[16] = "0x00000000", mac[18];
+    if (disc_netip_iphex(d->ip, hip, sizeof hip) < 0) return 0;
+    if (d->mask[0]) disc_netip_iphex(d->mask, hmask, sizeof hmask);
+    if (d->gateway[0]) disc_netip_iphex(d->gateway, hgw, sizeof hgw);
+    cJSON *doc = cJSON_CreateObject(), *nc = cJSON_CreateObject();
+    if (!doc || !nc) {
+        cJSON_Delete(doc);
+        cJSON_Delete(nc);
+        return 0;
+    }
+    /* What an XM device answers (its NetWork.NetCommon), with what this
+     * one is: the address of the interface the search came in on. */
+    snprintf(mac, sizeof mac, "%s", d->mac[0] ? d->mac : "00:00:00:00:00:00");
+    cJSON_AddNumberToObject(nc, "ChannelNum", d->channels);
+    cJSON_AddStringToObject(nc, "GateWay", hgw);
+    cJSON_AddStringToObject(nc, "HostIP", hip);
+    cJSON_AddStringToObject(nc, "HostName", d->name[0] ? d->name : "LocalHost");
+    cJSON_AddNumberToObject(nc, "HttpPort", d->http_port ? d->http_port : 80);
+    cJSON_AddStringToObject(nc, "MAC", mac);
+    cJSON_AddNumberToObject(nc, "MaxBps", 0);
+    cJSON_AddStringToObject(nc, "MonMode", "TCP");
+    cJSON_AddStringToObject(nc, "SN", d->serial);
+    cJSON_AddNumberToObject(nc, "SSLPort", 8443);
+    cJSON_AddStringToObject(nc, "Submask", hmask);
+    cJSON_AddNumberToObject(nc, "TCPMaxConn", 10);
+    cJSON_AddNumberToObject(nc, "TCPPort", d->netip_port ? d->netip_port : 34567);
+    cJSON_AddStringToObject(nc, "TransferPlan", "AutoAdapt");
+    cJSON_AddNumberToObject(nc, "UDPPort", 34568);
+    cJSON_AddBoolToObject(nc, "UseHSDownLoad", 0);
+    cJSON_AddStringToObject(nc, "Version", d->version);
+    cJSON_AddItemToObject(doc, "NetWork.NetCommon", nc);
+    cJSON_AddNumberToObject(doc, "Ret", 100);
+    cJSON_AddStringToObject(doc, "SessionID", "0x00000000");
+    char *text = cJSON_PrintUnformatted(doc);
+    cJSON_Delete(doc);
+    if (!text) return 0;
+    size_t tl = strlen(text), total = 20 + tl + 2;
+    if (total > cap) {
+        free(text);
+        return 0;
+    }
+    netip_hdr(buf, DISC_NETIP_SEARCH_REP, tl + 2);
+    buf[1] = 1;
+    memcpy(buf + 20, text, tl);
+    buf[20 + tl] = '\n';
+    buf[21 + tl] = 0;
+    free(text);
+    return total;
+}
+
 size_t disc_netip_set(uint8_t *buf, size_t cap, const disc_device_t *d, const char *ip,
                       const char *mask, const char *gw, const char *user, const char *pass)
 {

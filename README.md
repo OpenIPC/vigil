@@ -34,6 +34,9 @@ are part of the design.
 - **Zero channel**: that screen, live, in a browser at `http://<recorder>/`,
   with its mouse and keyboard, for users given the `remote` permission
   ([docs/api.md](docs/api.md#zero-channel)).
+- **NETIP server**: Xiongmai's own clients (CMS, VMS, XMEye on the LAN)
+  find the recorder by XM's search and show its cameras live, both
+  streams, as vigil's users ([docs/api.md](docs/api.md#netip-server)).
 
 ## Platforms
 

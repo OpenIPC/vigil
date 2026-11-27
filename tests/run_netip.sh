@@ -13,7 +13,7 @@ PORT=$((20000 + $$ % 20000))
 # In the build tree, not /tmp: recordings need a disk (tmpfs is refused),
 # and allow_rootfs lets the build tree be on the root filesystem.
 TMP=$(mktemp -d "$PWD/vigil-test.XXXXXX")
-printf 'record:\n  allow_rootfs: true\n' > "$TMP/vigil.yaml"
+printf 'record:\n  allow_rootfs: true\nnetip_server:\n  enabled: false\n' > "$TMP/vigil.yaml"
 trap 'kill $SRV 2>/dev/null; rm -rf "$TMP"' EXIT
 
 ARGS=

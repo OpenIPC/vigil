@@ -104,6 +104,14 @@ if(Python3_FOUND)
                                     $<TARGET_FILE:test_kvm>)
       set_tests_properties(web_e2e PROPERTIES SKIP_RETURN_CODE 77)
     endif()
+    # The NETIP server: XM's clients' logins, information, live view on one
+    # connection or two, the LAN search, and vigil's own NETIP source
+    # recording from it. Alone: it answers searches on UDP 34569.
+    add_test(NAME netip_server_e2e
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/netip_srv_test.py $<TARGET_FILE:vigild>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data/majestic_1080p.h265)
+    set_tests_properties(netip_server_e2e PROPERTIES RUN_SERIAL TRUE)
     add_test(NAME api_e2e
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/api_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)

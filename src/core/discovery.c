@@ -43,6 +43,8 @@ static unsigned        g_prefer[3] = { DISC_NETIP, DISC_ONVIF, DISC_DHIP };
 static disc_scan_opts_t g_last;      /* the last scan's interfaces, targets and ports */
 static unsigned        g_gen;        /* the table's generation: moves with every change */
 static unsigned        g_scan;       /* the id of the last scan job */
+static char            g_self_sn[48];   /* our own NETIP server (disc_set_self), under g_lock */
+static int             g_self_port;
 
 static time_t mono(void)
 {
@@ -551,6 +553,24 @@ static void scanner_send(scanner_t *s, uint32_t only)
 
 /* Read what has arrived for up to `ms`; each device heard goes into the
  * table (and to `heard`, if given: called with each parsed device). */
+void disc_set_self(const char *serial, int port)
+{
+    pthread_mutex_lock(&g_lock);
+    snprintf(g_self_sn, sizeof g_self_sn, "%s", serial ? serial : "");
+    g_self_port = port;
+    pthread_mutex_unlock(&g_lock);
+}
+
+/* Our own NETIP server's answer: the serial it gives and its port. */
+static int is_self(const disc_device_t *d)
+{
+    pthread_mutex_lock(&g_lock);
+    int self = g_self_sn[0] && d->protos == DISC_NETIP && !strcmp(d->serial, g_self_sn) &&
+               d->netip_port == g_self_port;
+    pthread_mutex_unlock(&g_lock);
+    return self;
+}
+
 static void scanner_listen(scanner_t *s, int ms, void (*heard)(const disc_device_t *, void *), void *u)
 {
     long long end = mono_ms() + ms;
@@ -578,7 +598,7 @@ static void scanner_listen(scanner_t *s, int ms, void (*heard)(const disc_device
                 int ok = map[k] == 0 ? disc_netip_parse(buf, (size_t)r, &d)
                        : map[k] == 1 ? disc_onvif_parse((const char *)buf, (size_t)r, &d)
                                      : disc_dhip_parse(buf, (size_t)r, &d);
-                if (ok < 0) continue;
+                if (ok < 0 || (map[k] == 0 && is_self(&d))) continue;
                 /* A reply from a unicast target (or through NAT) gives the
                  * address that answered; devices on another subnet still
                  * report their own. */

@@ -13,6 +13,7 @@
  *       group: viewer
  *       enabled: true
  *       password: "$6$...$..."       (crypt(3); never leaves the process)
+ *       netip_password: "tlJwpbo6"   (Xiongmai's hash of it, for NETIP clients)
  *
  * Two groups always exist, whether the file has them or not: "admin"
  * (every permission; cannot be changed or deleted) and "user" (live view
@@ -120,6 +121,15 @@ users_rc_t users_group_delete(const char *name, users_err_t *e);
  * wrong or the user unknown or disabled, -1 when it cannot be checked
  * (`why`, for the log: no shadow file, a locked account, ...). */
 int users_login(const char *name, const char *pass, unsigned *perms, char *why, size_t cap);
+
+/* The same for a NETIP client (src/api/netip_srv.c), which sends only
+ * Xiongmai's 8-character hash of the password (md5_sofia), never the
+ * password: checked against the hash kept with the user's password
+ * (`netip_password`, set with it), or for the system account the one
+ * learnt at its last login with the password (users_login keeps it,
+ * with which shadow entry it belongs to). -1 with `why` when there is
+ * none to check against yet. */
+int users_login_netip(const char *name, const char *xm, unsigned *perms, char *why, size_t cap);
 
 /* A crypt(3) hash of `pass` with a fresh random salt: SHA-512, else
  * SHA-256, else MD5, whichever the C library has. 0, or -1. */

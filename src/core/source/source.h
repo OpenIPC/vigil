@@ -96,6 +96,11 @@ int source_title(const char *url, char *out, size_t cap, const volatile int *sto
  * or of objects with a "Name"). 0 with `out` set, or -1. */
 int netip_title_parse(const char *reply, int ch, char *out, size_t cap);
 
+/* The body of one NETIP media message (msgid 1412) into the frames it
+ * completes, as the source reads them; `s` made by the netip ops' create.
+ * For tests: what vigild's NETIP server sends must play here. */
+void netip_media_feed(source_t *s, const uint8_t *body, size_t len, au_emit_fn emit, void *user);
+
 /* "rtsp, netip, capture" — for usage text. */
 const char *source_schemes(void);
 

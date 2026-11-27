@@ -15,6 +15,7 @@
 #include "cJSON.h"
 #include "config.h"
 #include "log.h"
+#include "md5.h"
 #include "schema.h"
 #include "schema_yaml.h"
 #include "users.h"
@@ -40,18 +41,30 @@ typedef struct {
     int  perm[PERM_N];
 } group_rec_t;
 
+#define NETIP_HASH 16                   /* Xiongmai's hash is 8 characters */
+
 typedef struct {
     char name[USERS_NAME_MAX];
     char group[USERS_NAME_MAX];
     int  enabled;
     char password[HASH_MAX];
+    char netip[NETIP_HASH];
 } user_rec_t;
 
+/* The system account's NETIP hash, learnt when it logs in with its
+ * password (users_login), and which shadow entry it belongs to: the MD5
+ * of the account's hash there, so a new password (passwd) forgets it. */
 typedef struct {
-    int         n_groups;
-    group_rec_t groups[GROUPS_MAX];
-    int         n_users;
-    user_rec_t  users[USERS_MAX];
+    char netip[NETIP_HASH];
+    char shadow[40];
+} system_rec_t;
+
+typedef struct {
+    int          n_groups;
+    group_rec_t  groups[GROUPS_MAX];
+    int          n_users;
+    user_rec_t   users[USERS_MAX];
+    system_rec_t system;
 } users_db_t;
 
 static int name_ok(const char *v)
@@ -107,6 +120,20 @@ static const schema_field_t user_fields[] = {
     { .key = "password", .type = SCHEMA_STRING, .off = offsetof(user_rec_t, password), .size = HASH_MAX,
       .def_str = "", .secret = SCHEMA_SECRET, .label = "Password",
       .help = "A crypt(3) hash, set through the API or the UI; empty: cannot log in." },
+    { .key = "netip_password", .type = SCHEMA_STRING, .off = offsetof(user_rec_t, netip), .size = NETIP_HASH,
+      .def_str = "", .secret = SCHEMA_SECRET, .label = "NETIP password",
+      .help = "Xiongmai's hash of the same password, which NETIP clients (CMS, XMEye) log in with: "
+              "set with the password, or at the user's next login elsewhere." },
+};
+
+static const schema_field_t system_fields[] = {
+    { .key = "netip_password", .type = SCHEMA_STRING, .off = offsetof(system_rec_t, netip), .size = NETIP_HASH,
+      .def_str = "", .secret = SCHEMA_SECRET, .label = "NETIP password",
+      .help = "Xiongmai's hash of the system account's password, for NETIP clients: learnt when "
+              "the account logs in to the API, the web page or the UI." },
+    { .key = "shadow", .type = SCHEMA_STRING, .off = offsetof(system_rec_t, shadow), .size = 40,
+      .def_str = "", .label = "Shadow entry",
+      .help = "Which password that was (an MD5 of the account's shadow hash): a new one forgets it." },
 };
 
 #define N(a) (int)(sizeof(a) / sizeof((a)[0]))
@@ -120,6 +147,9 @@ static const schema_section_t user_sections[] = {
       .count_off = offsetof(users_db_t, n_users), .item_size = sizeof(user_rec_t),
       .max_items = USERS_MAX, .fields = user_fields, .n_fields = N(user_fields), .label = "Users",
       .help = "Besides these, the system account (api.user) logs in with every permission." },
+    { .key = "system", .off = offsetof(users_db_t, system), .fields = system_fields,
+      .n_fields = N(system_fields), .label = "System account",
+      .help = "What NETIP clients need to log in as the system account." },
 };
 
 static const schema_t users_schema = { .version = 1, .sections = user_sections,
@@ -187,6 +217,7 @@ static void builtins(users_db_t *db)
             out.groups[out.n_groups++] = db->groups[i];
     out.n_users = db->n_users;
     memcpy(out.users, db->users, sizeof out.users);
+    out.system = db->system;
     *db = out;
 }
 
@@ -396,9 +427,10 @@ users_rc_t users_add(const char *name, const char *group, const char *password, 
     if (!password) return fail(e, USERS_EINVAL, "password", "%sis required", "");
     users_rc_t rc = check_password(password, e);
     if (rc) return rc;
-    char hash[HASH_MAX];
+    char hash[HASH_MAX], xm[9];
     if (users_hash(password, hash, sizeof hash) < 0)
         return fail(e, USERS_EIO, "password", "%scannot hash passwords here (crypt)", "");
+    md5_sofia(password, xm);
     pthread_mutex_lock(&g_lock);
     load();
     users_db_t db = g_db;
@@ -412,6 +444,7 @@ users_rc_t users_add(const char *name, const char *group, const char *password, 
         snprintf(u->group, sizeof u->group, "%s", group);
         u->enabled = !!enabled;
         snprintf(u->password, sizeof u->password, "%s", hash);
+        snprintf(u->netip, sizeof u->netip, "%s", xm);
         rc = save_locked(&db, e);
         if (!rc) vg_log("users: added %s (group %s%s)", name, group, enabled ? "" : ", disabled");
     }
@@ -423,12 +456,13 @@ users_rc_t users_update(const char *name, const char *group, int enabled, const 
                         users_err_t *e)
 {
     memset(e, 0, sizeof *e);
-    char hash[HASH_MAX] = "";
+    char hash[HASH_MAX] = "", xm[9] = "";
     if (password) {
         users_rc_t rc = check_password(password, e);
         if (rc) return rc;
         if (users_hash(password, hash, sizeof hash) < 0)
             return fail(e, USERS_EIO, "password", "%scannot hash passwords here (crypt)", "");
+        md5_sofia(password, xm);
     }
     pthread_mutex_lock(&g_lock);
     load();
@@ -440,7 +474,10 @@ users_rc_t users_update(const char *name, const char *group, int enabled, const 
     else {
         if (group) snprintf(u->group, sizeof u->group, "%s", group);
         if (enabled >= 0) u->enabled = !!enabled;
-        if (password) snprintf(u->password, sizeof u->password, "%s", hash);
+        if (password) {
+            snprintf(u->password, sizeof u->password, "%s", hash);
+            snprintf(u->netip, sizeof u->netip, "%s", xm);
+        }
         rc = save_locked(&db, e);
         if (!rc)
             vg_log("users: changed %s:%s%s%s%s", name, group ? " group " : "", group ? group : "",
@@ -536,13 +573,44 @@ users_rc_t users_group_delete(const char *name, users_err_t *e)
 
 /* ---- logging in ------------------------------------------------------------------------------ */
 
+/* After a login with the password: keep its NETIP hash, if the file does
+ * not have it yet (a user made before there was one, the system account).
+ * `id`: the system account's shadow entry (auth_shadow_id), NULL for a
+ * user of the file. */
+static void learn_netip(const char *name, const char *pass, const char *id)
+{
+    char xm[9];
+    md5_sofia(pass, xm);
+    pthread_mutex_lock(&g_lock);
+    load();
+    users_db_t *db = malloc(sizeof *db);
+    if (db) {
+        *db = g_db;
+        int change = 0;
+        user_rec_t *u = id ? NULL : find_user(db, name);
+        if (u && strcmp(u->netip, xm)) {
+            snprintf(u->netip, sizeof u->netip, "%s", xm);
+            change = 1;
+        } else if (id && (strcmp(db->system.netip, xm) || strcmp(db->system.shadow, id))) {
+            snprintf(db->system.netip, sizeof db->system.netip, "%s", xm);
+            snprintf(db->system.shadow, sizeof db->system.shadow, "%s", id);
+            change = 1;
+        }
+        users_err_t e;
+        if (change && !g_bad && save_locked(db, &e) == USERS_OK)
+            vg_log("users: %s can log in over NETIP now", id ? "the system account" : name);
+        free(db);
+    }
+    pthread_mutex_unlock(&g_lock);
+}
+
 int users_login(const char *name, const char *pass, unsigned *perms, char *why, size_t cap)
 {
     *perms = 0;
     if (cap) why[0] = 0;
     config_api_t api;
     api_settings(&api);
-    char hash[HASH_MAX] = "";
+    char hash[HASH_MAX] = "", xm[NETIP_HASH] = "", sys_xm[NETIP_HASH] = "", sys_id[40] = "";
     unsigned gperms = 0;
     int found = 0, enabled = 0, has_admin = 0;
     pthread_mutex_lock(&g_lock);
@@ -552,10 +620,13 @@ int users_login(const char *name, const char *pass, unsigned *perms, char *why, 
         found = 1;
         enabled = u->enabled;
         snprintf(hash, sizeof hash, "%s", u->password);
+        snprintf(xm, sizeof xm, "%s", u->netip);
         group_rec_t *g = find_group(&g_db, u->group);
         gperms = g ? rec_perms(g) : 0;          /* a group gone from the file: nothing */
     }
     has_admin = find_user(&g_db, "admin") != NULL;
+    snprintf(sys_xm, sizeof sys_xm, "%s", g_db.system.netip);
+    snprintf(sys_id, sizeof sys_id, "%s", g_db.system.shadow);
     pthread_mutex_unlock(&g_lock);
 
     if (found) {
@@ -565,18 +636,79 @@ int users_login(const char *name, const char *pass, unsigned *perms, char *why, 
         int ok = hash[0] && auth_crypt(pass, hash, r, sizeof r) == 0 && auth_equal(r, hash);
         if (!ok || !enabled) return 0;
         *perms = gperms;
+        char mine[9];
+        md5_sofia(pass, mine);
+        if (strcmp(mine, xm)) learn_netip(name, pass, NULL);
         return 1;
     }
     /* The system account, and "admin" as its other name until a user of
      * that name exists: whatever the file holds, root gets in. */
     if (!strcmp(name, api.user) || (!strcmp(name, "admin") && !has_admin)) {
         int rc = auth_check_shadow(api.shadow, api.user, pass, why, cap);
-        if (rc == 1) *perms = PERM_ALL;
+        if (rc == 1) {
+            *perms = PERM_ALL;
+            char id[33], mine[9], w[8];
+            md5_sofia(pass, mine);
+            if (auth_shadow_id(api.shadow, api.user, id, w, sizeof w) == 0 &&
+                (strcmp(mine, sys_xm) || strcmp(id, sys_id)))
+                learn_netip(api.user, pass, id);
+        }
         return rc;
     }
     /* Unknown user: the same crypt() as a known one, so the time does not
      * say which names exist. */
     char r[HASH_MAX];
     auth_crypt(pass, "$6$vigilnouser$", r, sizeof r);
+    return 0;
+}
+
+int users_login_netip(const char *name, const char *xm, unsigned *perms, char *why, size_t cap)
+{
+    *perms = 0;
+    if (cap) why[0] = 0;
+    config_api_t api;
+    api_settings(&api);
+    char have[NETIP_HASH] = "", sys_id[40] = "";
+    unsigned gperms = 0;
+    int found = 0, enabled = 0, has_admin = 0;
+    pthread_mutex_lock(&g_lock);
+    load_locked(api.users);
+    user_rec_t *u = find_user(&g_db, name);
+    if (u) {
+        found = 1;
+        enabled = u->enabled && u->password[0];
+        snprintf(have, sizeof have, "%s", u->netip);
+        group_rec_t *g = find_group(&g_db, u->group);
+        gperms = g ? rec_perms(g) : 0;
+    }
+    has_admin = find_user(&g_db, "admin") != NULL;
+    if (!found) {
+        snprintf(have, sizeof have, "%s", g_db.system.netip);
+        snprintf(sys_id, sizeof sys_id, "%s", g_db.system.shadow);
+    }
+    pthread_mutex_unlock(&g_lock);
+
+    if (found) {
+        if (!have[0]) {
+            snprintf(why, cap, "'%s' has no NETIP password yet: set the password again, or log in once "
+                     "to the web page, the API or the UI", name);
+            return -1;
+        }
+        if (!auth_equal(xm, have) || !enabled) return 0;
+        *perms = gperms;
+        return 1;
+    }
+    if (!strcmp(name, api.user) || (!strcmp(name, "admin") && !has_admin)) {
+        char id[33];
+        if (auth_shadow_id(api.shadow, api.user, id, why, cap) < 0) return -1;
+        if (!have[0] || strcmp(id, sys_id)) {
+            snprintf(why, cap, "the system account's NETIP password is not known%s: log in once to the "
+                     "web page, the API or the UI", have[0] ? " since its password changed" : " yet");
+            return -1;
+        }
+        if (!auth_equal(xm, have)) return 0;
+        *perms = PERM_ALL;
+        return 1;
+    }
     return 0;
 }

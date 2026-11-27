@@ -160,6 +160,11 @@ typedef struct {
 } config_web_t;
 
 typedef struct {
+    int  enabled;
+    int  port;                      /* TCP; discovery answers on UDP 34569 */
+} config_netip_server_t;
+
+typedef struct {
     char interfaces[128];           /* "eth0,eth1"; "" = every IPv4 interface */
     char targets[256];              /* unicast addresses also searched */
     char prefer[32];                /* "netip,onvif,dhip" */
@@ -183,6 +188,7 @@ typedef struct {
     config_display_t display;
     config_api_t    api;
     config_web_t    web;
+    config_netip_server_t netip_server;
     config_discovery_t discovery;
 } vigil_config_t;
 
