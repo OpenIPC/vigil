@@ -28,6 +28,13 @@
 #define VG_COLOR_ICON_OPERATION      0x2FC98A
 #define VG_COLOR_ICON_BACKUP         0xF5A623
 #define VG_COLOR_ICON_DISPLAY        0x3BC4D8
+#define VG_COLOR_SCAN_5              0x3A414D
+#define VG_COLOR_SCAN_20             0x5C6573
+#define VG_COLOR_SCAN_50             0x8E98A6
+#define VG_COLOR_SCAN_150            0x19BE6B
+#define VG_COLOR_SCAN_500            0xFF9900
+#define VG_COLOR_SCAN_SLOW           0xED4014
+#define VG_COLOR_SCAN_ERR            0x4C6FFF
 
 #define VG_SPACE_XS                  4
 #define VG_SPACE_SM                  8

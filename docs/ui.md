@@ -26,7 +26,7 @@ live view                  tiles over the whole screen, clock in a corner
       +-> NETWORK          settings screen: Ethernet, Wi-Fi, LTE, DDNS, UPnP,
       |                    SMTP, Alarm center, P2P
       +-> STORAGE          settings screen: Basic, Schedule, Disk Manager,
-      |                    Disk Quota, Network Storage
+      |                    Disk Maintenance, Disk Quota, Network Storage
       +-> SYSTEM           settings screen: General, HTTP API
       +-> ACCOUNT          settings screen: Users, Groups
       +-> OPERATION        platform, version, uptime, memory, storage (read-only)
@@ -230,12 +230,33 @@ plugged in shows up; Format, Mount and Unmount per row (never on a device
 that holds the system); Format (ext4 by default where the firmware has
 `mkfs.ext4`, else exFAT) opens a panel in the page with the
 filesystem, a field to type the device's name and a Format button that
-works only when the name matches; it runs as a job. *Disk Quota*: per
+works only when the name matches; it runs as a job. A surface scan under
+way shows as a line above the table and its disk's state, `scanning`.
+*Disk Maintenance*: a disk (whole disks only) and two tabs. *SMART*: the
+verdict (Good, Warning, Failing, or Unknown where the drive gives none, as
+a USB stick) with its reason, the identity (model, serial, firmware,
+capacity, rotation or SSD, SATA link, temperature, hours, the drive's own
+check), Short and Extended self-tests (Abort while one runs; it is read
+again every 30 s meanwhile), the attribute table with amber rows for counts
+that should be zero and red ones at or below their threshold, and the
+self-test log; read as a job, since a sleeping disk spins up first.
+*Surface scan*: mode (Read, Verify, Write), block size, start and end LBA,
+Start, or Pause/Resume and Stop while one runs; the sector map, one drawn
+object of up to 2000 cells coloured by the worst latency class in each,
+the current position outlined; the counts per class, speed, elapsed and
+left, the bad LBA ranges. Write first opens a panel naming the disk's
+model, serial and size and wants its name typed. The scan runs in vigild:
+the page can be left and shows it again when opened (on the scan's tab).
+*Disk Quota*: per
 camera, the most gigabytes and days. *Network Storage*: whether SMB and NFS
 can be mounted here and why not, the share's state, its form, Test, and
 "Record here" (`record.path` = `/mnt/nas/rec`).
 
 ![Storage, Schedule](../tests/ui/storage_schedule.png)
+
+![Storage, Disk Maintenance: SMART](../tests/ui/storage_maint.png)
+
+![Storage, Disk Maintenance: a surface scan](../tests/ui/storage_maint_scan.png)
 
 **System.** *General*: the device name (the host name; shown in the main
 menu's bar and the API's status), the language (the languages there are),

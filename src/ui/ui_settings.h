@@ -53,7 +53,14 @@ enum { UI_DISPLAY_OUTPUT, UI_DISPLAY_CLOCK, UI_DISPLAY_NAMES, UI_DISPLAY_ICONS }
 void ui_display_open_at(int first);
 
 /* Storage's sub-pages, for the context menu's Record. */
-enum { UI_STORAGE_BASIC, UI_STORAGE_SCHEDULE, UI_STORAGE_DISKS, UI_STORAGE_QUOTA, UI_STORAGE_NAS };
+enum { UI_STORAGE_BASIC, UI_STORAGE_SCHEDULE, UI_STORAGE_DISKS, UI_STORAGE_MAINT, UI_STORAGE_QUOTA, UI_STORAGE_NAS };
+
+/* Storage > Disk Maintenance (ui_set_maint.c): SMART and the surface
+ * scan. ui_maint_scan_line: while a scan runs, a line about it (and its
+ * disk) for the Disk Manager; 1, else 0. */
+void *ui_maint_open(ui_set_t *s, lv_obj_t *pane);
+void  ui_maint_close(void *st);
+int   ui_maint_scan_line(char *out, size_t cap, char *disk, size_t dcap);
 
 lv_group_t *ui_set_group(ui_set_t *s);
 lv_obj_t   *ui_set_save_btn(ui_set_t *s);

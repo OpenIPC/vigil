@@ -207,6 +207,137 @@ static int disks(ui_disk_t *out, int max)
     return n;
 }
 
+/* ---- disk maintenance ------------------------------------------------------------- */
+
+_Static_assert((int)UI_SMART_GOOD == (int)SMART_GOOD && (int)UI_SMART_WARN == (int)SMART_WARN &&
+               (int)UI_SMART_FAIL == (int)SMART_FAIL && (int)UI_SMART_UNKNOWN == (int)SMART_UNKNOWN,
+               "SMART verdicts");
+_Static_assert((int)UI_SCAN_READ == (int)SCAN_READ && (int)UI_SCAN_VERIFY == (int)SCAN_VERIFY &&
+               (int)UI_SCAN_WRITE == (int)SCAN_WRITE && (int)UI_SCAN_RUNNING == (int)SCAN_RUNNING &&
+               (int)UI_SCAN_PAUSED == (int)SCAN_PAUSED && (int)UI_SCAN_FAILED == (int)SCAN_FAILED &&
+               (int)UI_SCAN_CLASSES == (int)SCAN_NCLASS && UI_SCAN_MAP == SCAN_MAP,
+               "scan modes, states, classes, map");
+
+/* The UI's fonts have no degree sign: "37 °C" shows as "37 C". */
+static void cp_text(char *d, size_t n, const char *s)
+{
+    size_t o = 0;
+    for (; *s && o + 1 < n; ++s) {
+        if ((unsigned char)s[0] == 0xc2 && (unsigned char)s[1] == 0xb0) {
+            ++s;
+            continue;
+        }
+        d[o++] = *s;
+    }
+    d[o] = 0;
+}
+#define CPT(dst, src) cp_text((dst), sizeof(dst), (src))
+
+static int smart_read_(const char *disk, char *err, size_t cap) { return mgmt_smart_job(disk, err, cap); }
+
+static int smart_get(const char *disk, ui_smart_t *u)
+{
+    smart_info_t *s = malloc(sizeof *s);
+    time_t when = 0;
+    if (!s || mgmt_smart_cached(disk, s, &when) < 0) {
+        free(s);
+        return -1;
+    }
+    memset(u, 0, sizeof *u);
+    u->available = s->available;
+    CP(u->transport, s->transport);
+    CP(u->model, s->model);
+    CP(u->serial, s->serial);
+    CP(u->firmware, s->firmware);
+    u->bytes = (unsigned long long)s->sectors * s->sector_size;
+    u->rpm = s->rpm;
+    u->sata_max = s->sata_max;
+    u->sata_cur = s->sata_cur;
+    u->smart_enabled = s->smart_enabled;
+    u->health = s->health;
+    u->temp = s->temp;
+    u->hours = s->hours;
+    u->verdict = s->verdict;
+    CPT(u->reason, s->reason);
+    u->test_supported = s->selftest_supported;
+    u->test_running = s->test_status == 15;
+    u->test_remaining = s->test_remaining;
+    u->short_min = s->short_min;
+    u->ext_min = s->ext_min;
+    if (s->has_data)
+        smart_test_status_text((uint8_t)(s->test_status << 4 | s->test_remaining / 10), u->test_status,
+                               sizeof u->test_status);
+    u->n_attrs = s->n_attrs < UI_SMART_ATTRS ? s->n_attrs : UI_SMART_ATTRS;
+    for (int i = 0; i < u->n_attrs; ++i) {
+        const smart_attr_t *a = &s->attrs[i];
+        ui_smart_attr_t *x = &u->attrs[i];
+        x->id = a->id;
+        x->value = a->value;
+        x->worst = a->worst;
+        x->thresh = a->thresh;
+        x->level = a->level;
+        x->critical = a->critical;
+        CP(x->name, a->name);
+        CPT(x->raw, a->raw_text);
+        CPT(x->note, a->note);
+    }
+    u->n_tests = s->n_tests < UI_SMART_TESTS ? s->n_tests : UI_SMART_TESTS;
+    for (int i = 0; i < u->n_tests; ++i) {
+        const smart_test_t *t = &s->tests[i];
+        CP(u->tests[i].type, smart_test_type_text(t->type));
+        smart_test_status_text(t->status, u->tests[i].status, sizeof u->tests[i].status);
+        u->tests[i].hours = t->hours;
+        u->tests[i].failed = (t->status >> 4) >= 3 && (t->status >> 4) <= 8;
+        u->tests[i].lba = t->lba;
+    }
+    u->read_at = (long long)when;
+    free(s);
+    return 0;
+}
+
+static void scan_get(ui_scan_t *u)
+{
+    scan_status_t *s = malloc(sizeof *s);
+    memset(u, 0, sizeof *u);
+    if (!s) return;
+    mgmt_scan_status(s);
+    u->state = s->state;
+    u->mode = s->mode;
+    u->read_instead = s->read_instead;
+    CP(u->disk, s->disk);
+    CP(u->model, s->model);
+    CP(u->serial, s->serial);
+    u->start = s->start;
+    u->end = s->end;
+    u->lba = s->lba;
+    u->blocks_done = s->blocks_done;
+    u->blocks_total = s->blocks_total;
+    for (int i = 0; i < UI_SCAN_CLASSES; ++i) u->counts[i] = s->counts[i];
+    u->block = s->block;
+    u->sector = s->sector;
+    u->pass = s->pass;
+    u->passes = s->passes;
+    u->mbps = s->mbps;
+    u->elapsed = s->elapsed;
+    u->eta = s->eta;
+    CP(u->msg, s->msg);
+    u->n_bad = s->n_bad < UI_SCAN_BAD ? s->n_bad : UI_SCAN_BAD;
+    u->bad_more = s->bad_more + (unsigned long long)(s->n_bad - u->n_bad);
+    for (int i = 0; i < u->n_bad; ++i) {
+        u->bad_lba[i] = s->bad[i].lba;
+        u->bad_count[i] = s->bad[i].count;
+    }
+    u->cells = s->cells;
+    memcpy(u->map, s->map, sizeof u->map);
+    free(s);
+}
+
+static int scan_start_(const char *disk, int mode, unsigned long long start, unsigned long long end, unsigned block,
+                       const char *confirm, char *err, size_t cap)
+{
+    return mgmt_scan_start(disk, mode, start, end, block, confirm, err, cap);
+}
+
 static void time_get(ui_time_t *u)
 {
     sys_clock_t c;
@@ -399,6 +530,8 @@ static const ui_mgmt_t g_mgmt = {
     .curl = curl_available, .job = job,
     .disks = disks, .disk_formats = sys_disk_formats, .disk_format = mgmt_disk_format,
     .disk_mount = mgmt_disk_mount, .disk_unmount = mgmt_disk_unmount,
+    .smart_read = smart_read_, .smart_get = smart_get, .selftest = mgmt_selftest, .scan_start = scan_start_,
+    .scan_get = scan_get, .scan_pause = mgmt_scan_pause, .scan_stop = mgmt_scan_stop,
     .time_get = time_get, .zones = zones, .zone_name = zone_name, .zone_tz = zone_tz, .tz_parse = tz_parse_,
     .tz_build = tz_build_, .time_set = time_set, .ntp_set = ntp_set, .ntp_sync = ntp_sync_now,
     .hostname_get = hostname_get, .hostname_set = mgmt_hostname_set,

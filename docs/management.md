@@ -23,6 +23,7 @@ The same actions are in the HTTP API ([api.md](api.md#management)).
 | Storage | Basic | works | When the disk is full: overwrite the oldest recordings, or stop (event `REC disk full`); segment length in minutes; the recording directory. |
 | | Schedule | works | A week per camera in half hours: continuous, motion only, off. Motion only records while the camera reports motion, which no source does yet. |
 | | Disk Manager | works | Disks and partitions with their state; format (ext4 by default where `mkfs.ext4` exists, else exFAT; FAT32), mount, unmount. |
+| | Disk Maintenance | works | SMART of a SATA disk or a USB enclosure that passes ATA commands (verdict, identity, attributes with the important ones highlighted, self-tests and their log); a surface scan (Read, Verify, Write) with a sector map. |
 | | Disk Quota | works | Per camera: the most space (GB) and the most days its recordings may take. |
 | | Network Storage | works | SMB (CIFS, SMB2/3; SMB1 only where the kernel has nothing else) and NFS v3, mounted at `/mnt/nas`; Test mounts, writes and reads a file. |
 | System | General | works | Device name (host name), language (English for now), date and time, time zone with DST, NTP, date and time format. |
@@ -115,6 +116,66 @@ ends), its partitions are unmounted, and then:
 **Unmount** holds recording off the disk and unmounts it; recording then
 waits for a disk as it does when one is pulled. **Mount** mounts at
 `/mnt/<dev>`, loading the filesystem's module when the kernel asks for it.
+
+## Disk maintenance
+
+**SMART** is read by vigild itself: the firmware has no room for
+smartmontools, and five ATA commands are all it takes. They go to the
+drive as ATA PASS-THROUGH (SAT: the 16-byte command, the 12-byte one
+where a USB bridge knows only that) through the `SG_IO` ioctl on
+`/dev/sdX`: libata translates for a SATA disk, a USB enclosure's bridge
+in its firmware. IDENTIFY DEVICE gives the model, serial, firmware,
+capacity, sector sizes, rotation rate (or solid state) and the SATA link
+speeds; SMART READ DATA and READ THRESHOLDS the attribute table and the
+self-test state; SMART RETURN STATUS the drive's own verdict; READ LOG
+06h the self-test log. A USB stick, a memory card or a bridge without SAT
+answers none of it: "SMART not available", and why. NVMe is not handled
+(the recorders have none).
+
+The verdict:
+
+| | When |
+|---|---|
+| Failing | the drive says so (RETURN STATUS), an attribute is at or below its threshold, or the last self-test failed |
+| Warning | a raw count that only grows on a sick disk is not zero: reallocated sectors (5), reallocation events (196), pending sectors (197), offline uncorrectable (198), reported uncorrectable (187), command timeouts (188), spin retries (10), end-to-end errors (184); interface CRC errors (199), which are usually the cable or the connection, not the disk; an attribute that was at its threshold once (worst); hotter than 55 °C (an SSD: 70 °C); an SSD with 10 % of its life left or less |
+| Good | none of that |
+| Unknown | no SMART, or SMART off |
+
+Raw values are decoded where their meaning is common: temperatures with
+the minimum and maximum some drives keep, power-on hours (the low 32
+bits), spin-up time in ms, Seagate's three command-timeout counters.
+Self-tests (short, extended) run inside the drive, which keeps working.
+
+**The surface scan**, like Victoria or MHDD, reads a range of LBAs block
+by block on a thread of vigild and times each block:
+
+| Mode | How |
+|---|---|
+| Read | `pread` with `O_DIRECT`: no page cache, the disk's own time |
+| Verify | ATA READ VERIFY SECTORS EXT through the same pass-through: the drive reads the block into nothing, no data crosses the cable. Where nothing passes it (a USB stick, some bridges), the scan reads and says so |
+| Write | destructive: each sector gets a pattern (its LBA, the scan's nonce, a fixed byte), then a second pass reads every block back and compares. The disk is opened `O_EXCL`, which the kernel refuses while a partition of it is mounted; afterwards the kernel re-reads the (now gone) partition table |
+
+Each block falls in a class by its time: under 5, 20, 50, 150, 500 ms,
+500 ms or more, or an error (a failed read, a drive error, a block that
+reads back different); the classes are counted and the errors' LBA
+ranges listed. The map is up to 2000 cells over the range, each the worst
+class of its blocks. The default block is 256 sectors (128 KiB);
+Victoria's thresholds assume that size.
+
+Rules: one scan at a time; whole disks only; Write only on a disk with
+nothing mounted, not the recording directory's (`record.path` under
+`/mnt/<one of its devices>`), not the system's, and with its name typed
+(the screen names its model, serial and size). Read and Verify are
+allowed on a disk in use; on a mounted one the scan's thread runs at the
+idle I/O priority so recording goes first (the CFQ scheduler honours it;
+Verify's ATA commands bypass the scheduler), and recording may still slow
+down. A format of the scanned disk waits for the scan, and so does a
+mount during Write. The scan goes on when the page is left; stopping
+vigild stops it after the block under way (Write leaves the disk partly
+written). Events: `disk sdb: surface scan (read) started`, `... done, 0
+bad ranges`. Errors are counted per block read or written, so Write's
+read-back can count a block its write already failed; the bad ranges list
+each LBA range once.
 
 ## Recording policies
 

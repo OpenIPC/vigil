@@ -65,6 +65,7 @@ ICONS = [
     ("nav_basic", "device-floppy.svg", 22, 2),
     ("nav_schedule", "calendar-time.svg", 22, 2),
     ("nav_disks", "server-2.svg", 22, 2),
+    ("nav_maint", "stethoscope.svg", 22, 2),
     ("nav_quota", "chart-pie.svg", 22, 2),
     ("nav_nas", "folder-share.svg", 22, 2),
     ("nav_general", "settings.svg", 22, 2),

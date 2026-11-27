@@ -14,6 +14,8 @@ void test_sys_time(void);
 void test_sys_curl(void);
 void test_sys_disk(void);
 void test_sys_mgmt(void);
+void test_sys_smart(void);
+void test_sys_scan(void);
 
 void test_sys_seams(void)
 {
@@ -62,6 +64,8 @@ int main(void)
     test_sys_curl();
     test_sys_disk();
     test_sys_mgmt();
+    test_sys_smart();
+    test_sys_scan();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }
