@@ -1390,6 +1390,7 @@ static void test_channels_manual(void)
     shot("manual_onvif");
     man_proto(UI_MANUAL_DAHUA);
     CHECK(!strcmp(lv_textarea_get_text(textarea(1)), "554"), "Dahua: RTSP port 554");
+    shot("manual_dahua");
     man_proto(UI_MANUAL_RTSP);
     CHECK(find("Main stream", 0) && !find("Device channel", 0), "RTSP: the paths, no channel");
     lv_textarea_set_text(textarea(3), "pw");
