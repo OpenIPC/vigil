@@ -14,10 +14,22 @@
 #ifndef API_H
 #define API_H
 
+#include <stddef.h>
+
 /* Start serving as the configuration says ("" = no API). Returns 0 when
  * serving or not configured, -1 when it could not start (logged: vigild
  * records and shows video without it). */
 int  api_start(void);
 void api_stop(void);
+
+/* Stop and listen on `listen` instead (api.listen changed while running):
+ * 0, or -1 with `err` (nothing listens then; the caller starts the old
+ * one again, with `err` NULL, which keeps the failure reported). Main
+ * thread, as api_start. */
+int  api_restart(const char *listen, char *err, size_t cap);
+/* 1 while the API listens, with `listen` what on and `why` the last move
+ * that failed ("" if none); 0 with `why` it does not listen (off, the
+ * port in use, ...). Any thread. */
+int  api_listening(char *listen, size_t cap, char *why, size_t wcap);
 
 #endif /* API_H */

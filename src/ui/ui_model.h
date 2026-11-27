@@ -356,6 +356,16 @@ typedef struct {
     int      builtin, editable, members;
 } ui_group_t;
 
+/* One of vigild's servers (Network -> Ports): what it listens on now
+ * ("": nothing), and why not, or the last move to another port that
+ * failed (""). */
+enum { UI_SERVER_WEB, UI_SERVER_API, UI_SERVER_ONVIF };
+typedef struct {
+    int  on;
+    char listen[64];
+    char why[200];
+} ui_listen_t;
+
 /* Permissions, users.h's PERM_* bits (the bridge asserts they agree). */
 enum {
     UI_PERM_LIVE = 1u << 0, UI_PERM_PLAYBACK = 1u << 1, UI_PERM_PTZ = 1u << 2, UI_PERM_CAMERAS = 1u << 3,
@@ -447,6 +457,8 @@ typedef struct {
     /* Exit: reboot (1) or power off (0), after vigild stops cleanly; 0, or
      * < 0 on a system vigild does not manage */
     int  (*power)(int reboot);
+    /* UI_SERVER_*; NULL: not known in this build */
+    void (*listening)(int server, ui_listen_t *out);
 } ui_mgmt_t;
 
 typedef struct ui_model {

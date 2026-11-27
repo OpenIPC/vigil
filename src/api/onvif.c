@@ -53,6 +53,7 @@
 #include "hal.h"
 #include "log.h"
 #include "md5.h"
+#include "net.h"
 #include "mgmt.h"
 #include "onvif.h"
 #include "onvif_proto.h"
@@ -1394,10 +1395,25 @@ static int http_start(int port)
     struct mg_callbacks cb;
     memset(&cb, 0, sizeof cb);
     cb.log_message = log_message;
+    char why[128];
+    if (net_listen_check(ports, why, sizeof why) < 0) {
+        char t[160];
+        snprintf(t, sizeof t, "%s; trying again every 30 s", why);
+        api_server_state(2, "", t);
+        return -1;
+    }
     g_ctx = mg_start(&cb, NULL, options);
-    if (!g_ctx) return -1;
+    if (!g_ctx) {
+        api_server_state(2, "", "the web server library could not start there; trying again every 30 s");
+        return -1;
+    }
+    /* Device management and the profiles: the management class (qos.h). */
+    api_qos_listeners(g_ctx, QOS_MANAGEMENT);
     mg_set_request_handler(g_ctx, "/onvif", handler, NULL);
     atomic_store(&g_port, port);
+    char l[24];
+    snprintf(l, sizeof l, "0.0.0.0:%d", port);
+    api_server_state(2, l, "");
     return 0;
 }
 
@@ -1494,6 +1510,7 @@ static int wsd_open(wsd_t *s)
      * every socket bound to the port). */
     setsockopt(s->fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     setsockopt(s->fd, IPPROTO_IP, IP_PKTINFO, &one, sizeof one);
+    qos_mark(s->fd, QOS_MANAGEMENT, 1);
     unsigned char ttl = 1;
     setsockopt(s->fd, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof ttl);
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons((uint16_t)s->port) };
@@ -1583,6 +1600,7 @@ static void *supervisor(void *arg)
         config_get(c);
         int on = c->onvif_server.enabled, port = c->onvif_server.port;
         long now = mono();
+        if (!on && !g_ctx) api_server_state(2, "", "off: onvif_server.enabled is off");
         if (g_ctx && (!on || port != atomic_load(&g_port))) {
             if (s.fd >= 0) wsd_send_all(&s, 1, atomic_load(&g_port));
             http_stop();

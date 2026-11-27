@@ -24,6 +24,7 @@
 #include "hal.h"
 #include "log.h"
 #include "md5.h"
+#include "net.h"
 #include "sys_time.h"
 #include "users.h"
 
@@ -764,6 +765,8 @@ static int ws_connect(const struct mg_connection *conn, void *cbdata)
 static void ws_ready(struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
+    /* What this WebSocket carries is events, the alarm class's. */
+    api_qos_conn(conn, QOS_ALARM);
     /* A client starts with the state of things, not a second of silence. */
     char *st = message("status", status_json());
     char *cf = config_message(config_generation());
@@ -889,22 +892,100 @@ static void random_key_once(void)
         g_cache_key[i] = (unsigned char)('!' + g_cache_key[i] % 90);
 }
 
+void api_qos_listeners(const struct mg_context *ctx, qos_class_t c)
+{
+    struct mg_server_port ports[4];
+    int n = mg_get_server_ports(ctx, 4, ports);
+    for (int i = 0; i < n; ++i)
+        if (qos_mark_listeners(ports[i].port, c) <= 0) vg_log("qos: no listener found on port %d", ports[i].port);
+}
+
+void api_qos_conn(const struct mg_connection *conn, qos_class_t c)
+{
+    const struct mg_request_info *ri = mg_get_request_info(conn);
+    if (ri && qos_mark_peer(ri->server_port, ri->remote_addr, ri->remote_port, c) < 0)
+        vg_log("qos: the connection from %s:%d not found", ri->remote_addr, ri->remote_port);
+}
+
 void api_auth_init(void)
 {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
     pthread_once(&once, random_key_once);
 }
 
-int api_start(void)
+/* What each server listens on, for Network -> Ports (api.h, web.h,
+ * onvif.h); here for all of them, so that reading it needs none of the
+ * servers linked. */
+static pthread_mutex_t g_listen_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+    char listening[64], why[160];
+    char move_failed[200];          /* the last move that failed, until the next one */
+} g_srv[3];
+
+void api_server_state(int srv, const char *listen, const char *why)
 {
-    vigil_config_t *c = malloc(sizeof *c);
-    if (!c) return -1;
-    config_get(c);
-    config_api_t api = c->api;
-    free(c);
+    pthread_mutex_lock(&g_listen_lock);
+    snprintf(g_srv[srv].listening, sizeof g_srv[0].listening, "%s", listen);
+    snprintf(g_srv[srv].why, sizeof g_srv[0].why, "%s", why);
+    pthread_mutex_unlock(&g_listen_lock);
+}
+
+void api_server_moved(int srv, const char *listen, int failed, int requested, char *err, size_t cap)
+{
+    pthread_mutex_lock(&g_listen_lock);
+    char why[sizeof g_srv[0].why];
+    memcpy(why, g_srv[srv].why, sizeof why);
+    if (failed)
+        snprintf(g_srv[srv].move_failed, sizeof g_srv[0].move_failed, "could not move to '%s': %s", listen, why);
+    else if (requested)
+        g_srv[srv].move_failed[0] = 0;
+    if (failed && err) snprintf(err, cap, "%s", why);
+    pthread_mutex_unlock(&g_listen_lock);
+}
+
+static int server_listening(int srv, char *listen, size_t cap, char *why, size_t wcap)
+{
+    pthread_mutex_lock(&g_listen_lock);
+    int on = g_srv[srv].listening[0] != 0;
+    if (listen) snprintf(listen, cap, "%s", g_srv[srv].listening);
+    if (why) snprintf(why, wcap, "%s", on ? g_srv[srv].move_failed : g_srv[srv].why);
+    pthread_mutex_unlock(&g_listen_lock);
+    return on;
+}
+
+int api_listening(char *listen, size_t cap, char *why, size_t wcap)
+{
+    return server_listening(0, listen, cap, why, wcap);
+}
+
+int web_listening(char *listen, size_t cap, char *why, size_t wcap)
+{
+    return server_listening(1, listen, cap, why, wcap);
+}
+
+int onvif_listening(char *listen, size_t cap, char *why, size_t wcap)
+{
+    return server_listening(2, listen, cap, why, wcap);
+}
+
+static void set_listening(const char *listen, const char *why) { api_server_state(0, listen, why); }
+
+static int start_at(const char *listen, int auth)
+{
+    config_api_t api;
+    memset(&api, 0, sizeof api);
+    snprintf(api.listen, sizeof api.listen, "%s", listen);
+    api.auth = auth;
     if (!api.listen[0]) {
         vg_log("api: off (api.listen is empty)");
+        set_listening("", "off: api.listen is empty");
         return 0;
+    }
+    char why[128];
+    if (net_listen_check(api.listen, why, sizeof why) < 0) {
+        vg_log("api: cannot listen on %s: %s; running without the API", api.listen, why);
+        set_listening("", why);
+        return -1;
     }
     g_t0 = mono();
     api_auth_init();
@@ -925,9 +1006,12 @@ int api_start(void)
     g_ctx = mg_start(&cb, NULL, options);
     if (!g_ctx) {
         vg_log("api: cannot listen on %s; running without the API", api.listen);
+        set_listening("", "the web server library could not start there");
         mg_exit_library();
         return -1;
     }
+    set_listening(api.listen, "");
+    api_qos_listeners(g_ctx, QOS_MANAGEMENT);
     mg_set_auth_handler(g_ctx, "/api", auth_handler, NULL);
     mg_set_request_handler(g_ctx, "/api/v1", request_handler, NULL);
     mg_set_websocket_handler(g_ctx, "/api/v1/ws", ws_connect, ws_ready, ws_data, ws_close, NULL);
@@ -944,6 +1028,29 @@ int api_start(void)
     vg_log("api: listening on %s%s", api.listen,
            api.auth ? "" : " WITHOUT authentication (api.auth is off)");
     return 0;
+}
+
+int api_start(void)
+{
+    vigil_config_t *c = malloc(sizeof *c);
+    if (!c) return -1;
+    config_get(c);
+    config_api_t api = c->api;
+    free(c);
+    return start_at(api.listen, api.auth);
+}
+
+int api_restart(const char *listen, char *err, size_t cap)
+{
+    vigil_config_t *c = malloc(sizeof *c);
+    if (!c) return -1;
+    config_get(c);
+    int auth = c->api.auth;
+    free(c);
+    api_stop();
+    int rc = start_at(listen, auth);
+    api_server_moved(0, listen, rc < 0, err != NULL, err, cap);
+    return rc;
 }
 
 void api_stop(void)
@@ -970,4 +1077,5 @@ void api_stop(void)
         pthread_cond_destroy(&c->wake);
     }
     mg_exit_library();
+    set_listening("", "stopped");
 }

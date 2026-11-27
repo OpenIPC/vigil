@@ -23,8 +23,8 @@ live view                  tiles over the whole screen, clock in a corner
       |    |               Change IP, Mass change, Auto add, Manual add; Show) and every
       |    |               channel (bandwidth; X / +; Clear, Delete, Edit, Title)
       |    +-> a camera    form: URL, name, enabled
-      +-> NETWORK          settings screen: Ethernet, Wi-Fi, LTE, DDNS, UPnP,
-      |                    SMTP, Alarm center, P2P
+      +-> NETWORK          settings screen: Ethernet, Wi-Fi, LTE, Ports, DDNS,
+      |                    UPnP, SMTP, Alarm center, QoS, P2P
       +-> STORAGE          settings screen: Basic, Schedule, Disk Manager,
       |                    Disk Maintenance, Disk Quota, Network Storage
       +-> SYSTEM           settings screen: General, HTTP API
@@ -223,11 +223,29 @@ interface is not up yet, Save also sets `wlandev` and loads the driver;
 without one, "No Wi-Fi adapter" and nothing to fill in. *LTE*: the USB
 modems plugged in, each with its driver and profile and "Use this profile"
 (`wlandev`, for the next boot), and the modem's interface once it is up;
-or "No modem found". *DDNS*, *SMTP*: the form, the last
+or "No modem found". *Ports*: the web server's, the HTTP API's and the ONVIF
+server's ports (`web.listen`, `api.listen`, the address part kept;
+`onvif_server.port`), each with what it listens on now, refreshed every
+second, or why not, or the last move that failed; and, under "Services
+not available yet", the RTSP and NETIP ports, with a note that nothing
+listens on them. Save refuses two on one
+port (the one changed is marked, both named in a toast) and saves one
+section at a time, those moving onto a port another one leaves last; the
+store refuses a port that is taken, with the reason, and the port typed
+stays there, marked. The web and API ports need the users permission
+too, as their sections do. *DDNS*, *SMTP*: the form, the last
 update or mail and its result, and "Update now" / "Send test mail" (which
 use the saved settings: with unsaved changes they ask to save first).
 *UPnP*: the form, marked not active. *Alarm center*: the form and the last
-post. *P2P*: vigil has none, said so.
+post. *QoS*: `qos`, the DSCP vigild marks its packets with: the type (Off,
+Standard (RFC 4594), Custom) and, unless off, a number 0..63 per traffic
+class with its name beside it (AF41, CS2, EF, ...): Video (the zero
+channel's picture), Management (the API, the web pages, DDNS, camera
+searches), Cameras (vigild's connections to them), Alarms and events.
+Standard shows its values greyed; Custom makes them editable. Saved, it
+applies at once: new connections, the cameras' sessions and open
+WebSockets are marked again; an open web page or API connection keeps its
+mark until it reconnects. *P2P*: vigil has none, said so.
 
 **Storage** (also the context menu's Record). *Basic*: when the disk is
 full (Overwrite: the oldest recordings make room; Stop: recording stops

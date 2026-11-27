@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "qos.h"
 #include "sys.h"
 #include "sys_curl.h"
 
@@ -45,13 +46,20 @@ static int temp_file(const char *what, const char *data, char *path, size_t cap)
 }
 
 /* Common options; curl's TLS checks the server against the firmware's CA
- * bundle when it is there. */
-static void base_opts(char *cfg, size_t cap)
+ * bundle when it is there. The traffic class's DSCP (qos.h) goes as
+ * ip-tos, which curl has since 8.9; only when it is set, so that an older
+ * curl still works with QoS off. */
+static void base_opts(char *cfg, size_t cap, qos_class_t cls)
 {
     char ca[512];
     size_t l = strlen(cfg);
     snprintf(cfg + l, cap - l, "silent\nshow-error\nconnect-timeout = 15\nmax-time = 60\n"
                                "user-agent = \"OpenIPC vigil/%s\"\n", VIGIL_VERSION);
+    int tos = qos_tos(qos_dscp(cls));
+    if (tos > 0) {
+        l = strlen(cfg);
+        snprintf(cfg + l, cap - l, "ip-tos = %d\n", tos);
+    }
     if (sys_exists(CA_BUNDLE)) {
         l = strlen(cfg);
         snprintf(cfg + l, cap - l, "cacert = \"%s\"\n", sys_path(ca, sizeof ca, CA_BUNDLE));
@@ -123,7 +131,7 @@ int mail_send(const config_smtp_t *s, const char *subject, const char *body, cha
         if (n) l += (size_t)snprintf(cfg + l, sizeof cfg - l, "mail-rcpt = \"%.*s\"\n", (int)n, p);
         p += n;
     }
-    base_opts(cfg, sizeof cfg);
+    base_opts(cfg, sizeof cfg, QOS_ALARM);
     char out[512];
     int rc = run_curl(cfg, out, sizeof out);
     memset(cfg, 0, sizeof cfg);             /* it held the password */
@@ -185,7 +193,7 @@ int ddns_update(const config_ddns_t *d, char *msg, size_t cap)
     size_t l = (size_t)snprintf(cfg, sizeof cfg, "url = \"%s\"\nfail\n", url);
     if (d->user[0] && (!custom || !strstr(d->url, "{password}")))
         snprintf(cfg + l, sizeof cfg - l, "user = \"%s:%s\"\n", d->user, d->password);
-    base_opts(cfg, sizeof cfg);
+    base_opts(cfg, sizeof cfg, QOS_MANAGEMENT);
     char out[512];
     int rc = run_curl(cfg, out, sizeof out);
     memset(cfg, 0, sizeof cfg);
@@ -218,7 +226,7 @@ int http_post_json(const char *url, const char *json, char *msg, size_t cap)
     char cfg[1024];
     snprintf(cfg, sizeof cfg, "url = \"%s\"\nfail\nheader = \"Content-Type: application/json\"\n"
                               "data-binary = \"@%s\"\n", url, file);
-    base_opts(cfg, sizeof cfg);
+    base_opts(cfg, sizeof cfg, QOS_ALARM);
     char out[256];
     int rc = run_curl(cfg, out, sizeof out);
     unlink(file);

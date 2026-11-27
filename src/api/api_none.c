@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* api_none.c — vigild built without the API (-DVIGIL_API=OFF). */
+#include <stdio.h>
+
 #include "api.h"
 #include "config.h"
 #include "log.h"
@@ -26,6 +28,36 @@ int web_start(void)
 
 void web_stop(void) {}
 
+int api_restart(const char *listen, char *err, size_t cap)
+{
+    (void)listen;
+    (void)err;
+    (void)cap;
+    return 0;
+}
+
+int api_listening(char *listen, size_t cap, char *why, size_t wcap)
+{
+    if (listen && cap) listen[0] = 0;
+    if (why) snprintf(why, wcap, "this vigild is built without the API");
+    return 0;
+}
+
+int web_restart(const char *listen, char *err, size_t cap)
+{
+    (void)listen;
+    (void)err;
+    (void)cap;
+    return 0;
+}
+
+int web_listening(char *listen, size_t cap, char *why, size_t wcap)
+{
+    if (listen && cap) listen[0] = 0;
+    if (why) snprintf(why, wcap, "this vigild is built without the web server");
+    return 0;
+}
+
 int onvif_start(void)
 {
     vigil_config_t c;
@@ -35,3 +67,10 @@ int onvif_start(void)
 }
 
 void onvif_stop(void) {}
+
+int onvif_listening(char *listen, size_t cap, char *why, size_t wcap)
+{
+    if (listen && cap) listen[0] = 0;
+    if (why) snprintf(why, wcap, "this vigild is built without the API");
+    return 0;
+}
