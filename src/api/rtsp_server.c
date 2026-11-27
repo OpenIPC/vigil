@@ -763,8 +763,8 @@ static int login(rs_conn_t *c, const char *method, const char *auth, unsigned *p
                     return 1;
                 }
             } else if (known < 0) {
-                vg_log("rtsp: %s cannot log in yet: vigil keeps no RTSP password hash for it; set its "
-                       "password again, or log in once on the screen, the web page or the API", user);
+                vg_log("rtsp: %s cannot log in yet: vigil does not know its password; set it again, "
+                       "or log in once on the screen, the web page or the API", user);
             }
             if (strcmp(nonce, c->nonce)) {
                 *perms = 0;

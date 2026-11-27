@@ -38,6 +38,7 @@
 #include "qos.h"
 #include "rec_place.h"
 #include "rec_sched.h"
+#include "secret.h"
 #include "rtp_depay.h"
 #include "source.h"
 #include "rtsp_client.h"
@@ -1203,6 +1204,24 @@ static char *config_text(const vigil_config_t *c)
     return t;
 }
 
+/* `t` with every sealed value's base64 cut (secret.h): files that differ
+ * only in the nonces compare equal. In place; returns `t`. */
+static char *unsealed(char *t)
+{
+    char *w = t;
+    for (const char *r = t; *r;) {
+        if (!strncmp(r, "enc:v1:", 7)) {
+            memcpy(w, "enc:v1:", 7);
+            w += 7;
+            r += 7 + strspn(r + 7, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=");
+        } else {
+            *w++ = *r++;
+        }
+    }
+    *w = 0;
+    return t;
+}
+
 /* Write `text` to `path` and load it into `d`, errors into `e`. */
 static int load_text(const char *path, const char *text, vigil_config_t *d, schema_errors_t *e)
 {
@@ -1260,11 +1279,11 @@ static void test_config_file(void)
     CHECK(a && b && !strcmp(a, b), "round trip:\n%s\n%s", a, b);
     free(b);
     char *raw = read_file(path);
-    CHECK(raw && strstr(raw, "admin:secret@"), "the file keeps the password");
+    CHECK(raw && strstr(raw, "admin:enc:v1:") && !strstr(raw, "secret"), "the file has the password, sealed");
     /* YAML, documented by the schema's own help text */
     CHECK(raw && !strncmp(raw, "# vigild configuration", 22) && strstr(raw, "\nversion: 1\n") &&
-          strstr(raw, "\ncameras:\n  - url: \"rtsp://admin:secret@10.0.0.2/stream\"\n    name: Gate\n"
-                      "    enabled: true\n") &&
+          strstr(raw, "\ncameras:\n  - url: \"rtsp://admin:enc:v1:") &&
+          strstr(raw, "@10.0.0.2/stream\"\n    name: Gate\n    enabled: true\n") &&
           strstr(raw, "\nrecord:\n  # Recording directory: Where the streams are recorded") &&
           strstr(raw, "\n  path: /mnt/sda1/rec\n") &&
           strstr(raw, "  # Segment length (s): A new file starts at the first keyframe after this\n"
@@ -1279,7 +1298,7 @@ static void test_config_file(void)
     CHECK(config_save_file(path2, &d, err, sizeof err) == 0, "save again: %s", err);
     raw = read_file(path);
     char *raw2 = read_file(path2);
-    CHECK(raw && raw2 && !strcmp(raw, raw2), "load, save: the same text");
+    CHECK(raw && raw2 && !strcmp(unsealed(raw), unsealed(raw2)), "load, save: the same text but for the nonces");
     free(raw);
     free(raw2);
     unlink(path2);
@@ -1548,8 +1567,8 @@ static void test_config_store(void)
     struct stat st;
     CHECK(stat(bad, &st) == 0, "the invalid file is kept as .bad");
     char *raw = read_file(path);
-    CHECK(raw && strstr(raw, "s3cret") && strstr(raw, "\n    name: Gate\n") && strstr(raw, "# Segment length"),
-          "saved to the file, as YAML");
+    CHECK(raw && !strstr(raw, "s3cret") && strstr(raw, "admin:enc:v1:") && strstr(raw, "\n    name: Gate\n") &&
+              strstr(raw, "# Segment length"), "saved to the file, as YAML, the password sealed");
     free(raw);
     char *kept = read_file(bad);
     CHECK(kept && !strcmp(kept, "record:\n  segment: 1\n"), "the .bad copy is the file as it was");
@@ -3200,7 +3219,8 @@ static void test_secrets(void)
     config_get(&c);
     CHECK(!strcmp(c.smtp.password, "new"), "a new password replaces it");
     char *file = read_file(path);
-    CHECK(file && strstr(file, "password: new"), "the file holds the password itself");
+    CHECK(file && !strstr(file, "password: new") && strstr(file, "  password: \"enc:v1:"),
+          "the file holds the password sealed");
     free(file);
     body = "{\"to\":\"a@b.c, bad\"}";
     e = (schema_errors_t){ 0 };
@@ -3525,9 +3545,159 @@ static void test_display_config(void)
     if (system(cmd)) {}
 }
 
+/* ---- the passwords' cipher (secret.c) and the configuration's sealed passwords ---- */
+
+static void test_secret_cipher(const char *keydir)
+{
+    char key[128], other[128], none[128], buf[2048], out[1100];
+    secret_key_path(key, sizeof key);
+    snprintf(other, sizeof other, "%s/other.key", keydir);
+    snprintf(none, sizeof none, "%s/none/vigil.key", keydir);
+    CHECK(access(key, F_OK) < 0, "no key before it is needed");
+    CHECK(secret_seal("t:a", "pass word", buf, sizeof buf) == SECRET_OK && secret_is_sealed(buf) &&
+              !strstr(buf, "pass"), "sealed: %s", buf);
+    struct stat st;
+    char *k = read_file(key);
+    CHECK(stat(key, &st) == 0 && (st.st_mode & 0777) == 0600 && k && strlen(k) == 65 &&
+              strspn(k, "0123456789abcdef") == 64, "the key: made at the first seal, 0600, 64 hex digits");
+    free(k);
+    CHECK(strlen(buf) + 1 == SECRET_SEALED_SIZE(9), "SECRET_SEALED_SIZE is exact for 9 bytes (%zu)", strlen(buf));
+    CHECK(secret_open("t:a", buf, out, sizeof out) == SECRET_OK && !strcmp(out, "pass word"), "round trip");
+    char again[256];
+    secret_seal("t:a", "pass word", again, sizeof again);
+    CHECK(strcmp(again, buf) != 0, "a fresh nonce each time");
+    CHECK(secret_open("t:b", buf, out, sizeof out) == SECRET_EAUTH && !out[0], "another field's value does not open");
+    char bent[2048];
+    snprintf(bent, sizeof bent, "%s", buf);
+    bent[12] = bent[12] == 'A' ? 'B' : 'A';
+    CHECK(secret_open("t:a", bent, out, sizeof out) == SECRET_EAUTH, "a changed value does not open");
+    CHECK(secret_open("t:a", "enc:v1:@@@", out, sizeof out) == SECRET_EFORMAT, "not base64");
+    CHECK(secret_open("t:a", "enc:v1:AAAA", out, sizeof out) == SECRET_EFORMAT, "too short");
+    CHECK(secret_open("t:a", "plain", out, sizeof out) == SECRET_EFORMAT, "not sealed");
+    CHECK(secret_open("t:a", buf, out, 5) == SECRET_EFORMAT, "does not fit");
+    CHECK(secret_seal("t:a", "", buf + 1024, 1024) == SECRET_OK && secret_open("t:a", buf + 1024, out, sizeof out) ==
+              SECRET_OK && !out[0], "an empty value");
+    char longp[1025];
+    memset(longp, 'x', 1024);
+    longp[1024] = 0;
+    CHECK(secret_seal("t:a", longp, buf, sizeof buf) == SECRET_OK && secret_open("t:a", buf, out, sizeof out) ==
+              SECRET_OK && !strcmp(out, longp), "1024 bytes");
+    CHECK(secret_seal("t:a", longp, buf, 100) == SECRET_EFORMAT, "too small for it");
+    secret_seal("t:a", "pass word", buf, sizeof buf);
+
+    /* Another key, no key, a broken one: the value does not open, nothing crashes. */
+    secret_set_key_path(other);
+    CHECK(secret_open("t:a", buf, out, sizeof out) == SECRET_ENOKEY && !out[0], "no key file: ENOKEY");
+    CHECK(access(other, F_OK) < 0, "opening never makes a key");
+    CHECK(secret_ensure_key() == SECRET_OK && access(other, F_OK) == 0, "secret_ensure_key makes one");
+    CHECK(secret_open("t:a", buf, out, sizeof out) == SECRET_EAUTH && !out[0], "another key: EAUTH");
+    write_file(other, "0123\n");
+    secret_set_key_path(other);
+    CHECK(secret_open("t:a", buf, out, sizeof out) == SECRET_EBADKEY &&
+              secret_seal("t:a", "x", again, sizeof again) == SECRET_EBADKEY, "a short key file: EBADKEY");
+    k = read_file(other);
+    CHECK(k && !strcmp(k, "0123\n"), "and it is never replaced");
+    free(k);
+    secret_set_key_path(none);
+    CHECK(secret_seal("t:a", "x", again, sizeof again) == SECRET_ENOKEY, "no directory for a key: ENOKEY");
+    secret_set_key_path(key);
+    CHECK(secret_open("t:a", buf, out, sizeof out) == SECRET_OK && !strcmp(out, "pass word"), "the key again");
+}
+
+/* The configuration's passwords: sealed in the file, themselves in memory. */
+static void test_config_seal(void)
+{
+    char dir[] = "/tmp/vigil-seal-XXXXXX", path[128], err[300], key[128];
+    if (!mkdtemp(dir)) return;
+    snprintf(path, sizeof path, "%s/vigil.yaml", dir);
+    vigil_config_t c, d;
+    schema_errors_t e = { 0 };
+    config_defaults(&c);
+    c.n_cameras = 3;
+    snprintf(c.cameras[0].url, sizeof c.cameras[0].url, "rtsp://admin:Cam-Pa55@10.0.0.2/stream");
+    snprintf(c.cameras[0].sub_url, sizeof c.cameras[0].sub_url, "rtsp://admin:Sub-Pa55@10.0.0.2/sub");
+    snprintf(c.cameras[1].url, sizeof c.cameras[1].url, "netip://admin:@10.0.0.3/");
+    snprintf(c.cameras[2].url, sizeof c.cameras[2].url, "rtsp://10.0.0.4/live");
+    for (int i = 0; i < 3; ++i) c.cameras[i].enabled = 1;
+    snprintf(c.smtp.password, sizeof c.smtp.password, "Mail-Pa55");
+    snprintf(c.ddns.password, sizeof c.ddns.password, "Ddns-Pa55");
+    snprintf(c.nas.password, sizeof c.nas.password, "Nass-Pa55");
+    CHECK(config_save_file(path, &c, err, sizeof err) == 0, "save: %s", err);
+    char *t = read_file(path);
+    CHECK(t && !strstr(t, "Pa55") && strstr(t, "\"rtsp://admin:enc:v1:") && strstr(t, "password: \"enc:v1:") &&
+              strstr(t, "netip://admin:@10.0.0.3/") && strstr(t, "rtsp://10.0.0.4/live"),
+          "no password in the clear, the URLs' shape kept:\n%s", t ? t : "");
+    memset(&e, 0, sizeof e);
+    CHECK(config_load_file(path, &d, &e) == 0 && !strcmp(d.cameras[0].url, c.cameras[0].url) &&
+              !strcmp(d.cameras[0].sub_url, c.cameras[0].sub_url) && !strcmp(d.smtp.password, "Mail-Pa55") &&
+              !strcmp(d.ddns.password, "Ddns-Pa55") && !strcmp(d.nas.password, "Nass-Pa55") &&
+              !strcmp(d.cameras[1].url, c.cameras[1].url),
+          "read back as they were: %s", e.n ? e.e[0].msg : d.cameras[0].url);
+
+    /* A sealed value moved to another field does not open there. */
+    char *p = t ? strstr(t, "password: \"enc:v1:") : NULL;      /* nas comes first */
+    char *q = p ? strstr(p + 1, "password: \"enc:v1:") : NULL;  /* then ddns */
+    if (p && q) {
+        size_t lp = strcspn(p + 11, "\""), lq = strcspn(q + 11, "\"");
+        if (lp == lq) {
+            char tmpv[256];
+            memcpy(tmpv, p + 11, lp);
+            memmove(p + 11, q + 11, lq);
+            memcpy(q + 11, tmpv, lp);
+            write_file(path, t);
+            memset(&e, 0, sizeof e);
+            CHECK(config_load_file(path, &d, &e) == 0 && !d.nas.password[0] && !d.ddns.password[0] &&
+                      !strcmp(d.smtp.password, "Mail-Pa55"), "swapped between fields: neither opens");
+        } else {
+            CHECK(0, "nas and ddns sealed to different lengths (%zu, %zu)", lp, lq);
+        }
+    }
+    free(t);
+
+    /* The file of an older vigild, passwords in the clear: sealed at once. */
+    write_file(path, "cameras:\n  - url: \"rtsp://admin:Old-Pa55@10.0.0.2/stream\"\n"
+                     "smtp:\n  server: mail.example.org\n  password: \"Old-Mail\"\n");
+    CHECK(config_init(path) == 0, "old file loaded");
+    config_get(&d);
+    CHECK(!strcmp(d.cameras[0].url, "rtsp://admin:Old-Pa55@10.0.0.2/stream") && !strcmp(d.smtp.password, "Old-Mail"),
+          "in force as they were");
+    t = read_file(path);
+    CHECK(t && !strstr(t, "Old-Pa55") && !strstr(t, "Old-Mail") && strstr(t, "rtsp://admin:enc:v1:"),
+          "and the file rewritten sealed:\n%s", t ? t : "");
+    free(t);
+    char *j = config_get_json(NULL, 1);
+    CHECK(j && !strstr(j, "Old-") && !strstr(j, "enc:v1") && strstr(j, "admin:***@10.0.0.2"),
+          "the API shows neither the password nor its sealed form");
+    free(j);
+
+    /* Without the key (another board's file, the key deleted): the
+     * passwords are unknown, the rest loads; nothing crashes. */
+    secret_key_path(key, sizeof key);
+    char moved[160];
+    snprintf(moved, sizeof moved, "%s.away", key);
+    CHECK(rename(key, moved) == 0, "key moved away");
+    secret_set_key_path(key);
+    memset(&e, 0, sizeof e);
+    CHECK(config_load_file(path, &d, &e) == 0 && !strcmp(d.cameras[0].url, "rtsp://admin@10.0.0.2/stream") &&
+              !d.smtp.password[0] && !strcmp(d.smtp.server, "mail.example.org"),
+          "no key: passwords unknown, the camera without one: %s", d.cameras[0].url);
+    CHECK(access(key, F_OK) < 0, "and no key made by reading");
+    rename(moved, key);
+    secret_set_key_path(key);
+    char cmd[200];
+    snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
+    if (system(cmd)) {}
+}
+
 int main(int argc, char **argv)
 {
     g_data = argc > 1 ? argv[1] : "tests/data";
+    /* The passwords' key in a directory of the tests' own, not /etc. */
+    char keydir[] = "/tmp/vigil-key-XXXXXX", key[64];
+    if (!mkdtemp(keydir)) return 1;
+    snprintf(key, sizeof key, "%s/vigil.key", keydir);
+    secret_set_key_path(key);
+    test_secret_cipher(keydir);
     test_sps();
     test_au_norm();
     test_gop_cache();
@@ -3566,10 +3736,14 @@ int main(int argc, char **argv)
     test_channel_events();
     test_rec_policies();
     test_secrets();
+    test_config_seal();
     test_display_config();
     test_qos_config();
     test_qos_sockets();
     test_ports();
+    char cmd[100];
+    snprintf(cmd, sizeof cmd, "rm -rf %s", keydir);
+    if (system(cmd)) {}
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

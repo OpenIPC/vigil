@@ -448,6 +448,10 @@ typedef struct {
     int (*group_set)(const char *name, unsigned perms, int create, char *field, size_t fcap, char *err,
                      size_t cap);
     int (*group_delete)(const char *name, char *err, size_t cap);
+    /* the system account's password (root's, also the console and SSH
+     * login), given its current one ("current" names it when wrong) */
+    int (*system_password)(const char *current, const char *pass, char *field, size_t fcap, char *err,
+                           size_t cap);
 
     /* the on-screen login: 1 with *perms, 0 wrong user or password, -1
      * when it cannot be checked (`why`) */

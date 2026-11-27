@@ -284,9 +284,9 @@ def main():
         st, _, b = o.call(DEV, "SystemReboot", header=wsse("anna", "annapw"))
         check(st == 400 and "system permission" in b, "SystemReboot needs the system permission")
 
-        # ---- the system account: no ONVIF key, so PasswordText only
+        # ---- the system account: its password sealed at its API logins, so digests too
         st, _, b = o.call(DEV, "GetUsers", header=wsse("root", "secret"))
-        check(st == 400, "root with a digest token: refused (%s)" % st)
+        check(st == 200, "root with a digest token (%s)" % st)
         st, _, b = o.call(DEV, "GetUsers", header=text_token("root", "secret"))
         check(st == 200 and "<tt:Username>anna</tt:Username><tt:UserLevel>User</tt:UserLevel>" in b and
               "<tt:Username>root</tt:Username><tt:UserLevel>Administrator</tt:UserLevel>" in b,
@@ -304,8 +304,12 @@ def main():
         check(c.getresponse().status == 405, "GET: 405")
         c.close()
 
-        log = open(log_path).read()
+        # Paths may hold anything (this tree's own name): only the rest counts.
+        log = re.sub(r"/\S+", "", open(log_path).read())
         check("annapw" not in log and "secret" not in log, "no password in the log")
+        files = open(cfg).read() + open(os.path.join(tmp, "users.yaml")).read()
+        check("admin:cam@" not in files and "annapw" not in files and "netip://admin:enc:v1:" in files and
+              "password_enc:" in files, "the files hold the passwords sealed")
     finally:
         vd.terminate()
         try:

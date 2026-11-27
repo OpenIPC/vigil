@@ -12,7 +12,8 @@ jobs:
       - name: Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake libyaml-dev ffmpeg python3-gi gir1.2-gst-rtsp-server-1.0 \
+          sudo apt-get install -y cmake libyaml-dev libmbedtls-dev ffmpeg python3-cryptography python3-gi \
+            gir1.2-gst-rtsp-server-1.0 \
             gstreamer1.0-plugins-ugly gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
       - name: Build
         run: cmake -S . -B build -DVIGIL_PLATFORM=generic && cmake --build build -j
@@ -32,7 +33,7 @@ jobs:
       - name: Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake meson ninja-build pkg-config libdrm-dev libyaml-dev
+          sudo apt-get install -y cmake meson ninja-build pkg-config libdrm-dev libyaml-dev libmbedtls-dev
           sudo WORK=/tmp/vigil-deps scripts/rockchip/build-deps.sh
       - name: Build
         run: cmake -S . -B build -DVIGIL_PLATFORM=rockchip -DBUILD_TESTING=OFF && cmake --build build -j

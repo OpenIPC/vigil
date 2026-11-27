@@ -15,7 +15,7 @@
  * SOAP without a SOAP library: onvif_proto.h finds the operation and the
  * UsernameToken, the answers are templates. Logins are vigil's users
  * (users.h): a WS-UsernameToken digest or an HTTP Digest is checked
- * against the user's ONVIF key, PasswordText and Basic against the
+ * against the user's sealed password (users.h), PasswordText and Basic against the
  * crypt(3) hash; failures count with the API's (api_login).
  *
  * One thread (supervisor) follows the configuration: it starts, moves

@@ -15,6 +15,7 @@
 #include "config.h"
 #include "log.h"
 #include "schema_yaml.h"
+#include "secret.h"
 
 #define FILE_MAX (256u << 10)       /* far above any real configuration */
 
@@ -86,7 +87,116 @@ config_format_t config_format(const char *path)
     return n >= 5 && !strcmp(path + n - 5, ".json") ? CONFIG_JSON : CONFIG_YAML;
 }
 
-int config_load_file(const char *path, vigil_config_t *c, schema_errors_t *errs)
+/* ---- the passwords in the file (docs/security.md) -------------------------------------
+ * In memory every password is itself (the channels connect with it, the
+ * API hides it); in the file each is sealed (secret.h), the field's path
+ * its additional data. A camera URL keeps its shape, only the password in
+ * it sealed: "rtsp://admin:enc:v1:...@10.0.0.2/stream". */
+
+typedef struct {
+    int plain;                      /* passwords found in the clear (an older file, a hand edit) */
+    int lost;                       /* sealed ones that did not open */
+    secret_rc_t why;                /* the first failure */
+} seal_stats_t;
+
+/* The password of a URL's credentials: [*b, *e) (the same span
+ * schema_redact_url hides). 0 when the URL has one, non-empty. */
+static int url_password(const char *url, size_t *b, size_t *e)
+{
+    const char *auth = strstr(url, "://");
+    if (!auth) return -1;
+    auth += 3;
+    const char *at = strrchr(auth, '@');
+    const char *colon = at ? memchr(auth, ':', (size_t)(at - auth)) : NULL;
+    if (!colon || colon + 1 == at) return -1;
+    *b = (size_t)(colon + 1 - url);
+    *e = (size_t)(at - url);
+    return 0;
+}
+
+/* One secret field's value in `o`, sealed (`seal`) or opened in place.
+ * -1 only when sealing fails (`*why`). */
+static int seal_field(cJSON *o, const schema_field_t *f, const char *aad, int seal, seal_stats_t *st)
+{
+    cJSON *v = cJSON_GetObjectItemCaseSensitive(o, f->key);
+    if (!cJSON_IsString(v) || !v->valuestring[0]) return 0;
+    const char *s = v->valuestring;
+    size_t b = 0, e = strlen(s);
+    if (f->secret == SCHEMA_SECRET_URL && url_password(s, &b, &e) < 0) return 0;
+    size_t plen = e - b, cap = SECRET_SEALED_SIZE(plen) + 1;
+    char *part = malloc(plen + 1), *res = malloc(cap > plen + 1 ? cap : plen + 1);
+    char *text = NULL;
+    int rc = 0;
+    if (!part || !res) {
+        st->why = SECRET_ENOKEY;
+        rc = -1;
+        goto out;
+    }
+    memcpy(part, s + b, plen);
+    part[plen] = 0;
+    res[0] = 0;
+    if (seal) {
+        /* Even one that looks sealed: it is opened once, and is itself again. */
+        secret_rc_t r = secret_seal(aad, part, res, cap);
+        if (r != SECRET_OK) {
+            st->why = r;
+            rc = -1;
+            goto out;
+        }
+    } else if (secret_is_sealed(part)) {
+        secret_rc_t r = secret_open(aad, part, res, plen + 1);
+        if (r != SECRET_OK) {
+            vg_log("%s: the stored password cannot be read (%s); set it again", aad + 7, secret_strerror(r));
+            if (!st->lost++) st->why = r;
+            res[0] = 0;
+        }
+    } else {
+        ++st->plain;
+        goto out;
+    }
+    /* A URL whose password did not open loses the ':' with it. */
+    size_t rl = strlen(res), lead = b - (!res[0] && f->secret == SCHEMA_SECRET_URL);
+    text = malloc(lead + rl + strlen(s + e) + 1);
+    if (text) {
+        memcpy(text, s, lead);
+        memcpy(text + lead, res, rl);
+        strcpy(text + lead + rl, s + e);
+        cJSON_SetValuestring(v, text);
+    }
+out:
+    if (part) secret_wipe(part, plen);
+    if (res) secret_wipe(res, strlen(res));
+    if (text) secret_wipe(text, strlen(text));
+    free(part);
+    free(res);
+    free(text);
+    return rc;
+}
+
+/* Every secret field of the configuration document `doc`. */
+static int seal_doc(cJSON *doc, int seal, seal_stats_t *st)
+{
+    for (int i = 0; i < config_schema.n_sections; ++i) {
+        const schema_section_t *sec = &config_schema.sections[i];
+        cJSON *so = cJSON_GetObjectItemCaseSensitive(doc, sec->key);
+        int k = 0;
+        for (cJSON *o = sec->is_array ? (cJSON_IsArray(so) ? so->child : NULL) : so; o;
+             o = sec->is_array ? o->next : NULL, ++k) {
+            if (!cJSON_IsObject(o)) continue;
+            for (int j = 0; j < sec->n_fields; ++j) {
+                const schema_field_t *f = &sec->fields[j];
+                if (!f->secret) continue;
+                char aad[128];
+                if (sec->is_array) snprintf(aad, sizeof aad, "config:%s[%d].%s", sec->key, k, f->key);
+                else snprintf(aad, sizeof aad, "config:%s.%s", sec->key, f->key);
+                if (seal_field(o, f, aad, seal, st) < 0) return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int load_file(const char *path, vigil_config_t *c, schema_errors_t *errs, seal_stats_t *st)
 {
     config_defaults(c);
     FILE *f = fopen(path, "rb");
@@ -110,6 +220,7 @@ int config_load_file(const char *path, vigil_config_t *c, schema_errors_t *errs)
                                                     : schema_yaml_parse(&config_schema, buf, n, errs);
     free(buf);
     if (!doc) return -1;
+    seal_doc(doc, 0, st);
     /* Not strict: a key this vigild does not know (a newer one wrote the
      * file) is skipped instead of costing every other setting. */
     int rc = schema_from_json(&config_schema, doc, c, 0, errs);
@@ -120,6 +231,12 @@ int config_load_file(const char *path, vigil_config_t *c, schema_errors_t *errs)
         return -1;
     }
     return 0;
+}
+
+int config_load_file(const char *path, vigil_config_t *c, schema_errors_t *errs)
+{
+    seal_stats_t st = { 0 };
+    return load_file(path, c, errs, &st);
 }
 
 static int write_all(int fd, const char *p, size_t len)
@@ -195,10 +312,19 @@ int config_check_text(const vigil_config_t *c, config_format_t fmt, char *err, s
     return -1;
 }
 
-char *config_file_text(const vigil_config_t *c, config_format_t fmt)
+static char *file_text(const vigil_config_t *c, config_format_t fmt, char *err, size_t cap)
 {
     cJSON *doc = schema_to_json(&config_schema, c, 0);
     char *text = NULL;
+    seal_stats_t st = { 0 };
+    if (doc && seal_doc(doc, 1, &st) < 0) {
+        char key[300];
+        snprintf(err, cap, "cannot seal the passwords: %s (%s)", secret_strerror(st.why),
+                 secret_key_path(key, sizeof key));
+        cJSON_Delete(doc);
+        return NULL;
+    }
+    if (!doc) snprintf(err, cap, "out of memory");
     if (doc && fmt == CONFIG_YAML) {
         text = schema_yaml_emit(&config_schema, doc, yaml_header);
     } else if (doc && (text = cJSON_Print(doc)) != NULL) {
@@ -214,18 +340,24 @@ char *config_file_text(const vigil_config_t *c, config_format_t fmt)
         }
         text = t;
     }
+    if (doc && !text) snprintf(err, cap, "out of memory");
     cJSON_Delete(doc);
+    return text;
+}
+
+char *config_file_text(const vigil_config_t *c, config_format_t fmt)
+{
+    char err[400];
+    char *text = file_text(c, fmt, err, sizeof err);
+    if (!text) vg_log("config: %s", err);
     return text;
 }
 
 int config_save_file(const char *path, const vigil_config_t *c, char *err, size_t cap)
 {
     if (config_check_text(c, config_format(path), err, cap) < 0) return -1;
-    char *text = config_file_text(c, config_format(path));
-    if (!text) {
-        snprintf(err, cap, "out of memory");
-        return -1;
-    }
+    char *text = file_text(c, config_format(path), err, cap);
+    if (!text) return -1;
     int rc = config_write_atomic(path, text, strlen(text), err, cap);
     free(text);
     return rc;
@@ -283,9 +415,19 @@ int config_init(const char *path)
         return -2;
     }
     snprintf(g_path, sizeof g_path, "%s", path);
-    int rc = config_load_file(g_path, &c, &errs);
+    seal_stats_t st = { 0 };
+    int rc = load_file(g_path, &c, &errs, &st);
     if (rc == 1) vg_log("%s: not there, using the defaults", g_path);
     else if (rc == 0) vg_log("%s: loaded", g_path);
+    if (rc == 0 && st.plain) {
+        /* Passwords in the clear (a file from before they were sealed, or
+         * typed in by hand): sealed now, not at the next change. */
+        char err[700];
+        if (config_save_file(g_path, &c, err, sizeof err) < 0)
+            vg_log("%s: %d password(s) in the clear, not sealed: %s", g_path, st.plain, err);
+        else
+            vg_log("%s: %d password(s) found in the clear, sealed", g_path, st.plain);
+    }
     schema_errors_t perrs = { 0 };
     if (rc == 0) {
         if (config_check_ports(&c, &perrs) < 0) log_errors(g_path, &perrs);

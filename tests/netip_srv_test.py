@@ -235,8 +235,8 @@ def run(vigild, h264, h265, tmp, procs):
     check(rid == 1001 and r.get("Ret") == 100 and r.get("ChannelNum") == 2 and "DeviceType " in r and
           r.get("AliveInterval") == 20 and m.session, "viewer logs in: ChannelNum 2, \"DeviceType \", session (%s)" % r)
 
-    # The API login teaches the server the system account's hash, and
-    # "old" its own.
+    # The API login lets vigil keep the system account's password, sealed,
+    # and "old"'s.
     for user in ("root", "old"):
         req = urllib.request.Request("http://127.0.0.1:%d/api/v1/me" % api_port)
         req.add_header("Authorization", "Basic " + base64.b64encode(("%s:secret" % user).encode()).decode())
@@ -252,7 +252,8 @@ def run(vigild, h264, h265, tmp, procs):
         c.close()
     with open(users) as f:
         text = f.read()
-    check(text.count(sofia("secret")) == 4, "the hashes learnt are kept in the users file")
+    check(text.count(sofia("secret")) == 2 and text.count('password_enc: "enc:v1:') == 2,
+          "root's and old's passwords kept sealed in the users file, the others' old hashes as they were")
 
     # ---- information
     rid, r = m.get(1020, "SystemInfo")

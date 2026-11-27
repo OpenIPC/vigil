@@ -26,6 +26,8 @@ import time
 import urllib.error
 import urllib.request
 
+import vigil_secret
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 # openssl passwd -6 -salt vigiltestsalt secret
 HASH = ("$6$vigiltestsalt$YNf0cVVTPqcmB27N7LaoJSiqJTsS7DvT6GejoILXrgfuBwdj8rCp9"
@@ -380,19 +382,28 @@ def main():
         st, _, cfg = api.json("GET", "/api/v1/config")
         check(cfg["cameras"][0]["url"].startswith("netip://admin:***@"), "GET config: password redacted")
         disk = open(cfg_path).read()
-        check(CAM_PASS in disk and (os.stat(cfg_path).st_mode & 0o777) == 0o600,
-              "the file keeps the password, mode 0600")
+        key_path = os.path.join(tmp, "vigil.key")
+        check(CAM_PASS not in disk and "netip://admin:enc:v1:" in disk and (os.stat(cfg_path).st_mode & 0o777) == 0o600
+              and (os.stat(key_path).st_mode & 0o777) == 0o600,
+              "the file keeps the password sealed, mode 0600; the key beside it, 0600")
         check(disk.startswith("# vigild configuration") and "\ncameras:\n  - url: \"netip://admin:" in disk and
               "    name: Emulator\n" in disk and "\n  # Segment length (s): " in disk and
               "a comment of my own" not in disk,
               "the file is saved as YAML, with the settings' help as comments")
-        check(file_config()["cameras"][0]["url"] == url, "and reads back as saved")
+        if vigil_secret.HAVE:
+            key = vigil_secret.read_key(key_path)
+            check(vigil_secret.open_url(key, "config:cameras[0].url", file_config()["cameras"][0]["url"]) == url,
+                  "and reads back as saved")
+        else:
+            print("skip and reads back as saved (no python3-cryptography)")
         gen = status["config"]["generation"] if status else 0
         events_before = len(ws.find(lambda m: m["type"] == "event"))
         cfg["cameras"][0]["name"] = "Gate"
         st, _, _ = api.json("PUT", "/api/v1/config", cfg)
         check(st == 200, "PUT the redacted config back with a new name: 200")
-        check(CAM_PASS in open(cfg_path).read(), "*** kept the stored password")
+        disk = open(cfg_path).read()
+        check(":***@" not in disk and CAM_PASS not in disk and (not vigil_secret.HAVE or vigil_secret.open_url(
+              key, "config:cameras[0].url", file_config()["cameras"][0]["url"]) == url), "*** kept the stored password")
         renamed = wait_for(lambda: api.json("GET", "/api/v1/status")[2]["channels"][0]["name"] == "Gate", 5)
         check(renamed, "the new name shows in the status")
         time.sleep(1)

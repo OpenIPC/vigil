@@ -12,19 +12,24 @@
  *     - name: anna
  *       group: viewer
  *       enabled: true
- *       password: "$6$...$..."       (crypt(3); never leaves the process)
- *       onvif: "..."                 (the password, base64: users_login_with)
- *       netip_password: "tlJwpbo6"   (Xiongmai's hash of it: users_login_netip)
+ *       password: "$6$...$..."       (crypt(3): the UI's, the web page's and the API's logins)
+ *       password_enc: "enc:v1:..."   (the password, sealed: secret.h)
  *   system:
- *     netip_password: "..."          (the system account's, learnt at its login)
+ *     password_enc: "enc:v1:..."     (the system account's, sealed)
  *     shadow: "..."                  (which shadow entry that was)
  *
- * The onvif key and netip_password are the password's secrets for clients
- * that never send the password itself; like the hash, the API never shows
- * them. Both are written when a password is set (the onvif key only while
- * onvif_server is on), and filled in at a login with the password when
- * the account lacks them (users_login).
- *
+ * The sealed password is what RTSP, ONVIF and NETIP clients are checked
+ * against: they prove they know the password without sending it, each in
+ * its own way (Digest's HA1, the WS-UsernameToken digest, Xiongmai's
+ * hash), all made from it when they log in. It is written with every
+ * password set through vigil; the system account's, whose password is
+ * root's in the shadow file, also when it logs in with it (users_login),
+ * and kept only while that shadow entry is the same. Like the hash, the
+ * API never shows it. A file from an older vigild, with the password in
+ * base64 ("onvif") or only its hashes ("digest", "netip_password"), is
+ * read as it is: the base64 is sealed at once, the hashes keep working
+ * until the user's next login with the password, which seals it.
+
  * Two groups always exist, whether the file has them or not: "admin"
  * (every permission; cannot be changed or deleted) and "user" (live view
  * and playback by default; editable, not deletable).
@@ -132,37 +137,37 @@ users_rc_t users_group_delete(const char *name, users_err_t *e);
  * (`why`, for the log: no shadow file, a locked account, ...). */
 int users_login(const char *name, const char *pass, unsigned *perms, char *why, size_t cap);
 
+/* `name` logs in as the system account (api.user, or "admin" while no
+ * user has that name). */
+int users_is_system(const char *name);
+
+/* Set the system account's password: its hash into the shadow file
+ * (api.shadow, replaced atomically; root's SSH and console password too),
+ * and sealed into the users file for RTSP, ONVIF and NETIP. */
+users_rc_t users_set_system_password(const char *password, users_err_t *e);
+
 /* The realm of Digest logins (the RTSP server): a user's HA1 is
  * md5(name:USERS_REALM:password). */
 #define USERS_REALM "vigil"
 
 /* For a Digest login (RFC 2617): `name`'s HA1 (32 hex digits) and its
  * permissions. 1 when the user may log in and its HA1 is known; 0 when
- * not (unknown, disabled, no password); -1 when it may but its HA1 is not
- * known: a password set before vigild kept HA1s and not used to log in
- * since (crypt hashes cannot give one). The system account's is learnt
- * when it logs in (UI, API, web), as its NETIP hash is, and kept in the
- * file for as long as its shadow entry is the same. */
+ * not (unknown, disabled, no password); -1 when it may but its password
+ * is not known: not sealed (a user from an older file that has not logged
+ * in since, the system account after passwd) or not readable (no key). */
 int users_digest(const char *name, char ha1[33], unsigned *perms);
 /* Check a login whose password the client proves it knows without
  * sending it (ONVIF's WS-UsernameToken digest, HTTP Digest): `check`
  * gets the password and says whether the client's proof fits it (1).
- * That needs the password itself, which a crypt(3) hash cannot give:
- * users of the file have an ONVIF key (the password, base64) written
- * with it while onvif_server is on, or at their next login with it then;
- * the system account has none.
  * Returns as users_login: 1 with `*perms`, 0 refused, -1 cannot be
- * checked (`why`: no key yet, the system account). */
+ * checked (`why`: the password is not known, as for users_digest). */
 int users_login_with(const char *name, int (*check)(const char *pass, void *ctx), void *ctx, unsigned *perms,
                      char *why, size_t cap);
 
 /* A login from a NETIP client (src/api/netip_srv.c), which sends only
  * Xiongmai's 8-character hash of the password (md5_sofia), never the
- * password: checked against the hash kept with the user's password
- * (`netip_password`, set with it), or for the system account the one
- * learnt at its last login with the password (users_login keeps it,
- * with which shadow entry it belongs to). -1 with `why` when there is
- * none to check against yet. */
+ * password: checked against the hash of the sealed password. -1 with
+ * `why` when that is not known, as for users_digest. */
 int users_login_netip(const char *name, const char *xm, unsigned *perms, char *why, size_t cap);
 
 /* A crypt(3) hash of `pass` with a fresh random salt: SHA-512, else

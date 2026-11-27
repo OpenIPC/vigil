@@ -215,6 +215,41 @@ static int users_collection(struct mg_connection *conn, const char *m)
     return send_json(conn, 201, user_json(&u));
 }
 
+/* PUT /api/v1/users/<the system account> {"password": "..."}: root's
+ * password, in the shadow file and sealed for RTSP, ONVIF and NETIP. Only
+ * the system account itself: it is also the board's SSH and console
+ * login, which no user of vigil's file gets by being in "admin". */
+static int system_password(struct mg_connection *conn, const char *name)
+{
+    if (!users_is_system(api_request_user()))
+        return send_error(conn, 403, "only the system account can change its own password", NULL);
+    cJSON *doc = body_object(conn);
+    if (!doc) return 0;
+    static const char *const keys[] = { "password", "name", NULL };
+    static const char *const types[] = { "s", "s" };
+    schema_errors_t errs = { 0 };
+    const char *nm = str_of(doc, "name");
+    if (nm && strcmp(nm, name)) schema_error(&errs, "user.name", "a user cannot be renamed");
+    const char *pw = str_of(doc, "password");
+    if (!check_keys(doc, "user", keys, types, &errs) && !errs.n && !pw)
+        schema_error(&errs, "user.password", "the system account's password is all that can be set");
+    if (errs.n) {
+        wipe_strings(doc);
+        cJSON_Delete(doc);
+        return send_error(conn, 400, "invalid account", &errs);
+    }
+    users_err_t e;
+    users_rc_t rc = users_set_system_password(pw, &e);
+    wipe_strings(doc);
+    cJSON_Delete(doc);
+    if (rc) return send_users_error(conn, "user", rc, &e);
+    cJSON *d = cJSON_CreateObject();
+    cJSON_AddStringToObject(d, "name", name);
+    cJSON_AddBoolToObject(d, "system", 1);
+    cJSON_AddBoolToObject(d, "password_set", 1);
+    return send_json(conn, 200, d);
+}
+
 static int user_item(struct mg_connection *conn, const char *m, const char *name)
 {
     users_user_t u;
@@ -231,6 +266,7 @@ static int user_item(struct mg_connection *conn, const char *m, const char *name
         return send_json(conn, 200, d);
     }
     if (strcmp(m, "PUT")) return method_not_allowed(conn, "GET, HEAD, PUT, DELETE");
+    if (find_user(name, &u) < 0 && users_is_system(name)) return system_password(conn, name);
     cJSON *doc = body_object(conn);
     if (!doc) return 0;
     static const char *const keys[] = { "group", "password", "enabled", "name", NULL };

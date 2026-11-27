@@ -44,6 +44,7 @@
 #include "source.h"
 #include "onvif.h"
 #include "rtsp_server.h"
+#include "secret.h"
 #include "web.h"
 
 static volatile sig_atomic_t g_stop;
@@ -497,6 +498,10 @@ int main(int argc, char **argv)
         log_to_syslog_stop();
         return wrc;
     }
+    /* The passwords' key (secret.h), made now if there is none, so that
+     * it exists before the first password is set. Not for -w, which may
+     * run on a build host (-f /dev/null). */
+    secret_ensure_key();
 
     vg_mode_t out = { SCREEN_W, SCREEN_H, 60 };
     if (config_output_mode(cfg.display.output, &out.w, &out.h, &out.hz) < 0) vg_log("display.output: bad");

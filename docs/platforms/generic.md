@@ -22,12 +22,14 @@ cmake -B build && cmake --build build -j
 (cd build && ctest --output-on-failure)
 ```
 
-Building needs CMake and libyaml (`libyaml-dev`). The end-to-end tests
-need Python 3 and ffmpeg. The RTSP tests also need
+Building needs CMake, libyaml (`libyaml-dev`) and mbedTLS's libmbedcrypto
+(`libmbedtls-dev`, 2.28 or 3.x). The end-to-end tests need Python 3 and
+ffmpeg (and `python3-cryptography` to open the sealed passwords they check;
+without it those checks are skipped). The RTSP tests also need
 the GStreamer RTSP server. On Debian/Ubuntu:
 
 ```sh
-apt install cmake libyaml-dev ffmpeg python3-gi gir1.2-gst-rtsp-server-1.0 \
+apt install cmake libyaml-dev libmbedtls-dev ffmpeg python3-cryptography python3-gi gir1.2-gst-rtsp-server-1.0 \
     gstreamer1.0-plugins-ugly gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
 ```
 

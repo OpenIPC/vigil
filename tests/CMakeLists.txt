@@ -124,6 +124,13 @@ if(Python3_FOUND)
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/majestic_1080p.h265)
     set_tests_properties(netip_server_e2e PROPERTIES RUN_SERIAL TRUE)
+    # The passwords vigild keeps: one set through the API works at once on
+    # RTSP, ONVIF and NETIP, root's too, and after a restart; none in the
+    # clear in a file or the API. Alone, as netip_server_e2e.
+    add_test(NAME secrets_e2e
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/secrets_test.py $<TARGET_FILE:vigild>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
+    set_tests_properties(secrets_e2e PROPERTIES RUN_SERIAL TRUE)
     add_test(NAME api_e2e
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/api_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)

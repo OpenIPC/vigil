@@ -44,32 +44,28 @@ with one of:
 
 | Method | Checked against |
 |---|---|
-| WS-UsernameToken, `PasswordDigest` (what most clients send) | the user's ONVIF key |
-| HTTP Digest (MD5, `qop=auth`; realm `vigil`) | the user's ONVIF key |
+| WS-UsernameToken, `PasswordDigest` (what most clients send) | the user's sealed password |
+| HTTP Digest (MD5, `qop=auth`; realm `vigil`) | the user's sealed password |
 | WS-UsernameToken, `PasswordText`; HTTP Basic | the password hash, like the API |
 
 A digest proves that the client knows the password without sending it:
 the server computes the same digest from the password itself, which a
-`crypt(3)` hash cannot give. So while the ONVIF server is on, setting a
-user's password (API, on-screen settings) also stores an **ONVIF key**,
-the password base64-encoded, in `vigil.users.yaml` next to the hash (the
-file is mode 0600 and is never sent out; the API does not show it).
-Consequences:
+`crypt(3)` hash cannot give. vigil keeps every password it sets sealed
+beside its hash ([security.md](security.md)), whether the ONVIF server
+is on or not, and works the digest out from it at each login. So:
 
-- A user whose password was set before the ONVIF server existed, or while
-  it was off, has no key: digest logins fail for it (logged: "has no
-  ONVIF key: set its password again"). Setting the password again fixes
-  that, and so does the user's next login with its password (API, web
-  page, on-screen UI) while the ONVIF server is on: the key is filled in
-  then, as the NETIP server's hash is (docs/api.md, NETIP server).
-- The system account (`api.user`, `root`, and `admin` as its other name)
-  has only its hash in `/etc/shadow`: it logs in to ONVIF only with
-  `PasswordText` or Basic, which send the password in the clear over
-  HTTP. Give VMS a user of its own instead (group `user` is enough to
-  watch).
-- Turning the ONVIF server off does not remove keys already written (nor
-  does a login while it is off); to get rid of them, set those passwords
-  again while it is off.
+- A user's password works for ONVIF as soon as it is set (API, on-screen
+  settings), and so does the system account's (`api.user`, `root`, and
+  `admin` as its other name) when set through vigil. A system account
+  password changed elsewhere (`passwd`) is not known to vigil until the
+  account logs in once with it to the API, the web page or the screen;
+  until then its digest logins are refused (the log says why).
+- A user from an older users file that had only hashes of its password
+  (no `onvif` key) logs in with digests after its next login with the
+  password elsewhere; one with an `onvif` key is converted when the file
+  is read ([security.md](security.md#migration)).
+- Give a VMS a user of its own all the same (group `user` is enough to
+  watch): the system account is also the board's SSH login.
 
 A `PasswordDigest` token is refused when its nonce was seen before (the
 last 64 are kept) or its `Created` is more than 15 minutes from the
@@ -216,7 +212,7 @@ Hikvision iVMS or Synology Surveillance Station.
   the WS-Discovery socket; the operations as templates written into one
   growing buffer per answer. Its workers only read snapshots
   (`config_get`, `channels_status`), like the API's.
-- The users' ONVIF keys: `src/api/users.c` (`users_login_with`), the
+- The sealed passwords: `src/api/users.c` (`users_login_with`), the
   failure counting: `api_login_with` in `src/api/api.c`.
 - For tests, `VIGIL_ONVIF_WSD_PORT` moves WS-Discovery off 3702, so test
   runs side by side do not answer each other's probes.

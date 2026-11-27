@@ -56,6 +56,28 @@ else()
   target_link_libraries(vigil_yaml INTERFACE ${LIBYAML_LIBRARY})
 endif()
 
+# libmbedcrypto (mbedTLS, Apache-2.0): AES-256-GCM for the passwords vigil
+# keeps in its files (src/core/secret.c, docs/security.md). OpenIPC images
+# carry it (mbedtls-openipc); on a host, libmbedtls-dev. Found as libyaml is.
+if(PKG_CONFIG_FOUND AND (NOT CMAKE_CROSSCOMPILING OR DEFINED ENV{PKG_CONFIG_LIBDIR}
+                         OR DEFINED ENV{PKG_CONFIG_SYSROOT_DIR}))
+  pkg_check_modules(MBEDCRYPTO QUIET IMPORTED_TARGET mbedcrypto)
+endif()
+add_library(vigil_mbedcrypto INTERFACE)
+if(TARGET PkgConfig::MBEDCRYPTO)
+  target_link_libraries(vigil_mbedcrypto INTERFACE PkgConfig::MBEDCRYPTO)
+else()
+  find_path(MBEDCRYPTO_INCLUDE_DIR mbedtls/gcm.h)
+  find_library(MBEDCRYPTO_LIBRARY NAMES mbedcrypto)
+  if(NOT MBEDCRYPTO_INCLUDE_DIR OR NOT MBEDCRYPTO_LIBRARY)
+    message(FATAL_ERROR "libmbedcrypto not found (mbedtls/gcm.h, libmbedcrypto): apt install libmbedtls-dev; "
+                        "when cross compiling, the target's mbedTLS in the toolchain's sysroot, "
+                        "-DCMAKE_FIND_ROOT_PATH=<staging>, or -DMBEDCRYPTO_INCLUDE_DIR=… -DMBEDCRYPTO_LIBRARY=…")
+  endif()
+  target_include_directories(vigil_mbedcrypto INTERFACE ${MBEDCRYPTO_INCLUDE_DIR})
+  target_link_libraries(vigil_mbedcrypto INTERFACE ${MBEDCRYPTO_LIBRARY})
+endif()
+
 # ---- core: hardware-agnostic, builds and tests on any host ------------------
 add_library(vigil_core STATIC
   src/core/aspect.c
@@ -77,6 +99,7 @@ add_library(vigil_core STATIC
   src/core/qos.c
   src/core/schema.c
   src/core/schema_yaml.c
+  src/core/secret.c
   src/core/sha1.c
   src/core/rec_place.c
   src/core/rec_sched.c
@@ -90,7 +113,7 @@ add_library(vigil_core STATIC
   src/core/source/source_netip.c
   src/core/source/source_rtsp.c)
 target_include_directories(vigil_core PUBLIC src/core src/core/source src/hal)
-target_link_libraries(vigil_core PUBLIC cjson vigil_yaml Threads::Threads m)
+target_link_libraries(vigil_core PUBLIC cjson vigil_yaml vigil_mbedcrypto Threads::Threads m)
 
 # ---- sys: looking after the system vigild runs on (src/sys, Linux) ------------
 # Network, time, host name, disks, network storage, mail: OS work the

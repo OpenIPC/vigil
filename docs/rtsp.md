@@ -77,20 +77,15 @@ offered: the password would cross the network in clear.
 
 Digest needs the password, or `md5(user:vigil:password)` (HA1), and
 vigil's users file holds `crypt(3)` hashes, from which it cannot be had. So
-the users file keeps each user's HA1 beside its hash (`digest`): written
-whenever a password is set, through the API or the screen, and, for users
-made before the RTSP server, at their next login there (the screen, the
-web page or the API); until then such a user is refused and the log says
-why. The system account (`root`, `admin` while no user has that name)
-has its password only in `/etc/shadow`: its HA1s (as `root` and as
-`admin`) are learnt when it logs in to the screen, the web page or the
-API, kept in the users file's `system` section with its NETIP hash, and
-forgotten when its shadow entry changes (`passwd`). **Give a VMS a user
-of its own** in a group with just `live`.
-
-An HA1 is as good as the password for logging in to this server (not
-elsewhere: it is bound to the realm and the user name); the users file is
-mode 0600, as before.
+the HA1 is worked out at each login from the user's sealed password
+([security.md](security.md)), which vigil keeps beside the hash for every
+password set through the API or the screen: a new password works here at
+once. The system account (`root`, `admin` while no user has that name)
+has its password in `/etc/shadow`; vigil knows it when it was set through
+vigil, or since the account last logged in to the screen, the web page or
+the API, for as long as its shadow entry is the same (after a `passwd`
+elsewhere, until its next such login; the log says why it is refused).
+**Give a VMS a user of its own** in a group with just `live`.
 
 Five failed logins in a row from one address make that address wait 2, 4,
 8, … up to 300 s, without its credentials being looked at; other addresses

@@ -42,7 +42,9 @@ comments; options override the file.
   snapshots (`channels_status`, `config_get`, its own `events` cursor) and
   writes the configuration store; the main thread applies a new generation.
   Camera passwords never leave the process: redact URLs
-  (`schema_redact_url`) in API output and logs.
+  (`schema_redact_url`) in API output and logs. In vigil's files every
+  password is sealed (`src/core/secret.h`, `docs/security.md`): a new
+  secret setting is a `SCHEMA_SECRET` field, which `config.c` seals.
 - **Pixels never pass through the core.** Decoded or captured pictures stay
   inside the platform (VDEC→VPSS→VO, MPP→RGA→DRM). The core handles
   compressed access units only.
@@ -54,7 +56,8 @@ comments; options override the file.
 ## Layout
 
 - `src/core/` — channel threads, the access-unit normalizer (`au_norm`), SPS
-  parsing, the segment writer, events, small net/md5 helpers, and the
+  parsing, the segment writer, events, small net/md5 helpers, the
+  passwords' cipher (`secret.c`, AES-GCM through libmbedcrypto), and the
   configuration: `schema.c` (generic engine), `config_schema.c` (every
   setting as a table row), `schema_yaml.c` (the file's YAML, via libyaml,
   to and from the same cJSON document), `config.c` (the file and the store).
@@ -99,7 +102,7 @@ comments; options override the file.
 ## Build
 
 ```sh
-# host (generic platform) + tests; needs libyaml-dev
+# host (generic platform) + tests; needs libyaml-dev and libmbedtls-dev
 cmake -B build && cmake --build build -j && (cd build && ctest --output-on-failure)
 
 # hi3536dv100, against the SDK (static) or the firmware's headers + shared libs
@@ -174,5 +177,8 @@ what the next line does.
   v1.7.19) and **CivetWeb** (`third_party/civetweb`, a master commit after
   v1.16: v1.16 lacks later security fixes) are submodules; clone with
   `--recursive`. **libyaml** (MIT) comes from the system (`libyaml-dev`; on
-  OpenIPC images with `yaml-cli`). A new setting is a row in `src/core/config_schema.c`, not
+  OpenIPC images with `yaml-cli`), and so does **libmbedcrypto** (mbedTLS,
+  Apache-2.0: `libmbedtls-dev`; on OpenIPC images `mbedtls-openipc`), the
+  AES-GCM that seals the passwords in vigil's files (`src/core/secret.c`,
+  `docs/security.md`). A new setting is a row in `src/core/config_schema.c`, not
   hand-written JSON code.
