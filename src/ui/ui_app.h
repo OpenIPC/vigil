@@ -132,6 +132,30 @@ int       ui_popup_sub_is_open(void);
 /* "<what> is not available yet": what a menu item or a card of a feature
  * vigil does not have yet (playback, PTZ, ...) opens. */
 void      ui_not_yet(const char *what);
+/* Also `o` in the popup's keyboard order (after what is there); focus
+ * `o`. */
+void      ui_popup_focus_add(lv_obj_t *o);
+void      ui_popup_focus_obj(lv_obj_t *o);
+
+/* ---- the session (ui_session.c) ---------------------------------------------------- */
+
+/* ui.login and ui.idle_logout, as they are now. */
+void ui_session_config(int required, int idle_min);
+void ui_session_init(void);
+int  ui_login_required(void);
+int  ui_logged_in(void);
+const char *ui_session_user(void);
+/* May the UI do what needs `perm` (UI_PERM_*; 0: any user) now? Always
+ * with the on-screen login off. */
+int  ui_allowed(unsigned perm);
+/* fn(arg) now if allowed, else after a login that brings `perm`. */
+void ui_with_perm(unsigned perm, void (*fn)(void *), void *arg);
+void ui_login_open(void (*then)(void *), void *arg, unsigned perm);
+/* End the session: back to the live view. `idle`: for want of use. */
+void ui_logout(int idle);
+/* Exit: Logout, Reboot, Shutdown, Cancel. */
+void ui_exit_open(void);
+
 /* The keyboard shortcuts (F1 or ?); open again: closed. */
 void      ui_help_toggle(void);
 

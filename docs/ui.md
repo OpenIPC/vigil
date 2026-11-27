@@ -39,14 +39,15 @@ live view                  tiles over the whole screen, clock in a corner
 four 640x360 tiles); there is no header or footer bar. Each tile is a
 *hole*: LVGL paints it in the colour the platform keys out (or fully
 transparent where the UI layer has alpha, `hal_ui_hole`), so the decoded
-video below shows through. On it sit small opaque chips: bottom left the
-camera's name from the configuration (or `CAM n`); bottom right icons only,
+video below shows through. Bottom left, the camera's name from the
+configuration (or `CAM n`) as outlined text straight on the picture (no
+chip; see below); bottom right, in a small opaque chip, icons only,
 a red dot while the channel records and an amber icon for each event the
 camera reports now (motion, human, face, vehicle; each held 5 s after the
 camera's last report); nothing at the top left. The stream's codec, size
 and frame rate are not on the tiles but on the Channel info page
 (System). The middle of a tile says something only when there is no
-picture:
+picture, outlined like the name:
 
 | `status` (core `ch_state_t`) | Tile |
 |---|---|
@@ -58,9 +59,11 @@ picture:
 | `error`: anything else | No video, and the error |
 | `disabled` | Disabled |
 | `live`, but no decoder free | No decoder |
-| `empty`: no camera in this slot | a large "+" |
+| `empty`: no camera in this slot | a small "+" |
 
-The **"+"** of an empty slot (a click, or Enter on its tile) opens the
+The **"+"** of an empty slot, a 36-pixel disc with "Add camera" under it
+while it is hovered or its tile has the keyboard (a click, or Enter on its
+tile) opens the
 camera form for that channel ("Cameras 7: new"); saving puts the camera at
 that position, the slots before it staying empty. There is a tile for
 every channel the platform shows (`hal_caps()->max_channels`), paged by
@@ -107,8 +110,9 @@ The **context menu** (right button, or the Menu key) is, in this order:
 **Main menu**; **Channels** (the Channels page); **Playback**; **Record**
 (the recording settings); **PTZ**; **Display** (output, clock corner and
 layouts, read-only until the UI has settings of its own); **Split**, a
-submenu of the layouts; nothing else (full screen is a double click or
-Enter, pages the arrows, pinning the bar its own button). Playback and
+submenu of the layouts; and **Exit**: Logout, Reboot, Shutdown, Cancel
+(below). Nothing else (full screen is a double click or Enter, pages the
+arrows, pinning the bar its own button). Playback and
 PTZ are not in vigil yet: they
 are in the menu, muted, and say "not available yet" when chosen; they are
 placeholders for what comes next.
@@ -248,6 +252,33 @@ Playback, PTZ, Cameras, Storage, Network, System, Users), saved with Save;
 `admin` is read-only, `user` cannot be removed. The on-screen UI does not
 ask for a login yet: the accounts are enforced on the HTTP API, where the
 system account (root) always logs in as an administrator.
+
+## Login and Exit
+
+**Exit**, the context menu's last item, offers Logout, Reboot, Shutdown and
+Cancel. Reboot and Shutdown ask first; then vigild stops as on SIGTERM
+(each channel closes its recording), the disks are synced, and busybox's
+`reboot` or `poweroff` runs (`mgmt_power_request`, also
+`POST /api/v1/system/reboot` and `/system/shutdown`). Where vigild does not
+manage the system (a desktop), it says so instead.
+
+**The on-screen login** is off by default (`ui.login`, System > General >
+Log in): everyone may do everything, and Logout is shown muted. Turned on,
+the live view stays as it is, but the menus and settings ask for a user and
+its password first, with vigil's users and groups (the Account pages,
+`users.h`) and the system account (`api.user`, root), which always logs in
+with every permission, so nobody is locked out. Each part needs its
+permission: Camera and Channels `cameras`, Storage and Record `storage`,
+Network `network`, Account `users`, System, Display, Operation, Reboot and
+Shutdown `system`; the main menu itself, any user. A user without it is
+told. The dialog lists the system account and the enabled users; the
+password takes the on-screen keyboard for a mouse user. Exit > Logout, or
+`ui.idle_logout` minutes (default 10; 0: never) without a key or the
+mouse, end the session and go back to the live view.
+
+![Exit](../tests/ui/exit.png)
+
+![Log in](../tests/ui/login.png)
 
 ## Architecture
 
@@ -475,8 +506,25 @@ colour-keyed layer (HiSilicon hifb, SigmaStar GOP) a half-transparent pixel
 is a blend with the key colour and shows as a pink fringe. For the same reason the chips over the video are square (a
 rounded corner's soft edge is such a blend), and the round page arrows and
 the "+" of an empty channel stand on a disc with hard edges (`ui_disc`:
-every pixel opaque or not drawn, like the mouse pointer). Text keeps its
-smoothing; its edges lie on the chip's own opaque background.
+every pixel opaque or not drawn, like the mouse pointer).
+
+**Text straight on the video** (a tile's name and its state) has no chip:
+`ui_outlined` draws it in a hard-edged version of the font (`ui_hard_font`:
+the Montserrat glyphs with their anti-aliasing cut at a little under half,
+every pixel opaque or not drawn) with a one-pixel black outline made of the
+same glyphs drawn eight times around it. Nothing is blended, so nothing
+fringes, and the outline keeps it readable on a bright or a dark picture.
+The other way out, per-pixel alpha on the UI plane instead of the colour
+key, was looked at: SigmaStar's GOP has it (`MI_FB_GlobalAlpha_t` with
+`bAlphaChannel` in `sstarFb.h`, `FBIOSET_GLOBAL_ALPHA`), but the
+emulator's GOP composites the plane opaque with only the key, so it could
+not be checked there, and the HiSilicon boards would still key. Text on a
+chip (menus, the clock) keeps its smoothing: its edges lie on the chip.
+
+The screenshot target (below) shows it over a made-up picture
+(`live-16-text-over-video.png`): with `--shots` the tests' screens use the
+boards' magenta key and put a picture where it is, as the video layer
+would, so a blended pixel would show as magenta there.
 
 ## Input
 
@@ -610,7 +658,10 @@ arrows (`live-page-arrow-next.png`, `-prev`), every tile state and the
 empty slots' "+" (`live-16.png`), `live-empty-plus-hover.png`,
 `camera-add-channel-4.png`, the Channel info page (`channel-info.png`,
 `channel-info-16.png`) and the on-screen keyboard (`osk-letters.png`,
-`osk-shifted.png`, `osk-symbols.png`, `osk-above.png`). They are for people reviewing
+`osk-shifted.png`, `osk-symbols.png`, `osk-above.png`), the text over a
+picture (`live-16-text-over-video.png`), Exit (`context-menu-exit.png`,
+`exit-chooser.png`, `reboot-confirm.png`, `shutdown-confirm.png`) and the
+login (`login.png`, `login-keyboard.png`). They are for people reviewing
 a change to the UI, not committed: run it after changing a screen or a
 menu and look at the set. The `ui_screenshots` test only checks that the
 walk still gets through every screen; the references above guard the

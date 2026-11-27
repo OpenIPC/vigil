@@ -17,6 +17,7 @@
 #define VG_COLOR_TEXT2               0x9AA3AF
 #define VG_COLOR_CHIP                0x0B0D11
 #define VG_COLOR_FOCUS               0xFFFFFF
+#define VG_COLOR_OUTLINE             0x000000
 #define VG_COLOR_MENU_TOP            0x16233A
 #define VG_COLOR_MENU_BOTTOM         0x0A0F18
 #define VG_COLOR_CARD                0x1A263A
@@ -57,6 +58,7 @@
 #define VG_SIZE_ICON_ROW             28
 #define VG_SIZE_PAGE_ARROW           48
 #define VG_SIZE_OSK_W                560
+#define VG_SIZE_ADD_DISC             36
 #define VG_SIZE_OSK_H                190
 #define VG_SIZE_PAGE_HEADER          56
 #define VG_SIZE_BUTTON               40

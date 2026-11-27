@@ -15,6 +15,7 @@
   --vg-color-text2: #9aa3af;
   --vg-color-chip: #0b0d11;
   --vg-color-focus: #ffffff;
+  --vg-color-outline: #000000;
   --vg-color-menu-top: #16233a;
   --vg-color-menu-bottom: #0a0f18;
   --vg-color-card: #1a263a;
@@ -47,6 +48,7 @@
   --vg-size-icon-row: 28px;
   --vg-size-page-arrow: 48px;
   --vg-size-osk-w: 560px;
+  --vg-size-add-disc: 36px;
   --vg-size-osk-h: 190px;
   --vg-size-page-header: 56px;
   --vg-size-button: 40px;

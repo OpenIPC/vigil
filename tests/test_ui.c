@@ -57,9 +57,17 @@ void hal_display_clear_tile(int ch) { (void)ch; }
 int  hal_cap_start(int in, int ch, hal_cap_cb cb, void *user) { (void)in; (void)ch; (void)cb; (void)user; return -1; }
 void hal_cap_stop(int in) { (void)in; }
 int  hal_cap_signal(int in) { (void)in; return 0; }
+/* Black holes for the tests' references; for the screenshots, the boards'
+ * magenta key, replaced by a picture when the screen is written (shot),
+ * as the video layer would: what is drawn over the video can be judged,
+ * and a pixel blended with the key would show as a fringe. */
+static int g_shots;                     /* --shots: every screen, not the tests */
+static int g_video_all;                 /* a picture behind every tile, whatever its state */
+#define KEY 0xFF00FFu
+
 void hal_ui_hole(lv_color_t *c, lv_opa_t *o)
 {
-    *c = lv_color_hex(0x000000);
+    *c = lv_color_hex(g_shots ? KEY : 0x000000);
     *o = LV_OPA_COVER;
 }
 
@@ -67,7 +75,6 @@ void hal_ui_hole(lv_color_t *c, lv_opa_t *o)
 
 static ui_model_t g_model;
 static int        g_channels = 4;       /* the platform's, as the model says */
-static int        g_shots;              /* --shots: every screen, not the tests */
 static void shots_status(int idx, ui_chan_t *st);
 static ui_rect_t  g_tiles[UI_MAX_CHANNELS];
 static int        g_tile_calls;
@@ -360,6 +367,52 @@ static void click_at(int x, int y)
     button(BTN_LEFT);
 }
 
+/* A camera's picture, made up: sky, a sun, a hill, a road, houses with
+ * lit windows, and some grain; `seed` varies it from tile to tile. u, v
+ * in 0..1. 0xRRGGBB. */
+static uint32_t scene(double u, double v, int seed)
+{
+    unsigned n = (unsigned)(u * 997 + v * 7919 + seed * 131) * 2654435761u;
+    int grain = (int)(n >> 28) - 8;
+    double r, g, b;
+    double hill = 0.55 + 0.08 * __builtin_sin(u * 6.0 + seed) + 0.03 * __builtin_sin(u * 17.0);
+    if (v < hill) {                                 /* sky, lighter to the horizon */
+        r = 70 + 120 * v; g = 120 + 100 * v; b = 200 + 40 * v;
+        double du = u - (0.2 + 0.1 * (seed % 5)), dv = v - 0.18;
+        if (du * du + dv * dv < 0.004) r = 255, g = 245, b = 210;          /* the sun */
+        if (v > hill - 0.18 && ((int)(u * 9 + seed) % 3) == 0) {         /* a house */
+            r = 150; g = 120; b = 100;
+            if (((int)(u * 60) % 4 == 1) && ((int)(v * 60) % 4 == 1)) r = 255, g = 230, b = 120;
+        }
+    } else if (__builtin_fabs(u - 0.5 - 0.3 * (v - hill)) < 0.06 + 0.25 * (v - hill)) {
+        r = g = b = 80 + 40 * v;                    /* the road */
+        if (__builtin_fabs(u - 0.5 - 0.3 * (v - hill)) < 0.006 && (int)(v * 40) % 2) r = g = b = 240;
+    } else {
+        r = 60 + 40 * v; g = 110 + 30 * v; b = 50;  /* grass */
+    }
+    r += grain; g += grain; b += grain;
+    r = r < 0 ? 0 : r > 255 ? 255 : r; g = g < 0 ? 0 : g > 255 ? 255 : g; b = b < 0 ? 0 : b > 255 ? 255 : b;
+    return (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
+}
+
+/* The picture behind a hole pixel: the tile it is in (the rectangles
+ * handed to show_tiles), else the whole screen's. */
+static uint32_t video_at(int x, int y)
+{
+    for (int i = 0; i < UI_MAX_CHANNELS; ++i) {
+        const ui_rect_t *t = &g_tiles[i];
+        if (t->w && x >= t->x && x < t->x + t->w && y >= t->y && y < t->y + t->h) {
+            ui_chan_t st;
+            shots_status(i, &st);
+            /* A picture only where the camera's video is decoded (or
+             * everywhere, to judge the text over a picture). */
+            if (!g_video_all && (st.status != UI_CH_LIVE || st.no_decoder)) return 0x000000;
+            return scene((double)(x - t->x) / t->w, (double)(y - t->y) / t->h, i);
+        }
+    }
+    return scene((double)x / W, (double)y / H, 0);
+}
+
 static void shot(const char *name)
 {
     run(400);                           /* animations end, timers settle */
@@ -376,6 +429,7 @@ static void shot(const char *name)
     for (int y = 0; y < H; ++y) {
         for (int x = 0; x < W; ++x) {
             uint32_t p = g_fb[y * W + x];
+            if (g_shots && (p & 0xFFFFFF) == KEY) p = video_at(x, y);
             row[x * 3] = (uint8_t)(p >> 16);
             row[x * 3 + 1] = (uint8_t)(p >> 8);
             row[x * 3 + 2] = (uint8_t)p;
@@ -695,6 +749,35 @@ static int fa_group_delete(const char *name, char *err, size_t cap)
     return 0;
 }
 
+/* Logins: root with "rootpw" (every permission), a user of the list with
+ * its name and "pw" (its group's). */
+static int fa_login(const char *name, const char *pass, unsigned *perms, char *why, size_t cap)
+{
+    (void)why;
+    (void)cap;
+    char want[48];
+    snprintf(want, sizeof want, "%spw", name);
+    if (!strcmp(name, "root")) {
+        *perms = 0xff;
+        return !strcmp(pass, "rootpw");
+    }
+    for (int i = 0; i < g_nfu; ++i)
+        if (!strcmp(g_fu[i].name, name) && g_fu[i].enabled && !strcmp(pass, want)) {
+            *perms = 0;
+            for (int k = 0; k < g_nfg; ++k)
+                if (!strcmp(g_fg[k].name, g_fu[i].group)) *perms = g_fg[k].perms;
+            return 1;
+        }
+    return 0;
+}
+static void fa_system_user(char *buf, size_t cap) { snprintf(buf, cap, "root"); }
+static int g_power = -1;                /* what Exit asked for: 1 reboot, 0 off */
+static int fa_power(int reboot)
+{
+    g_power = reboot;
+    return 0;
+}
+
 static void fake_mgmt(ui_model_t *m)
 {
     g_mg = *m->mgmt;                    /* real: time zone parsing */
@@ -739,6 +822,9 @@ static void fake_mgmt(ui_model_t *m)
     g_mg.user_delete = fa_user_delete;
     g_mg.group_set = fa_group_set;
     g_mg.group_delete = fa_group_delete;
+    g_mg.login = fa_login;
+    g_mg.system_user = fa_system_user;
+    g_mg.power = fa_power;
     m->mgmt = &g_mg;
 }
 
@@ -857,11 +943,12 @@ static int arrow_up(int next)
     return b && visible(b);
 }
 
-/* The tile showing `title` (its name chip's parent). */
+/* The tile showing `title` (its name's parent: the outlined name sits on
+ * the tile). */
 static lv_obj_t *tile(const char *title)
 {
     lv_obj_t *l = find(title, 0);
-    return l ? lv_obj_get_parent(lv_obj_get_parent(l)) : NULL;
+    return l ? lv_obj_get_parent(l) : NULL;
 }
 
 /* ---- the steps ---------------------------------------------------------------------------- */
@@ -2346,6 +2433,131 @@ static void test_empty_slot(void)
     CHECK(!ui_page_top(), "back on the live view");
 }
 
+/* Pick `text` in drop-down `dd`. */
+static void dd_pick_text(lv_obj_t *dd, const char *text)
+{
+    char opts[512];
+    snprintf(opts, sizeof opts, "%s", lv_dropdown_get_options(dd));
+    int i = 0;
+    for (char *p = strtok(opts, "\n"); p; p = strtok(NULL, "\n"), ++i)
+        if (!strcmp(p, text)) {
+            lv_dropdown_set_selected(dd, (uint32_t)i);
+            return;
+        }
+}
+
+/* Exit: reboot and shutdown asked, then done; the on-screen login: off by
+ * default, then on: the menu needs a user, a wrong password is refused,
+ * a user without the permission is told, Exit > Logout and idle end it. */
+static void test_session(void)
+{
+    CHECK(!ui_login_required(), "the on-screen login is off by default");
+    move_to(300, 200);
+    button(BTN_RIGHT);
+    click_text("Exit");
+    CHECK(ui_popup_is_open() && find("Shutdown", 1) && find("the on-screen login is off", 1), "Exit: the chooser");
+    lv_obj_t *out = find("Logout", 1);
+    CHECK(out && lv_obj_has_state(lv_obj_get_parent(out), LV_STATE_DISABLED), "Logout: off without a login");
+    shot("exit");
+    click_text("Reboot");
+    CHECK(ui_popup_is_open() && find("Reboot the recorder?", 1), "Reboot asks first");
+    shot("reboot_confirm");
+    click_text("Cancel");
+    CHECK(g_power == -1 && !ui_popup_is_open(), "Cancel: nothing");
+    button(BTN_RIGHT);
+    click_text("Exit");
+    click_text("Shutdown");
+    lv_obj_t *yes = find_in(lv_layer_top(), "Shutdown", 0);
+    if (yes) {
+        int x, y;
+        center_of(yes, &x, &y);
+        click_at(x, y);
+    }
+    CHECK(g_power == 0 && find("Shutting down", 1), "Shutdown, confirmed: asked of the system");
+    run(VG_DURATION_TOAST + 100);
+
+    /* The login on, out after a minute without use. */
+    schema_errors_t se = { 0 };
+    static const char on[] = "{\"login\":true,\"idle_logout\":1}", off[] = "{\"login\":false}";
+    CHECK(config_put_json("ui", on, strlen(on), &se) == CONFIG_OK, "login on");
+    ui_app_refresh();
+    run(300);
+    CHECK(ui_login_required() && !ui_logged_in(), "required, nobody in");
+    move_to(W / 2, H - 1);
+    run(300);
+    click_text("Main menu");
+    CHECK(ui_popup_is_open() && find("Log in", 1) && !ui_page_top(), "the menu asks for a user");
+    lv_obj_t *dd = NULL, *pw = NULL;
+    int seen = 0;
+    pw = find_textarea(lv_layer_top(), 0, &seen);
+    shot("login");
+    CHECK(pw && lv_textarea_get_password_mode(pw), "a password field");
+    if (pw) lv_textarea_set_text(pw, "nope");
+    click_text("Log in");                       /* the title: nothing */
+    lv_obj_t *btn = find_nth(lv_layer_top(), "Log in", 1);
+    int bx, by;
+    if (btn) {
+        center_of(btn, &bx, &by);
+        click_at(bx, by);
+    }
+    CHECK(find("Wrong user or password", 1) && !ui_logged_in(), "a wrong password: refused");
+    shot("login_wrong");
+    if (pw) lv_textarea_set_text(pw, "rootpw");
+    if (btn) click_at(bx, by);
+    CHECK(ui_logged_in() && !strcmp(ui_session_user(), "root") && ui_page_top(), "root: in, the menu opens");
+    button(BTN_RIGHT);
+    move_to(300, 200);
+    button(BTN_RIGHT);
+    click_text("Exit");
+    out = find("Logout", 1);
+    CHECK(out && !lv_obj_has_state(lv_obj_get_parent(out), LV_STATE_DISABLED), "Logout: there now");
+    click_text("Logout");
+    CHECK(!ui_logged_in() && find("Logged out", 1), "logged out");
+    run(VG_DURATION_TOAST + 100);
+
+    /* A user with the live view only: in, but not into Camera. */
+    g_fu[g_nfu] = (ui_user_t){ .name = "liv", .group = "watch", .enabled = 1, .password_set = 1 };
+    g_fg[g_nfg] = (ui_group_t){ .name = "watch", .perms = UI_PERM_LIVE, .editable = 1 };
+    ++g_nfu;
+    ++g_nfg;
+    move_to(W / 2, H - 1);
+    run(300);
+    click_text("Main menu");
+    dd = NULL;
+    seen = 0;
+    pw = find_textarea(lv_layer_top(), 0, &seen);
+    /* the drop-down: the first one on the top layer */
+    lv_obj_t *stack[64];
+    int sp = 0;
+    stack[sp++] = lv_layer_top();
+    while (sp && !dd) {
+        lv_obj_t *o = stack[--sp];
+        if (lv_obj_check_type(o, &lv_dropdown_class)) dd = o;
+        for (uint32_t i = 0; i < lv_obj_get_child_count(o) && sp < 64; ++i) stack[sp++] = lv_obj_get_child(o, (int32_t)i);
+    }
+    CHECK(dd && pw, "the dialog again");
+    if (dd) dd_pick_text(dd, "liv");
+    if (pw) lv_textarea_set_text(pw, "livpw");
+    btn = find_nth(lv_layer_top(), "Log in", 1);
+    if (btn) {
+        center_of(btn, &bx, &by);
+        click_at(bx, by);
+    }
+    CHECK(ui_logged_in() && !strcmp(ui_session_user(), "liv") && ui_page_top(), "liv: in, the menu");
+    click_text("CAMERA");
+    CHECK(find("no permission", 1) && find("Main menu", 0), "liv: not into Camera");
+    button(BTN_RIGHT);
+
+    /* A minute without a key or the mouse: out. */
+    run(61 * 1000);
+    CHECK(!ui_logged_in() && !ui_page_top(), "idle: logged out, the live view");
+    CHECK(config_put_json("ui", off, strlen(off), &se) == CONFIG_OK, "login off again");
+    ui_app_refresh();
+    run(300);
+    --g_nfu;
+    --g_nfg;
+}
+
 /* Caps Lock, Num Lock, a second keyboard, and unplugging with Shift held. */
 static void test_keyboard_plug(void)
 {
@@ -2772,6 +2984,44 @@ static int shots_4(void)
     key(KEY_ENTER);
     key(KEY_DOWN);
     shot("record-focus");
+    key(KEY_ESC);
+    key(KEY_ESC);
+    key(KEY_ESC);
+
+    /* Exit, a reboot asked, and the on-screen login (turned on here);
+     * the keyboard unplugged: the on-screen keyboard is back. */
+    close(g_kbd[1]);
+    run(200);
+    move_to(300, 200);
+    button(BTN_RIGHT);
+    shot("context-menu-exit");
+    click_text("Exit");
+    shot("exit-chooser");
+    click_text("Reboot");
+    shot("reboot-confirm");
+    click_text("Cancel");
+    button(BTN_RIGHT);
+    click_text("Exit");
+    click_text("Shutdown");
+    shot("shutdown-confirm");
+    click_text("Cancel");
+    schema_errors_t se = { 0 };
+    static const char on[] = "{\"login\":true,\"idle_logout\":10}";
+    config_put_json("ui", on, strlen(on), &se);
+    ui_app_refresh();
+    run(300);
+    move_to(W / 2, H - 1);
+    run(300);
+    click_text("Main menu");
+    shot("login");
+    int seen = 0;
+    lv_obj_t *pw = find_textarea(lv_layer_top(), 0, &seen);
+    if (pw) {
+        int x, y;
+        center_of(pw, &x, &y);
+        click_at(x, y);
+        shot("login-keyboard");
+    }
     input_evdev_delete();
     unlink(path);
     return g_fail ? 1 : 0;
@@ -2823,6 +3073,10 @@ static int shots_16(void)
     shot("live-9");
     key(KEY_0);
     shot("live-16");                            /* every state, icons, "+" on 15 and 16 */
+    g_video_all = 1;
+    lv_obj_invalidate(lv_screen_active());
+    shot("live-16-text-over-video");            /* the outlined text over a picture */
+    g_video_all = 0;
     move_to(W / 2, H - 1);
     run(300);
     click_text("Main menu");
@@ -2931,6 +3185,7 @@ int main(int argc, char **argv)
     test_keyboard_dropdown();
     test_keyboard_plug();
     test_empty_slot();
+    test_session();
     test_network_pages();
     test_storage_pages();
     test_system_pages();

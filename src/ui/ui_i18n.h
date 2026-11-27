@@ -57,7 +57,31 @@
     X(S_TEST, "Test") \
     X(S_ADD, "Add") \
     X(S_EDIT, "Edit") \
-    X(S_REMOVE, "Remove")
+    X(S_REMOVE, "Remove") \
+    X(S_ADD_CAMERA, "Add camera") \
+    X(S_ST_DISABLED, "Disabled") \
+    X(S_ST_CONNECTING, "Connecting...") \
+    X(S_ST_NO_DECODER, "No decoder") \
+    X(S_ST_NO_VIDEO, "No video") \
+    X(S_ST_OFFLINE, "Offline") \
+    X(S_ST_AUTH, "Authentication error") \
+    X(S_ST_CODEC, "Unsupported codec") \
+    X(S_EXIT, "Exit") \
+    X(S_LOGOUT, "Logout") \
+    X(S_REBOOT, "Reboot") \
+    X(S_SHUTDOWN, "Shutdown") \
+    X(S_REBOOT_Q, "Reboot the recorder? Recording stops until it is back up.") \
+    X(S_SHUTDOWN_Q, "Shut the recorder down? Recording stops until it is switched on again.") \
+    X(S_REBOOTING, "Rebooting: recording stops cleanly first") \
+    X(S_SHUTTING_DOWN, "Shutting down: recording stops cleanly first") \
+    X(S_POWER_UNMANAGED, "Not here: vigild does not manage this system") \
+    X(S_LOGIN_OFF, "Logout: the on-screen login is off (System > General).") \
+    X(S_LOG_IN, "Log in") \
+    X(S_USER, "User") \
+    X(S_PASSWORD, "Password") \
+    X(S_WRONG_LOGIN, "Wrong user or password") \
+    X(S_NO_PERMISSION, "no permission for this") \
+    X(S_LOGGED_OUT, "Logged out")
 
 typedef enum {
 #define UI_STR_ID(id, en) id,

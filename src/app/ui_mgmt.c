@@ -361,7 +361,33 @@ static int group_delete(const char *name, char *err, size_t cap)
     users_err_t e = { 0 };
     return urc(users_group_delete(name, &e), &e, NULL, 0, err, cap);
 }
+
+_Static_assert((unsigned)UI_PERM_LIVE == (unsigned)PERM_LIVE && (unsigned)UI_PERM_CAMERAS == (unsigned)PERM_CAMERAS &&
+                   (unsigned)UI_PERM_STORAGE == (unsigned)PERM_STORAGE &&
+                   (unsigned)UI_PERM_NETWORK == (unsigned)PERM_NETWORK &&
+                   (unsigned)UI_PERM_SYSTEM == (unsigned)PERM_SYSTEM && (unsigned)UI_PERM_USERS == (unsigned)PERM_USERS,
+               "UI_PERM_* are users.h's PERM_*");
+
+static int login_(const char *name, const char *pass, unsigned *perms, char *why, size_t cap)
+{
+    users_reload();
+    return users_login(name, pass, perms, why, cap);
+}
 #endif
+
+static void system_user(char *buf, size_t cap)
+{
+    vigil_config_t *c = malloc(sizeof *c);
+    if (!c) {
+        snprintf(buf, cap, "root");
+        return;
+    }
+    config_get(c);
+    snprintf(buf, cap, "%s", c->api.user[0] ? c->api.user : "root");
+    free(c);
+}
+
+static int power(int reboot) { return mgmt_power_request(reboot ? MGMT_POWER_REBOOT : MGMT_POWER_OFF); }
 
 static const ui_mgmt_t g_mgmt = {
     .managed = managed,
@@ -379,8 +405,9 @@ static const ui_mgmt_t g_mgmt = {
 #ifdef VIGIL_HAVE_USERS
     .users_gen = users_gen, .users = users_, .groups = groups_, .perm_names = users_perm_names,
     .n_perms = PERM_N, .user_add = user_add, .user_update = user_update, .user_delete = user_delete,
-    .group_set = group_set, .group_delete = group_delete,
+    .group_set = group_set, .group_delete = group_delete, .login = login_,
 #endif
+    .system_user = system_user, .power = power,
 };
 
 const ui_mgmt_t *ui_mgmt_model(void) { return &g_mgmt; }
