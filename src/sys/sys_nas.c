@@ -127,7 +127,10 @@ int sys_nas_mount_args(const config_nas_t *n, const char *ip, char *src, size_t 
         }
         char cred[300];
         if (n->user[0]) snprintf(cred, sizeof cred, "username=%s,password=%s", n->user, pw);
-        else snprintf(cred, sizeof cred, "guest");
+        /* Guest: the 4.9 kernel's client ignores "guest" and refuses the
+         * mount ("No username specified", EINVAL); a user with an empty
+         * password is what a guest login is on the wire. */
+        else snprintf(cred, sizeof cred, "user=guest,password=");
         memset(pw, 0, sizeof pw);
         snprintf(src, scap, "//%s/%s", ip, share);
         r = snprintf(data, dcap, "unc=\\\\%s\\%.*s,ip=%s,%s%s%s%s%s%s", ip, (int)sl, share, ip, cred,
@@ -190,6 +193,26 @@ static const char *mount_error(int e)
     }
 }
 
+/* The newest "CIFS VFS:" line of the kernel log, without the prefix;
+ * "" when there is none. */
+static void kernel_says(char *out, size_t cap)
+{
+    out[0] = 0;
+    if (!sys_ops()->klog) return;
+    char *buf = malloc(8192);
+    if (!buf) return;
+    if (sys_ops()->klog(buf, 8192) > 0) {
+        char *last = NULL;
+        for (char *p = strstr(buf, "CIFS VFS: "); p; p = strstr(p + 1, "CIFS VFS: ")) last = p;
+        if (last) {
+            last += 10;
+            size_t n = strcspn(last, "\r\n");
+            snprintf(out, cap, "%.*s", (int)(n < cap ? n : cap - 1), last);
+        }
+    }
+    free(buf);
+}
+
 int sys_nas_mount(const config_nas_t *n, const char *target, char *msg, size_t cap)
 {
     char why[200], ip[64], src[300], data[700];
@@ -221,23 +244,29 @@ int sys_nas_mount(const config_nas_t *n, const char *target, char *msg, size_t c
     int rc = sys_ops()->mount(src, p, n->type, 0, data);
     int e = errno, smb1 = 0;
     memset(data, 0, sizeof data);
-    if (rc < 0 && e == EINVAL && !strcmp(n->type, "cifs") && !strstr(n->options, "vers=")) {
-        /* A kernel without CONFIG_CIFS_SMB2 (the ssr621q one, 4.9) takes
-         * no vers= but 1.0 and answers EINVAL to 2.1, whatever the
-         * server: seen in QEMU. Try SMB1 before saying anything. */
-        config_nas_t v1 = *n;
-        snprintf(v1.options, sizeof v1.options, "vers=1.0%s%.110s", n->options[0] ? "," : "", n->options);
-        if (sys_nas_mount_args(&v1, ip, src, sizeof src, data, sizeof data, why, sizeof why) == 0) {
-            rc = sys_ops()->mount(src, p, n->type, 0, data);
-            e = errno;
-            smb1 = 1;
+    /* EINVAL says little: the kernel log says why. Only "Unknown vers="
+     * (a kernel without CONFIG_CIFS_SMB2) means SMB1 is all there is;
+     * then SMB1 is tried before anything is said. */
+    char klast[160] = "";
+    if (rc < 0 && e == EINVAL && !strcmp(n->type, "cifs")) {
+        kernel_says(klast, sizeof klast);
+        if (!strstr(n->options, "vers=") && strstr(klast, "Unknown vers=")) {
+            config_nas_t v1 = *n;
+            snprintf(v1.options, sizeof v1.options, "vers=1.0%s%.110s", n->options[0] ? "," : "", n->options);
+            if (sys_nas_mount_args(&v1, ip, src, sizeof src, data, sizeof data, why, sizeof why) == 0) {
+                rc = sys_ops()->mount(src, p, n->type, 0, data);
+                e = errno;
+                smb1 = 1;
+                if (rc < 0 && e == EINVAL) kernel_says(klast, sizeof klast);
+                else klast[0] = 0;
+            }
+            memset(data, 0, sizeof data);
+            memset(v1.password, 0, sizeof v1.password);
         }
-        memset(data, 0, sizeof data);
-        memset(v1.password, 0, sizeof v1.password);
     }
     if (rc < 0) {
-        snprintf(msg, cap, "cannot mount %s: %s%s", src, mount_error(e),
-                 smb1 ? " (this kernel speaks SMB1 only: SMB2/3 need CONFIG_CIFS_SMB2)" : "");
+        snprintf(msg, cap, "cannot mount %s: %s%s%.120s%s", src, mount_error(e), klast[0] ? " (kernel: " : "",
+                 klast, klast[0] ? ")" : smb1 ? " (this kernel speaks SMB1 only: SMB2/3 need CONFIG_CIFS_SMB2)" : "");
         return -1;
     }
     snprintf(msg, cap, "%s mounted at %s%s", src, target,

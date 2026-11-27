@@ -19,6 +19,13 @@ time_t fake_time;
 char   fake_mounted[512];
 char   fake_umounted[256];
 int    fake_mount_errno, fake_umount_errno, fake_mount_errno_once;
+char   fake_klog[4096];
+
+static int f_klog(char *buf, size_t cap)
+{
+    snprintf(buf, cap, "%s", fake_klog);
+    return (int)strlen(buf);
+}
 char   fake_stdin[8192];
 char   fake_snap[4096];
 static char g_snap_prog[64], g_snap_path[256];
@@ -170,7 +177,7 @@ void fake_init(void)
     sys_set_root(fake_root);
     static const sys_ops_t ops = { .run = f_run, .have = f_have, .sethostname = f_sethostname,
                                    .settime = f_settime, .mount = f_mount, .umount = f_umount,
-                                   .reread_parts = f_reread, .ifaddr = f_ifaddr };
+                                   .reread_parts = f_reread, .ifaddr = f_ifaddr, .klog = f_klog };
     sys_set_ops(&ops);
     memset(g_ans, 0, sizeof g_ans);
     memset(g_have, 0, sizeof g_have);
@@ -178,6 +185,7 @@ void fake_init(void)
     fake_log[0] = fake_hostname[0] = fake_mounted[0] = fake_umounted[0] = fake_stdin[0] = 0;
     fake_time = 0;
     fake_mount_errno = fake_umount_errno = fake_mount_errno_once = 0;
+    fake_klog[0] = 0;
 }
 
 void fake_done(void)

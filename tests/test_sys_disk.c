@@ -342,7 +342,8 @@ static void test_nas(void)
     n.user[0] = 0;
     snprintf(n.share, sizeof n.share, "/rec");
     sys_nas_mount_args(&n, "10.0.0.5", src, sizeof src, data, sizeof data, why, sizeof why);
-    CHECK(!strcmp(data, "unc=\\\\10.0.0.5\\rec,ip=10.0.0.5,guest,vers=3.0,uid=0"), "guest, own vers: %s", data);
+    CHECK(!strcmp(data, "unc=\\\\10.0.0.5\\rec,ip=10.0.0.5,user=guest,password=,vers=3.0,uid=0"),
+          "guest: a user with an empty password, own vers: %s", data);
     config_nas_t f = { .type = "nfs", .server = "10.0.0.6", .share = "/export/nvr" };
     CHECK(sys_nas_mount_args(&f, "10.0.0.6", src, sizeof src, data, sizeof data, why, sizeof why) == 0 &&
           !strcmp(src, "10.0.0.6:/export/nvr") && !strcmp(data, "addr=10.0.0.6,nolock,vers=3"),
@@ -360,7 +361,14 @@ static void test_nas(void)
     CHECK(strstr(fake_mounted, "password=Pa55,,word") && strstr(fake_mounted, " cifs "), "cifs mount(2)");
     CHECK(fake_ran("modprobe cifs"), "the module is loaded");
     CHECK(!strstr(msg, "Pa55"), "no password in the message");
-    /* A kernel without SMB2 (CONFIG_CIFS_SMB2): EINVAL to vers=2.1, then SMB1. */
+    /* EINVAL for another reason (the 4.9 client's "No username
+     * specified"): no SMB1 retry, no blaming SMB1, the kernel's words. */
+    snprintf(fake_klog, sizeof fake_klog, "<3>[  12.0] CIFS VFS: No username specified\n");
+    fake_mount_errno_once = EINVAL;
+    CHECK(sys_nas_mount(&c, "/mnt/nas", msg, sizeof msg) < 0 && !strstr(fake_mounted, "vers=1.0") &&
+          !strstr(msg, "SMB1") && strstr(msg, "No username specified"), "other EINVAL: %s", msg);
+    /* A kernel without SMB2 (CONFIG_CIFS_SMB2): "Unknown vers=" for 2.1, then SMB1. */
+    snprintf(fake_klog, sizeof fake_klog, "<3>[  13.0] CIFS VFS: Unknown vers= option specified: 2.1\n");
     fake_mount_errno_once = EINVAL;
     CHECK(sys_nas_mount(&c, "/mnt/nas", msg, sizeof msg) == 0 && strstr(fake_mounted, "vers=1.0") &&
           strstr(msg, "SMB1") && !strstr(msg, "Pa55"), "SMB1 fallback: %s", msg);
@@ -368,6 +376,7 @@ static void test_nas(void)
     fake_mount_errno = EHOSTUNREACH;
     CHECK(sys_nas_mount(&c, "/mnt/nas", msg, sizeof msg) < 0 && strstr(msg, "CONFIG_CIFS_SMB2") &&
           !strstr(msg, "nvalid"), "SMB1 fallback, the real error: %s", msg);
+    fake_klog[0] = 0;
     fake_mount_errno = 0;
     snprintf(c.options, sizeof c.options, "vers=3.0");
     fake_mount_errno_once = EINVAL;

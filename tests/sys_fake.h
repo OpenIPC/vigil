@@ -33,6 +33,7 @@ extern char   fake_umounted[256];
 extern int    fake_mount_errno;     /* nonzero: mount() fails with it */
 extern int    fake_umount_errno;
 extern int    fake_mount_errno_once; /* the next mount() only fails with it */
+extern char   fake_klog[4096];        /* what the kernel log holds (ops->klog) */
 /* What the last run of each program got on stdin (one buffer, the last). */
 extern char   fake_stdin[8192];
 
