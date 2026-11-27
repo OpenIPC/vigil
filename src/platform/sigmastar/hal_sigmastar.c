@@ -828,6 +828,16 @@ static int dec_open(int ch, vg_codec_t codec, const vg_stream_info_t *si, unsign
     nx_drop(ch);
     int ids = own;
     for (int i = 0; i < g_vdec_ids && !ids; ++i) ids = !g_vdec_busy[i];
+    /* Another channel's takeover holds two numbers until its new decoder
+     * has pictures: with 4 of them, a 2x2 page coming back from full
+     * screen ran out, and the last channel waited for the core's retry
+     * (10 s). Finish that takeover now; its port keeps the old picture
+     * until the new decoder's first. */
+    for (int o = 0; o < MAX_CH && !ids; ++o) {
+        if (o == ch || !g_ch[o].nx.on) continue;
+        nx_swap(o);
+        for (int i = 0; i < g_vdec_ids && !ids; ++i) ids = !g_vdec_busy[i];
+    }
     if (!ids) {
         refuse(ch, "mi_vdec's %d channels are all in use", g_vdec_ids);
         return -1;
