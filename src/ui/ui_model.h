@@ -62,6 +62,7 @@ typedef struct {
     char     codec[8];          /* "H.264", "H.265", "" */
     int      no_decoder;        /* live, but the platform has no decoder for it now */
     unsigned width, height, fps;
+    unsigned main_kbps, sub_kbps;   /* what each stream brings in (2 s average), 0: not running */
 } ui_chan_t;
 
 typedef struct {
@@ -453,6 +454,7 @@ typedef struct ui_model {
     const char *role;           /* "NVR" / "DVR" */
     int         channels;       /* tiles the platform can show */
     int         fixed_tiles;    /* no layouts, no full screen */
+    unsigned    max_in_kbps;    /* the chip's rated incoming bandwidth, kbit/s; 0: not known */
 
     /* live view */
     void   (*chan_status)(int idx, ui_chan_t *st);

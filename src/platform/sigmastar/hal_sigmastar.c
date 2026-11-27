@@ -105,6 +105,15 @@ static const hal_caps_t g_caps = {
     /* the heap holds 16 decoders of 720p, fewer of larger pictures, and
      * mi_vdec may take only 4 (above) */
     .dec_shown_only = 1,
+    /* 64 Mbit/s of camera streams coming in. SigmaStar publishes no
+     * SSR621Q datasheet or product brief; this is the figure every
+     * SSR621Q recorder's spec sheet gives (and so, most likely, the
+     * vendor's reference design): "Mstar SSR621Q platform ... Network
+     * video Input/Output Bandwidth: 64Mbps/32Mbps" (Uvision NVR6116),
+     * "64Mbps input" (DVC DRN-0861RN), "Incoming bandwidth 64M"
+     * (Secureye ST-NVR-011). The HAL does not tell infinity2m chips
+     * apart; the SSR621Q is the NVR one. */
+    .max_in_kbps = 64000,
 };
 
 static struct {

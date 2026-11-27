@@ -344,6 +344,13 @@ def main():
                   ch["width"] == 640 and CAM_PASS not in json.dumps(status),
                   "status: name, host, codec, size; no password")
             check(status["config"]["applied"] == status["config"]["generation"], "status: config applied")
+            check(status["platform"]["max_in_kbps"] == 0 and "sub_kbps" in ch, "status: no rated bandwidth here; sub_kbps")
+
+        def bitrate():
+            s, _, d = api.json("GET", "/api/v1/status")
+            return s == 200 and d["channels"] and d["channels"][0]["main_kbps"] > 0 and d["channels"][0]["main_kbps"]
+        kbps = wait_for(bitrate, 6, 0.5)
+        check(kbps, "status: the main stream's bitrate (%s kbit/s)" % kbps)
         check(wait_for(lambda: ws.find(lambda m: m["type"] == "event" and m["data"]["camera"] == 1 and
                                        m["data"]["text"] == "online"), 5),
               "WebSocket: event CAM1 online")
