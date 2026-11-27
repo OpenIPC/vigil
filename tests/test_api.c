@@ -261,6 +261,22 @@ static void test_users(void)
     }
     CHECK(users_generation() != gen, "a changed file is read again");
     CHECK(users_list(u, USERS_MAX) == 3, "same users after reading again");
+    /* Edited in place, the same length, within the same second. */
+    gen = users_generation();
+    stat(users, &st);
+    text = slurp(users);
+    char *grp = text ? strstr(text, "# Groups") : NULL;
+    if (grp) {
+        grp[2] = 'g';
+        f = fopen(users, "r+");
+        fputs(text, f);
+        fclose(f);
+        struct timespec ts[2] = { st.st_mtim, st.st_mtim };
+        ts[0].tv_nsec = ts[1].tv_nsec = (st.st_mtim.tv_nsec + 1) % 1000000000L;
+        utimensat(AT_FDCWD, users, ts, 0);
+    }
+    free(text);
+    CHECK(grp && users_generation() != gen, "an edit in place of the same length, in the same second: read again");
 
     /* An admin user replaces the alias. */
     CHECK(users_add("admin", "user", "adminpw", 1, &e) == USERS_OK, "add admin");

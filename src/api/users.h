@@ -114,6 +114,13 @@ int users_reload(void);
  * again): a UI list rebuilds when it does. */
 unsigned users_generation(void);
 
+struct stat;
+/* The same version of an account file (the users file, the shadow file):
+ * inode, size, and modification and change times to the nanosecond, so
+ * that an edit within the second, in place and of the same length, is
+ * still a change. */
+int users_same_file(const struct stat *a, const struct stat *b);
+
 /* Every user / group, in file order (built-ins first for groups); returns
  * how many (at most `max`). */
 int users_list(users_user_t *u, int max);

@@ -99,6 +99,7 @@ typedef struct {
     unsigned    perms;
     time_t      made;
     struct stat shadow_st, users_st;    /* the files it was checked against */
+    unsigned    users_gen;              /* and vigild's users then */
 } sess_t;
 
 static pthread_mutex_t g_sess_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -107,12 +108,6 @@ static sess_t          g_sess[SESS_MAX];
 static void stat_or_none(const char *path, struct stat *st)
 {
     if (stat(path, st) < 0) memset(st, 0, sizeof *st);
-}
-
-static int same_file(const struct stat *a, const struct stat *b)
-{
-    return a->st_ino == b->st_ino && a->st_dev == b->st_dev && a->st_mtime == b->st_mtime &&
-           a->st_size == b->st_size;
 }
 
 static int random_hex(char *out, size_t bytes)
@@ -132,6 +127,7 @@ static int sess_new(const char *user, unsigned perms, char tok[65])
     config_api_t api;
     web_config(&api);
     if (random_hex(tok, 32) < 0) return -1;
+    unsigned gen = users_generation();
     pthread_mutex_lock(&g_sess_lock);
     sess_t *s = &g_sess[0];
     for (int i = 0; i < SESS_MAX; ++i) {
@@ -149,6 +145,7 @@ static int sess_new(const char *user, unsigned perms, char tok[65])
     s->made = mono();
     stat_or_none(api.shadow, &s->shadow_st);
     stat_or_none(api.users, &s->users_st);
+    s->users_gen = gen;
     pthread_mutex_unlock(&g_sess_lock);
     return 0;
 }
@@ -164,12 +161,14 @@ static int sess_find(const char *t, char *user, size_t ucap, unsigned *perms)
     struct stat sh, us;
     stat_or_none(api.shadow, &sh);
     stat_or_none(api.users, &us);
+    unsigned gen = users_generation();
     int ok = 0;
     pthread_mutex_lock(&g_sess_lock);
     for (int i = 0; i < SESS_MAX && !ok; ++i) {
         sess_t *s = &g_sess[i];
         if (!s->tok[0] || !auth_equal(s->tok, t)) continue;
-        if (mono() - s->made >= SESS_SECS || !same_file(&sh, &s->shadow_st) || !same_file(&us, &s->users_st)) {
+        if (mono() - s->made >= SESS_SECS || !users_same_file(&sh, &s->shadow_st) ||
+            !users_same_file(&us, &s->users_st) || s->users_gen != gen) {
             memset(s, 0, sizeof *s);
             break;
         }

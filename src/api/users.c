@@ -279,10 +279,11 @@ static void api_settings(config_api_t *api)
     free(c);
 }
 
-static int same_stat(const struct stat *a, const struct stat *b)
+int users_same_file(const struct stat *a, const struct stat *b)
 {
-    return a->st_ino == b->st_ino && a->st_dev == b->st_dev && a->st_mtime == b->st_mtime &&
-           a->st_size == b->st_size;
+    return a->st_ino == b->st_ino && a->st_dev == b->st_dev && a->st_size == b->st_size &&
+           a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
+           a->st_ctim.tv_sec == b->st_ctim.tv_sec && a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
 }
 
 static void wipe(void *p, size_t n) { secret_wipe(p, n); }
@@ -422,7 +423,7 @@ static int load_locked(const char *path)
     struct stat st;
     memset(&st, 0, sizeof st);
     int there = stat(path, &st) == 0;
-    if (g_loaded && !strcmp(path, g_path) && (there ? same_stat(&st, &g_st) : g_st.st_ino == 0))
+    if (g_loaded && !strcmp(path, g_path) && (there ? users_same_file(&st, &g_st) : g_st.st_ino == 0))
         return g_bad ? -1 : 0;
     snprintf(g_path, sizeof g_path, "%s", path);
     g_st = st;

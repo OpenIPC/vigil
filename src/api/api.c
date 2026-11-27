@@ -124,12 +124,14 @@ typedef struct {
  * CACHE_SECS, a few at once so that clients of different users polling
  * side by side do not push each other out; each stays valid only while
  * the shadow file and the users file are the ones it was checked
- * against. */
+ * against, and vigild has changed no user since (users_generation: a
+ * change it made within the file's time resolution, on jffs2 a second). */
 #define CACHE_N 4
 typedef struct {
     unsigned char d[16];                    /* md5(key, user:password:shadow:users) */
     time_t        at;                       /* monotonic; 0: empty */
     struct stat   shadow_st, users_st;      /* st_ino 0: the file was not there */
+    unsigned      users_gen;
     unsigned      perms;
 } cache_entry_t;
 
@@ -154,12 +156,6 @@ static void cache_digest(const char *user, const char *pass, const char *files, 
     md5_raw(buf, n < 0 ? 0 : (size_t)n >= sizeof buf ? sizeof buf - 1 : (size_t)n, d);
     volatile char *w = buf;
     for (size_t i = 0; i < sizeof buf; ++i) w[i] = 0;
-}
-
-static int same_file(const struct stat *a, const struct stat *b)
-{
-    return a->st_ino == b->st_ino && a->st_dev == b->st_dev && a->st_mtime == b->st_mtime &&
-           a->st_size == b->st_size;
 }
 
 static void stat_or_none(const char *path, struct stat *st)
@@ -266,11 +262,12 @@ int api_login(const char *addr, const char *user, const char *pass, unsigned *pe
     stat_or_none(api.users, &us);
     snprintf(files, sizeof files, "%s:%s", api.shadow, api.users);
     cache_digest(user, pass, files, d);
+    unsigned gen = users_generation();
     pthread_mutex_lock(&g_auth_lock);
     for (int i = 0; i < CACHE_N && !ok; ++i) {
         cache_entry_t *ce = &g_cache[i];
-        if (ce->at && now - ce->at < CACHE_SECS && same_file(&sh, &ce->shadow_st) &&
-            same_file(&us, &ce->users_st) && memcmp(d, ce->d, sizeof d) == 0) {
+        if (ce->at && now - ce->at < CACHE_SECS && users_same_file(&sh, &ce->shadow_st) &&
+            users_same_file(&us, &ce->users_st) && ce->users_gen == gen && memcmp(d, ce->d, sizeof d) == 0) {
             ok = 1;
             *perms = ce->perms;
         }
@@ -279,6 +276,11 @@ int api_login(const char *addr, const char *user, const char *pass, unsigned *pe
     if (!ok) {
         ok = users_login(user, pass, perms, why, sizeof why) == 1;
         if (ok) {
+            /* After the login, which may have written the file (sealing
+             * the password at a first login). */
+            gen = users_generation();
+            stat_or_none(api.shadow, &sh);
+            stat_or_none(api.users, &us);
             pthread_mutex_lock(&g_auth_lock);
             cache_entry_t *ce = &g_cache[0];
             for (int i = 1; i < CACHE_N; ++i)
@@ -287,6 +289,7 @@ int api_login(const char *addr, const char *user, const char *pass, unsigned *pe
             ce->at = now;
             ce->shadow_st = sh;
             ce->users_st = us;
+            ce->users_gen = gen;
             ce->perms = *perms;
             pthread_mutex_unlock(&g_auth_lock);
         }
