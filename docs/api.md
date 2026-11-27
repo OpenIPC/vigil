@@ -427,6 +427,7 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `GET /api/v1/discovery/job` | The current or last discovery job. |
 | `POST /api/v1/discovery/ip` | Change devices' addresses, or (`dry_run`) show the plan. |
 | `POST /api/v1/channels/<n>/assign` | Add a device found to channel n. |
+| `POST /api/v1/channels/<n>/events` | Events of channel n's camera, reported from outside ([below](#post-apiv1channelsnevents)). |
 | `POST /api/v1/discovery/autoadd` | Add every new device to the empty channels. |
 | `POST /api/v1/devices/test` | Connect to a camera described by hand: codec and size, or why not. |
 
@@ -777,6 +778,24 @@ profiles (GetProfiles, GetStreamUri, at the time of the request), RTSP the
 paths given. The results show the URLs, redacted (`url`, `sub_url`). A
 manual device is not refused for being on another channel already (an NVR's
 channels share an address).
+
+### `POST /api/v1/channels/<n>/events`
+
+`{"events": ["motion", "human"]}` reports events of channel n's camera as
+if the camera had (any of `motion`, `human`, `face`, `vehicle`): for an
+alarm input vigild does not read itself (a script relaying a camera's or a
+sensor's alarm), and for trying the tiles' alarm icons and frame
+(`display.alarm_icons`, `display.alert_frame`). Each is held 5 s after
+its last report, like a camera's, so a source repeats it while it lasts;
+the status's `events` and the live view show it meanwhile. The answer is
+the events held now, `{"channel": 1, "events": ["motion", "human"]}`.
+`400` for an unknown event, `404` past the channels. Needs `cameras`.
+
+```sh
+while sleep 2; do
+  curl -s -u root:PASSWORD -d '{"events": ["motion"]}' $NVR/api/v1/channels/1/events
+done
+```
 
 ### `POST /api/v1/devices/test`
 

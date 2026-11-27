@@ -9,6 +9,8 @@
  *   POST /api/v1/discovery/ip          change addresses (dry_run: the plan)
  *   POST /api/v1/discovery/autoadd     every new device into the empty channels
  *   POST /api/v1/channels/N/assign     one device into channel N
+ *   POST /api/v1/channels/N/events     events of channel N's camera, from
+ *                                      outside (an alarm input, a test)
  *
  * The work is a job on discovery.c's thread; these handlers start it and,
  * except for a scan, wait up to WAIT_MS for it to end, so a short change
@@ -445,6 +447,36 @@ static int do_assign(struct mg_connection *conn, int ch)
     return answer_job(conn, (unsigned)id, WAIT_MS);
 }
 
+/* {"events": ["motion", ...]}: as if the camera had reported them now
+ * (channels_report_events, held CHANNEL_EVENT_HOLD s); the answer has
+ * the events held now. Nothing else of the channel changes. */
+static int do_events(struct mg_connection *conn, int ch)
+{
+    int rc;
+    cJSON *b = body_object(conn, &rc);
+    if (!b) return rc;
+    const cJSON *ev = cJSON_GetObjectItemCaseSensitive(b, "events"), *e;
+    unsigned bits = 0;
+    int bad = !cJSON_IsArray(ev);
+    cJSON_ArrayForEach(e, ev) {
+        int bit = -1;
+        for (int k = 0; cJSON_IsString(e) && ch_event_name(k); ++k)
+            if (!strcmp(e->valuestring, ch_event_name(k))) bit = k;
+        if (bit < 0) bad = 1;
+        else bits |= 1u << bit;
+    }
+    cJSON_Delete(b);
+    if (bad) return send_error(conn, 400, "invalid request: events (motion, human, face, vehicle)", NULL);
+    channels_report_events(ch - 1, bits);
+    channel_status_t st;
+    channels_status(ch - 1, &st);
+    cJSON *doc = cJSON_CreateObject(), *held = cJSON_AddArrayToObject(doc, "events");
+    cJSON_AddNumberToObject(doc, "channel", ch);
+    for (int k = 0; held && ch_event_name(k); ++k)
+        if (st.events & (1u << k)) cJSON_AddItemToArray(held, cJSON_CreateString(ch_event_name(k)));
+    return send_json(conn, 200, doc);
+}
+
 static int do_autoadd(struct mg_connection *conn)
 {
     int rc;
@@ -526,6 +558,11 @@ int api_disc_request(struct mg_connection *conn, const char *uri, const char *m)
         if (!post) return method_not_allowed(conn, "POST");
         if (ch < 1 || ch > CHANNEL_MAX) return send_error(conn, 404, "no such channel", NULL);
         return do_assign(conn, ch);
+    }
+    if (sscanf(uri, "/api/v1/channels/%d/events%n", &ch, &used) == 1 && used && !uri[used]) {
+        if (!post) return method_not_allowed(conn, "POST");
+        if (ch < 1 || ch > channels_count()) return send_error(conn, 404, "no such channel", NULL);
+        return do_events(conn, ch);
     }
     return send_error(conn, 404, "not found", NULL);
 }

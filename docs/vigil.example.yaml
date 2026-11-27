@@ -231,6 +231,19 @@ display:
   # straight on the video; none: the text alone; box: on a dark box. One of:
   # outline, none, box. Default outline.
   icons_background: outline
+  # REC icon: REC in the status icons' corner of each tile while its channel
+  # records. Default true.
+  rec_icon: true
+  # Alarm icons: The events the camera reports (motion, human, face, vehicle)
+  # as icons in the status icons' corner, while they last. Default true.
+  alarm_icons: true
+  # Lines between tiles: A thin line around each tile of the live view. Off:
+  # the pictures touch. Default true.
+  tile_dividers: true
+  # Alarm frame: A red frame, blinking, inside the edge of a tile while its
+  # camera reports an event (the alarm icons' events); none otherwise. Default
+  # false.
+  alert_frame: false
 
 # HTTP API
 api:
