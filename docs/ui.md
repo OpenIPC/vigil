@@ -403,10 +403,13 @@ windows of the 8-split) shows the camera's sub-stream, a larger one (1x1,
 full screen, the 8-split's large window) its main stream. The sub-stream is
 the camera's `sub_url`, or for a NETIP camera the same URL with
 `stream=extra`; a camera without either shows its main stream everywhere.
-The switch keeps the old picture up until the new stream's first keyframe
-(and the tile's state stays that picture's stream until then),
-and a sub-stream no longer shown keeps its connection for 5 s, so flipping
-between full screen and a layout does not reconnect. The tile's stream line
+Both streams stay connected whatever is on screen, and each keeps the GOP
+it is in, so full screen and back, or another page, shows the new stream
+at once rather than at the camera's next keyframe (see
+[architecture](architecture.md), "Main stream and sub-stream"); when there
+is no GOP to start from, the old picture stays up until the new stream's
+first keyframe (and the tile's state stays that picture's stream until
+then). The tile's stream line
 (`H.264 352x288 10 fps`) is the stream on screen; recording always takes
 the main stream. Where decoders are scarce (`dec_shown_only`, SigmaStar)
 channels not on the page decode nothing, and a tile whose camera is live

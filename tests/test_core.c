@@ -20,6 +20,7 @@
 
 #include "aspect.h"
 #include "au_norm.h"
+#include "gop_cache.h"
 #include "channel.h"
 #include "cJSON.h"
 #include "config.h"
@@ -395,6 +396,80 @@ static void test_au_norm(void)
 
     au_norm_free(&a);
     free(b);
+}
+
+/* ---- GOP cache ------------------------------------------------------------- */
+
+static vg_au_t gop_test_au(uint8_t *buf, size_t len, int n, int key)
+{
+    memset(buf, n & 0xff, len);
+    return (vg_au_t){ .codec = VG_CODEC_H264, .data = buf, .len = len, .pts_us = 1000u * (unsigned)n, .key = key };
+}
+
+static void test_gop_cache(void)
+{
+    static uint8_t buf[200000];
+    gop_cache_t g;
+    gop_cache_init(&g, 1u << 20);
+    CHECK(gop_cache_used() == 0, "nothing held at first");
+
+    /* Nothing before a keyframe; then the keyframe and every AU after it,
+     * in order, as they came. */
+    vg_au_t au = gop_test_au(buf, 100, 1, 0);
+    CHECK(gop_cache_add(&g, &au, 1) == GOP_IDLE && !gop_cache_ready(&g), "no keyframe yet: nothing kept");
+    for (int i = 0; i < 30; ++i) {
+        au = gop_test_au(buf, 1000 + (size_t)i * 100, i, i == 0);
+        CHECK(gop_cache_add(&g, &au, 1) == GOP_KEPT, "AU %d kept", i);
+    }
+    CHECK(gop_cache_ready(&g) && g.n == 30, "a GOP of 30 (%u)", g.n);
+    int order = 1;
+    for (unsigned i = 0; i < g.n; ++i) {
+        vg_au_t o;
+        gop_cache_get(&g, i, &o);
+        order &= o.len == 1000 + i * 100 && o.data[0] == i && o.data[o.len - 1] == i &&
+                 o.pts_us == 1000u * i && o.key == (i == 0) && o.codec == VG_CODEC_H264;
+    }
+    CHECK(order, "replayed in order, keyframe first, data and times intact");
+    size_t held = gop_cache_used();
+    CHECK(held >= g.len && held <= 1u << 20, "held %zu for %zu bytes", held, g.len);
+
+    /* The next keyframe starts over in the same memory. */
+    au = gop_test_au(buf, 500, 40, 1);
+    CHECK(gop_cache_add(&g, &au, 1) == GOP_KEPT && g.n == 1 && gop_cache_used() == held,
+          "a keyframe starts over, no new memory (%u, %zu)", g.n, gop_cache_used());
+
+    /* Over the cap: dropped, its memory given back, nothing kept until
+     * the next keyframe. */
+    int rc = GOP_KEPT, i;
+    for (i = 0; i < 20 && rc == GOP_KEPT; ++i) {
+        au = gop_test_au(buf, sizeof buf, i, 0);
+        rc = gop_cache_add(&g, &au, 1);
+    }
+    CHECK(rc == GOP_OVER_CAP && i == 6 && !gop_cache_ready(&g) && gop_cache_used() == 0,
+          "over 1 MiB: dropped after %d AUs, %zu held", i, gop_cache_used());
+    au = gop_test_au(buf, 100, 1, 0);
+    CHECK(gop_cache_add(&g, &au, 1) == GOP_IDLE && !gop_cache_ready(&g), "then nothing until a keyframe");
+    au = gop_test_au(buf, 100, 2, 1);
+    CHECK(gop_cache_add(&g, &au, 1) == GOP_KEPT && gop_cache_ready(&g), "a keyframe: kept again");
+
+    /* A new SPS without a keyframe: not a GOP a decoder could start. */
+    au = gop_test_au(buf, 100, 3, 0);
+    CHECK(gop_cache_add(&g, &au, 2) == GOP_OVER_CAP && !gop_cache_ready(&g), "stream changed mid-GOP: dropped");
+
+    /* The budget, shared: a second cache cannot take what the first holds. */
+    gop_cache_t h;
+    gop_cache_init(&h, 1u << 20);
+    gop_cache_set_budget(300000);
+    au = gop_test_au(buf, 150000, 1, 1);
+    CHECK(gop_cache_add(&g, &au, 1) == GOP_KEPT, "first cache within the budget");
+    au = gop_test_au(buf, 150000, 2, 1);
+    CHECK(gop_cache_add(&h, &au, 1) == GOP_OVER_BUDGET && !gop_cache_ready(&h) &&
+              gop_cache_used() <= 300000, "second over the budget: dropped (%zu used)", gop_cache_used());
+    gop_cache_free(&g);
+    CHECK(gop_cache_add(&h, &au, 1) == GOP_KEPT, "the first freed: the second fits");
+    gop_cache_free(&h);
+    gop_cache_set_budget(GOP_CACHE_BUDGET);
+    CHECK(gop_cache_used() == 0, "all given back (%zu)", gop_cache_used());
 }
 
 /* ---- RTP depacketizer -------------------------------------------------------- */
@@ -1582,6 +1657,11 @@ static pthread_mutex_t g_dec_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_dec_slots;                     /* decoders the fake platform has */
 static int g_dec_open[CHANNEL_MAX];         /* channel holds one */
 static int g_dec_opens[CHANNEL_MAX], g_dec_fails[CHANNEL_MAX], g_dec_sent[CHANNEL_MAX];
+/* How decoders start: the first AU after each open not a keyframe (never
+ * right), and opens while the camera was well into a GOP (from a GOP
+ * cache: at a keyframe the camera's count is 0). */
+static int g_dec_first[CHANNEL_MAX], g_dec_bad_start[CHANNEL_MAX], g_dec_mid_gop[CHANNEL_MAX];
+static atomic_int g_cam_since_key[2];       /* the fake camera's, [0] main, [1] extra */
 
 static int dec_count(int *a, int ch)
 {
@@ -1600,15 +1680,18 @@ int hal_dec_open(int ch, vg_codec_t c, const vg_stream_info_t *si)
     int ok = used < g_dec_slots;
     g_dec_open[ch] = ok;
     ++*(ok ? &g_dec_opens[ch] : &g_dec_fails[ch]);
+    g_dec_first[ch] = ok;
+    if (ok && atomic_load(&g_cam_since_key[si->width == 640]) > 3) ++g_dec_mid_gop[ch];
     pthread_mutex_unlock(&g_dec_lock);
     return ok ? 0 : -1;
 }
 int hal_dec_send(int ch, const vg_au_t *au)
 {
-    (void)au;
     pthread_mutex_lock(&g_dec_lock);
     int ok = g_dec_open[ch];
     g_dec_sent[ch] += ok;
+    if (ok && g_dec_first[ch]) g_dec_bad_start[ch] += !au->key;
+    g_dec_first[ch] = 0;
     pthread_mutex_unlock(&g_dec_lock);
     return ok ? 0 : -1;
 }
@@ -1808,6 +1891,8 @@ static void *cam_client(void *arg)
             memcpy(m, key ? ihead : phead, hl - 4);
             put_le32(m + hl - 4, len);
             if (cam_send(fd, 1412, m, hl + len) < 0) goto out_msg;
+            if (key) atomic_store(&g_cam_since_key[extra], 0);
+            else atomic_fetch_add(&g_cam_since_key[extra], 1);
             len = 0;
             key = 0;
             usleep(10 * 1000);
@@ -2013,23 +2098,26 @@ static void test_channel_substream(void)
     CHECK(view_is(0, "main", 1920), "full screen: the main stream decodes");
     CHECK(atomic_load(&g_cam.streaming[0]) == 1, "still one main connection");
 
-    /* Back to 2x2 within the sub-stream's linger: no new connection. */
+    /* Back to 2x2: the sub-stream's connection was never dropped. */
     channels_set_tiles(quad);
     WAIT_FOR(view_is(0, "sub", 640), 5000);
     CHECK(view_is(0, "sub", 640), "2x2 again: the sub-stream");
     CHECK(atomic_load(&g_cam.streaming[1]) == 1, "the sub-stream's connection was kept");
 
-    /* Off screen: no decoder, and the sub-stream goes after its linger;
-     * the main stream and its recording stay. */
+    /* Off screen: no decoder; both streams stay connected, the main one
+     * recording. */
     channels_set_tiles(none);
-    WAIT_FOR(atomic_load(&g_cam.streaming[1]) == 0, 9000);
+    WAIT_FOR(!dec_count(g_dec_open, 0), 3000);
+    usleep(300 * 1000);
     channels_status(0, &st);
     CHECK(!st.decoding && !dec_count(g_dec_open, 0) && !st.view[0], "hidden: not decoding ('%s')", st.view);
-    CHECK(atomic_load(&g_cam.streaming[1]) == 0 && atomic_load(&g_cam.streaming[0]) == 1,
-          "hidden: the sub-stream's connection is gone, the main one stays");
+    CHECK(atomic_load(&g_cam.streaming[1]) == 1 && atomic_load(&g_cam.streaming[0]) == 1 &&
+              st.sub_status == CH_LIVE && st.main_status == CH_LIVE,
+          "hidden: both connections stay (main %d, extra %d)", atomic_load(&g_cam.streaming[0]),
+          atomic_load(&g_cam.streaming[1]));
     channels_set_tiles(quad);
     WAIT_FOR(view_is(0, "sub", 640), 5000);
-    CHECK(view_is(0, "sub", 640), "shown again: the sub-stream comes back");
+    CHECK(view_is(0, "sub", 640), "shown again: the sub-stream decodes");
 
     /* An explicit sub_url wins, and changing it restarts only the
      * sub-stream. */
@@ -2051,6 +2139,61 @@ static void test_channel_substream(void)
     g_fake_caps.dec_shown_only = 0;
     g_dec_slots = 0;
     if (system(cmd)) {}
+}
+
+/* Full screen and back, and off screen and back: each time the stream
+ * wanted decodes from the GOP it kept, without waiting for the camera's
+ * next keyframe, every decoder starting at a keyframe all the same. */
+static void test_channel_instant_switch(void)
+{
+    int port = cam_start("majestic_1080p.h265", "testsrc_640x360.h264");
+    if (!port) return;
+    char url[64];
+    snprintf(url, sizeof url, "netip://127.0.0.1:%d/?ch=0&stream=main", port);
+    g_fake_caps.dec_shown_only = 1;
+    g_dec_slots = 2;
+    channels_set_screen(1280, 720);
+    vg_rect_t quad[CHANNEL_MAX] = { { 0, 40, 640, 300 } };
+    vg_rect_t full[CHANNEL_MAX] = { { 0, 40, 1280, 600 } };
+    vg_rect_t none[CHANNEL_MAX] = { { 0 } };
+    channels_config_t cc = { .urls = { url }, .n = 1, .seg_secs = 60 };
+    CHECK(channels_start(&cc, quad) == 0, "start");
+    WAIT_FOR(view_is(0, "sub", 640), 5000);
+    CHECK(view_is(0, "sub", 640), "2x2: the sub-stream");
+    pthread_mutex_lock(&g_dec_lock);
+    g_dec_mid_gop[0] = g_dec_bad_start[0] = 0;
+    pthread_mutex_unlock(&g_dec_lock);
+
+    int opens = dec_count(g_dec_opens, 0), ok = 1;
+    for (int i = 0; i < 6; ++i) {
+        usleep(300 * 1000);                 /* both GOPs kept again */
+        channels_set_tiles(i % 3 == 2 ? none : full);
+        if (i % 3 == 2) {
+            WAIT_FOR(!dec_count(g_dec_open, 0), 2000);
+            usleep(300 * 1000);
+        } else {
+            WAIT_FOR(view_is(0, "main", 1920), 2000);
+            ok &= view_is(0, "main", 1920);
+            usleep(300 * 1000);
+        }
+        channels_set_tiles(quad);
+        WAIT_FOR(view_is(0, "sub", 640), 2000);
+        ok &= view_is(0, "sub", 640);
+    }
+    CHECK(ok, "every switch decoded the stream wanted");
+    int mid = dec_count(g_dec_mid_gop, 0), bad = dec_count(g_dec_bad_start, 0);
+    CHECK(dec_count(g_dec_opens, 0) - opens >= 10 && mid >= 3,
+          "decoders opened mid-GOP from the cache (%d of %d)", mid, dec_count(g_dec_opens, 0) - opens);
+    CHECK(bad == 0, "every decoder started at a keyframe (%d did not)", bad);
+    CHECK(atomic_load(&g_cam.streaming[0]) == 1 && atomic_load(&g_cam.streaming[1]) == 1,
+          "one connection per stream all along");
+
+    channels_stop();
+    CHECK(gop_cache_used() == 0, "stopped: every GOP given back (%zu)", gop_cache_used());
+    cam_stop();
+    channels_set_screen(0, 0);
+    g_fake_caps.dec_shown_only = 0;
+    g_dec_slots = 0;
 }
 
 /* A 16:9 camera whose sub-stream is anamorphic D1 (704x576, claiming square
@@ -2158,15 +2301,16 @@ static void test_channel_stream_states(void)
     CHECK(!strcmp(st.title, "Front door") && !strcmp(st.name, "Front door"), "the camera's name: '%s' '%s'",
           st.title, st.name);
 
-    /* Full screen: the sub-stream's picture stays until it goes (its
-     * linger), then the tile says what the main stream does. */
+    /* Full screen: the main stream never comes to take over, so the
+     * sub-stream, connected all along, keeps the picture up; the main
+     * stream's failure is still said as its own. */
     channels_set_tiles(full);
-    usleep(500 * 1000);
-    CHECK(status_is(0, CH_LIVE, NULL), "full screen, the sub-stream still up: live");
-    WAIT_FOR(status_is(0, CH_ERROR, NULL), 9000);
+    usleep(1500 * 1000);
     channels_status(0, &st);
-    CHECK(st.status == CH_ERROR && !st.decoding && strstr(st.state, "monitor refused") && st.sub_status == CH_EMPTY,
-          "full screen: the main stream's error (%s '%s')", ch_state_name(st.status), st.state);
+    CHECK(st.status == CH_LIVE && st.decoding && !strcmp(st.view, "sub") && st.sub_status == CH_LIVE &&
+              st.main_status == CH_ERROR && strstr(st.main_state, "monitor refused"),
+          "full screen, main refused: the sub-stream's picture stays (%s '%s', view '%s', main %s)",
+          ch_state_name(st.status), st.state, st.view, ch_state_name(st.main_status));
 
     /* A configured name wins over the camera's. */
     cc.names[0] = "Gate";
@@ -2694,6 +2838,7 @@ int main(int argc, char **argv)
     g_data = argc > 1 ? argv[1] : "tests/data";
     test_sps();
     test_au_norm();
+    test_gop_cache();
     test_depay();
     test_rtsp_read();
     test_rtsp_request();
@@ -2714,6 +2859,7 @@ int main(int argc, char **argv)
     test_channel_decode();
     test_sub_url();
     test_channel_substream();
+    test_channel_instant_switch();
     test_channel_aspect();
     test_netip_title_parse();
     test_channel_stream_states();
