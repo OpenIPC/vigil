@@ -10,7 +10,16 @@
  * clicks; the right button calls hooks.right and the wheel hooks.wheel,
  * which LVGL's own evdev driver cannot do: it reports only
  * BTN_MOUSE/BTN_TOUCH, and no keys. The
- * pointer is drawn by LVGL (ui_cursor.c), shown while a pointer is there.
+ * pointer is shown while a pointer device is there.
+ *
+ * Where the platform has a cursor plane (hal_ui_cursor_create), it draws
+ * the pointer, and a thread of its own reads the mice as their events come
+ * and hands each new position straight to it: the pointer follows the
+ * mouse at the output's refresh rate whatever the UI is drawing, where
+ * LVGL would move it only at its next frame, after a busy render. LVGL's
+ * pointer reads the same state (under the lock) for clicks and hovering.
+ * Elsewhere LVGL draws it (ui_cursor.c), and the devices are read when
+ * LVGL polls its input, every frame.
  *
  * Keys are translated here, with a US layout: Shift, Caps Lock (letters
  * only) and Num Lock (the keypad's digits, or its arrows, Home, End, Page
@@ -28,6 +37,8 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -35,6 +46,7 @@
 #include <sys/stat.h>
 #include <linux/input.h>
 
+#include "hal_ui.h"
 #include "input_evdev.h"
 #include "log.h"
 #include "ui_cursor.h"
@@ -63,6 +75,7 @@ typedef struct {
     int      min_x, max_x, min_y, max_y;
     int      left;                  /* this device's button (or touch) is down */
     unsigned held;                  /* HELD_*: this keyboard's modifiers */
+    int      dead;                  /* the reader saw it fail: the LVGL side removes it */
 } dev_t_;
 
 typedef struct {
@@ -73,6 +86,11 @@ typedef struct {
     uint32_t key;
     unsigned mods;
 } key_t_;
+
+/* Everything in g that the reader thread touches is under g_lock: the
+ * devices, the position, the queues. Hooks and LVGL calls are made with it
+ * released, on the LVGL thread. */
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static struct {
     dev_t_        dev[DEVS_MAX];
@@ -92,18 +110,52 @@ static struct {
     int           k_down;           /* ... and it still has to see its release */
     int           caps, numlock;
     lv_indev_t   *indev, *keypad;
-    lv_obj_t     *cursor;
+    lv_obj_t     *cursor;           /* LVGL's arrow, without a cursor plane */
     lv_timer_t   *scan;
     input_hooks_t hooks;
+    int           shown;            /* the pointer last shown (1) or hidden (0); -1 not yet */
+    int           kbd_told;         /* the keyboard count hooks.keyboards last had */
+    int           hw;               /* a cursor plane (hal_ui_cursor_*) draws the pointer */
+    int           hw_x, hw_y;       /* where it was put last */
+    pthread_t     reader;           /* with hw: reads the mice as their events come */
+    int           reader_on, stop;
+    int           wake[2], piped;   /* the reader polls again: devices changed, or stop */
 } g;
 
 static int clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
-static void cursor_visible(void)
+/* Locked. */
+static void wake_reader(void)
 {
-    if (!g.cursor) return;
-    if (g.n_ptr) lv_obj_remove_flag(g.cursor, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(g.cursor, LV_OBJ_FLAG_HIDDEN);
+    if (g.reader_on && write(g.wake[1], "", 1) < 0) { /* full: it will poll again anyway */ }
+}
+
+/* Locked: the cursor plane to the position, if it moved (the HAL only
+ * records it: this never waits for the display). */
+static void hw_follow(void)
+{
+    if (!g.hw || (g.x == g.hw_x && g.y == g.hw_y)) return;
+    g.hw_x = g.x;
+    g.hw_y = g.y;
+    hal_ui_cursor_move(g.x, g.y);
+}
+
+/* On the LVGL thread, unlocked: the pointer shown while a pointer device
+ * is there, and the UI told when the number of keyboards changed. */
+static void notify(void)
+{
+    pthread_mutex_lock(&g_lock);
+    int show = g.n_ptr > 0, n_kbd = g.n_kbd;
+    int show_changed = show != g.shown, kbd_changed = n_kbd != g.kbd_told;
+    g.shown = show;
+    g.kbd_told = n_kbd;
+    pthread_mutex_unlock(&g_lock);
+    if (show_changed) {
+        if (g.hw) hal_ui_cursor_show(show);
+        else if (g.cursor && show) lv_obj_remove_flag(g.cursor, LV_OBJ_FLAG_HIDDEN);
+        else if (g.cursor) lv_obj_add_flag(g.cursor, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (kbd_changed && g.hooks.keyboards) g.hooks.keyboards(n_kbd);
 }
 
 /* ---- keys ------------------------------------------------------------------------------- */
@@ -265,25 +317,25 @@ static void buttons_changed(void)
     }
 }
 
-static void counts_changed(int kbd_before)
+/* Locked; notify() passes the counts on. */
+static void counts_changed(void)
 {
     g.n_ptr = g.n_kbd = 0;
     for (int i = 0; i < g.n; ++i) {
         g.n_ptr += g.dev[i].ptr;
         g.n_kbd += g.dev[i].kbd;
     }
-    cursor_visible();
-    if (g.n_kbd != kbd_before && g.hooks.keyboards) g.hooks.keyboards(g.n_kbd);
 }
 
+/* Locked, on the LVGL thread (the reader only marks a device dead). */
 static void dev_remove(int i)
 {
-    int kbd = g.n_kbd;
     vg_log("input: %s gone", g.dev[i].path);
     close(g.dev[i].fd);
     g.dev[i] = g.dev[--g.n];
+    wake_reader();                              /* not to poll the closed fd */
     buttons_changed();                          /* unplugged while pressed: released */
-    counts_changed(kbd);                        /* and its modifiers are gone with it */
+    counts_changed();                           /* and its modifiers are gone with it */
     /* With no keyboard left, nothing typed is still to come: a key typed
      * just before the unplug must not make the UI a keyboard one again. */
     if (!g.n_kbd) g.k_len = 0;
@@ -295,7 +347,7 @@ static int scale(int v, int lo, int hi, int size)
     return clamp((int)((long long)(v - lo) * (size - 1) / (hi - lo)), 0, size - 1);
 }
 
-/* Everything the device has queued. Returns -1 when it is gone. */
+/* Locked: everything the device has queued. Returns -1 when it is gone. */
 static int dev_drain(dev_t_ *d)
 {
     struct input_event ev[32];
@@ -331,10 +383,58 @@ static int dev_drain(dev_t_ *d)
     }
 }
 
+/* Locked, on the LVGL thread. */
 static void poll_devices(void)
 {
     for (int i = 0; i < g.n; ++i)
         if (dev_drain(&g.dev[i]) < 0) dev_remove(i--);
+    hw_follow();
+}
+
+/*
+ * With a cursor plane: the mice, read as their events come. Only pointer
+ * devices that are not keyboards too: a keyboard is read no faster than
+ * its queue empties (dev_drain), which would keep poll() returning here.
+ * A device that fails is left to the LVGL side to remove (dev_remove
+ * calls the UI's hooks), which sees it fail again.
+ */
+static void *reader(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        struct pollfd pf[DEVS_MAX + 1];
+        int n = 0;
+        pthread_mutex_lock(&g_lock);
+        int stop = g.stop;
+        for (int i = 0; i < g.n; ++i)
+            if (g.dev[i].ptr && !g.dev[i].kbd && !g.dev[i].dead)
+                pf[n++] = (struct pollfd){ .fd = g.dev[i].fd, .events = POLLIN };
+        pthread_mutex_unlock(&g_lock);
+        if (stop) break;
+        pf[n] = (struct pollfd){ .fd = g.wake[0], .events = POLLIN };
+        if (poll(pf, (nfds_t)n + 1, -1) < 0) {
+            if (errno == EINTR) continue;
+            vg_log("input: poll: %s", strerror(errno));
+            break;
+        }
+        if (pf[n].revents) {
+            char b[16];
+            while (read(g.wake[0], b, sizeof b) > 0) {}
+        }
+        pthread_mutex_lock(&g_lock);
+        for (int k = 0; k < n; ++k) {
+            if (!pf[k].revents) continue;
+            /* By its fd: the list may have changed while this polled. */
+            for (int i = 0; i < g.n; ++i)
+                if (g.dev[i].fd == pf[k].fd && g.dev[i].ptr && !g.dev[i].kbd && !g.dev[i].dead) {
+                    if (dev_drain(&g.dev[i]) < 0) g.dev[i].dead = 1;
+                    break;
+                }
+        }
+        hw_follow();
+        pthread_mutex_unlock(&g_lock);
+    }
+    return NULL;
 }
 
 static void right_cb(void *arg)
@@ -346,21 +446,31 @@ static void right_cb(void *arg)
 static void wheel_cb(void *arg)
 {
     (void)arg;
+    pthread_mutex_lock(&g_lock);
     int steps = g.wheel;
     g.wheel = g.wheel_queued = 0;
+    pthread_mutex_unlock(&g_lock);
     if (steps && g.hooks.wheel) g.hooks.wheel(steps);
+}
+
+/* The devices read, and what that changed passed on (unplugged: the
+ * pointer hidden, the UI told). */
+static void poll_and_notify(void)
+{
+    pthread_mutex_lock(&g_lock);
+    poll_devices();
+    pthread_mutex_unlock(&g_lock);
+    notify();
 }
 
 static void read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     (void)indev;
-    poll_devices();
-    /* Not from inside LVGL's input processing: back may change screens. */
-    for (; g.right; --g.right) lv_async_call(right_cb, NULL);
-    if (g.wheel && !g.wheel_queued) {
-        g.wheel_queued = 1;                     /* the notches since, in one call */
-        lv_async_call(wheel_cb, NULL);
-    }
+    poll_and_notify();
+    pthread_mutex_lock(&g_lock);
+    int right = g.right, wheel = g.wheel && !g.wheel_queued;
+    g.right = 0;
+    if (wheel) g.wheel_queued = 1;              /* the notches since, in one call */
     if (g.q_len) {
         press_t p = g.queue[g.q_head];
         g.q_head = (g.q_head + 1) % QUEUE_MAX;
@@ -369,32 +479,44 @@ static void read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         data->point.y = p.y;
         data->state = p.pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
         data->continue_reading = g.q_len > 0;
-        return;
+    } else {
+        data->point.x = g.x;
+        data->point.y = g.y;
+        data->state = g.left ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
     }
-    data->point.x = g.x;
-    data->point.y = g.y;
-    data->state = g.left ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    pthread_mutex_unlock(&g_lock);
+    /* Not from inside LVGL's input processing: back may change screens. */
+    for (; right; --right) lv_async_call(right_cb, NULL);
+    if (wheel) lv_async_call(wheel_cb, NULL);
 }
 
 static void key_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     (void)indev;
-    poll_devices();
+    poll_and_notify();
+    pthread_mutex_lock(&g_lock);
     data->key = g.k_last;
     data->state = LV_INDEV_STATE_RELEASED;
     if (g.k_down) {                             /* the release of the last press */
         g.k_down = 0;
         data->continue_reading = g.k_len > 0;
+        pthread_mutex_unlock(&g_lock);
         return;
     }
-    if (!g.k_len) return;
+    if (!g.k_len) {
+        pthread_mutex_unlock(&g_lock);
+        return;
+    }
     key_t_ k = g.keys[g.k_head];
     g.k_head = (g.k_head + 1) % KEYS_MAX;
     --g.k_len;
+    pthread_mutex_unlock(&g_lock);
     uint32_t key = g.hooks.key ? g.hooks.key(k.key, k.mods) : k.key;
     if (!key) return;                           /* taken by the UI: the rest after what it started */
+    pthread_mutex_lock(&g_lock);
     g.k_last = key;
     g.k_down = 1;
+    pthread_mutex_unlock(&g_lock);
     data->key = key;
     data->state = LV_INDEV_STATE_PRESSED;
     data->continue_reading = 1;
@@ -402,11 +524,11 @@ static void key_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 
 /* ---- devices -------------------------------------------------------------------------------- */
 
+/* Locked. */
 static int dev_add(int fd, const char *name, int ptr, int abs, int min_x, int max_x, int min_y, int max_y,
                    int kbd)
 {
     if (g.n == DEVS_MAX) return -1;
-    int kbd_before = g.n_kbd;
     dev_t_ *d = &g.dev[g.n++];
     memset(d, 0, sizeof *d);
     d->fd = fd;
@@ -419,18 +541,27 @@ static int dev_add(int fd, const char *name, int ptr, int abs, int min_x, int ma
     d->min_y = min_y;
     d->max_y = max_y;
     if (kbd) leds_write(fd);
-    counts_changed(kbd_before);
+    counts_changed();
+    wake_reader();
     return 0;
 }
 
 int input_evdev_attach(int fd, const char *name, int abs, int min_x, int max_x, int min_y, int max_y)
 {
-    return dev_add(fd, name, 1, abs, min_x, max_x, min_y, max_y, 0);
+    pthread_mutex_lock(&g_lock);
+    int rc = dev_add(fd, name, 1, abs, min_x, max_x, min_y, max_y, 0);
+    pthread_mutex_unlock(&g_lock);
+    notify();
+    return rc;
 }
 
 int input_evdev_attach_keyboard(int fd, const char *name)
 {
-    return dev_add(fd, name, 0, 0, 0, 0, 0, 0, 1);
+    pthread_mutex_lock(&g_lock);
+    int rc = dev_add(fd, name, 0, 0, 0, 0, 0, 0, 1);
+    pthread_mutex_unlock(&g_lock);
+    notify();
+    return rc;
 }
 
 static int is_open(const char *path, ino_t ino)
@@ -449,8 +580,8 @@ static void ignore(const char *path, ino_t ino)
     g.ignored[g.n_ignored++].ino = ino;
 }
 
-/* Open `path` if it is a pointer device or a keyboard. Read-write when
- * allowed, for a keyboard's Caps Lock and Num Lock lights. */
+/* Locked: open `path` if it is a pointer device or a keyboard. Read-write
+ * when allowed, for a keyboard's Caps Lock and Num Lock lights. */
 static void probe(const char *path, ino_t ino)
 {
     int fd = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
@@ -500,6 +631,7 @@ static void scan_cb(lv_timer_t *t)
     DIR *d = opendir(INPUT_DIR);
     if (!d) return;
     struct dirent *e;
+    pthread_mutex_lock(&g_lock);
     while ((e = readdir(d))) {
         if (strncmp(e->d_name, "event", 5)) continue;
         char path[64];
@@ -508,7 +640,9 @@ static void scan_cb(lv_timer_t *t)
         if (stat(path, &st) < 0 || !S_ISCHR(st.st_mode) || is_open(path, st.st_ino)) continue;
         probe(path, st.st_ino);
     }
+    pthread_mutex_unlock(&g_lock);
     closedir(d);
+    notify();
 }
 
 lv_indev_t *input_evdev_create(lv_display_t *disp, const input_hooks_t *hooks, int scan)
@@ -520,6 +654,7 @@ lv_indev_t *input_evdev_create(lv_display_t *disp, const input_hooks_t *hooks, i
     g.x = g.w / 2;
     g.y = g.h / 2;
     g.numlock = 1;
+    g.shown = -1;
     g.indev = lv_indev_create();
     lv_indev_set_type(g.indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_display(g.indev, disp);
@@ -528,9 +663,28 @@ lv_indev_t *input_evdev_create(lv_display_t *disp, const input_hooks_t *hooks, i
     lv_indev_set_type(g.keypad, LV_INDEV_TYPE_KEYPAD);
     lv_indev_set_display(g.keypad, disp);
     lv_indev_set_read_cb(g.keypad, key_read_cb);
-    g.cursor = ui_cursor_create();
-    lv_indev_set_cursor(g.indev, g.cursor);
-    cursor_visible();
+    uint32_t arrow[UI_CURSOR_WIDTH * UI_CURSOR_HEIGHT];
+    ui_cursor_argb(arrow);
+    if (hal_ui_cursor_create(arrow, UI_CURSOR_WIDTH, UI_CURSOR_HEIGHT) == 0) {
+        g.hw = 1;
+        g.hw_x = g.hw_y = -1;
+        hw_follow();
+        if (pipe(g.wake) == 0) {
+            g.piped = 1;
+            for (int i = 0; i < 2; ++i) {
+                fcntl(g.wake[i], F_SETFL, O_NONBLOCK);
+                fcntl(g.wake[i], F_SETFD, FD_CLOEXEC);
+            }
+            g.reader_on = pthread_create(&g.reader, NULL, reader, NULL) == 0;
+        }
+        /* Without the thread the mice are still read every LVGL frame. */
+        if (!g.reader_on) vg_log("input: no reader thread: the pointer moves at the UI's frame rate");
+        vg_log("input: the pointer is on the display's cursor plane");
+    } else {
+        g.cursor = ui_cursor_create();
+        lv_indev_set_cursor(g.indev, g.cursor);
+    }
+    notify();
     if (scan) {
         scan_cb(NULL);
         g.scan = lv_timer_create(scan_cb, RESCAN_MS, NULL);
@@ -542,8 +696,21 @@ lv_indev_t *input_evdev_keypad(void) { return g.keypad; }
 
 void input_evdev_delete(void)
 {
+    if (g.reader_on) {
+        pthread_mutex_lock(&g_lock);
+        g.stop = 1;
+        wake_reader();
+        pthread_mutex_unlock(&g_lock);
+        pthread_join(g.reader, NULL);
+    }
+    if (g.piped) {
+        close(g.wake[0]);
+        close(g.wake[1]);
+    }
+    if (g.hw) hal_ui_cursor_delete();
     if (g.scan) lv_timer_delete(g.scan);
     if (g.indev) lv_indev_delete(g.indev);
+    if (g.cursor) lv_obj_delete(g.cursor);
     if (g.keypad) lv_indev_delete(g.keypad);
     for (int i = 0; i < g.n; ++i) close(g.dev[i].fd);
     memset(&g, 0, sizeof g);

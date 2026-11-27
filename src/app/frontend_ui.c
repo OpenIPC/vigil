@@ -43,8 +43,10 @@ int frontend_run(int run_secs, volatile sig_atomic_t *stop, void (*tick)(void))
     time_t t0 = time(NULL);
     while (!*stop) {
         tick();
+        /* Asleep until LVGL's next timer is due (its next frame at the
+         * latest), not longer: a frame late is a pointer late. */
         uint32_t ms = lv_timer_handler();
-        usleep((ms > 30 ? 30 : ms) * 1000u);
+        usleep((ms > LV_DEF_REFR_PERIOD ? LV_DEF_REFR_PERIOD : ms) * 1000u);
         if (run_secs > 0 && time(NULL) - t0 >= run_secs) break;
     }
     input_evdev_delete();

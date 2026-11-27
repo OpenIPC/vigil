@@ -25,6 +25,21 @@ fbdev.ko sets its size and format from `fbdev.ini` (1280x720, ARGB8888 on
 OpenIPC); vigild checks them and paints tiles magenta, which the GOP's
 colour key makes see-through.
 
+The mouse pointer is fbdev.ko's hardware cursor (`FBIOSET_CURSOR_ATTRIBUTE`),
+a window on GOP 0 above the UI's GOP 1, set up by `fbdev.ini`'s
+`[FB_CURSOR]` section (memory `E_MMAP_ID_HW_CURSOR`). A move is one ioctl
+and no redraw, so the pointer follows the mouse once a frame, at the
+output's 60 or 50 Hz, however busy the UI is ([ui.md](../ui.md), Input).
+What vigild does with it follows from fbdev.ko and the region code under
+it (opensigmastar `kernel/rgn`): GOP 0 cannot scale, so fbdev.ko places it
+1:1 in output pixels, and vigild scales the position and the arrow from
+the UI's 1280x720 to the output; GOP 0 has no ARGB8888, so the arrow goes
+as ARGB1555 (alpha 0 and 255), `[FB_CURSOR]`'s own `FB_HWWIN_FORMAT` being
+unused; and each call waits for the next vsync, so a thread of vigild's own
+makes the calls with the newest position. Without `[FB_CURSOR]` in the
+file fbdev.ko loaded (`default_config_path_file`) LVGL draws the pointer
+instead: the cursor ioctl would dereference a NULL pointer in fbdev.ko.
+
 Layouts and full screen ([ui.md](../ui.md)) move a channel's input port
 window (`hal_display_set_tile`). A smaller tile shrinks the decoder's
 output at once; a larger one is enlarged by the display until the next
@@ -201,6 +216,16 @@ blended with the key in every clock and name style. The emulator scales
 nearest-neighbour; what the GOP's own stretch filter does at the edge of a
 keyed pixel (whether it blends the key colour into the text's edge at
 1080p) and how monitors take each timing are unverified.
+
+The hardware cursor, also only in emulation, on a GOP 0 model added for it
+(qemu-bench, `mstar-disp`'s fourth region, banks 0x1231/0x1232: the window,
+its ARGB1555 alphas, blended above GOP 1): the arrow at the UI's position at
+720p and at 1080p (1.5 times larger, at 1.5 times the coordinates), hidden
+with no mouse, and the pointer moved in 55 to 60 of every 60 frames while
+the emulated mouse reported about 100 times a second. That GOP 0 is mixed
+above GOP 1, how the real GOP 0 blends the ARGB1555 arrow, and the rate
+fbdev.ko's vsync wait gives on a board (the emulator raises its vsync
+interrupt several times a frame) are unverified.
 
 Sixteen channels, also only in emulation (OpenIPC firmware image, 16 fake
 cameras: ten NETIP with a CIF sub-stream on `stream=extra`, six RTSP with a
