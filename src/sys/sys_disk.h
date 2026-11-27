@@ -57,8 +57,9 @@ typedef struct {
  * "") marks the one recorded onto. Returns how many were filled. */
 int sys_disk_list(sys_disk_t *out, int max, const char *rec_path);
 
-/* The filesystems this system can make, best first: exfat (mkfs.exfat),
- * vfat (mkfs.vfat), ext4 (mkfs.ext4); only those whose tool is there.
+/* The filesystems this system can make, best (the default) first: ext4
+ * (mkfs.ext4), exfat (mkfs.exfat), vfat (mkfs.vfat); only those whose
+ * tool is there.
  * Returns how many. */
 int sys_disk_formats(char out[][8], int max);
 

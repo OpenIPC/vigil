@@ -194,7 +194,8 @@ static void test_refusals(void)
           "ext4 without mkfs.ext4: %s", msg);
     fake_have("mkfs.ext4", 1);
     nk = sys_disk_formats(kinds, 4);
-    CHECK(nk == 3 && !strcmp(kinds[2], "ext4"), "ext4 when mkfs.ext4 is there");
+    CHECK(nk == 3 && !strcmp(kinds[0], "ext4") && !strcmp(kinds[1], "exfat"),
+          "ext4 first (the default) when mkfs.ext4 is there");
     fake_done();
 }
 

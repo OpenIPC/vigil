@@ -302,8 +302,13 @@ static int find(const char *name, sys_disk_t *all, int n, sys_disk_t **dev, sys_
 
 /* ---- what can be made ---------------------------------------------------------------- */
 
+/* The first one there is the default. ext4 where the firmware can make
+ * it: a journal, so a power cut while recording costs the open segment,
+ * not the filesystem. e2fsprogs 1.47 turns on orphan_file and
+ * metadata_csum_seed, which the 4.9 kernel mounted in QEMU. exFAT
+ * otherwise (files over 4 GiB, read by any computer), FAT32 last. */
 static const struct { const char *fs, *tool; } MKFS[] = {
-    { "exfat", "mkfs.exfat" }, { "vfat", "mkfs.vfat" }, { "ext4", "mkfs.ext4" },
+    { "ext4", "mkfs.ext4" }, { "exfat", "mkfs.exfat" }, { "vfat", "mkfs.vfat" },
 };
 
 int sys_disk_formats(char out[][8], int max)
