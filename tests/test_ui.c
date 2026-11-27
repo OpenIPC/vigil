@@ -98,6 +98,10 @@ static lv_obj_t *nth_of(const lv_obj_class_t *cls, int nth);
 static ui_rect_t  g_tiles[UI_MAX_CHANNELS];
 static int        g_tile_calls;
 
+/* Channel 4 as an XM camera whose main stream is refused while a small
+ * tile shows its sub-stream (Channel info only). */
+static int g_xm_chan4;
+
 static void fake_status(int idx, ui_chan_t *st)
 {
     switch (idx) {
@@ -105,14 +109,25 @@ static void fake_status(int idx, ui_chan_t *st)
         *st = (ui_chan_t){ .configured = 1, .status = UI_CH_LIVE, .live = 1, .recording = 1,
                            .events = UI_EV_MOTION | UI_EV_HUMAN, .rec_bytes = 734u << 20, .name = "Gate",
                            .codec = "H.265", .width = 1920, .height = 1080, .fps = 25, .view = "main",
-                           .rec_state = "recording" };
+                           .rec_state = "recording", .main_status = UI_CH_LIVE };
         break;
     case 1:
-        *st = (ui_chan_t){ .configured = 1, .status = UI_CH_CONNECTING, .name = "Yard", .state = "CONNECTING" };
+        *st = (ui_chan_t){ .configured = 1, .status = UI_CH_CONNECTING, .name = "Yard", .state = "CONNECTING",
+                           .main_status = UI_CH_CONNECTING, .main_state = "CONNECTING" };
         break;
     case 2:
-        *st = (ui_chan_t){ .configured = 1, .status = UI_CH_ERROR, .state = "DESCRIBE: 404" };
+        *st = (ui_chan_t){ .configured = 1, .status = UI_CH_ERROR, .state = "DESCRIBE: 404",
+                           .main_status = UI_CH_ERROR, .main_state = "DESCRIBE: 404" };
         break;
+    case 3:
+        if (g_xm_chan4 && g_channels <= 4) {
+            *st = (ui_chan_t){ .configured = 1, .status = UI_CH_LIVE, .live = 1, .name = "Front door",
+                               .title = "Front door", .codec = "H.264", .width = 640, .height = 360, .fps = 15,
+                               .view = "sub", .rec_state = "ready", .main_status = UI_CH_ERROR,
+                               .main_state = "monitor refused (Ret 103)", .sub_status = UI_CH_LIVE };
+            break;
+        }
+        /* fall through */
     default:
         /* Past the first four (the runs with more channels): live, some
          * recording. */
@@ -3078,10 +3093,15 @@ static void test_empty_slot(void)
     run(300);
     click_text("Main menu");
     click_text("OPERATION");
+    g_xm_chan4 = 1;
     click_text("Channel info");
+    run(1100);
     CHECK(find("Channel info", 0) && find("1920x1080", 0) && find("motion, human", 0) &&
           find("Connecting", 0), "Channel info: state, size, events");
+    CHECK(find("Front door", 0) && find("monitor refused (Ret 103)", 0) && find("640x360", 0),
+          "Channel info: the sub-stream live, the main stream's failure in its own column");
     shot("channel_info");
+    g_xm_chan4 = 0;
     button(BTN_RIGHT);
     button(BTN_RIGHT);
     button(BTN_RIGHT);

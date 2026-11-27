@@ -1500,7 +1500,10 @@ static void test_channel_tiles(void)
 /* A NETIP camera on loopback: logs anyone in and streams a clip, one
  * access unit per message, at about 100 fps: the main stream (stream
  * "Main") one clip, the sub-stream ("Extra") another. It counts the
- * streams being sent and remembers the last channel asked for. */
+ * streams being sent and remembers the last channel asked for. It names
+ * its channel `title` (ChannelTitle); `refuse[]` makes it refuse to claim
+ * the main [0] or the sub-stream [1]; `wide` sends the main stream's
+ * I-frame headers as an XM 4 MP camera does (2560x1440: codec byte 0x13). */
 typedef struct {
     const uint8_t *data;
     size_t         len;
@@ -1513,6 +1516,9 @@ static struct {
     cam_clip_t     main, extra;
     atomic_int     streaming[2];       /* [0] main, [1] extra */
     atomic_int     last_channel;
+    const char    *title;
+    int            refuse[2];
+    int            wide;
 } g_cam;
 
 static void put_le32(uint8_t *p, size_t v)
@@ -1544,6 +1550,7 @@ static void *cam_client(void *arg)
 {
     int fd = (int)(intptr_t)arg, extra = 0;
     static const char ok[] = "{\"Ret\":100,\"SessionID\":\"0x00000001\",\"AliveInterval\":20}\n";
+    static const char no[] = "{\"Ret\":103,\"SessionID\":\"0x00000001\"}\n";
     uint8_t h[20], body[2049];
     for (;;) {                                      /* login, claim, start */
         if (cam_recv(fd, h, 20) < 0) goto out;
@@ -1555,6 +1562,16 @@ static void *cam_client(void *arg)
             extra = strstr((char *)body, "\"StreamType\":\"Extra\"") != NULL;
             const char *chn = strstr((char *)body, "\"Channel\":");
             if (chn) atomic_store(&g_cam.last_channel, atoi(chn + 10));
+        }
+        if (msgid == 1048) {
+            char t[160];
+            int n = snprintf(t, sizeof t, "{\"Name\":\"ChannelTitle\",\"ChannelTitle\":[\"%s\"],\"Ret\":100}\n",
+                             g_cam.title ? g_cam.title : "");
+            cam_send(fd, 1049, t, (size_t)n + 1);
+        }
+        if (msgid == 1413 && g_cam.refuse[extra]) {
+            cam_send(fd, 1414, no, sizeof no);
+            goto out;
         }
         if (msgid == 1000 || msgid == 1413) cam_send(fd, msgid + 1, ok, sizeof ok);
         if (msgid == 1410) break;
@@ -1578,6 +1595,11 @@ static void *cam_client(void *arg)
             key |= clip->h265 ? t >= 16 && t <= 21 : t == 5;
             if (!vcl) continue;
             uint8_t ihead[12] = { 0, 0, 1, 0xFC, clip->h265 ? 3 : 2, 100, 80, 45 };
+            if (g_cam.wide && !extra) {                 /* 2560/8 = 0x140, 1440/8 = 180 */
+                ihead[4] |= 0x10;
+                ihead[6] = 0x40;
+                ihead[7] = 180;
+            }
             static const uint8_t phead[4] = { 0, 0, 1, 0xFD };
             size_t hl = key ? 16 : 8;
             uint8_t *m = msg + 16 - hl;
@@ -1827,6 +1849,131 @@ static void test_channel_substream(void)
     g_fake_caps.dec_shown_only = 0;
     g_dec_slots = 0;
     if (system(cmd)) {}
+}
+
+/* ---- NETIP: the camera's quirks, the stream on screen -------------------------------- */
+
+static void test_netip_title_parse(void)
+{
+    char out[32];
+    static const struct { const char *reply; int ch, rc; const char *want; } cases[] = {
+        { "{\"Name\":\"ChannelTitle\",\"ChannelTitle\":[\"CAM01\"],\"Ret\":100,\"SessionID\":\"0x1\"}\n", 0, 0,
+          "CAM01" },
+        { "{\"ChannelTitle\":[\"Gate\",\"Yard\"],\"Ret\":100}", 1, 0, "Yard" },
+        { "{\"ChannelTitle\":[\"Gate\"],\"Ret\":100}", 1, -1, "" },            /* no such channel */
+        { "{\"ChannelTitle\":[{\"Name\":\"Porch\",\"SetOSD\":true}],\"Ret\":100}", 0, 0, "Porch" },
+        { "{\"ChannelTitle\":\"Shed\",\"Ret\":100}", 0, 0, "Shed" },          /* one, not a list */
+        { "{\"ChannelTitle\":[\"  Back door  \"]}", 0, 0, "Back door" },
+        { "{\"ChannelTitle\":[\"\u0421\u0430\u0434\"],\"Ret\":100}", 0, 0, "\xd0\xa1\xd0\xb0\xd0\xb4" },
+        { "{\"ChannelTitle\":[\"a\\tb\"],\"Ret\":100}", 0, 0, "ab" },        /* control characters go */
+        { "{\"ChannelTitle\":[\"\xc4\xe3\xba\xc3\"],\"Ret\":100}", 0, 0, "????" },   /* GB2312, not UTF-8 */
+        { "{\"Name\":\"ChannelTitle\",\"Ret\":103}", 0, -1, "" },
+        { "{\"ChannelTitle\":[\"CAM01\"],\"Ret\":107}", 0, -1, "" },
+        { "not json", 0, -1, "" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
+        int rc = netip_title_parse(cases[i].reply, cases[i].ch, out, sizeof out);
+        CHECK(rc == cases[i].rc && !strcmp(out, cases[i].want), "title %zu: %d '%s'", i, rc, out);
+    }
+    CHECK(netip_title_parse("{\"ChannelTitle\":[\"0123456789\xd0\xa1\"]}", 0, out, 12) == 0 &&
+              !strcmp(out, "0123456789"), "cut on a character: '%s'", out);
+}
+
+static int status_is(int ch, ch_state_t want, int *live)
+{
+    channel_status_t st;
+    channels_status(ch, &st);
+    if (live) *live = st.live;
+    return st.status == want;
+}
+
+/* The field report: a tile showing a camera's sub-stream said "No video"
+ * while its main stream failed. The tile follows the stream on screen;
+ * the main stream's state is said on its own. */
+static void test_channel_stream_states(void)
+{
+    int port = cam_start("majestic_1080p.h265", "testsrc_640x360.h264");
+    if (!port) return;
+    char url[64], name[40];
+    snprintf(url, sizeof url, "netip://127.0.0.1:%d/?ch=0&stream=main", port);
+    g_cam.title = "Front door";
+    g_cam.refuse[0] = 1;
+    g_fake_caps.dec_shown_only = 1;
+    g_dec_slots = 2;
+    channels_set_screen(1280, 720);
+    vg_rect_t quad[CHANNEL_MAX] = { { 0, 40, 640, 300 } };
+    vg_rect_t full[CHANNEL_MAX] = { { 0, 40, 1280, 600 } };
+    channels_config_t cc = { .urls = { url }, .n = 1, .seg_secs = 60 };
+    CHECK(channels_start(&cc, quad) == 0, "start");
+
+    /* 2x2, the main stream refused: the sub-stream plays, the tile is live. */
+    WAIT_FOR(view_is(0, "sub", 640), 5000);
+    channel_status_t st;
+    WAIT_FOR((channels_status(0, &st), st.main_status == CH_ERROR), 3000);
+    channels_status(0, &st);
+    CHECK(view_is(0, "sub", 640) && st.status == CH_LIVE && st.live,
+          "sub-stream on screen, main refused: live (%s '%s')", ch_state_name(st.status), st.state);
+    CHECK(st.main_status == CH_ERROR && strstr(st.main_state, "monitor refused (Ret 103)") &&
+              st.sub_status == CH_LIVE, "the main stream's failure is its own (%s '%s', sub %s)",
+          ch_state_name(st.main_status), st.main_state, ch_state_name(st.sub_status));
+    /* No name configured: the camera's. */
+    CHECK(!strcmp(st.title, "Front door") && !strcmp(st.name, "Front door"), "the camera's name: '%s' '%s'",
+          st.title, st.name);
+
+    /* Full screen: the sub-stream's picture stays until it goes (its
+     * linger), then the tile says what the main stream does. */
+    channels_set_tiles(full);
+    usleep(500 * 1000);
+    CHECK(status_is(0, CH_LIVE, NULL), "full screen, the sub-stream still up: live");
+    WAIT_FOR(status_is(0, CH_ERROR, NULL), 9000);
+    channels_status(0, &st);
+    CHECK(st.status == CH_ERROR && !st.decoding && strstr(st.state, "monitor refused") && st.sub_status == CH_EMPTY,
+          "full screen: the main stream's error (%s '%s')", ch_state_name(st.status), st.state);
+
+    /* A configured name wins over the camera's. */
+    cc.names[0] = "Gate";
+    CHECK(channels_apply(&cc) == 0, "rename");
+    channels_status(0, &st);
+    CHECK(!strcmp(st.name, "Gate") && !strcmp(st.title, "Front door"), "configured name: '%s' (title '%s')",
+          st.name, st.title);
+    channels_stop();
+
+    /* The other way round: the sub-stream refused. Full screen shows the
+     * main stream; in 2x2 it keeps its picture up (no sub-stream keyframe
+     * comes to take over), so the tile is live, and the sub-stream's
+     * failure is its own. */
+    g_cam.refuse[0] = 0;
+    g_cam.refuse[1] = 1;
+    cc.names[0] = NULL;
+    CHECK(channels_start(&cc, full) == 0, "start full screen");
+    WAIT_FOR(view_is(0, "main", 1920), 5000);
+    CHECK(view_is(0, "main", 1920) && status_is(0, CH_LIVE, NULL), "full screen: main, live");
+    channels_set_tiles(quad);
+    WAIT_FOR((channels_status(0, &st), st.sub_status == CH_ERROR), 5000);
+    channels_status(0, &st);
+    CHECK(st.status == CH_LIVE && st.decoding && st.sub_status == CH_ERROR && st.main_status == CH_LIVE,
+          "2x2, sub refused: the main picture stays, live (%s, sub %s '%s')", ch_state_name(st.status),
+          ch_state_name(st.sub_status), st.sub_state);
+    channels_stop();
+
+    /* An XM 4 MP camera: the codec byte carries the size's high bits. */
+    g_cam.refuse[1] = 0;
+    g_cam.wide = 1;
+    CHECK(channels_start(&cc, full) == 0, "start a wide camera");
+    WAIT_FOR(view_is(0, "main", 1920), 5000);
+    CHECK(view_is(0, "main", 1920) && status_is(0, CH_LIVE, NULL), "codec byte 0x13: H.265, decoded");
+    channels_stop();
+
+    /* Asked when a camera is added: the name it gives its channel. */
+    snprintf(url, sizeof url, "netip://127.0.0.1:%d/?ch=0", port);
+    CHECK(source_title(url, name, sizeof name, NULL) == 0 && !strcmp(name, "Front door"), "source_title: '%s'",
+          name);
+    CHECK(source_title("rtsp://127.0.0.1:1/x", name, sizeof name, NULL) < 0 && !name[0], "RTSP: no title");
+
+    cam_stop();
+    channels_set_screen(0, 0);
+    g_fake_caps.dec_shown_only = 0;
+    g_dec_slots = 0;
 }
 
 /* ---- empty camera slots, channel states, events ------------------------------------ */
@@ -2326,6 +2473,8 @@ int main(int argc, char **argv)
     test_channel_decode();
     test_sub_url();
     test_channel_substream();
+    test_netip_title_parse();
+    test_channel_stream_states();
     test_camera_slots();
     test_fail_kinds();
     test_channel_events();

@@ -84,9 +84,17 @@ unsigned channel_events_held(const time_t last[CH_EV_TYPES], time_t now);
 
 typedef struct {
     int        configured;          /* a source is set for this tile */
-    ch_state_t status;              /* what it is doing (state has the text) */
+    /* What the stream on screen (`view`; the main one when none is) is
+     * doing, `state` has the text: a tile showing the sub-stream is live
+     * whatever the main stream does, and the other way round. */
+    ch_state_t status;
     unsigned   events;              /* CH_EV_* the camera reports now */
-    int        live;                /* video arrived within the last 3 s */
+    int        live;                /* video of that stream arrived within the last 3 s */
+    /* Each stream on its own: the main one (recorded; the picture in a
+     * large tile) and the sub-stream (small tiles; CH_EMPTY and "" while
+     * none runs). */
+    ch_state_t main_status, sub_status;
+    char       main_state[48], sub_state[48];
     int        decoding;            /* a decoder is running */
     int        no_decoder;          /* the tile wants a picture but the platform has no
                                        decoder for it now (memory, decoder channels);
@@ -107,7 +115,9 @@ typedef struct {
     vg_codec_t codec;
     unsigned   width, height, fps;  /* fps averaged over 2 s */
     char       host[64];
-    char       name[32];
+    char       name[32];            /* the configured name, else `title` */
+    char       title[32];           /* what the camera calls the channel (NETIP
+                                       ChannelTitle); "" when it does not say */
     char       state[48];           /* "CONNECTING", the last error, ... */
 } channel_status_t;
 

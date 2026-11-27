@@ -48,6 +48,10 @@ typedef struct {
     /* Optional: the camera's sub-stream for a main-stream URL. Returns 0
      * with `out` set, or -1 (none, or the URL is the sub-stream already). */
     int  (*sub_url)(const char *url, char *out, size_t cap);
+    /* Optional: connect, ask the camera what it calls this channel, hang
+     * up (s->title set, "" when it does not say). Returns 0, or -1 with
+     * s->err set. */
+    int  (*title)(source_t *s);
 } source_ops_t;
 
 #define SOURCE_PS_MAX  3
@@ -63,6 +67,10 @@ struct source {
     const uint8_t *ps[SOURCE_PS_MAX];
     size_t      ps_len[SOURCE_PS_MAX];
     int         ps_n;
+    /* The camera's own name for the channel, where the protocol has one
+     * (NETIP ChannelTitle): set by open (or title) when the camera says;
+     * "" until then. */
+    char        title[32];
     int         index;              /* channel index (capture sources use it) */
     /* Set by the channel: drivers abandon connects and waits when *stop is
      * set, so a stop never waits for a slow camera. */
@@ -78,6 +86,15 @@ void      source_destroy(source_t *s);
  * protocol has a fixed way to name it (NETIP: stream=extra); RTSP paths
  * are the vendor's own, so none there. 0 with `out` set, or -1. */
 int source_sub_url(const char *url, char *out, size_t cap);
+
+/* The camera's own name for the channel of `url` (ops->title): 0 with
+ * `out` set (maybe ""), or -1 (the protocol has none, or the camera could
+ * not be asked). `stop` (may be NULL) abandons the attempt. */
+int source_title(const char *url, char *out, size_t cap, const volatile int *stop);
+
+/* NETIP: channel `ch`'s name from a ChannelTitle reply (a list of names,
+ * or of objects with a "Name"). 0 with `out` set, or -1. */
+int netip_title_parse(const char *reply, int ch, char *out, size_t cap);
 
 /* "rtsp, netip, capture" — for usage text. */
 const char *source_schemes(void);

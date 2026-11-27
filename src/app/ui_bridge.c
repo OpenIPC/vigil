@@ -63,6 +63,11 @@ static void chan_status(int idx, ui_chan_t *st)
     st->live = cs.live;
     st->recording = cs.recording;
     st->status = (ui_ch_status_t)cs.status;         /* the same order (ui_model.h) */
+    st->main_status = (ui_ch_status_t)cs.main_status;
+    st->sub_status = (ui_ch_status_t)cs.sub_status;
+    snprintf(st->main_state, sizeof st->main_state, "%s", cs.main_state);
+    snprintf(st->sub_state, sizeof st->sub_state, "%s", cs.sub_state);
+    snprintf(st->title, sizeof st->title, "%s", cs.title);
     st->events = cs.events;                         /* the same bits */
     snprintf(st->view, sizeof st->view, "%s", cs.view);
     snprintf(st->rec_state, sizeof st->rec_state, "%s", cs.rec_state);

@@ -8,7 +8,7 @@ formats):
 
   NETIP  UDP search 1530 -> 1531 NetWork.NetCommon; UDP set 1532 -> 1533
          (MAC, user and sofia hash checked); TCP login 1000, ConfigGet
-         1042 / ConfigSet 1040 of NetWork.NetCommon
+         1042 / ConfigSet 1040 of NetWork.NetCommon, ChannelTitle 1048
   ONVIF  WS-Discovery Probe -> ProbeMatches; HTTP SOAP with a checked
          WS-Security UsernameToken: GetSystemDateAndTime, GetCapabilities,
          GetProfiles, GetStreamUri, GetNetworkInterfaces,
@@ -279,6 +279,10 @@ class NetipTcp(socketserver.BaseRequestHandler):
             elif msgid == 1042 and authed:
                 self.request.sendall(netip_msg(1043, {"Name": "NetWork.NetCommon", "Ret": 100,
                                                       "NetWork.NetCommon": dev.netcommon()}, session))
+            elif msgid == 1048 and authed:
+                # The name the camera gives its channel, not its host name.
+                self.request.sendall(netip_msg(1049, {"Name": "ChannelTitle", "Ret": 100,
+                                                      "ChannelTitle": ["Porch%d" % dev.index]}, session))
             elif msgid == 1040 and authed:
                 nc = js.get("NetWork.NetCommon", {})
                 log("netip tcp set -> %s" % hexip(nc["HostIP"]))

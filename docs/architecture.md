@@ -122,7 +122,12 @@ pictures after it would refer to a picture the decoder never got.
 A camera can have a second session: its **sub-stream** (`sub_url`, or for
 NETIP the same URL with `stream=extra`), a second thread with its own
 source and normalizer. The main session above always runs: the camera's
-status and events follow it, and it records. The tile decides which one is
+events follow it, and it records. Each session keeps its own state; the
+channel's status is the state of the one whose picture is on screen (the
+decoder's holder, else the one the tile waits for), and the status carries
+the main and the sub-stream's states besides, so a main stream that fails
+while a small tile shows the sub-stream is said there, not as "No video"
+on the tile. The tile decides which one is
 decoded (`channels_set_tiles`): a tile of a quarter of the screen or less
 shows the sub-stream, a larger one or full screen the main stream; a
 channel off screen, where the platform's decoders are scarce
@@ -169,7 +174,8 @@ video and tries again every 10 s.
 ### Status and events
 
 Channel threads never touch the UI. They publish a status snapshot
-(`channels_status()`: live, fps, codec, size, recording, last error) and
+(`channels_status()`: live, fps, codec, size, recording, last error, each
+stream's state, the camera's own name for the channel) and
 short events ("CAM2 offline") through a thread-safe ring (`events.c`).
 The ring has many readers, each with its own cursor: the UI thread (tile
 flashes, toasts) and the API's WebSocket feed both see every event, and a reader that

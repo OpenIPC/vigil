@@ -56,6 +56,21 @@ int source_sub_url(const char *url, char *out, size_t cap)
     return -1;
 }
 
+int source_title(const char *url, char *out, size_t cap, const volatile int *stop)
+{
+    if (cap) out[0] = 0;
+    source_t *s = source_create(url, 0);
+    if (!s) return -1;
+    int rc = -1;
+    if (s->ops->title) {
+        s->stop = stop;
+        rc = s->ops->title(s);
+        if (rc == 0) snprintf(out, cap, "%s", s->title);
+    }
+    source_destroy(s);
+    return rc;
+}
+
 void source_destroy(source_t *s)
 {
     if (!s) return;

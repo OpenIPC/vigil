@@ -4,15 +4,17 @@
  * A channel has up to two sessions with its camera, each a thread with its
  * own source and au_norm:
  *
- *   main   the camera's `url`, always: the connection the status and events
- *          follow, the recording, and the picture when the tile is large
+ *   main   the camera's `url`, always: the connection the events follow,
+ *          the recording, and the picture when the tile is large
  *   sub    the sub-stream (`sub_url`, or derived from a NETIP main URL),
  *          only while the tile is small (multi-window): its picture there
  *
  * The channel's one decoder (hal_decoder.h) belongs to one session at a
  * time; the one the tile wants (`view`) takes it over at its first
  * keyframe, and the other keeps the picture up until then. A view change
- * never touches the main session, so recording goes on unbroken.
+ * never touches the main session, so recording goes on unbroken. Each
+ * session keeps its own state; the channel's status is that of the one
+ * whose picture is on screen.
  */
 #define _DEFAULT_SOURCE
 #include <errno.h>
@@ -66,8 +68,12 @@ typedef struct {
     int             dec_ok;         /* feeding the decoder since the last keyframe */
     int             was_viewed;
     unsigned        frames;
+    unsigned        frames_total;   /* video AUs on this connection, for the log */
+    int             title_taken;    /* the source's title went to the channel */
     time_t          last_video;     /* last access unit from the source */
     /* Status, under c->lock. */
+    ch_state_t      status;
+    char            state[48];
     int             live;
     unsigned        fps, width, height;
     vg_codec_t      codec;
@@ -83,6 +89,7 @@ struct channel {
     uint64_t        quota_bytes;
     time_t          quota_age;
     int             self_displayed; /* the platform shows its source (local capture) */
+    char            title[32];      /* the camera's name for the channel (under lock) */
 
     sess_t          s[S_N];
     seg_writer_t    seg;            /* the main session's */
@@ -187,17 +194,24 @@ static ch_state_t fail_state(src_fail_t f)
     }
 }
 
-/* The main session's state: what the status says about the camera. */
-static void set_state(channel_t *c, int live, ch_state_t status, const char *fmt, ...)
+/* A session's state. */
+static void set_state(sess_t *s, int live, ch_state_t status, const char *fmt, ...)
 {
-    pthread_mutex_lock(c->lock);
-    c->s[S_MAIN].live = live;
-    c->st.status = status;
+    pthread_mutex_lock(s->c->lock);
+    s->live = live;
+    s->status = status;
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(c->st.state, sizeof c->st.state, fmt, ap);
+    vsnprintf(s->state, sizeof s->state, fmt, ap);
     va_end(ap);
-    pthread_mutex_unlock(c->lock);
+    pthread_mutex_unlock(s->c->lock);
+}
+
+/* A session's state as the status says it: connected without video for
+ * LIVE_SECS is "no video". */
+static ch_state_t sess_status(const sess_t *s)
+{
+    return s->status == CH_LIVE && !s->live ? CH_NO_VIDEO : s->status;
 }
 
 static const char *view_name(int v) { return v == S_SUB ? "sub" : v == S_MAIN ? "main" : ""; }
@@ -217,14 +231,23 @@ void channels_status(int idx, channel_status_t *st)
     } else {
         *st = c->st;
         /* The stream on screen: the decoder's, else the one the tile waits
-         * for once it is up, else the main one. */
+         * for, else the main one. The main stream failing while a small
+         * tile shows the sub-stream is not "no video" there: that is the
+         * main state's to say (and the recording's). */
         int holder = atomic_load(&c->dec_holder), view = atomic_load(&c->view);
-        int shown = holder != VIEW_NONE ? holder
-                  : view == S_SUB && c->s[S_SUB].thread_up && c->s[S_SUB].live ? S_SUB : S_MAIN;
+        const sess_t *sub = &c->s[S_SUB];
+        int sub_up = sub->thread_up && !sub->done;
+        int shown = holder != VIEW_NONE ? holder : view == S_SUB && sub_up ? S_SUB : S_MAIN;
         const sess_t *v = &c->s[shown];
-        st->live = c->s[S_MAIN].live;
-        /* Connected, but no video for LIVE_SECS. */
-        if (st->status == CH_LIVE && !st->live) st->status = CH_NO_VIDEO;
+        st->status = sess_status(v);
+        st->live = v->live;
+        snprintf(st->state, sizeof st->state, "%s", v->state);
+        st->main_status = sess_status(&c->s[S_MAIN]);
+        snprintf(st->main_state, sizeof st->main_state, "%s", c->s[S_MAIN].state);
+        st->sub_status = sub_up ? sess_status(sub) : CH_EMPTY;
+        snprintf(st->sub_state, sizeof st->sub_state, "%s", sub_up ? sub->state : "");
+        snprintf(st->title, sizeof st->title, "%s", c->title);
+        if (!st->name[0]) snprintf(st->name, sizeof st->name, "%s", c->title);
         st->events = channel_events_held(g_ev_last[idx], time(NULL));
         st->decoding = holder != VIEW_NONE;
         st->no_decoder = !st->decoding && view != VIEW_NONE && atomic_load(&c->dec_told);
@@ -569,6 +592,7 @@ static void on_raw_au(void *user, const vg_au_t *au)
     /* Only video counts as "the camera is alive": RTCP, audio or info
      * packets must not hold off the no-data reconnect. */
     s->last_video = time(NULL);
+    ++s->frames_total;
     if (au->codec != s->norm.codec) {
         au_norm_free(&s->norm);
         au_norm_init(&s->norm, au->codec);
@@ -581,6 +605,19 @@ static void on_raw_au(void *user, const vg_au_t *au)
         pthread_mutex_unlock(c->lock);
     }
     au_norm_push(&s->norm, au, on_au, s);
+}
+
+/* The camera named the channel (source.h, title): the name the tile shows
+ * while the configuration gives none. Either session may hear it first. */
+static void take_title(sess_t *s)
+{
+    channel_t *c = s->c;
+    s->title_taken = 1;
+    pthread_mutex_lock(c->lock);
+    int news = strcmp(c->title, s->src->title) != 0;
+    if (news) snprintf(c->title, sizeof c->title, "%s", s->src->title);
+    pthread_mutex_unlock(c->lock);
+    if (news) vg_log("CAM%d: the camera calls it \"%s\"", c->idx + 1, s->src->title);
 }
 
 static void sleep_interruptible(volatile int *stop, int secs)
@@ -618,9 +655,9 @@ static void *sess_thread(void *arg)
     const char *tag = main ? "" : " sub";
 
     while (!s->stop && sess_wanted(s)) {
-        if (main) set_state(c, 0, CH_CONNECTING, "CONNECTING");
+        set_state(s, 0, CH_CONNECTING, "CONNECTING");
         if (s->src->ops->open(s->src) < 0) {
-            if (main) set_state(c, 0, fail_state(s->src->fail), "%.40s", s->src->err);
+            set_state(s, 0, fail_state(s->src->fail), "%.40s", s->src->err);
             if (!told_fail) {
                 vg_log("CAM%d%s %s: %s", ch, tag, s->src->host, s->src->err);
                 if (main) events_push(ch, "down");
@@ -654,28 +691,31 @@ static void *sess_thread(void *arg)
         s->dec_ok = 0;
 
         vg_log("CAM%d%s %s: online", ch, tag, s->src->host);
-        if (main) {
-            events_push(ch, "online");
-            set_state(c, 1, CH_LIVE, "");
-        } else {
-            pthread_mutex_lock(c->lock);
-            s->live = 1;
-            pthread_mutex_unlock(c->lock);
-        }
+        if (main) events_push(ch, "online");
+        /* Live at its first frame, not at the login: a camera that takes
+         * the claim and then sends nothing is not live meanwhile. */
+        set_state(s, 0, CH_CONNECTING, "waiting for video");
 
         time_t sec = time(NULL);
         s->last_video = sec;
+        s->frames_total = 0;
         while (!s->stop && sess_wanted(s)) {
             int rc = s->src->ops->poll(s->src, on_raw_au, s);
             time_t now = time(NULL);
+            if (s->src->title[0] && !s->title_taken) take_title(s);
             if (rc < 0) {
                 vg_log("CAM%d%s %s: %s", ch, tag, s->src->host, s->src->err);
                 if (main) events_push(ch, "offline");
+                set_state(s, 0, fail_state(s->src->fail), "%.40s", s->src->err);
                 break;
             }
             if (now - s->last_video >= NO_DATA_SECS) {
-                vg_log("CAM%d%s %s: no data for %d s", ch, tag, s->src->host, NO_DATA_SECS);
+                /* Reconnect. No frame at all since connecting: the camera
+                 * sends nothing the source reads as H.264 or H.265. */
+                vg_log("CAM%d%s %s: no video for %d s, %u frames since connecting", ch, tag, s->src->host,
+                       NO_DATA_SECS, s->frames_total);
                 if (main) events_push(ch, "offline");
+                set_state(s, 0, CH_NO_VIDEO, "no video for %d s", NO_DATA_SECS);
                 break;
             }
             /* Rate over 2 s: cameras deliver in bursts over TCP, so a
@@ -688,8 +728,10 @@ static void *sess_thread(void *arg)
                 sec = now;
             }
             /* Live = video within the last LIVE_SECS, not "fps > 0". */
-            int live = now - s->last_video < LIVE_SECS;
-            if (live != s->live) {
+            int live = s->frames_total && now - s->last_video < LIVE_SECS;
+            if (s->frames_total && s->status == CH_CONNECTING) {
+                set_state(s, live, CH_LIVE, "");
+            } else if (live != s->live) {
                 pthread_mutex_lock(c->lock);
                 s->live = live;
                 pthread_mutex_unlock(c->lock);
@@ -724,12 +766,14 @@ static int sess_start(channel_t *c, int id, const char *url)
     s->id = id;
     s->stop = 0;
     s->src->stop = &s->stop;
-    s->dec_ok = s->was_viewed = 0;
+    s->dec_ok = s->was_viewed = s->title_taken = 0;
     s->frames = 0;
     au_norm_init(&s->norm, VG_CODEC_NONE);
     pthread_mutex_lock(c->lock);
     s->done = 0;
     s->unwanted_since = 0;
+    s->status = CH_CONNECTING;
+    snprintf(s->state, sizeof s->state, "CONNECTING");
     s->live = 0;
     s->fps = s->width = s->height = 0;
     s->codec = VG_CODEC_NONE;

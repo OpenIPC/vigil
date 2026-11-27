@@ -400,7 +400,9 @@ For example:
   "channels": [
     { "camera": 1, "url": "rtsp://admin:***@192.168.1.10/stream=0", "name": "Gate",
       "enabled": true, "host": "192.168.1.10", "running": true, "live": true,
-      "state": "live", "status": "live", "events": ["motion"], "decoding": true, "view": "main", "no_decoder": false, "recording": true, "rec_state": "recording",
+      "state": "live", "status": "live", "title": "CAM01",
+      "main": { "status": "live", "state": "" }, "sub": null,
+      "events": ["motion"], "decoding": true, "view": "main", "no_decoder": false, "recording": true, "rec_state": "recording",
       "rec_bytes": 73400320,
       "codec": "H.265", "width": 1920, "height": 1080, "fps": 25 }
   ]
@@ -411,14 +413,24 @@ For example:
 time). One channel per camera slot, in tile order (an empty slot, a camera
 whose `url` is `""`, is `status: "empty"`). `running`: the
 channel has a source (it is enabled and its URL could be used); `live`:
-video arrived in the last 3 s; `state` is `live`, `off`, `CONNECTING` or the
-last error (`connect: Connection refused`, `login refused (Ret 203)`, …);
+video arrived in the last 3 s; `state` is `live`, `off`, `CONNECTING`,
+`waiting for video` (connected, no frame yet; `status` is still
+`connecting`), or the last error (`connect: Connection refused`, `login refused (Ret 203)`, …);
 `status` says the same in one word: `empty` (no camera in this slot),
 `disabled`, `connecting`, `live`, `no_video` (connected, no video for 3 s),
 `offline` (refused, timed out, no route, lost), `auth` (the camera refused
 the user or the password: RTSP 401 or 403, NETIP login 203, 205, 206),
 `codec` (neither H.264 nor H.265) or `error` (anything else; `state` has
-the text); `events` are the events the camera reports now, each held 5 s
+the text). `live`, `state` and `status` are those of the stream on screen
+(`view`; the main stream when none is): a small tile showing the
+sub-stream is `live` while the sub-stream plays, whatever the main stream
+does. `main` and `sub` are each stream's own `status` and `state` (`sub`
+is `null` while no sub-stream runs; both are absent when the channel does
+not run): a main stream that fails while the sub-stream is shown is said
+in `main` (and `rec_state` says nothing is recorded). `title` is what a
+NETIP camera calls the channel (its ChannelTitle, asked at each login),
+`""` when the camera does not say; with no `name` configured the UI shows
+it. `events` are the events the camera reports now, each held 5 s
 after the last report: `motion`, `human`, `face`, `vehicle` (no source
 reports them yet: camera alarms over NETIP and ONVIF events are to come);
 `recording`: a segment is open; `rec_state` is `off` (no `record.path`);
@@ -631,9 +643,12 @@ After a change the device is looked for at its new address for up to 10 s
 `{"device": "...", "user": "admin", "password": "...", "protocol": "onvif",
 "name": "Gate", "replace": false}` puts a device found on channel n (the
 channels before it, if empty, stay empty). `protocol` (default: the order
-above) and `name` (default: the device's) are optional. A channel with a
-camera is refused unless `replace`; a device already on a channel is
-refused.
+above) and `name` are optional. Without a `name`, a camera added over NETIP
+(here, by hand below, or by `autoadd`) is named as it names the channel
+itself (it is asked for its ChannelTitle; `""` when it does not say, and
+the channel then shows the title it gives when it connects); any other,
+the device's name. A channel with a camera is refused unless `replace`; a
+device already on a channel is refused.
 
 A camera that discovery does not find (another subnet, a host name, a
 plain RTSP camera) is described by hand instead of `device`:

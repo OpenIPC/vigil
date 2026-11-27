@@ -31,7 +31,7 @@ live view                  tiles over the whole screen, clock in a corner
       +-> ACCOUNT          settings screen: Users, Groups
       +-> OPERATION        platform, version, uptime, memory, storage (read-only)
       |               +-> Channel info: every channel's state, stream, codec,
-      |                   size, fps, recording, events
+      |                   size, fps, main stream, recording, events
       +-> DISPLAY          settings screen: Output, Clock, Camera names,
                            Status icons
 ```
@@ -41,7 +41,8 @@ four 640x360 tiles); there is no header or footer bar. Each tile is a
 *hole*: LVGL paints it in the colour the platform keys out (or fully
 transparent where the UI layer has alpha, `hal_ui_hole`), so the decoded
 video below shows through. In one corner (bottom left by default), the
-camera's name from the configuration (or `CAM n`) as outlined text straight
+camera's name from the configuration (else the name a NETIP camera gives
+the channel, its ChannelTitle; else `CAM n`) as outlined text straight
 on the picture (see below); in another (bottom right), icons only, a red
 dot while the channel records and an amber icon for each event the camera
 reports now (motion, human, face, vehicle; each held 5 s after the camera's
@@ -49,7 +50,11 @@ last report). Where they go, their size and what they stand on are
 `display.*` (Display, below). The stream's codec, size
 and frame rate are not on the tiles but on the Channel info page
 (System). The middle of a tile says something only when there is no
-picture, outlined like the name:
+picture, outlined like the name. It is about the stream on screen: a small
+tile showing the sub-stream is live while its sub-stream plays, whatever the
+main stream does; the main stream's own state is the Channel info page's
+*Main stream* column (and the recording's state says why nothing is
+recorded):
 
 | `status` (core `ch_state_t`) | Tile |
 |---|---|
@@ -383,7 +388,8 @@ windows of the 8-split) shows the camera's sub-stream, a larger one (1x1,
 full screen, the 8-split's large window) its main stream. The sub-stream is
 the camera's `sub_url`, or for a NETIP camera the same URL with
 `stream=extra`; a camera without either shows its main stream everywhere.
-The switch keeps the old picture up until the new stream's first keyframe,
+The switch keeps the old picture up until the new stream's first keyframe
+(and the tile's state stays that picture's stream until then),
 and a sub-stream no longer shown keeps its connection for 5 s, so flipping
 between full screen and a layout does not reconnect. The tile's stream line
 (`H.264 352x288 10 fps`) is the stream on screen; recording always takes

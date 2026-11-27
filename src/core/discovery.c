@@ -1057,6 +1057,23 @@ static void device_name(const disc_device_t *d, const char *given, char *out, si
     out[k] = 0;
 }
 
+/* The name a new camera's channel gets when none is given. A NETIP camera
+ * names its channels itself (ChannelTitle, the name it draws on the
+ * picture): that, rather than the device's host name from the search,
+ * which is the same on every camera of a make ("XM"). One that does not
+ * answer gets "": the channel shows the camera's title once it connects.
+ * Other protocols: the device's name (device_name). */
+static void channel_name(const disc_device_t *d, const char *given, const char *url, char *out, size_t cap)
+{
+    if ((given && *given) || strncmp(url, "netip://", 8) != 0) {
+        if (d) device_name(d, given, out, cap);
+        else snprintf(out, cap, "%s", given ? given : "");
+        return;
+    }
+    job_msg("asking for the channel's name");
+    if (source_title(url, out, cap, &g_stop) < 0) out[0] = 0;
+}
+
 static int first_empty(const vigil_config_t *c, int after)
 {
     for (int ch = after + 1; ch <= g_max_ch; ++ch)
@@ -1107,7 +1124,7 @@ static void run_assign(job_args_t *a)
     device_urls(&d, a->proto, a->user, a->pass, url, sizeof url, sub, sizeof sub, &r.rc, r.msg, sizeof r.msg, &r.proto);
     if (r.rc != DISC_OK) goto out;
     char name[32];
-    device_name(&d, a->name, name, sizeof name);
+    channel_name(&d, a->name, url, name, sizeof name);
     cams = config_get_json("cameras", 0);
     text = cams ? disc_cameras_with(cams, ch, url, sub, name) : NULL;
     if (!text) {
@@ -1162,7 +1179,7 @@ static void run_autoadd(job_args_t *a)
         char url[512], sub[512], name[32];
         device_urls(d, 0, a->user, a->pass, url, sizeof url, sub, sizeof sub, &r.rc, r.msg, sizeof r.msg, &r.proto);
         if (r.rc == DISC_OK) {
-            device_name(d, NULL, name, sizeof name);
+            channel_name(d, NULL, url, name, sizeof name);
             char *t = disc_cameras_with(cams, ch, url, sub, name);
             if (t) {
                 wipe(cams, strlen(cams));
@@ -1513,7 +1530,7 @@ static void run_assign_manual(job_args_t *a)
     r.rc = disc_manual_urls(&a->manual, url, sizeof url, sub, sizeof sub, r.msg, sizeof r.msg);
     if (r.rc != DISC_OK) goto out;
     char name[32];
-    snprintf(name, sizeof name, "%s", a->name);
+    channel_name(NULL, a->name, url, name, sizeof name);
     cams = config_get_json("cameras", 0);
     text = cams ? disc_cameras_with(cams, ch, url, sub, name) : NULL;
     if (!text) {

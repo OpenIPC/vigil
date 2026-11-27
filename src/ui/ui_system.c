@@ -71,29 +71,40 @@ static void sys_close(ui_page_t *p)
 
 /* ---- Channel info: every channel's state and stream --------------------------------------- */
 
-#define CI_COLS 9
+#define CI_COLS 10
 static const char *const k_ci_head[CI_COLS] = { "#", "Name", "State", "Stream", "Codec", "Resolution",
-                                                "FPS", "Recording", "Events" };
-static const int k_ci_w[CI_COLS] = { 40, 190, 190, 80, 80, 120, 60, 170, 150 };
+                                                "FPS", "Main stream", "Recording", "Events" };
+static const int k_ci_w[CI_COLS] = { 40, 150, 170, 70, 70, 110, 50, 200, 140, 130 };
 
 typedef struct {
     lv_obj_t *cell[UI_MAX_CHANNELS][CI_COLS];
     int       n;
 } ci_t;
 
-const char *ui_chan_status_word(const ui_chan_t *st)
+static const char *status_word(ui_ch_status_t status, int no_decoder, const char *state)
 {
-    switch (st->status) {
+    switch (status) {
     case UI_CH_EMPTY:      return "-";
     case UI_CH_DISABLED:   return "Disabled";
     case UI_CH_CONNECTING: return "Connecting";
-    case UI_CH_LIVE:       return st->no_decoder ? "Live, no decoder" : "Live";
+    case UI_CH_LIVE:       return no_decoder ? "Live, no decoder" : "Live";
     case UI_CH_NO_VIDEO:   return "No video";
     case UI_CH_OFFLINE:    return "Offline";
     case UI_CH_AUTH:       return "Authentication error";
     case UI_CH_CODEC:      return "Unsupported codec";
-    default:               return st->state[0] ? st->state : "Error";
+    default:               return state[0] ? state : "Error";
     }
+}
+
+const char *ui_chan_status_word(const ui_chan_t *st)
+{
+    return status_word(st->status, st->no_decoder, st->state);
+}
+
+static lv_color_t status_color(ui_ch_status_t s)
+{
+    return s == UI_CH_LIVE ? UI_C(OK) : s == UI_CH_EMPTY || s == UI_CH_DISABLED ? UI_C(TEXT2)
+         : s == UI_CH_CONNECTING ? UI_C(WARN) : UI_C(BAD);
 }
 
 static void ci_fill(ci_t *ci)
@@ -113,20 +124,22 @@ static void ci_fill(ci_t *ci)
         else snprintf(v[5], sizeof v[5], "-");
         if (live) snprintf(v[6], sizeof v[6], "%u", st->fps);
         else snprintf(v[6], sizeof v[6], "-");
-        snprintf(v[7], sizeof v[7], "%s", st->rec_state[0] ? st->rec_state : "off");
-        v[8][0] = 0;
+        /* The main stream (the recording's) even while a small tile shows
+         * the sub-stream: its failure is said here, not on the tile. */
+        int has_main = st->configured && st->status != UI_CH_DISABLED;
+        snprintf(v[7], sizeof v[7], "%s", has_main ? status_word(st->main_status, 0, st->main_state) : "-");
+        snprintf(v[8], sizeof v[8], "%s", st->rec_state[0] ? st->rec_state : "off");
+        v[9][0] = 0;
         for (int b = 0; b < 4; ++b)
             if (st->events & (1u << b)) {
-                size_t n = strlen(v[8]);
-                snprintf(v[8] + n, sizeof v[8] - n, "%s%s", n ? ", " : "", ev[b]);
+                size_t n = strlen(v[9]);
+                snprintf(v[9] + n, sizeof v[9] - n, "%s%s", n ? ", " : "", ev[b]);
             }
-        if (!v[8][0]) snprintf(v[8], sizeof v[8], "-");
+        if (!v[9][0]) snprintf(v[9], sizeof v[9], "-");
         for (int c = 0; c < CI_COLS; ++c)
             if (strcmp(lv_label_get_text(ci->cell[ch][c]), v[c])) lv_label_set_text(ci->cell[ch][c], v[c]);
-        lv_color_t col = st->status == UI_CH_LIVE ? UI_C(OK)
-                       : st->status == UI_CH_EMPTY || st->status == UI_CH_DISABLED ? UI_C(TEXT2)
-                       : st->status == UI_CH_CONNECTING ? UI_C(WARN) : UI_C(BAD);
-        lv_obj_set_style_text_color(ci->cell[ch][2], col, 0);
+        lv_obj_set_style_text_color(ci->cell[ch][2], status_color(st->status), 0);
+        lv_obj_set_style_text_color(ci->cell[ch][7], has_main ? status_color(st->main_status) : UI_C(TEXT2), 0);
     }
 }
 
@@ -178,13 +191,17 @@ void ui_channel_info_open(void)
         for (int c = 0; c < CI_COLS; ++c) {
             lv_obj_t *l = ui_label(r, "", VG_FONT_SM_LV, UI_C(TEXT));
             lv_obj_set_width(l, k_ci_w[c]);
+            /* One line, cut with "...": a label wraps unless its height is set. */
+            lv_obj_set_height(l, lv_font_get_line_height(VG_FONT_SM_LV));
             lv_label_set_long_mode(l, LV_LABEL_LONG_DOT);
             ci->cell[ch][c] = l;
         }
     }
-    ui_label(p->body, "Stream: the camera's stream on the screen (main, or sub in a small tile); codec, "
-                      "resolution and FPS are that stream's. Events are held a few seconds.",
-             VG_FONT_SM_LV, UI_C(TEXT2));
+    lv_obj_t *note = ui_label(p->body, "Stream: the camera's stream on the screen (main, or sub in a small tile); "
+                                       "state, codec, resolution and FPS are that stream's. Main stream: the one "
+                                       "recorded. Events are held a few seconds.",
+                              VG_FONT_SM_LV, UI_C(TEXT2));
+    lv_obj_set_width(note, LV_PCT(100));
     ci_fill(ci);
     lv_obj_set_user_data(p->body, lv_timer_create(ci_tick_cb, 1000, ci));
     ui_page_ready(p);
