@@ -25,7 +25,6 @@
 #include "log.h"
 #include "schema.h"
 #include "source.h"
-#include "sps.h"
 
 #define IFACE_MAX   16
 #define ROUNDS      3                /* searches per scan, a second apart */
@@ -1364,33 +1363,36 @@ disc_rc_t disc_manual_urls(const disc_manual_t *m, char *url, size_t ucap, char 
     return DISC_OK;
 }
 
+/* The first keyframe, through the channel's own normalizer: it knows a
+ * keyframe whatever the protocol marks, and keeps the SPS (in-band or
+ * from the SDP) for the picture size. */
 typedef struct {
-    vg_codec_t codec;
-    int        got, width, height;
+    au_norm_t  norm;
+    int        norm_up, got;
+    source_t  *src;
 } probe_t;
 
-static void probe_size(probe_t *p, vg_codec_t c, const uint8_t *nal, size_t len)
+static void probe_key(void *user, const vg_au_t *au)
 {
-    int t = c == VG_CODEC_H264 ? nal[0] & 0x1f : (nal[0] >> 1) & 0x3f;
-    vg_stream_info_t si;
-    memset(&si, 0, sizeof si);
-    if (((c == VG_CODEC_H264 && t == 7) || (c == VG_CODEC_H265 && t == 33)) && sps_parse(c, nal, len, &si) == 0 &&
-        si.width) {
-        p->width = (int)si.width;
-        p->height = (int)si.height;
-    }
+    probe_t *p = user;
+    if (au->key) p->got = 1;
 }
 
 static void probe_au(void *user, const vg_au_t *au)
 {
     probe_t *p = user;
-    if (p->got || !au->key || (au->codec != VG_CODEC_H264 && au->codec != VG_CODEC_H265)) return;
-    p->codec = au->codec;
-    size_t pos = 0, nl;
-    const uint8_t *nal;
-    while ((nal = au_next_nal(au->data, au->len, &pos, &nl)) != NULL)
-        if (nl) probe_size(p, au->codec, nal, nl);
-    p->got = 1;
+    if (p->got || (au->codec != VG_CODEC_H264 && au->codec != VG_CODEC_H265)) return;
+    if (!p->norm_up || p->norm.codec != au->codec) {
+        if (p->norm_up) au_norm_free(&p->norm);
+        if (au_norm_init(&p->norm, au->codec) < 0) {
+            p->norm_up = 0;
+            return;
+        }
+        p->norm_up = 1;
+        for (int i = 0; i < p->src->ps_n; ++i)
+            if (p->src->ps_len[i]) au_norm_add_param_set(&p->norm, p->src->ps[i], p->src->ps_len[i]);
+    }
+    au_norm_push(&p->norm, au, probe_key, p);
 }
 
 static disc_rc_t fail_rc(src_fail_t f)
@@ -1422,9 +1424,7 @@ disc_rc_t disc_test_url(const char *url, int secs, char codec[8], int *width, in
         source_destroy(s);
         return rc;
     }
-    probe_t p = { .codec = s->codec };
-    for (int i = 0; i < s->ps_n; ++i)
-        if (s->ps_len[i]) probe_size(&p, s->codec, s->ps[i], s->ps_len[i]);
+    probe_t p = { .src = s };
     long long end = mono_ms() + secs * 1000LL;
     rc = DISC_ETIMEOUT;
     snprintf(err, errcap, "connected, but no video within %d s", secs);
@@ -1437,11 +1437,14 @@ disc_rc_t disc_test_url(const char *url, int secs, char codec[8], int *width, in
     }
     if (p.got) {
         rc = DISC_OK;
-        snprintf(codec, 8, "%s", vg_codec_name(p.codec));
-        *width = p.width;
-        *height = p.height;
+        snprintf(codec, 8, "%s", vg_codec_name(p.norm.codec));
+        if (p.norm.info_gen) {
+            *width = (int)p.norm.info.width;
+            *height = (int)p.norm.info.height;
+        }
         err[0] = 0;
-    } else if (rc == DISC_ETIMEOUT && s->codec != VG_CODEC_NONE && s->codec != VG_CODEC_H264 &&
+    }
+    if (p.norm_up) au_norm_free(&p.norm); else if (rc == DISC_ETIMEOUT && s->codec != VG_CODEC_NONE && s->codec != VG_CODEC_H264 &&
                s->codec != VG_CODEC_H265) {
         rc = DISC_ECODEC;
         snprintf(err, errcap, "video, but neither H.264 nor H.265");
