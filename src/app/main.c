@@ -10,9 +10,9 @@
  *      rollback, NTP, DDNS, network storage, alarm center, mail)
  *   -> api_start (HTTP/WebSocket API on its own threads, if configured),
  *      web_start (the zero channel), onvif_start (the ONVIF server and
- *      WS-Discovery, while onvif_server.enabled),
- *      rtsp_server_start (the cameras' streams to other clients, its own
- *      thread)
+ *      WS-Discovery, while onvif_server.enabled), netip_server_start (the
+ *      cameras for XM's clients, netip_srv.h), rtsp_server_start (the
+ *      cameras' streams to other clients, its own thread)
  *   -> frontend_run (LVGL quad view, or status lines when headless); on
  *      this thread, a configuration the API saved is applied
  *      (channels_apply)
@@ -29,6 +29,7 @@
 
 #include "api.h"
 #include "cJSON.h"
+#include "netip_srv.h"
 #include "channel.h"
 #include "config.h"
 #include "events.h"
@@ -302,14 +303,15 @@ static void relisten(const char *what, const char *want, char *cur, int (*restar
 }
 
 /* config_put_json asks before saving a new api.listen, web.listen, or
- * ONVIF or RTSP port: a port vigild's own server holds now is free for it
- * (the server moves). */
+ * ONVIF, RTSP or NETIP port: a port vigild's own server holds now is free
+ * for it (the server moves). */
 static int listen_check(const char *what, const char *listen, char *err, size_t cap)
 {
     char cur[64] = "";
     if (!strcmp(what, "api")) api_listening(cur, sizeof cur, NULL, 0);
     else if (!strcmp(what, "web")) web_listening(cur, sizeof cur, NULL, 0);
     else if (!strcmp(what, "rtsp")) rtsp_server_listening(cur, sizeof cur, NULL, 0);
+    else if (!strcmp(what, "netip")) netip_server_listening(cur, sizeof cur, NULL, 0);
     else onvif_listening(cur, sizeof cur, NULL, 0);
     if (cur[0] && config_listen_port(cur) == config_listen_port(listen)) return 0;
     return net_listen_check(listen, err, cap);
@@ -341,6 +343,7 @@ static void apply_config(void)
     }
     if (strcmp(c.api.listen, g_api_listen) != 0) relisten("api", c.api.listen, g_api_listen, api_restart);
     if (strcmp(c.web.listen, g_web_listen) != 0) relisten("web", c.web.listen, g_web_listen, web_restart);
+    netip_server_apply(&c.netip_server);
 }
 
 int main(int argc, char **argv)
@@ -495,9 +498,11 @@ int main(int argc, char **argv)
         api_start();                    /* failing to start it is logged, not fatal */
         web_start();                    /* the same */
         onvif_start();                  /* the same */
+        netip_server_start(&running.netip_server, caps->name);     /* the same */
         rtsp_server_start();            /* the same */
         rc = frontend_run(run_secs, &g_stop, apply_config) < 0 ? 1 : 0;
         rtsp_server_stop();
+        netip_server_stop();
         onvif_stop();
         web_stop();
         api_stop();

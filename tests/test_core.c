@@ -30,7 +30,9 @@
 #include "hal_capture.h"
 #include "hal_decoder.h"
 #include "hal_display.h"
+#include "disc_proto.h"
 #include "net.h"
+#include "netip_proto.h"
 #include "qos.h"
 #include "rec_place.h"
 #include "rec_sched.h"
@@ -2517,6 +2519,124 @@ static void test_netip_title_parse(void)
               !strcmp(out, "0123456789"), "cut on a character: '%s'", out);
 }
 
+
+/* vigild's NETIP server frames what its stream taps give it
+ * (netip_proto.h); vigil's own NETIP source must read back the same
+ * access units: codec, keyframes, every byte, a 4 MP picture's size bits
+ * in the codec byte, frames split over messages as the server sends them. */
+typedef struct { int n; vg_au_t au[4]; uint8_t *data[4]; } emitted_t;
+
+static void collect(void *user, const vg_au_t *au)
+{
+    emitted_t *e = user;
+    if (e->n >= 4) return;
+    e->au[e->n] = *au;
+    e->data[e->n] = malloc(au->len);
+    memcpy(e->data[e->n], au->data, au->len);
+    e->au[e->n].data = e->data[e->n];
+    ++e->n;
+}
+
+/* As netip_srv.c sends a frame: its header and payload, 8 KiB a message. */
+static void send_frame(source_t *src, const uint8_t *head, size_t hl, const uint8_t *p, size_t len, emitted_t *e)
+{
+    size_t total = hl + len;
+    uint8_t *f = malloc(total);
+    memcpy(f, head, hl);
+    memcpy(f + hl, p, len);
+    for (size_t off = 0; off < total; off += 8192)
+        netip_media_feed(src, f + off, total - off > 8192 ? 8192 : total - off, collect, e);
+    free(f);
+}
+
+static void test_netip_server_proto(void)
+{
+    /* The header. */
+    uint8_t b[NETIP_HDR_LEN];
+    netip_hdr_t h = { .version = 1, .session = 0x1234ABCD, .seq = 7, .total = 3, .cur = 1, .msgid = 1412,
+                      .len = 8192 }, g;
+    netip_hdr_put(b, &h);
+    CHECK(b[0] == 0xff && b[14] == (1412 & 255) && b[15] == 1412 >> 8 && b[12] == 3 && b[16] == 0 && b[17] == 0x20,
+          "header bytes");
+    CHECK(netip_hdr_get(b, &g) == 0 && g.version == 1 && g.session == h.session && g.seq == 7 && g.total == 3 &&
+          g.cur == 1 && g.msgid == 1412 && g.len == 8192, "header round trip");
+    b[0] = 0;
+    CHECK(netip_hdr_get(b, &g) < 0, "not NETIP without 0xFF");
+
+    /* XM's packed time. */
+    struct tm t = { .tm_year = 126, .tm_mon = 10, .tm_mday = 27, .tm_hour = 23, .tm_min = 59, .tm_sec = 58 }, u;
+    netip_time_unpack(netip_time_pack(&t), &u);
+    CHECK(u.tm_year == 126 && u.tm_mon == 10 && u.tm_mday == 27 && u.tm_hour == 23 && u.tm_min == 59 &&
+          u.tm_sec == 58, "time round trip");
+    struct tm doc = { .tm_year = 109, .tm_mon = 1, .tm_mday = 13, .tm_hour = 12, .tm_min = 3, .tm_sec = 12 };
+    CHECK(netip_time_pack(&doc) == (12u | 3u << 6 | 12u << 12 | 13u << 17 | 2u << 22 | 9u << 26), "time layout");
+
+    uint32_t sid;
+    CHECK(netip_session_parse("0x0000000B", &sid) == 0 && sid == 11 && netip_session_parse("x", &sid) < 0,
+          "session ids");
+    CHECK(netip_stream_type("Main") == 0 && netip_stream_type("Extra1") == 1 && netip_stream_type("Extra") == 1 &&
+          netip_stream_type("Sub") == 1 && netip_stream_type("Fourth") < 0, "stream types");
+
+    /* Frames, through source_netip's parser. */
+    uint8_t head[NETIP_FRAME_HEAD];
+    CHECK(netip_frame_head(head, 1, VG_CODEC_NONE, 640, 360, 25, &t, 10) == 0, "no codec, no frame");
+    size_t n = 20000, hl;
+    uint8_t *key = malloc(n), *p = malloc(5000);
+    for (size_t i = 0; i < n; ++i) key[i] = (uint8_t)(i * 7 + 3);
+    memcpy(key, "\0\0\0\1\x40\x01", 6);                /* VPS ... */
+    for (size_t i = 0; i < 5000; ++i) p[i] = (uint8_t)(i * 13 + 1);
+    memcpy(p, "\0\0\0\1\x02\x01", 6);                  /* a TRAIL_R slice */
+    source_t *src = source_create("netip://admin:x@127.0.0.1/", 0);
+    CHECK(src != NULL, "a NETIP source to parse with");
+    if (!src) return;
+    emitted_t e = { 0 };
+    hl = netip_frame_head(head, 1, VG_CODEC_H265, 2560, 1440, 25, &t, (uint32_t)n);
+    CHECK(hl == 16 && head[3] == 0xfc && head[4] == 0x13 && head[5] == 25 && head[6] == (320 & 255) &&
+          head[7] == 180, "a 2560x1440 H.265 I-frame header: codec byte 0x13 (%02x)", head[4]);
+    send_frame(src, head, hl, key, n, &e);
+    hl = netip_frame_head(head, 0, VG_CODEC_H265, 2560, 1440, 25, &t, 5000);
+    CHECK(hl == 8 && head[3] == 0xfd, "a P-frame header");
+    send_frame(src, head, hl, p, 5000, &e);
+    CHECK(e.n == 2 && e.au[0].codec == VG_CODEC_H265 && e.au[0].key && e.au[0].len == n &&
+          !memcmp(e.au[0].data, key, n) && e.au[1].codec == VG_CODEC_H265 && !e.au[1].key &&
+          e.au[1].len == 5000 && !memcmp(e.au[1].data, p, 5000), "H.265 read back as sent (%d)", e.n);
+    for (int i = 0; i < e.n; ++i) free(e.data[i]);
+    memset(&e, 0, sizeof e);
+    hl = netip_frame_head(head, 1, VG_CODEC_H264, 3840, 2160, 30, &t, 9000);
+    CHECK(head[4] == (2 | 1 << 4 | 1 << 6) && head[6] == (480 & 255) && head[7] == (270 & 255),
+          "3840x2160 H.264: 0x%02x", head[4]);
+    key[4] = 0x67;
+    send_frame(src, head, hl, key, 9000, &e);
+    CHECK(e.n == 1 && e.au[0].codec == VG_CODEC_H264 && e.au[0].key && e.au[0].len == 9000 &&
+          !memcmp(e.au[0].data, key, 9000), "H.264 read back as sent");
+    for (int i = 0; i < e.n; ++i) free(e.data[i]);
+    source_destroy(src);
+    free(key);
+    free(p);
+
+    /* The search answer the server gives, as the camera search reads it. */
+    disc_device_t d = { 0 }, r;
+    snprintf(d.ip, sizeof d.ip, "192.168.1.10");
+    snprintf(d.mask, sizeof d.mask, "255.255.255.0");
+    snprintf(d.gateway, sizeof d.gateway, "192.168.1.1");
+    snprintf(d.mac, sizeof d.mac, "02:00:00:00:00:42");
+    snprintf(d.serial, sizeof d.serial, "0000020000000042");
+    snprintf(d.name, sizeof d.name, "nvr");
+    snprintf(d.version, sizeof d.version, "V0.1.0.vigil");
+    d.netip_port = 34567;
+    d.http_port = 80;
+    d.channels = 9;
+    uint8_t pkt[1024];
+    size_t pl = disc_netip_reply(pkt, sizeof pkt, &d);
+    CHECK(pl > 20 && pl <= 1024 && disc_netip_parse(pkt, pl, &r) == 0 && !strcmp(r.ip, "192.168.1.10") &&
+          !strcmp(r.mask, "255.255.255.0") && !strcmp(r.gateway, "192.168.1.1") && !strcmp(r.mac, d.mac) &&
+          !strcmp(r.serial, d.serial) && r.netip_port == 34567 && r.channels == 9 && !strcmp(r.name, "nvr"),
+          "search answer round trip (%zu bytes)", pl);
+    uint8_t q[32];
+    CHECK(disc_netip_is_search(q, disc_netip_search(q, sizeof q)) && !disc_netip_is_search(pkt, pl), "a search");
+    CHECK(disc_netip_reply(pkt, 100, &d) == 0, "too small a buffer");
+}
+
 static int status_is(int ch, ch_state_t want, int *live)
 {
     channel_status_t st;
@@ -3341,6 +3461,7 @@ int main(int argc, char **argv)
     test_stream_tap();
     test_channel_aspect();
     test_netip_title_parse();
+    test_netip_server_proto();
     test_channel_stream_states();
     test_camera_slots();
     test_fail_kinds();

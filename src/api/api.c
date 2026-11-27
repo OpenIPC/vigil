@@ -17,6 +17,7 @@
 
 #include "api.h"
 #include "api_int.h"
+#include "netip_srv.h"
 #include "auth.h"
 #include "channel.h"
 #include "config.h"
@@ -914,13 +915,13 @@ void api_auth_init(void)
 }
 
 /* What each server listens on, for Network -> Ports (api.h, web.h,
- * onvif.h); here for all of them, so that reading it needs none of the
+ * onvif.h, netip_srv.h); here for all of them, so that reading it needs none of the
  * servers linked. */
 static pthread_mutex_t g_listen_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct {
     char listening[64], why[160];
     char move_failed[200];          /* the last move that failed, until the next one */
-} g_srv[3];
+} g_srv[4];                          /* api, web, onvif, netip */
 
 void api_server_state(int srv, const char *listen, const char *why)
 {
@@ -966,6 +967,11 @@ int web_listening(char *listen, size_t cap, char *why, size_t wcap)
 int onvif_listening(char *listen, size_t cap, char *why, size_t wcap)
 {
     return server_listening(2, listen, cap, why, wcap);
+}
+
+int netip_server_listening(char *listen, size_t cap, char *why, size_t wcap)
+{
+    return server_listening(3, listen, cap, why, wcap);
 }
 
 static void set_listening(const char *listen, const char *why) { api_server_state(0, listen, why); }

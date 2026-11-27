@@ -19,6 +19,10 @@ int auth_base64_decode(const char *in, size_t len, unsigned char *out, size_t ca
 int auth_check_shadow(const char *shadow, const char *user, const char *password,
                       char *why, size_t cap);
 
+/* Which password `user` has in `shadow`, without saying it: the MD5
+ * (hex) of its hash there. 0, or -1 with `why` (as auth_check_shadow). */
+int auth_shadow_id(const char *shadow, const char *user, char out[33], char *why, size_t cap);
+
 /* crypt(3) of `password` with `setting` (a hash, or "$6$salt"), copied
  * into `out` under the lock crypt's static buffer needs. 0, or -1 when
  * the C library cannot (no such method: NULL or "*..."). */

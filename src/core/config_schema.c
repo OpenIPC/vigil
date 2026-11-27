@@ -550,6 +550,15 @@ static const schema_field_t rtsp_server_fields[] = {
               "buffer (2 to 4 MiB for a main stream, less for a sub-stream)." },
 };
 
+static const schema_field_t netip_server_fields[] = {
+    { .key = "enabled", BOOL(config_netip_server_t, enabled), .def_int = 1, .live = 1, .label = "On",
+      .help = "Xiongmai's own clients (CMS, VMS, XMEye on the LAN) see this recorder as an XM one: "
+              "they find it by its search and play the cameras' live streams, as vigil's users "
+              "with the live permission. Nothing can be changed through it." },
+    { .key = "port", INT(config_netip_server_t, port), .def_int = 34567, .min = 1, .max = 65535,
+      .live = 1, .label = "TCP port", .help = "NETIP's port, 34567 on XM devices." },
+};
+
 static const schema_field_t discovery_fields[] = {
     { .key = "interfaces", STR(config_discovery_t, interfaces), .def_str = "", .live = 1,
       .check = check_ifaces, .label = "Search on interfaces",
@@ -592,10 +601,12 @@ static const schema_field_t qos_fields[] = {
               "off: nothing marked (DSCP 0); standard: video AF41 (34), management CS2 (16), cameras "
               "AF41 (34), alarms AF21 (18); custom: the values below." },
     DSCP("video", video, 34, "Video DSCP",
-         "With type custom: the zero channel's picture (web.listen's WebSocket)."),
+         "With type custom: the zero channel's picture (web.listen's WebSocket), the RTSP "
+         "and NETIP servers' video."),
     DSCP("management", management, 16, "Management DSCP",
          "With type custom: the HTTP API, the web pages and logins, the ONVIF service and its "
-         "WS-Discovery, DDNS, camera searches."),
+         "WS-Discovery, the RTSP server's requests, the NETIP server's requests and search answers, "
+         "DDNS, camera searches."),
     DSCP("camera", camera, 34, "Camera DSCP",
          "With type custom: vigild's connections to cameras, RTSP and NETIP control and the ACKs of "
          "their video; a connection open when this changes is marked at once."),
@@ -622,13 +633,6 @@ void config_to_qos(const vigil_config_t *c, int dscp[QOS_CLASSES])
 }
 
 /* ---- ports of vigild's servers ---------------------------------------------------- */
-
-#define SERVER_PORT(NAME, WHAT, DEF, HELP) \
-    static const schema_field_t NAME[] = { \
-        { .key = "port", INT(config_server_t, port), .def_int = DEF, .min = 1, .max = 65535, .live = 1, \
-          .label = WHAT " port", .help = HELP " vigild has no " WHAT " server yet: the port is kept for it, " \
-                                         "and no other of vigild's servers may take it." } }
-SERVER_PORT(netip_server_fields, "NETIP", 34567, "XM's NETIP (CMS, VMS), as XM recorders have it.");
 
 int config_listen_port(const char *listen)
 {
@@ -691,13 +695,15 @@ static const schema_section_t sections[] = {
     { .key = "api", .off = offsetof(vigil_config_t, api), .fields = api_fields,
       .n_fields = N(api_fields), .label = "HTTP API" },
     OBJECT("web", web, web_fields, "Zero channel"),
+    { .key = "netip_server", .off = offsetof(vigil_config_t, netip_server), .fields = netip_server_fields,
+      .n_fields = N(netip_server_fields), .label = "NETIP server",
+      .help = "The cameras over Xiongmai's NETIP (DVRIP), for XM's clients (docs/api.md, NETIP server)." },
     { .key = "discovery", .off = offsetof(vigil_config_t, discovery), .fields = discovery_fields,
       .n_fields = N(discovery_fields), .label = "Camera search" },
     OBJECT("onvif_server", onvif_server, onvif_server_fields, "ONVIF server"),
     { .key = "qos", .off = offsetof(vigil_config_t, qos), .fields = qos_fields, .n_fields = N(qos_fields),
       .label = "QoS", .help = "DSCP marking of vigild's packets, so that the network can prioritise them." },
     OBJECT("rtsp_server", rtsp_server, rtsp_server_fields, "RTSP server"),
-    OBJECT("netip_server", netip_server, netip_server_fields, "NETIP server"),
 };
 
 const schema_t config_schema = {

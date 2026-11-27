@@ -5,6 +5,7 @@
 #include "api.h"
 #include "config.h"
 #include "log.h"
+#include "netip_srv.h"
 #include "rtsp_server.h"
 #include "onvif.h"
 #include "web.h"
@@ -88,6 +89,25 @@ int onvif_start(void)
 void onvif_stop(void) {}
 
 int onvif_listening(char *listen, size_t cap, char *why, size_t wcap)
+{
+    if (listen && cap) listen[0] = 0;
+    if (why) snprintf(why, wcap, "this vigild is built without the API");
+    return 0;
+}
+
+int netip_server_start(const config_netip_server_t *cfg, const char *platform)
+{
+    (void)platform;
+    if (cfg->enabled) vg_log("netip_server.enabled is on, but this vigild is built without the API, "
+                             "whose users it logs in");
+    return 0;
+}
+
+void netip_server_stop(void) {}
+
+void netip_server_apply(const config_netip_server_t *cfg) { (void)cfg; }
+
+int netip_server_listening(char *listen, size_t cap, char *why, size_t wcap)
 {
     if (listen && cap) listen[0] = 0;
     if (why) snprintf(why, wcap, "this vigild is built without the API");

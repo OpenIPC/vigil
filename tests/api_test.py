@@ -640,7 +640,7 @@ def main():
         # ---- Ports: no two of vigild's servers on one port; the API moves at once
         st, _, srvs = api.json("GET", "/api/v1/config")
         check(st == 200 and srvs["rtsp_server"]["port"] == 554 and srvs["onvif_server"]["port"] == 8899 and
-              srvs["netip_server"] == {"port": 34567}, "ports: the defaults (%s)" % st)
+              srvs["netip_server"] == {"enabled": True, "port": 34567}, "ports: the defaults (%s)" % st)
         st, _, err = api.json("PUT", "/api/v1/config/onvif_server", {"port": 80})
         check(st == 400 and err["errors"][0]["path"] == "onvif_server.port" and
               "web.listen" in err["errors"][0]["message"], "ONVIF on the web server's port 80: refused (%s %s)" %

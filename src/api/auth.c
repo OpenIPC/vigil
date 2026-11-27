@@ -12,6 +12,7 @@
 #endif
 
 #include "auth.h"
+#include "md5.h"
 
 int auth_base64_decode(const char *in, size_t len, unsigned char *out, size_t cap)
 {
@@ -125,6 +126,17 @@ int auth_crypt(const char *password, const char *setting, char *out, size_t cap)
     if (rc == 0) memcpy(out, r, strlen(r) + 1);
     pthread_mutex_unlock(&g_crypt_lock);
     return rc;
+}
+
+int auth_shadow_id(const char *shadow, const char *user, char out[33], char *why, size_t cap)
+{
+    char hash[256];
+    out[0] = 0;
+    if (shadow_hash(shadow, user, hash, sizeof hash, why, cap) < 0) return -1;
+    md5_hex(hash, strlen(hash), out);
+    volatile char *w = hash;
+    for (size_t i = 0; i < sizeof hash; ++i) w[i] = 0;
+    return 0;
 }
 
 int auth_check_shadow(const char *shadow, const char *user, const char *password,

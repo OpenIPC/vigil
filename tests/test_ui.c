@@ -709,6 +709,7 @@ static void fm_listening(int server, ui_listen_t *out)
              server == UI_SERVER_WEB     ? "0.0.0.0:80"
              : server == UI_SERVER_ONVIF ? "0.0.0.0:8899"
              : server == UI_SERVER_RTSP  ? "0.0.0.0:554"
+             : server == UI_SERVER_NETIP ? "0.0.0.0:34567"
                                          : "0.0.0.0:8080");
     if (server == UI_SERVER_API && g_mg_move_failed)
         snprintf(out->why, sizeof out->why, "could not move to '0.0.0.0:81': port 81 is in use (another program, "
@@ -2154,13 +2155,14 @@ static void test_network_pages(void)
     g_mg_modem = 0;
     g_mg_lte_profile[0] = 0;
     nav_to("Ports");
-    lv_obj_t *pw = textarea(0), *pa = textarea(1), *po = textarea(2), *pr = textarea(3);
-    CHECK(pw && pa && po && pr && !strcmp(lv_textarea_get_text(pw), "80") &&
+    lv_obj_t *pw = textarea(0), *pa = textarea(1), *po = textarea(2), *pr = textarea(3), *pn = textarea(4);
+    CHECK(pw && pa && po && pr && pn && !strcmp(lv_textarea_get_text(pw), "80") &&
           !strcmp(lv_textarea_get_text(pa), "8080") && !strcmp(lv_textarea_get_text(po), "8899") &&
-          !strcmp(lv_textarea_get_text(pr), "554") && find("Listening on 0.0.0.0:80", 1) &&
-          find("Listening on 0.0.0.0:8899", 1) && find("Listening on 0.0.0.0:554", 1) &&
-          find("Services not available yet", 0) && find("nothing listens on this port", 1),
-          "Ports: web 80, API 8080, ONVIF 8899, RTSP 554, what each listens on, the service to come");
+          !strcmp(lv_textarea_get_text(pr), "554") && !strcmp(lv_textarea_get_text(pn), "34567") &&
+          find("Listening on 0.0.0.0:80", 1) && find("Listening on 0.0.0.0:8899", 1) &&
+          find("Listening on 0.0.0.0:554", 1) && find("Listening on 0.0.0.0:34567", 1) &&
+          !find("Services not available yet", 0),
+          "Ports: web 80, API 8080, ONVIF 8899, RTSP 554, NETIP 34567, what each listens on");
     if (po) lv_textarea_set_text(po, "80");
     click_text(SAVE);
     run(100);
@@ -2170,11 +2172,14 @@ static void test_network_pages(void)
           pc.onvif_server.port == 8899, "two on port 80: refused, marked, nothing saved");
     if (po) lv_textarea_set_text(po, "8000");
     if (pw) lv_textarea_set_text(pw, "8081");
+    if (pn) lv_textarea_set_text(pn, "34570");
     click_text(SAVE);
     run(100);
     config_get(&pc);
-    CHECK(pc.onvif_server.port == 8000 && !strcmp(pc.web.listen, "0.0.0.0:8081") && find("Ports saved", 1),
-          "Ports saved, the address kept: web %s, ONVIF %d", pc.web.listen, pc.onvif_server.port);
+    CHECK(pc.onvif_server.port == 8000 && !strcmp(pc.web.listen, "0.0.0.0:8081") && pc.netip_server.port == 34570 &&
+              find("Ports saved", 1),
+          "Ports saved, the address kept: web %s, ONVIF %d, NETIP %d", pc.web.listen, pc.onvif_server.port,
+          pc.netip_server.port);
     g_mg_move_failed = 1;
     run(1100);
     CHECK(find("could not move to '0.0.0.0:81'", 1), "a failed move: said on the page");

@@ -63,8 +63,9 @@ int api_disc_request(struct mg_connection *conn, const char *uri, const char *me
 void api_qos_listeners(const struct mg_context *ctx, qos_class_t c);
 void api_qos_conn(const struct mg_connection *conn, qos_class_t c);
 
-/* The servers' state for api_listening, web_listening and onvif_listening
- * (`srv` 0: the API, 1: the web server, 2: ONVIF): what one listens on
+/* The servers' state for api_listening, web_listening, onvif_listening
+ * and netip_server_listening (`srv` 0: the API, 1: the web server, 2:
+ * ONVIF, 3: NETIP): what one listens on
  * ("": nothing) and why not; after a restart (api_restart, web_restart)
  * to `listen`, whether it failed, and whether the move was asked for (it
  * clears an old failure) or is a way back (it keeps it); `err` gets the

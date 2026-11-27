@@ -283,6 +283,17 @@ web:
   # 1..30, default 15.
   fps: 15
 
+# NETIP server: The cameras over Xiongmai's NETIP (DVRIP), for XM's clients
+# (docs/api.md, NETIP server).
+netip_server:
+  # On: Xiongmai's own clients (CMS, VMS, XMEye on the LAN) see this recorder
+  # as an XM one: they find it by its search and play the cameras' live
+  # streams, as vigil's users with the live permission. Nothing can be changed
+  # through it. Default true.
+  enabled: true
+  # TCP port: NETIP's port, 34567 on XM devices. 1..65535, default 34567.
+  port: 34567
+
 # Camera search
 discovery:
   # Search on interfaces: Network interfaces to search for cameras on,
@@ -318,10 +329,11 @@ qos:
   # custom: the values below. One of: off, standard, custom. Default off.
   type: "off"
   # Video DSCP: With type custom: the zero channel's picture (web.listen's
-  # WebSocket). 0..63, default 34.
+  # WebSocket), the RTSP and NETIP servers' video. 0..63, default 34.
   video: 34
   # Management DSCP: With type custom: the HTTP API, the web pages and logins,
-  # the ONVIF service and its WS-Discovery, DDNS, camera searches. 0..63,
+  # the ONVIF service and its WS-Discovery, the RTSP server's requests, the
+  # NETIP server's requests and search answers, DDNS, camera searches. 0..63,
   # default 16.
   management: 16
   # Camera DSCP: With type custom: vigild's connections to cameras, RTSP and
@@ -350,10 +362,3 @@ rtsp_server:
   # Clients of one stream share its buffer (2 to 4 MiB for a main stream, less
   # for a sub-stream). 1..32, default 8.
   max_clients: 8
-
-# NETIP server
-netip_server:
-  # NETIP port: XM's NETIP (CMS, VMS), as XM recorders have it. vigild has no
-  # NETIP server yet: the port is kept for it, and no other of vigild's
-  # servers may take it. 1..65535, default 34567.
-  port: 34567

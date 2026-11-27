@@ -82,10 +82,11 @@ whenever a password is set, through the API or the screen, and, for users
 made before the RTSP server, at their next login there (the screen, the
 web page or the API); until then such a user is refused and the log says
 why. The system account (`root`, `admin` while no user has that name)
-has its password only in `/etc/shadow`: its HA1 is learnt when it logs in
-to the screen, the web page or the API, kept in memory only, and forgotten
-when the shadow file changes. **Give a VMS a user of its own** in a
-group with just `live`.
+has its password only in `/etc/shadow`: its HA1s (as `root` and as
+`admin`) are learnt when it logs in to the screen, the web page or the
+API, kept in the users file's `system` section with its NETIP hash, and
+forgotten when its shadow entry changes (`passwd`). **Give a VMS a user
+of its own** in a group with just `live`.
 
 An HA1 is as good as the password for logging in to this server (not
 elsewhere: it is bound to the realm and the user name); the users file is

@@ -59,14 +59,17 @@ Consequences:
 - A user whose password was set before the ONVIF server existed, or while
   it was off, has no key: digest logins fail for it (logged: "has no
   ONVIF key: set its password again"). Setting the password again fixes
-  that.
+  that, and so does the user's next login with its password (API, web
+  page, on-screen UI) while the ONVIF server is on: the key is filled in
+  then, as the NETIP server's hash is (docs/api.md, NETIP server).
 - The system account (`api.user`, `root`, and `admin` as its other name)
   has only its hash in `/etc/shadow`: it logs in to ONVIF only with
   `PasswordText` or Basic, which send the password in the clear over
   HTTP. Give VMS a user of its own instead (group `user` is enough to
   watch).
-- Turning the ONVIF server off does not remove keys already written; to
-  get rid of them, set those passwords again while it is off.
+- Turning the ONVIF server off does not remove keys already written (nor
+  does a login while it is off); to get rid of them, set those passwords
+  again while it is off.
 
 A `PasswordDigest` token is refused when its nonce was seen before (the
 last 64 are kept) or its `Created` is more than 15 minutes from the

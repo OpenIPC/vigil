@@ -500,6 +500,11 @@ static void media_chunk(source_t *s, const uint8_t *p, size_t len, au_emit_fn em
     n->frame_kind = 0;
 }
 
+void netip_media_feed(source_t *s, const uint8_t *body, size_t len, au_emit_fn emit, void *user)
+{
+    media_chunk(s, body, len, emit, user);
+}
+
 static int netip_poll(source_t *s, au_emit_fn emit, void *user)
 {
     netip_t *n = s->priv;
