@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* seg_writer.c — record an elementary stream into segments (see seg_writer.h). */
 #define _DEFAULT_SOURCE
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -95,9 +96,34 @@ typedef struct {
     time_t   mtime;
 } rec_file_t;
 
+/* Oldest first: by name, the numbers in it by value, so that the tenth
+ * segment of a second (..._HHMMSS_10) comes after the second (_2). */
+int seg_name_cmp(const char *a, const char *b)
+{
+    while (*a && *b) {
+        if (isdigit((unsigned char)*a) && isdigit((unsigned char)*b)) {
+            while (*a == '0') ++a;
+            while (*b == '0') ++b;
+            size_t la = 0, lb = 0;
+            while (isdigit((unsigned char)a[la])) ++la;
+            while (isdigit((unsigned char)b[lb])) ++lb;
+            if (la != lb) return la < lb ? -1 : 1;
+            int c = memcmp(a, b, la);
+            if (c) return c;
+            a += la;
+            b += lb;
+            continue;
+        }
+        if (*a != *b) return (unsigned char)*a < (unsigned char)*b ? -1 : 1;
+        ++a;
+        ++b;
+    }
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
 static int by_name(const void *a, const void *b)
 {
-    return strcmp(((const rec_file_t *)a)->name, ((const rec_file_t *)b)->name);
+    return seg_name_cmp(((const rec_file_t *)a)->name, ((const rec_file_t *)b)->name);
 }
 
 int seg_quota_enforce(const char *dir, const char *prefix, uint64_t max_bytes, time_t max_age,

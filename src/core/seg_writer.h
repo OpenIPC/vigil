@@ -69,8 +69,12 @@ void seg_set_overwrite(seg_writer_t *w, int overwrite);
  * seconds (0: none); checked when the next segment opens. */
 void seg_set_quota(seg_writer_t *w, uint64_t max_bytes, time_t max_age);
 
+/* Segment names in time order: <0, 0, >0 as strcmp, but the numbers in
+ * them compared by value (..._HHMMSS_2 before ..._HHMMSS_10). */
+int seg_name_cmp(const char *a, const char *b);
+
 /* Enforce the quota on the files of `prefix` in `dir` now: delete the
- * oldest (by name, which is by time) beyond `max_bytes`, and those whose
+ * oldest (by name, which is by time: seg_name_cmp) beyond `max_bytes`, and those whose
  * modification time is before `now - max_age`; never a segment open in
  * this process. Returns the number deleted. */
 int seg_quota_enforce(const char *dir, const char *prefix, uint64_t max_bytes, time_t max_age,

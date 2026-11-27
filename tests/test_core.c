@@ -3144,6 +3144,25 @@ static void test_rec_policies(void)
     CHECK(seg_quota_enforce(dir, "CAM1", 0, 36 * 3600, now) == 1 && !exists_in(dir, "CAM1_20260103_000000.h265") &&
           exists_in(dir, "CAM1_20260104_000000.h264"), "age quota: older than 36 h deleted");
     CHECK(seg_quota_enforce(dir, "CAM1", 0, 0, now) == 0, "no quota: nothing");
+    /* Eleven segments in one second (_1 to _10 after the first): the
+     * oldest go first, not _10 because it sorts before _2 as text. */
+    snprintf(cmd, sizeof cmd, "rm -f %s/CAM1_*", dir);
+    if (system(cmd)) {}
+    for (int i = 0; i <= 10; ++i) {
+        char nm[64];
+        if (i) snprintf(nm, sizeof nm, "CAM1_20260105_120000_%d.h264", i);
+        else snprintf(nm, sizeof nm, "CAM1_20260105_120000.h264");
+        touch_at(dir, nm, 100, now);
+    }
+    CHECK(seg_quota_enforce(dir, "CAM1", 300, 0, now) == 8 && exists_in(dir, "CAM1_20260105_120000_10.h264") &&
+              exists_in(dir, "CAM1_20260105_120000_9.h264") && exists_in(dir, "CAM1_20260105_120000_8.h264") &&
+              !exists_in(dir, "CAM1_20260105_120000_7.h264") && !exists_in(dir, "CAM1_20260105_120000.h264"),
+          "size quota, eleven in a second: _8, _9 and _10 kept");
+    CHECK(seg_name_cmp("CAM1_20260105_120000_2.h264", "CAM1_20260105_120000_10.h264") < 0 &&
+              seg_name_cmp("CAM1_20260105_120000.h264", "CAM1_20260105_120000_1.h264") < 0 &&
+              seg_name_cmp("CAM1_20260105_120000_9.h264", "CAM1_20260105_120001.h264") < 0 &&
+              seg_name_cmp("CAM1_20260105_120000_3.h264", "CAM1_20260105_120000_3.h264") == 0,
+          "segment names in time order");
     snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
     if (system(cmd)) {}
 
