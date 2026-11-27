@@ -406,6 +406,7 @@ typedef struct {
     char module[32];                /* the first module it loads */
     char ids[6][10];                /* "vvvv:pppp" the profile names */
     int  n_ids;
+    int  board;                     /* drives a camera board's GPIOs: not for this box */
 } profile_t;
 
 static void hex4(const char *p, char *out)
@@ -448,6 +449,7 @@ static int read_profiles(const char *file, profile_t *out, int max)
             } else if (!strcmp(t, "fi") && line == t) {
                 cur = NULL;
             } else if (cur) {
+                if (strstr(t, "gpio")) cur->board = 1;
                 const char *m = strstr(t, "modprobe ");
                 if (m && !cur->module[0]) {
                     m += 9;
@@ -552,14 +554,16 @@ int usb_radios(int modems, usb_radio_t *out, int max)
         if (aliases && ma[0]) module_for(aliases, ma, mod, sizeof mod);
         /* The profile: one naming this device (a modem in another mode
          * at first, e3372h), else the one loading its module; for Wi-Fi
-         * only the "-generic" ones, the others power a camera's own
-         * radio through its GPIOs. */
+         * only the "-generic" ones. Never one that drives GPIOs: those
+         * power a particular camera board's own radio, and on this box
+         * the same pins are something else. */
         const profile_t *hit = NULL;
         for (int i = 0; i < np && !hit; ++i)
-            for (int k = 0; k < pr[i].n_ids && !hit; ++k)
+            for (int k = 0; k < pr[i].n_ids && !hit && !pr[i].board; ++k)
                 if (!strcmp(pr[i].ids[k], id)) hit = &pr[i];
         for (int i = 0; i < np && !hit && mod[0]; ++i)
-            if (!strcmp(pr[i].module, mod) && (modems || strstr(pr[i].name, "-generic"))) hit = &pr[i];
+            if (!strcmp(pr[i].module, mod) && !pr[i].board && (modems || strstr(pr[i].name, "-generic")))
+                hit = &pr[i];
         int ours = hit || (modems ? is_modem_module(mod) : 0);
         if (!ours) continue;
         usb_radio_t *r = &out[n++];

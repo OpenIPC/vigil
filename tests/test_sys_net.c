@@ -211,8 +211,8 @@ void test_sys_net(void)
               "if [ \"$1\" = \"rndis-e3372h\" ]; then\n"
               "\tusb_modeswitch -v 0x12d1 -p 0x1f01 -c /usr/share/usb_modeswitch/12d1:1f01\n"
               "\tmodprobe rndis_host\n\texit 0\nfi\n"
-              "if [ \"$1\" = \"ec200n-gk7205v200-vixand\" ]; then\n\tmodprobe rndis_host\n"
-              "\tmodprobe usbserial vendor=0x2c7c product=0x6002\n\texit 0\nfi\nexit 1\n");
+              "if [ \"$1\" = \"ec200n-gk7205v200-vixand\" ]; then\n\tset_gpio 9 1\n\tmodprobe rndis_host\n"
+              "\tmodprobe usbserial vendor=0x2c7c product=0x0125\n\texit 0\nfi\nexit 1\n");
     fake_file("/sys/bus/usb/devices/1-1/idVendor", "148f\n");
     fake_file("/sys/bus/usb/devices/1-1/idProduct", "7601\n");
     fake_file("/sys/bus/usb/devices/1-1/manufacturer", "MediaTek\n");
@@ -240,7 +240,8 @@ void test_sys_net(void)
     CHECK(!l.ifname[0] && l.n_modems == 2, "two modems: %d", l.n_modems);
     int e3372 = !strcmp(l.modems[0].id, "12d1:1f01") ? 0 : 1;
     CHECK(!strcmp(l.modems[e3372].profile, "rndis-e3372h") && !strcmp(l.modems[1 - e3372].driver, "qmi_wwan") &&
-          !l.modems[1 - e3372].profile[0], "e3372h (storage mode) by its id; a QMI modem with no profile");
+          !l.modems[1 - e3372].profile[0],
+          "e3372h (storage mode) by its id; a QMI modem with no profile (a board's GPIO profile naming it skipped)");
     /* Joining loads the driver the firmware's way, the interface comes up. */
     fake_answer("fw_printenv", 0, "");
     fake_clear_log();
