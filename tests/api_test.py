@@ -250,7 +250,7 @@ def main():
         secs = {s["key"]: s for s in schema["sections"]} if st == 200 else {}
         seg = [f for f in secs.get("record", {}).get("fields", []) if f["key"] == "segment"]
         check(set(secs) == {"cameras", "record", "schedule", "quota", "nas", "ddns", "upnp", "smtp",
-                              "alarm", "time", "ui", "display", "api", "web", "discovery", "onvif_server",
+                              "alarm", "time", "ui", "display", "live", "api", "web", "discovery", "onvif_server",
                               "qos", "rtsp_server", "netip_server"} and seg and seg[0]["min"] == 10 and
               seg[0]["max"] == 3600 and seg[0]["live"], "schema: sections and limits")
         st, _, _ = api.json("GET", "/api/v1/nothing")

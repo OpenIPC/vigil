@@ -256,6 +256,8 @@ static const char *const corners[] = { "top-left", "top-right", "bottom-left", "
 static const char *const osd_sizes[] = { "small", "medium", "large", "xlarge", NULL };
 static const char *const osd_backgrounds[] = { "outline", "none", "box", NULL };
 static const char *const video_aspects[] = { "fit", "stretch", "fill", NULL };
+/* ui_layout_name's, smallest first */
+static const char *const live_layouts[] = { "1x1", "2x2", "1+7", "3x3", "4x4", "8x4", "8x8", NULL };
 
 int config_output_mode(const char *s, unsigned *w, unsigned *h, unsigned *hz)
 {
@@ -526,6 +528,17 @@ static const schema_field_t display_fields[] = {
               "(the alarm icons' events); none otherwise." },
 };
 
+static const schema_field_t live_fields[] = {
+    { .key = "layout", ENUM(config_live_t, layout, live_layouts), .def_str = "2x2", .live = 1, .label = "Layout",
+      .help = "The live view's windows (1+7: one large, seven small). One with more windows than the "
+              "board has channels shows the largest that fits. A camera full screen by a double click is "
+              "not kept, the grid it came from is." },
+    { .key = "page", INT(config_live_t, page), .def_int = 1, .min = 1, .max = LIVE_PAGE_MAX, .live = 1,
+      .label = "Page",
+      .help = "Which cameras the layout shows: 1 the first ones (CAM1.. for 2x2: CAM1-CAM4), 2 the next, "
+              "...; past the last page, the last." },
+};
+
 static const schema_field_t api_fields[] = {
     { .key = "listen", STR(config_api_t, listen), .def_str = "0.0.0.0:8080", .check = check_listen, .live = 1,
       .label = "Listen on", .help = "IPv4 address and port of the HTTP API, or just the port. "
@@ -722,6 +735,11 @@ static const schema_section_t sections[] = {
     { .key = "display", .off = offsetof(vigil_config_t, display), .fields = display_fields,
       .n_fields = N(display_fields), .label = "Display",
       .help = "The HDMI/VGA output, and the clock, names and icons over the live view." },
+    { .key = "live", .off = offsetof(vigil_config_t, live), .fields = live_fields, .n_fields = N(live_fields),
+      .label = "Live view",
+      .help = "What the live view shows, saved by the on-screen UI a few seconds after the user changes "
+              "it (and when vigild stops), so that a restart comes back to it. Through the API it applies "
+              "at once." },
     { .key = "api", .off = offsetof(vigil_config_t, api), .fields = api_fields,
       .n_fields = N(api_fields), .label = "HTTP API" },
     OBJECT("web", web, web_fields, "Zero channel"),

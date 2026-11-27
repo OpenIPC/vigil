@@ -329,6 +329,7 @@ saved over it until it is fixed or removed.
 | `/config/record`, `schedule`, `quota`, `nas` | `storage` |
 | `/config/ddns`, `upnp`, `smtp`, `alarm`, `onvif_server`, `qos`, `netip_server` | `network` |
 | `/config/time`, `ui`, `display` | `system` |
+| `/config/live` | `live` |
 | `/config/api`, `web`, `rtsp_server` | `users` |
 | `/network/…` | `network` |
 | `/system/…` | `system` |
@@ -572,7 +573,7 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `GET /api/v1/status` | Platform, uptime, configuration generation, one entry per camera. |
 | `GET /api/v1/config` | The configuration in force, passwords redacted. |
 | `PUT /api/v1/config` | Replace the whole configuration. Sections and keys it omits get their defaults. |
-| `GET /api/v1/config/<section>` | One section (`cameras`, `record`, `schedule`, `quota`, `nas`, `ddns`, `upnp`, `smtp`, `alarm`, `time`, `ui`, `display`, `api`, `discovery`, `qos`, `rtsp_server`, `onvif_server`, `netip_server`). |
+| `GET /api/v1/config/<section>` | One section (`cameras`, `record`, `schedule`, `quota`, `nas`, `ddns`, `upnp`, `smtp`, `alarm`, `time`, `ui`, `display`, `live`, `api`, `discovery`, `qos`, `rtsp_server`, `onvif_server`, `netip_server`). |
 | `PUT /api/v1/config/<section>` | Replace one section; the others stay. |
 | `GET /api/v1/schema` | Every setting: type, default, limits, label, help. |
 | `GET /api/v1/ws` | WebSocket: pushed status, events and configuration changes. |
@@ -597,6 +598,14 @@ not be saved (the configuration in force is unchanged), or — "the
 configuration is in force, but saving it is not confirmed" — the new file
 replaced the old one but its directory could not be synced, so it may not
 survive a power cut.
+
+`live` is what the screen's live view shows: `layout` (`1x1`, `2x2`, `1+7`,
+`3x3`, `4x4`, `8x4`, `8x8`) and `page` (1 the first cameras, 2 the next
+...). The on-screen UI saves it itself a few seconds after the user stops
+changing it, and when vigild stops, so a restart comes back to it; a `PUT`
+shows it at once (`curl -X PUT .../config/live -d '{"layout":"3x3","page":2}'`).
+A layout larger than the board's channels shows the largest one that fits,
+a page past the last the last one.
 
 ### Examples
 

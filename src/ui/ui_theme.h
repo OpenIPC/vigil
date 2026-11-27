@@ -79,6 +79,11 @@ void      ui_outlined_set_color(lv_obj_t *o, lv_color_t c);
 /* The text label (for its text, width or long mode). */
 lv_obj_t *ui_outlined_label(lv_obj_t *o);
 
+/* `base` with digits of equal width, none kerned (a clock that does not
+ * move sideways as its digits change), and the label's font made so. */
+const lv_font_t *ui_tnum_font(const lv_font_t *base);
+void             ui_tnum(lv_obj_t *label);
+
 /* What text and icons over the video stand on (display.*_background). */
 typedef enum {
     UI_OSD_OUTLINE,             /* hard edges, the dark outline (ui_outlined) */

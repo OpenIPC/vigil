@@ -232,6 +232,8 @@ void ui_app_refresh(void)
     if (strcmp(clk, lv_subject_get_string(&ui_subj_clock))) lv_subject_copy_string(&ui_subj_clock, clk);
 }
 
+void ui_app_flush(void) { ui_live_flush(); }
+
 static void refresh_cb(lv_timer_t *t)
 {
     (void)t;
@@ -643,6 +645,9 @@ static void page_deleted_cb(lv_event_t *e)
 ui_page_t *ui_page_push(const char *title)
 {
     if (g_depth == STACK_MAX) return NULL;
+    /* A layout waiting to be saved, saved before a page can take the
+     * configuration's generation: its own save would find it moved. */
+    ui_live_flush();
     ui_page_t *p = calloc(1, sizeof *p);
     if (!p) return NULL;
     ui_popup_close();
@@ -685,6 +690,7 @@ ui_page_t *ui_page_push(const char *title)
     lv_obj_set_flex_align(p->actions, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(p->actions, VG_SPACE_SM, 0);
     lv_obj_t *clk = ui_label(p->header, "", VG_FONT_SM_LV, UI_C(TEXT2));
+    ui_tnum(clk);
     lv_label_bind_text(clk, &ui_subj_clock, NULL);
 
     p->body = lv_obj_create(p->scr);
@@ -707,6 +713,7 @@ ui_page_t *ui_page_push(const char *title)
 ui_page_t *ui_page_push_plain(void)
 {
     if (g_depth == STACK_MAX) return NULL;
+    ui_live_flush();                    /* as ui_page_push */
     ui_page_t *p = calloc(1, sizeof *p);
     if (!p) return NULL;
     ui_popup_close();

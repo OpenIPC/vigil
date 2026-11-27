@@ -14,12 +14,13 @@
  * force as it changes (a slider while it is dragged) and saved at once (a
  * slider when it is let go), without the page's Save.
  *
- * Clock, Camera names, Status icons, Video: drop-downs of display.* (and
- * the clock's format, ui.date_format and ui.time_format, which System ->
- * General also sets); the live view follows a save at once.
- *
- * Status icons and Tiles also have switches (display.rec_icon,
- * alarm_icons, tile_dividers, alert_frame): a row of a page may be either. */
+ * OSD: what the live view draws over the video, on one page that scrolls,
+ * a section each: Clock, Camera names, Status icons, Video, Tiles.
+ * Drop-downs of display.* (and the clock's format, ui.date_format and
+ * ui.time_format, which System -> General also sets) and switches
+ * (display.rec_icon, alarm_icons, tile_dividers, alert_frame); one Save
+ * for the page, one write per section changed (display, ui). The live
+ * view follows a save at once. */
 #define _DEFAULT_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -510,7 +511,7 @@ static void adj_open(ui_set_t *s, lv_obj_t *pane)
     adj_load(a);
 }
 
-/* ---- Clock, Camera names, Status icons: drop-downs of display.* and ui.* ------------- */
+/* ---- OSD: drop-downs and switches of display.* (and ui.*'s clock format) ---------- */
 
 typedef struct {
     const char        *sec, *key;
@@ -521,10 +522,10 @@ typedef struct {
     int                sw;              /* a switch of a boolean: values k_bool, no names */
 } drow_t;
 
-#define DROWS_MAX 6
+#define DROWS_MAX 16
 
 typedef struct {
-    const drow_t *rows;
+    const drow_t *rows[DROWS_MAX];      /* k_osd's, in the page's order */
     int           n;
     lv_obj_t     *dd[DROWS_MAX];        /* a drop-down, or a switch (drow_t.sw) */
     int           sel0[DROWS_MAX];      /* what is stored */
@@ -535,13 +536,13 @@ static const char *const k_bool[] = { "0", "1" };
 
 static int row_sel(const dpage_t *d, int i)
 {
-    if (d->rows[i].sw) return lv_obj_has_state(d->dd[i], LV_STATE_CHECKED);
+    if (d->rows[i]->sw) return lv_obj_has_state(d->dd[i], LV_STATE_CHECKED);
     return dd_sel(d->dd[i]);
 }
 
 static void row_set(dpage_t *d, int i, int sel)
 {
-    if (!d->rows[i].sw) lv_dropdown_set_selected(d->dd[i], (uint32_t)sel);
+    if (!d->rows[i]->sw) lv_dropdown_set_selected(d->dd[i], (uint32_t)sel);
     else if (sel) lv_obj_add_state(d->dd[i], LV_STATE_CHECKED);
     else lv_obj_remove_state(d->dd[i], LV_STATE_CHECKED);
 }
@@ -606,38 +607,60 @@ static const drow_t k_tile_rows[] = {
       "otherwise.", k_bool, NULL, 2, 1 },
 };
 
+#define N(a) (int)(sizeof(a) / sizeof((a)[0]))
+
+/* OSD: every setting of what is drawn over the video on one page, a
+ * section each, saved together. */
+typedef struct {
+    const char   *title;
+    const drow_t *rows;
+    int           n;
+} dgroup_t;
+
+static const dgroup_t k_osd[] = {
+    { "Clock", k_clock_rows, N(k_clock_rows) },
+    { "Camera names", k_name_rows, N(k_name_rows) },
+    { "Status icons", k_icon_rows, N(k_icon_rows) },
+    { "Video", k_video_rows, N(k_video_rows) },
+    { "Tiles", k_tile_rows, N(k_tile_rows) },
+};
+_Static_assert(N(k_clock_rows) + N(k_name_rows) + N(k_icon_rows) + N(k_video_rows) + N(k_tile_rows) <= DROWS_MAX,
+               "the OSD page's rows fit dpage_t");
+
 static void dpage_load(dpage_t *d)
 {
     for (int i = 0; i < d->n; ++i) {
         char v[32];
-        stored(d->rows[i].sec, d->rows[i].key, v, sizeof v);
+        stored(d->rows[i]->sec, d->rows[i]->key, v, sizeof v);
         d->sel0[i] = 0;
-        for (int k = 0; k < d->rows[i].n; ++k)
-            if (!strcmp(d->rows[i].values[k], v)) d->sel0[i] = k;
+        for (int k = 0; k < d->rows[i]->n; ++k)
+            if (!strcmp(d->rows[i]->values[k], v)) d->sel0[i] = k;
         row_set(d, i, d->sel0[i]);
     }
 }
 
-static void *dpage_open(ui_set_t *s, lv_obj_t *pane, const char *title, const drow_t *rows, int n)
+static void *osd_open(ui_set_t *s, lv_obj_t *pane)
 {
     dpage_t *d = calloc(1, sizeof *d);
     if (!d) return NULL;
-    d->rows = rows;
-    d->n = n < DROWS_MAX ? n : DROWS_MAX;
-    lv_obj_t *sect = ui_set_section(pane, title);
-    for (int i = 0; i < d->n; ++i) {
-        if (i && strcmp(rows[i].sec, rows[i - 1].sec)) sect = ui_set_section(pane, "Format");
-        lv_obj_t *box = ui_set_row(sect, rows[i].label, rows[i].help);
-        if (rows[i].sw) {
-            d->dd[i] = ui_set_switch(s, box, 0);
-            continue;
+    for (int g = 0; g < N(k_osd); ++g) {
+        lv_obj_t *sect = ui_set_section(pane, k_osd[g].title);
+        for (int r = 0; r < k_osd[g].n && d->n < DROWS_MAX; ++r) {
+            const drow_t *row = &k_osd[g].rows[r];
+            int i = d->n++;
+            d->rows[i] = row;
+            lv_obj_t *box = ui_set_row(sect, row->label, row->help);
+            if (row->sw) {
+                d->dd[i] = ui_set_switch(s, box, 0);
+                continue;
+            }
+            char opts[256] = "";
+            for (int k = 0; k < row->n; ++k) {
+                size_t l = strlen(opts);
+                snprintf(opts + l, sizeof opts - l, "%s%s", k ? "\n" : "", row->names[k]);
+            }
+            d->dd[i] = ui_set_dropdown(s, box, opts, 0, 320);
         }
-        char opts[256] = "";
-        for (int k = 0; k < rows[i].n; ++k) {
-            size_t l = strlen(opts);
-            snprintf(opts + l, sizeof opts - l, "%s%s", k ? "\n" : "", rows[i].names[k]);
-        }
-        d->dd[i] = ui_set_dropdown(s, box, opts, 0, 320);
     }
     dpage_load(d);
     return d;
@@ -651,23 +674,33 @@ static int dpage_dirty(void *st)
     return 0;
 }
 
-/* Each section the page shows, on its own: the display's rows, then the
- * formats. */
+/* One write per settings section the page shows (display, then ui for
+ * the clock's format), each only when one of its rows changed. */
 static int dpage_save(void *st)
 {
     dpage_t *d = st;
     if (!d) return 0;
     int failed = 0;
     for (int i = 0; i < d->n; ++i) {
-        if (i && !strcmp(d->rows[i].sec, d->rows[i - 1].sec)) continue;
+        int first = 1;
+        for (int j = 0; j < i; ++j)
+            if (!strcmp(d->rows[j]->sec, d->rows[i]->sec)) first = 0;
+        if (!first) continue;
         const char *keys[DROWS_MAX], *vals[DROWS_MAX];
         int k = 0, changed = 0;
-        for (int j = i; j < d->n && !strcmp(d->rows[j].sec, d->rows[i].sec); ++j) {
-            keys[k] = d->rows[j].key;
-            vals[k++] = d->rows[j].values[row_sel(d, j)];
+        for (int j = i; j < d->n; ++j) {
+            if (strcmp(d->rows[j]->sec, d->rows[i]->sec)) continue;
+            keys[k] = d->rows[j]->key;
+            vals[k++] = d->rows[j]->values[row_sel(d, j)];
             changed |= row_sel(d, j) != d->sel0[j];
         }
-        if (changed && save_fields(d->rows[i].sec, keys, vals, k) < 0) failed = 1;
+        if (!changed) continue;
+        if (save_fields(d->rows[i]->sec, keys, vals, k) < 0) {
+            failed = 1;
+            continue;
+        }
+        for (int j = i; j < d->n; ++j)         /* saved: no longer a change, whatever the others do */
+            if (!strcmp(d->rows[j]->sec, d->rows[i]->sec)) d->sel0[j] = row_sel(d, j);
     }
     if (failed) return -1;
     ui_toast(UI_TOAST_OK, "%s", TR(S_SAVED));
@@ -682,35 +715,9 @@ static void dpage_cancel(void *st)
 
 static void dpage_close(void *st) { free(st); }
 
-#define N(a) (int)(sizeof(a) / sizeof((a)[0]))
-static void *clock_open(ui_set_t *s, lv_obj_t *pane)
-{
-    return dpage_open(s, pane, "Clock on the live view", k_clock_rows, N(k_clock_rows));
-}
-static void *names_open(ui_set_t *s, lv_obj_t *pane)
-{
-    return dpage_open(s, pane, "Camera names on the tiles", k_name_rows, N(k_name_rows));
-}
-static void *icons_open(ui_set_t *s, lv_obj_t *pane)
-{
-    return dpage_open(s, pane, "Status icons on the tiles", k_icon_rows, N(k_icon_rows));
-}
-static void *video_open(ui_set_t *s, lv_obj_t *pane)
-{
-    return dpage_open(s, pane, "Camera pictures", k_video_rows, N(k_video_rows));
-}
-static void *tiles_open(ui_set_t *s, lv_obj_t *pane)
-{
-    return dpage_open(s, pane, "The live view's tiles", k_tile_rows, N(k_tile_rows));
-}
-
 static const ui_set_item_t g_items[] = {
     { "Output", &ui_icon_nav_output, out_open, out_dirty, out_save, out_cancel, out_close },
-    { "Clock", &ui_icon_nav_clock, clock_open, dpage_dirty, dpage_save, dpage_cancel, dpage_close },
-    { "Camera names", &ui_icon_nav_names, names_open, dpage_dirty, dpage_save, dpage_cancel, dpage_close },
-    { "Status icons", &ui_icon_nav_icons, icons_open, dpage_dirty, dpage_save, dpage_cancel, dpage_close },
-    { "Video", &ui_icon_nav_aspect, video_open, dpage_dirty, dpage_save, dpage_cancel, dpage_close },
-    { "Tiles", &ui_icon_nav_tiles, tiles_open, dpage_dirty, dpage_save, dpage_cancel, dpage_close },
+    { "OSD", &ui_icon_nav_osd, osd_open, dpage_dirty, dpage_save, dpage_cancel, dpage_close },
 };
 
 void ui_display_open(void) { ui_display_open_at(UI_DISPLAY_OUTPUT); }

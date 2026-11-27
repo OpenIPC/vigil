@@ -215,6 +215,7 @@ static void top_bar(ui_page_t *p)
     lv_obj_set_style_pad_left(title, VG_SPACE_LG, 0);
     lv_obj_set_flex_grow(title, 1);
     lv_obj_t *clk = ui_label(bar, "", VG_FONT_SM_LV, UI_C(TEXT2));
+    ui_tnum(clk);
     lv_label_bind_text(clk, &ui_subj_clock, NULL);
     lv_obj_t *live = ui_btn(bar, LV_SYMBOL_VIDEO, "LIVE");
     lv_obj_add_event_cb(live, live_cb, LV_EVENT_CLICKED, NULL);

@@ -22,6 +22,9 @@ static const struct { const char *key; unsigned perm; } SECTIONS[] = {
     { "alarm", PERM_NETWORK }, { "qos", PERM_NETWORK }, { "onvif_server", PERM_NETWORK },
     { "netip_server", PERM_NETWORK },
     { "time", PERM_SYSTEM }, { "ui", PERM_SYSTEM }, { "display", PERM_SYSTEM },
+    /* The live view's layout and page: what the screen's Split and page
+     * arrows change, which need no login there either. */
+    { "live", PERM_LIVE },
     /* api.auth and api.user decide who gets in at all; web, who reaches
      * the console; rtsp_server.auth, who sees every camera. */
     { "api", PERM_USERS }, { "web", PERM_USERS }, { "rtsp_server", PERM_USERS },

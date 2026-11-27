@@ -62,6 +62,11 @@ int ui_keyboard_in_use(void);
 /* Poll the model now instead of at the next refresh tick (tests). */
 void ui_app_refresh(void);
 
+/* Save now what waits to be saved (the live view's layout and page, which
+ * wait a few seconds for the user to stop changing them): before vigild
+ * stops, reboots or powers off. */
+void ui_app_flush(void);
+
 /* ---- between the screens ------------------------------------------------------------- */
 
 const ui_model_t *ui_model(void);
@@ -190,6 +195,7 @@ lv_group_t *ui_live_group(void);
 int       ui_live_key(uint32_t key, unsigned mods);
 void      ui_live_context_menu(const lv_point_t *at);
 void      ui_live_event(const ui_event_t *ev);
+void      ui_live_flush(void);          /* ui_app_flush */
 void      ui_menu_open(void);
 void      ui_form_open(int sec, int item);  /* item -1: object section; n: new item */
 /* A new item of array section `sec` at position `slot` (a camera on

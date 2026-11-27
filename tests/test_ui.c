@@ -36,6 +36,7 @@
 #include "ui_cursor.h"
 #include "ui_layout.h"
 #include "ui_osk.h"
+#include "ui_theme.h"
 #include "theme_tokens.h"
 #include "icons.h"
 
@@ -151,6 +152,9 @@ static ui_model_t g_model;
 static int        g_channels = 4;       /* the platform's, as the model says */
 static void shots_status(int idx, ui_chan_t *st);
 static void quiet(void);
+static void key(int code);
+static lv_obj_t *focused(void);
+static int g_kbd[2];
 static lv_obj_t *nth_of(const lv_obj_class_t *cls, int nth);
 static ui_rect_t  g_tiles[UI_MAX_CHANNELS];
 static int        g_tile_calls;
@@ -201,7 +205,8 @@ static const ui_event_t k_events[] = {
 };
 static int g_ev;
 
-static time_t fake_now(void) { return 1795703525; }     /* 2026-11-26 14:32:05 UTC */
+static time_t g_now = 1795703525;                       /* 2026-11-26 14:32:05 UTC */
+static time_t fake_now(void) { return g_now; }
 
 static ui_event_t g_more[8];             /* pushed by the steps */
 static int        g_n_more, g_more_read;
@@ -2898,6 +2903,22 @@ static int alarm_frame_shown(lv_obj_t *t)
     return 0;
 }
 
+/* The OSD page's pane: what scrolls it. */
+static lv_obj_t *osd_pane(void)
+{
+    lv_obj_t *o = find("Clock", 0);
+    while (o && !(lv_obj_get_scroll_dir(o) & LV_DIR_VER && lv_obj_get_scroll_bottom(o) > 0)) o = lv_obj_get_parent(o);
+    return o;
+}
+
+static int below_screen(lv_obj_t *o)
+{
+    lv_area_t a;
+    if (!o) return 0;
+    lv_obj_get_coords(o, &a);
+    return a.y1 >= H;
+}
+
 static int put_display(const char *json)
 {
     schema_errors_t e;
@@ -2963,8 +2984,8 @@ static void test_display_pages(void)
     move_to(300, 200);
     button(BTN_RIGHT);
     click_text("Display");
-    CHECK(find("Display", 1) && find("Output", 0) && find("Clock", 0) && find("Camera names", 0) &&
-          find("Status icons", 0) && find("Video", 0) && find("Tiles", 0), "Display: its six parts");
+    CHECK(find("Display", 1) && find("Output", 0) && find("OSD", 0) && !find("Clock", 0) && !find("Tiles", 0),
+          "Display: its two parts, Output and OSD");
 
     /* A new resolution, kept: switched, then saved. */
     int sets = g_mode_sets;
@@ -3079,13 +3100,33 @@ static void test_display_pages(void)
     config_get(&c);
     CHECK(!strcmp(c.display.picture, "standard") && g_picture.gamma == 100, "Standard again");
 
-    /* The clock: bottom centre, large, on a box; then the format. */
-    click_text("Clock");
-    CHECK(find("Position", 0) && find("Background", 0) && find("Date", 0), "Clock: its settings");
+    /* OSD: the clock, the names, the icons, the video and the tiles, one
+     * page with a section each, taller than the screen. */
+    click_text("OSD");
+    CHECK(find("Clock", 0) && find("Camera names", 0) && find("Status icons", 0) && find("Video", 0) &&
+              find("Tiles", 0) && find("Date", 0) && find("Video aspect", 0) && find("Lines between tiles", 0),
+          "OSD: its five sections");
+    lv_obj_t *last = nth_of(&lv_switch_class, 3), *pane = osd_pane();
+    CHECK(nth_of(&lv_dropdown_class, 10) && !nth_of(&lv_dropdown_class, 11) && last && !nth_of(&lv_switch_class, 4),
+          "OSD: 11 drop-downs, 4 switches");
+    CHECK(pane && lv_obj_get_scroll_y(pane) == 0 && lv_obj_get_scroll_bottom(pane) > 0 && below_screen(last),
+          "OSD: taller than the screen, at its top");
+    run(VG_DURATION_TOAST);                     /* the resolution's toast gone */
+    shot("display_osd");
+
+    /* Every section changed, one Save: the clock bottom centre, large, on
+     * a box, 12-hour (ui.*); the names top right without an outline; the
+     * icons top right on a box; the video stretched. */
     dd_pick(nth_of(&lv_dropdown_class, 0), 5);
     dd_pick(nth_of(&lv_dropdown_class, 1), 2);
     dd_pick(nth_of(&lv_dropdown_class, 2), 2);
     dd_pick(nth_of(&lv_dropdown_class, 4), 1);          /* 12-hour */
+    dd_pick(nth_of(&lv_dropdown_class, 5), 2);          /* names: top right */
+    dd_pick(nth_of(&lv_dropdown_class, 7), 1);          /* no outline */
+    dd_pick(nth_of(&lv_dropdown_class, 8), 1);          /* icons: top right, next to the name */
+    dd_pick(nth_of(&lv_dropdown_class, 9), 2);          /* box */
+    dd_pick(nth_of(&lv_dropdown_class, 10), 1);         /* stretch */
+    unsigned gen0 = config_generation();
     click_text(SAVE);
     run(300);
     config_get(&c);
@@ -3093,49 +3134,66 @@ static void test_display_pages(void)
           !strcmp(c.display.clock_background, "box") && !strcmp(c.ui.time_format, "12h"),
           "clock saved: %s %s %s %s", c.display.clock_position, c.display.clock_size, c.display.clock_background,
           c.ui.time_format);
+    CHECK(!strcmp(c.display.name_position, "top-right") && !strcmp(c.display.name_background, "none") &&
+          !strcmp(c.display.icons_position, "top-right") && !strcmp(c.display.icons_background, "box"),
+          "names and icons saved");
+    CHECK(!strcmp(c.display.video_aspect, "stretch"), "video aspect saved: %s", c.display.video_aspect);
+    CHECK(config_generation() == gen0 + 2, "one write for display, one for ui (%u)", config_generation() - gen0);
+    CHECK(find("Saved", 1), "Saved");
     lv_obj_t *clk = osd_clock();
     if (clk) {
         int x, y;
         center_of(clk, &x, &y);
         CHECK(x > W / 2 - 20 && x < W / 2 + 20 && y > H - 40, "the clock at the bottom centre (%d, %d)", x, y);
-        CHECK(lv_obj_get_style_text_font(clk, 0) == VG_FONT_LG_LV && lv_obj_get_style_bg_opa(clk, 0) == LV_OPA_COVER,
-              "large, on an opaque box");
+        CHECK(lv_obj_get_style_text_font(clk, 0) == ui_tnum_font(VG_FONT_LG_LV) &&
+                  lv_obj_get_style_bg_opa(clk, 0) == LV_OPA_COVER,
+              "large (equal digits), on an opaque box");
     } else {
         CHECK(0, "the clock in 12-hour time on the live view");
     }
-
-    click_text("Camera names");
-    dd_pick(nth_of(&lv_dropdown_class, 0), 2);          /* top right */
-    dd_pick(nth_of(&lv_dropdown_class, 2), 1);          /* no outline */
-    click_text(SAVE);
-    run(300);
-    click_text("Status icons");
-    dd_pick(nth_of(&lv_dropdown_class, 0), 1);          /* top right: next to the name */
-    dd_pick(nth_of(&lv_dropdown_class, 1), 2);          /* box */
-    click_text(SAVE);
-    run(300);
-    config_get(&c);
-    CHECK(!strcmp(c.display.name_position, "top-right") && !strcmp(c.display.name_background, "none") &&
-          !strcmp(c.display.icons_position, "top-right") && !strcmp(c.display.icons_background, "box"),
-          "names and icons saved");
-    click_text("Video");
-    CHECK(find("Video aspect", 0) && lv_dropdown_get_selected(nth_of(&lv_dropdown_class, 0)) == 0,
-          "Video: fit by default");
-    dd_pick(nth_of(&lv_dropdown_class, 0), 1);          /* stretch */
-    click_text(SAVE);
-    run(300);
-    config_get(&c);
-    CHECK(!strcmp(c.display.video_aspect, "stretch"), "video aspect saved: %s", c.display.video_aspect);
-    dd_pick(nth_of(&lv_dropdown_class, 0), 2);          /* fill */
+    dd_pick(nth_of(&lv_dropdown_class, 10), 2);         /* fill */
     click_text(SAVE);
     run(300);
     config_get(&c);
     CHECK(!strcmp(c.display.video_aspect, "fill"), "video aspect fill saved: %s", c.display.video_aspect);
-    dd_pick(nth_of(&lv_dropdown_class, 0), 0);
+    dd_pick(nth_of(&lv_dropdown_class, 10), 0);
     click_text(SAVE);
     run(300);
     config_get(&c);
     CHECK(!strcmp(c.display.video_aspect, "fit"), "and back to fit: %s", c.display.video_aspect);
+
+    /* The keyboard reaches every field, the page scrolling to it (one
+     * plugged in for this, unplugged after). */
+    if (pipe(g_kbd) == 0) {
+        fcntl(g_kbd[0], F_SETFL, O_NONBLOCK);
+        input_evdev_attach_keyboard(g_kbd[0], "test keyboard");
+    }
+    run(50);
+    lv_obj_scroll_to_y(pane, 0, LV_ANIM_OFF);
+    lv_obj_t *seen_w[24];
+    int n_seen = 0;
+    for (int i = 0; i < 40 && focused() != last; ++i) {
+        key(KEY_TAB);
+        lv_obj_t *f = focused();
+        if (f && (lv_obj_check_type(f, &lv_dropdown_class) || lv_obj_check_type(f, &lv_switch_class))) {
+            int dup = 0;
+            for (int k = 0; k < n_seen; ++k) dup |= seen_w[k] == f;
+            if (!dup && n_seen < 24) seen_w[n_seen++] = f;
+        }
+    }
+    run(500);                                   /* the scroll's animation */
+    lv_area_t la, pa;
+    lv_obj_get_coords(last, &la);
+    lv_obj_get_coords(pane, &pa);
+    CHECK(focused() == last && n_seen == 15, "Tab: every field in turn, to the last (%d)", n_seen);
+    CHECK(lv_obj_get_scroll_y(pane) > 0 && la.y1 >= pa.y1 && la.y2 <= pa.y2, "scrolled to it (%d, %d..%d in %d..%d)",
+          (int)lv_obj_get_scroll_y(pane), la.y1, la.y2, pa.y1, pa.y2);
+    lv_obj_scroll_to_y(pane, LV_COORD_MAX, LV_ANIM_OFF);   /* the end, help and all */
+    run(50);
+    shot("display_osd_end");
+    close(g_kbd[1]);
+    g_kbd[1] = -1;
+    run(200);
     button(BTN_RIGHT);
     CHECK(!ui_page_top(), "back on the live view");
     lv_obj_t *gate = find("Gate", 0);
@@ -3201,16 +3259,13 @@ static void test_display_pages(void)
           "by default: a line around the tile, no alarm frame");
     button(BTN_RIGHT);
     click_text("Display");
-    click_text("Status icons");
+    click_text("OSD");
     lv_obj_t *rec_sw = nth_of(&lv_switch_class, 0), *ev_sw = nth_of(&lv_switch_class, 1);
     CHECK(find("REC", 0) && find("Alarms", 0) && rec_sw && ev_sw && lv_obj_has_state(rec_sw, LV_STATE_CHECKED) &&
               lv_obj_has_state(ev_sw, LV_STATE_CHECKED),
           "Status icons: REC and Alarms, both on");
     if (rec_sw) click_obj(rec_sw);
-    click_text(SAVE);
-    run(300);
-    click_text("Tiles");
-    lv_obj_t *div_sw = nth_of(&lv_switch_class, 0), *frame_sw = nth_of(&lv_switch_class, 1);
+    lv_obj_t *div_sw = nth_of(&lv_switch_class, 2), *frame_sw = nth_of(&lv_switch_class, 3);
     CHECK(find("Lines between tiles", 0) && find("Alarm frame", 0) && div_sw && frame_sw &&
               lv_obj_has_state(div_sw, LV_STATE_CHECKED) && !lv_obj_has_state(frame_sw, LV_STATE_CHECKED),
           "Tiles: lines on, the alarm frame off");
@@ -3244,6 +3299,72 @@ static void test_display_pages(void)
     memset(&e, 0, sizeof e);
     config_put_json("ui", fmt, strlen(fmt), &e);
     run(300);
+}
+
+/* The live view's clock on the screen now (the clock subject's text). */
+static lv_obj_t *clock_now(void)
+{
+    const char *t = lv_subject_get_string(&ui_subj_clock);
+    lv_obj_t *scr = lv_screen_active();
+    for (uint32_t i = 0; i < lv_obj_get_child_count(scr); ++i) {
+        lv_obj_t *o = lv_obj_get_child(scr, (int32_t)i);
+        if (lv_obj_check_type(o, &lv_label_class) && !strcmp(lv_label_get_text(o), t)) return o;
+    }
+    return NULL;
+}
+
+/* The clock does not move as its digits change (narrow 1s, wide 8s): in
+ * every place, size and background, date and time alike. */
+static void test_clock_digits(void)
+{
+    static const time_t k_t[2] = { 1321009871, 3744565138 };   /* 2011-11-11 11:11:11, 2088-08-28 20:58:58 */
+    static const char *const k_pos[] = { "top-left", "top-center", "top-right", "bottom-left", "bottom-center",
+                                         "bottom-right" };
+    static const char *const k_bg[] = { "outline", "none", "box" };
+    static const char *const k_size[] = { "small", "xlarge" };
+    time_t now0 = g_now;
+    int moved = 0, n = 0;
+    for (size_t p = 0; p < sizeof k_pos / sizeof *k_pos; ++p)
+        for (size_t b = 0; b < sizeof k_bg / sizeof *k_bg; ++b)
+            for (size_t z = 0; z < sizeof k_size / sizeof *k_size; ++z) {
+                char json[160];
+                snprintf(json, sizeof json, "{\"clock_position\":\"%s\",\"clock_background\":\"%s\","
+                         "\"clock_size\":\"%s\"}", k_pos[p], k_bg[b], k_size[z]);
+                put_display(json);
+                lv_area_t a[2];
+                int ok = 1;
+                for (int i = 0; i < 2; ++i) {
+                    g_now = k_t[i];
+                    ui_app_refresh();
+                    run(50);
+                    lv_obj_t *clk = clock_now();
+                    ok &= clk != NULL;
+                    if (clk) lv_obj_get_coords(clk, &a[i]);
+                }
+                ++n;
+                if (!ok || memcmp(&a[0], &a[1], sizeof a[0])) {
+                    ++moved;
+                    fprintf(stderr, "%s %s %s: %d,%d-%d,%d then %d,%d-%d,%d\n", k_pos[p], k_bg[b], k_size[z],
+                            a[0].x1, a[0].y1, a[0].x2, a[0].y2, a[1].x1, a[1].y1, a[1].x2, a[1].y2);
+                }
+            }
+    CHECK(!moved, "the clock stays put as its digits change (%d of %d moved)", moved, n);
+    /* ... where Montserrat's own digits would not. */
+    g_now = k_t[0];
+    ui_app_refresh();
+    char t0[48];
+    snprintf(t0, sizeof t0, "%s", lv_subject_get_string(&ui_subj_clock));
+    g_now = k_t[1];
+    ui_app_refresh();
+    const char *t1 = lv_subject_get_string(&ui_subj_clock);
+    const lv_font_t *f = VG_FONT_XL_LV;
+    CHECK(lv_text_get_width(t0, (uint32_t)strlen(t0), f, 0) != lv_text_get_width(t1, (uint32_t)strlen(t1), f, 0) &&
+              lv_text_get_width(t0, (uint32_t)strlen(t0), ui_tnum_font(f), 0) ==
+                  lv_text_get_width(t1, (uint32_t)strlen(t1), ui_tnum_font(f), 0),
+          "\"%s\" and \"%s\": as wide only with equal digits", t0, t1);
+    g_now = now0;
+    ui_app_refresh();
+    put_display("{}");
 }
 
 static void test_account_pages(void)
@@ -3366,7 +3487,7 @@ static void shots_account(void)
 
 /* ---- the keyboard ------------------------------------------------------------------------------- */
 
-static int g_kbd[2] = { -1, -1 };       /* pipe: test -> evdev reader, as a keyboard */
+static int g_kbd[2] = { -1, -1 };      /* pipe: test -> evdev reader, as a keyboard */
 
 static void kev(int fd, int code, int value)
 {
@@ -4039,6 +4160,97 @@ static void test_split16(void)
     run(100);
 }
 
+/* live.* as stored: "3x3 2". */
+static const char *live_cfg(void)
+{
+    static char t[24];
+    vigil_config_t c;
+    config_get(&c);
+    snprintf(t, sizeof t, "%s %d", c.live.layout, c.live.page);
+    return t;
+}
+
+/* 16 channels, the layout and page kept: saved SAVE_DELAY (3 s) after the
+ * last of a run of changes, in one write; at once when vigild stops; a
+ * full screen by double click is not kept; live.* through the API is
+ * shown at once. The file is left for test_layout_restart. */
+static void test_layout_kept(void)
+{
+    ui_app_flush();                             /* whatever test_split16 left */
+    unsigned gen = config_generation();
+    char before[24];
+    snprintf(before, sizeof before, "%s", live_cfg());
+    key(KEY_9);
+    if (g_tiles[0].w) key(KEY_PAGEDOWN);        /* to page 2, CAM10..CAM16 */
+    run(1000);
+    CHECK(rect_is(9, 0, 0, 416, 240) && g_tiles[0].w == 0, "3x3, page 2");
+    key(KEY_PAGEDOWN);                          /* a run of flips: page 1, page 2 */
+    run(1000);
+    key(KEY_PAGEDOWN);
+    run(2000);
+    CHECK(!strcmp(live_cfg(), before) && config_generation() == gen,
+          "2 s after the last flip: not saved yet (%s)", live_cfg());
+    run(1200);
+    CHECK(!strcmp(live_cfg(), "3x3 2") && config_generation() == gen + 1, "3 s after: 3x3 page 2, one write (%s, %u)",
+          live_cfg(), config_generation() - gen);
+
+    /* Full screen by double click: not kept, while it lasts or after. */
+    click_at(200, 100);                         /* CAM10 */
+    run(100);
+    click_at(200, 100);
+    run(50);
+    CHECK(g_tiles[9].w == W && g_tiles[10].w == 0, "CAM10 full screen");
+    run(4000);
+    ui_app_flush();
+    CHECK(!strcmp(live_cfg(), "3x3 2") && config_generation() == gen + 1, "full screen not saved (%s)", live_cfg());
+
+    /* Set through the API: shown at once (out of full screen). */
+    schema_errors_t e;
+    memset(&e, 0, sizeof e);
+    const char *j = "{\"layout\":\"4x4\",\"page\":1}";
+    CHECK(config_put_json("live", j, strlen(j), &e) == CONFIG_OK, "PUT live 4x4");
+    run(300);
+    CHECK(rect_is(0, 0, 0, 320, 180) && rect_is(15, 960, 540, 320, 180), "the API's 4x4 shown");
+    j = "{\"layout\":\"8x8\",\"page\":9}";
+    CHECK(config_put_json("live", j, strlen(j), &e) == CONFIG_OK, "PUT live 8x8 page 9");
+    run(300);
+    CHECK(rect_is(0, 0, 0, 320, 180) && !strcmp(live_cfg(), "8x8 9"), "8x8 on 16 channels: 4x4, its one page");
+    j = "{\"layout\":\"3x3\",\"page\":0}";
+    CHECK(config_put_json("live", j, strlen(j), &e) == CONFIG_EINVAL, "PUT live page 0 ...");
+    j = "{\"layout\":\"5x5\"}";
+    CHECK(config_put_json("live", j, strlen(j), &e) == CONFIG_EINVAL, "... and 5x5 are refused");
+    run(300);
+    CHECK(!strcmp(live_cfg(), "8x8 9") && rect_is(0, 0, 0, 320, 180), "nothing changed");
+
+    /* A change, then the stop before the delay: saved by the flush
+     * (frontend_run's, the Exit menu's). */
+    key(KEY_9);
+    run(100);
+    if (g_tiles[0].w) key(KEY_PAGEDOWN);
+    run(100);
+    CHECK(!strcmp(live_cfg(), "8x8 9"), "not saved yet");
+    ui_app_flush();
+    CHECK(!strcmp(live_cfg(), "3x3 2"), "flushed: %s", live_cfg());
+
+    /* Left full screen: the restart shows the grid. */
+    click_at(200, 100);
+    run(100);
+    click_at(200, 100);
+    run(50);
+    ui_app_flush();
+    CHECK(g_tiles[9].w == W && !strcmp(live_cfg(), "3x3 2"), "stopped in full screen: 3x3 page 2 kept");
+}
+
+/* A restart on that file: the same layout and page. */
+static void test_layout_restart(void)
+{
+    CHECK(rect_is(9, 0, 0, 416, 240) && rect_is(15, 0, 480, 416, 240) && g_tiles[0].w == 0 && g_tiles[8].w == 0,
+          "restarted: 3x3, page 2 (CAM10..CAM16)");
+    lv_obj_t *nav_page = find("2 / 2", 0);
+    CHECK(nav_page != NULL, "the navigation bar says page 2 / 2");
+    shot("layout_restart");
+}
+
 /* 64 channels: 32 (8x4) and 64 (8x8) too. */
 static void test_split64(void)
 {
@@ -4063,11 +4275,13 @@ static int setup(int channels, const char *json, char *path, size_t cap)
 {
     g_channels = channels;
     snprintf(path, cap, "%s/vigil-%d.json", g_out, channels);
-    unlink(path);
-    FILE *f = fopen(path, "w");
-    if (!f) return -1;
-    fputs(json, f);
-    fclose(f);
+    if (json) {                                 /* else the one a run before left */
+        unlink(path);
+        FILE *f = fopen(path, "w");
+        if (!f) return -1;
+        fputs(json, f);
+        fclose(f);
+    }
     CHECK(config_init(path) == 0, "config");
     lv_init();
     lv_tick_set_cb(fake_ms);
@@ -4096,17 +4310,20 @@ static int setup(int channels, const char *json, char *path, size_t cap)
     return 0;
 }
 
-/* The UI on a platform with `channels` channels (a fresh process). */
-static int run_split(int channels)
+/* The UI on a platform with `channels` channels (a fresh process);
+ * `restart`: on the file the run before left (16 channels). */
+static int run_split(int channels, int restart)
 {
     char path[512];
-    if (setup(channels, "{\"version\":1,\"cameras\":[{\"url\":\"rtsp://192.168.1.10/s\",\"name\":\"Gate\"}]}",
+    if (setup(channels,
+              restart ? NULL : "{\"version\":1,\"cameras\":[{\"url\":\"rtsp://192.168.1.10/s\",\"name\":\"Gate\"}]}",
               path, sizeof path) < 0)
         return 1;
-    if (channels == 16) test_split16();
+    if (restart) test_layout_restart();
+    else if (channels == 16) test_split16(), test_layout_kept();
     else test_split64();
     input_evdev_delete();
-    unlink(path);
+    if (restart || channels != 16) unlink(path);
     printf("%d channels: %d checks, %d failed\n", channels, g_checks, g_fail);
     fflush(NULL);
     return g_fail ? 1 : 0;
@@ -4168,17 +4385,24 @@ static void shots_display(void)
     shot("display-keep");
     click_text(LV_SYMBOL_REFRESH "  Undo");
     quiet();
-    click_text("Clock");
-    shot("display-clock");
-    click_text("Camera names");
-    shot("display-names");
-    click_text("Status icons");
-    shot("display-icons");
-    click_text("Video");
-    shot("display-video");
-    lv_dropdown_open(nth_of(&lv_dropdown_class, 0));
-    shot("display-video-list");
-    lv_dropdown_close(nth_of(&lv_dropdown_class, 0));
+    click_text("OSD");
+    shot("display-osd");
+    lv_obj_t *names = find("Camera names", 0);
+    lv_obj_t *pane = names ? lv_obj_get_parent(names) : NULL;
+    if (pane) {
+        lv_obj_scroll_to_y(pane, lv_obj_get_y(names), LV_ANIM_OFF);
+        run(50);
+        shot("display-osd-names-icons");
+        lv_obj_scroll_to_y(pane, LV_COORD_MAX, LV_ANIM_OFF);
+        run(50);
+        shot("display-osd-video-tiles");
+    }
+    lv_obj_t *aspect = nth_of(&lv_dropdown_class, 10);
+    if (aspect) {
+        lv_dropdown_open(aspect);
+        shot("display-osd-video-list");
+        lv_dropdown_close(aspect);
+    }
     click_text("Output");
 }
 
@@ -4205,6 +4429,24 @@ static void shots_osd(void)
         lv_obj_invalidate(lv_screen_active());
         shot(k[i].name);
     }
+    /* The clock with narrow and wide digits: it stays where it is. */
+    static const char *const bgs[] = { "outline", "none", "box" };
+    static const struct { time_t t; const char *name; } times[] = { { 1321009871, "111111" },
+                                                                    { 3744565138, "205858" } };
+    for (size_t b = 0; b < sizeof bgs / sizeof bgs[0]; ++b)
+        for (size_t i = 0; i < sizeof times / sizeof times[0]; ++i) {
+            char json[128], name[64];
+            snprintf(json, sizeof json, "{\"clock_size\":\"xlarge\",\"clock_background\":\"%s\"}", bgs[b]);
+            put_display(json);
+            g_now = times[i].t;
+            ui_app_refresh();
+            run(50);
+            lv_obj_invalidate(lv_screen_active());
+            snprintf(name, sizeof name, "osd-clock-digits-%s-%s", bgs[b], times[i].name);
+            shot(name);
+        }
+    g_now = 1795703525;
+    ui_app_refresh();
     put_display("{}");
     lv_obj_invalidate(lv_screen_active());
     g_video_all = 0;
@@ -4666,14 +4908,14 @@ int main(int argc, char **argv)
 
     /* More channels than the test platform has: each in a process of its
      * own, since LVGL and the UI are set up once per process. */
-    static const int k_more[] = { 16, 64 };
+    static const struct { int ch, restart; } k_more[] = { { 16, 0 }, { 16, 1 }, { 64, 0 } };
     for (size_t i = 0; i < sizeof k_more / sizeof k_more[0]; ++i) {
         fflush(NULL);
         pid_t pid = fork();
-        if (pid == 0) _exit(run_split(k_more[i]));
+        if (pid == 0) _exit(run_split(k_more[i].ch, k_more[i].restart));
         int st = 0;
         CHECK(pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0,
-              "the %d-channel run", k_more[i]);
+              "the %d-channel run%s", k_more[i].ch, k_more[i].restart ? ", restarted" : "");
     }
 
     char path[512];
@@ -4740,6 +4982,7 @@ int main(int argc, char **argv)
     test_system_pages();
     test_account_pages();
     test_display_pages();
+    test_clock_digits();
     test_cursor_plane(disp);
 
     lv_mem_monitor_t mon;

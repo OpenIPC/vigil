@@ -274,6 +274,20 @@ display:
   # false.
   alert_frame: false
 
+# Live view: What the live view shows, saved by the on-screen UI a few seconds
+# after the user changes it (and when vigild stops), so that a restart comes
+# back to it. Through the API it applies at once.
+live:
+  # Layout: The live view's windows (1+7: one large, seven small). One with
+  # more windows than the board has channels shows the largest that fits. A
+  # camera full screen by a double click is not kept, the grid it came from
+  # is. One of: 1x1, 2x2, 1+7, 3x3, 4x4, 8x4, 8x8. Default 2x2.
+  layout: "2x2"
+  # Page: Which cameras the layout shows: 1 the first ones (CAM1.. for 2x2:
+  # CAM1-CAM4), 2 the next, ...; past the last page, the last. 1..64, default
+  # 1.
+  page: 1
+
 # HTTP API
 api:
   # Listen on: IPv4 address and port of the HTTP API, or just the port. Empty:

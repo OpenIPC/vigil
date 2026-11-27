@@ -254,6 +254,7 @@ static int g_power_reboot;
 static void power_now(void *u)
 {
     (void)u;
+    ui_app_flush();                     /* the layout the user just picked, before the board goes */
     int rc = MG() && MG()->power ? MG()->power(g_power_reboot) : -1;
     if (rc < 0) ui_toast(UI_TOAST_BAD, "%s", TR(S_POWER_UNMANAGED));
     else ui_toast(UI_TOAST_WARN, "%s", g_power_reboot ? TR(S_REBOOTING) : TR(S_SHUTTING_DOWN));
