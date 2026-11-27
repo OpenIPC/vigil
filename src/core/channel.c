@@ -438,7 +438,11 @@ static long ms_since(const struct timespec *t)
  * it the GOP so far, the current AU being its last. Returns 0, or -1 if
  * the platform dropped one (then the next keyframe, as after any drop).
  * The platform decodes the pictures as fast as it can, so the picture
- * runs fast up to the present for a moment. */
+ * runs fast up to the present for a moment. It takes a GOP in a few ms
+ * where its queue has room; one that makes each picture wait for room
+ * (Rockchip: up to 100 ms) is given up after REPLAY_MS, under dec_lock
+ * as it runs, and at a stop. */
+#define REPLAY_MS 500
 static int dec_replay(channel_t *c, sess_t *s)
 {
     struct timespec t0;
@@ -446,9 +450,11 @@ static int dec_replay(channel_t *c, sess_t *s)
     for (unsigned i = 0; i < s->gop.n; ++i) {
         vg_au_t au;
         gop_cache_get(&s->gop, i, &au);
-        if (hal_dec_send(c->idx, &au) < 0) {
-            vg_log("CAM%d%s: the GOP so far was not taken (%u of %u pictures); waiting for a keyframe",
-                   c->idx + 1, s->id == S_SUB ? " sub" : "", i, s->gop.n);
+        int slow = i && ms_since(&t0) > REPLAY_MS;
+        if (s->stop || slow || hal_dec_send(c->idx, &au) < 0) {
+            if (!s->stop)
+                vg_log("CAM%d%s: the GOP so far was not taken (%u of %u pictures%s); waiting for a keyframe",
+                       c->idx + 1, s->id == S_SUB ? " sub" : "", i, s->gop.n, slow ? " in time" : "");
             return -1;
         }
     }
