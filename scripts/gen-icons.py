@@ -75,6 +75,7 @@ ICONS = [
     ("nav_clock", "clock.svg", 22, 2),
     ("nav_names", "device-cctv.svg", 22, 2),
     ("nav_icons", "activity.svg", 22, 2),
+    ("nav_aspect", "aspect-ratio.svg", 22, 2),
 ]
 
 

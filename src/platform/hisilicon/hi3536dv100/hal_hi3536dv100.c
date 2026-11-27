@@ -13,8 +13,11 @@
  * sized per camera, 1080p + 2 x 5 MP + 2 x H.264 took 87 MiB on the lab NVR.
  *
  * VPSS runs one channel in auto mode, which scales to the size of the VO
- * channel it is bound to; the VO channel keeps the aspect ratio
- * (letterbox/pillarbox in black).
+ * channel it is bound to; the VO channel places the picture inside its
+ * rectangle at the display aspect ratio the core gives
+ * (hal_display_set_aspect: ASPECT_RATIO_MANUAL with aspect_fit's
+ * rectangle, black around it; NONE to stretch), or, before the core says,
+ * at the picture's own (ASPECT_RATIO_AUTO).
  *
  * Revision-2 Hi3536DV100 chips (SC_SYSID0 0x12050EE0 bits 31:24 = 2) need a
  * vdec.ko whose chip-revision check is bypassed: the stock SDK module reads
@@ -37,6 +40,7 @@
 #include "mpi_vpss.h"
 #include "mpi_vo.h"
 
+#include "aspect.h"
 #include "hal.h"
 #include "hal_capture.h"
 #include "hal_decoder.h"
@@ -58,6 +62,9 @@ static const hal_caps_t g_caps = {
 static struct {
     int        vo_up, vpss_up;
     vg_codec_t codec;                               /* VG_CODEC_NONE: no VDEC */
+    vg_rect_t  tile;                                /* the VO channel's rectangle */
+    int        asp_set;                             /* hal_display_set_aspect said: */
+    vg_ratio_t asp;                                 /* 0:0 stretch */
 } g_ch[MAX_CH];
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -89,6 +96,39 @@ void hal_shutdown(void)
 
 /* ---- display ------------------------------------------------------------- */
 
+/* The picture's place in VO channel ch: stVideoRect is relative to the
+ * channel's rectangle. */
+static void chn_aspect(int ch)
+{
+    VO_CHN_PARAM_S vp;
+    if (HI_MPI_VO_GetChnParam(HI_DISPLAY_VO_LAYER, ch, &vp) != HI_SUCCESS) return;
+    vp.stAspectRatio.u32BgColor = 0x000000;
+    if (!g_ch[ch].asp_set) {
+        vp.stAspectRatio.enMode = ASPECT_RATIO_AUTO;
+    } else if (!g_ch[ch].asp.w) {
+        vp.stAspectRatio.enMode = ASPECT_RATIO_NONE;
+    } else {
+        vg_rect_t w = aspect_fit(&g_ch[ch].tile, g_ch[ch].asp, 2);
+        vp.stAspectRatio.enMode = ASPECT_RATIO_MANUAL;
+        vp.stAspectRatio.stVideoRect.s32X = w.x;
+        vp.stAspectRatio.stVideoRect.s32Y = w.y;
+        vp.stAspectRatio.stVideoRect.u32Width = (HI_U32)w.w;
+        vp.stAspectRatio.stVideoRect.u32Height = (HI_U32)w.h;
+    }
+    HI_S32 rc = HI_MPI_VO_SetChnParam(HI_DISPLAY_VO_LAYER, ch, &vp);
+    if (rc != HI_SUCCESS) fprintf(stderr, "hi3536dv100: VO_SetChnParam(%d) aspect 0x%x\n", ch, rc);
+}
+
+void hal_display_set_aspect(int ch, unsigned w, unsigned h)
+{
+    if (ch < 0 || ch >= MAX_CH) return;
+    pthread_mutex_lock(&g_lock);                    /* a channel's thread, while tiles move */
+    g_ch[ch].asp_set = 1;
+    g_ch[ch].asp = w && h ? (vg_ratio_t){ w, h } : (vg_ratio_t){ 0, 0 };
+    if (g_ch[ch].tile.w) chn_aspect(ch);
+    pthread_mutex_unlock(&g_lock);
+}
+
 int hal_display_set_tile(int ch, const vg_rect_t *r)
 {
     if (ch < 0 || ch >= MAX_CH) return -1;
@@ -103,12 +143,10 @@ int hal_display_set_tile(int ch, const vg_rect_t *r)
         fprintf(stderr, "hi3536dv100: VO_SetChnAttr(%d) 0x%x\n", ch, rc);
         return -1;
     }
-    VO_CHN_PARAM_S vp;
-    if (HI_MPI_VO_GetChnParam(HI_DISPLAY_VO_LAYER, ch, &vp) == HI_SUCCESS) {
-        vp.stAspectRatio.enMode = ASPECT_RATIO_AUTO;
-        vp.stAspectRatio.u32BgColor = 0x000000;
-        HI_MPI_VO_SetChnParam(HI_DISPLAY_VO_LAYER, ch, &vp);
-    }
+    pthread_mutex_lock(&g_lock);
+    g_ch[ch].tile = (vg_rect_t){ 0, 0, (int)va.stRect.u32Width, (int)va.stRect.u32Height };
+    chn_aspect(ch);
+    pthread_mutex_unlock(&g_lock);
     /* A move (another layout, full screen) changes the attributes of a
      * channel that is already enabled. */
     if (!g_ch[ch].vo_up && (rc = HI_MPI_VO_EnableChn(HI_DISPLAY_VO_LAYER, ch)) != HI_SUCCESS) {

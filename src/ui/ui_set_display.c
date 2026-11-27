@@ -9,8 +9,8 @@
  * comes back, so a monitor that cannot show the new one gets its picture
  * back by itself. Only a kept mode is saved (display.output).
  *
- * Clock, Camera names, Status icons: drop-downs of display.* (and the
- * clock's format, ui.date_format and ui.time_format, which System ->
+ * Clock, Camera names, Status icons, Video: drop-downs of display.* (and
+ * the clock's format, ui.date_format and ui.time_format, which System ->
  * General also sets); the live view follows a save at once. */
 #define _DEFAULT_SOURCE
 #include <stdio.h>
@@ -312,6 +312,17 @@ static const drow_t k_icon_rows[] = {
     { "display", "icons_background", "Background", BG_HELP, ui_bg_keys, k_bg_names, UI_N_BGS },
 };
 
+/* Two values: the drop-down needs no third. */
+static const char *const k_aspect_keys[] = { "fit", "stretch" };
+static const char *const k_aspect_names[] = { "Fit (keep its shape)", "Stretch to the tile" };
+static const drow_t k_video_rows[] = {
+    { "display", "video_aspect", "Video aspect",
+      "Fit: each camera's picture keeps its shape in its tile and full screen, with black bars where "
+      "the shapes differ; a sub-stream is shown at its main stream's shape. Stretch: the picture fills "
+      "the tile, whatever its shape.",
+      k_aspect_keys, k_aspect_names, 2 },
+};
+
 static void dpage_load(dpage_t *d)
 {
     for (int i = 0; i < d->n; ++i) {
@@ -397,12 +408,17 @@ static void *icons_open(ui_set_t *s, lv_obj_t *pane)
 {
     return dpage_open(s, pane, "Status icons on the tiles", k_icon_rows, N(k_icon_rows));
 }
+static void *video_open(ui_set_t *s, lv_obj_t *pane)
+{
+    return dpage_open(s, pane, "Camera pictures", k_video_rows, N(k_video_rows));
+}
 
 static const ui_set_item_t g_items[] = {
     { "Output", &ui_icon_nav_output, out_open, out_dirty, out_save, out_cancel, out_close },
     { "Clock", &ui_icon_nav_clock, clock_open, dpage_dirty, dpage_save, dpage_cancel, dpage_close },
     { "Camera names", &ui_icon_nav_names, names_open, dpage_dirty, dpage_save, dpage_cancel, dpage_close },
     { "Status icons", &ui_icon_nav_icons, icons_open, dpage_dirty, dpage_save, dpage_cancel, dpage_close },
+    { "Video", &ui_icon_nav_aspect, video_open, dpage_dirty, dpage_save, dpage_cancel, dpage_close },
 };
 
 void ui_display_open(void) { ui_display_open_at(UI_DISPLAY_OUTPUT); }

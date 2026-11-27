@@ -77,6 +77,7 @@ void hal_shutdown(void)
 /* The VI pipeline places its own tiles. */
 int  hal_display_set_tile(int ch, const vg_rect_t *r) { (void)ch; (void)r; return 0; }
 void hal_display_clear_tile(int ch) { (void)ch; }
+void hal_display_set_aspect(int ch, unsigned w, unsigned h) { (void)ch; (void)w; (void)h; }
 
 int  hal_dec_open(int ch, vg_codec_t codec, const vg_stream_info_t *si) { (void)ch; (void)codec; (void)si; return -1; }
 int  hal_dec_send(int ch, const vg_au_t *au) { (void)ch; (void)au; return -1; }

@@ -253,6 +253,7 @@ static const char *const corners_off[] = { "off", "top-left", "top-right", "bott
 static const char *const corners[] = { "top-left", "top-right", "bottom-left", "bottom-right", NULL };
 static const char *const osd_sizes[] = { "small", "medium", "large", "xlarge", NULL };
 static const char *const osd_backgrounds[] = { "outline", "none", "box", NULL };
+static const char *const video_aspects[] = { "fit", "stretch", NULL };
 
 int config_output_mode(const char *s, unsigned *w, unsigned *h, unsigned *hz)
 {
@@ -455,6 +456,11 @@ static const schema_field_t display_fields[] = {
       .label = "Output resolution",
       .help = "HDMI and VGA, as WIDTHxHEIGHT@HZ. The menus keep their layout, scaled to it; the video "
               "is shown at the output's own resolution. A mode the board does not drive is ignored." },
+    { .key = "video_aspect", ENUM(config_display_t, video_aspect, video_aspects), .def_str = "fit", .live = 1,
+      .label = "Video aspect",
+      .help = "fit: each picture keeps its shape inside its tile or the full screen, with black bars "
+              "where the shapes differ; a sub-stream (704x576, 352x288, ...) is shown at its main "
+              "stream's shape. stretch: the picture fills the tile." },
     { .key = "clock_position", ENUM(config_display_t, clock_position, clock_positions), .def_str = "top-right",
       .live = 1, .label = "Clock",
       .help = "Where the date and time are on the live view; their format is ui.date_format and "

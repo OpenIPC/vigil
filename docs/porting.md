@@ -120,8 +120,15 @@ MI_DISP, linked with MI_SYS_BindChnPort).
 ## 4. Display: `hal_display.h`
 
 `hal_display_set_tile(ch, r)` puts channel `ch`'s video into rectangle `r`
-(screen pixels). Keep the source's aspect ratio inside it, with black bars.
-It is called when a channel starts (the 2x2 tiles of `frontend_tiles()`)
+(screen pixels). `hal_display_set_aspect(ch, w, h)` gives the shape to show
+the picture at inside it (the camera's display aspect ratio, which for an
+anamorphic sub-stream is not its coded size's; 0:0 fills the tile): place
+it with `aspect_fit` (`src/core/aspect.h`), black around it, on the
+output's own pixels (`aspect_map` when the output's size differs from the
+screen's). Until the first call, the decoded picture's own shape; it comes
+from a channel's thread (before `hal_dec_open`, and when the main stream's
+SPS arrives) or the main thread (the setting), while tiles move. `set_tile`
+is called when a channel starts (the 2x2 tiles of `frontend_tiles()`)
 and again, from the main thread while the decoders run, whenever the UI
 changes the layout or shows a channel full screen: the tile may move and
 grow. `hal_display_clear_tile(ch)` hides the channel until it is placed
