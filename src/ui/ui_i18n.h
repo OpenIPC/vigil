@@ -78,7 +78,6 @@
     X(S_REBOOTING, "Rebooting: recording stops cleanly first") \
     X(S_SHUTTING_DOWN, "Shutting down: recording stops cleanly first") \
     X(S_POWER_UNMANAGED, "Not here: vigild does not manage this system") \
-    X(S_LOGIN_OFF, "Logout: the on-screen login is off (System > General).") \
     X(S_LOG_IN, "Log in") \
     X(S_USER, "User") \
     X(S_PASSWORD, "Password") \

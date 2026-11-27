@@ -37,5 +37,6 @@
   "radius": { "sm": 4, "md": 8, "lg": 12 },
   "font": { "sm": 14, "md": 16, "lg": 20, "xl": 24 },
   "size": { "navbar": 64, "icon_dot": 10, "focus_ring": 3, "focus_gap": 2, "card_w": 376, "card_h": 208, "icon_card": 96, "icon_row": 28, "page_arrow": 48, "osk_w": 560, "add_disc": 36, "osk_h": 190, "page_header": 56, "button": 40, "cursor": 19 },
-  "duration": { "fast": 150, "normal": 250, "navbar_hide": 3000, "toast": 2500, "double_click": 400, "flash": 3000 }
+  "duration": { "fast": 150, "normal": 250, "navbar_hide": 3000, "toast": 2500, "double_click": 400, "flash": 3000,
+                "submenu_open": 200, "submenu_close": 300 }
 }

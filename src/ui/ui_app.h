@@ -139,6 +139,14 @@ lv_obj_t *ui_popup_sub(lv_obj_t *item, int w);
 void      ui_popup_sub_place(lv_obj_t *first);
 void      ui_popup_sub_close(void);
 int       ui_popup_sub_is_open(void);
+/* `item` (of the popup's panel) opens a submenu: `open(item)` fills it
+ * (ui_popup_sub, ui_popup_sub_place). A click, Enter or Right opens it at
+ * once; the pointer resting on it VG_DURATION_SUBMENU_OPEN opens it too.
+ * With a submenu open, the pointer on another item of the menu closes it
+ * (or opens that item's) after VG_DURATION_SUBMENU_CLOSE, so a diagonal
+ * path to the submenu across a neighbour keeps it: reaching the submenu
+ * cancels that. The pointer outside both menus changes nothing. */
+void      ui_popup_sub_item(lv_obj_t *item, void (*open)(lv_obj_t *item));
 /* "<what> is not available yet": what a menu item or a card of a feature
  * vigil does not have yet (playback, PTZ, ...) opens. */
 void      ui_not_yet(const char *what);

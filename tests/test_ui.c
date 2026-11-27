@@ -1609,6 +1609,130 @@ static void test_context_and_full_screen(void)
     CHECK(!ui_page_top(), "back on the live view");
 }
 
+static int g_glide_sub;                 /* a submenu was open during a glide */
+
+/* The pointer to (x, y) in steps of at most `step` pixels, 16 ms apart: a
+ * hand moving a mouse, not one jump. */
+static void glide(int x, int y, int step)
+{
+    int x0 = g_px, y0 = g_py, dx = x - x0, dy = y - y0;
+    int d = abs(dx) > abs(dy) ? abs(dx) : abs(dy), n = (d + step - 1) / step;
+    for (int i = 1; i <= n; ++i) {
+        int nx = x0 + dx * i / n, ny = y0 + dy * i / n;
+        ev(EV_REL, REL_X, nx - g_px);
+        ev(EV_REL, REL_Y, ny - g_py);
+        ev(EV_SYN, SYN_REPORT, 0);
+        g_px = nx;
+        g_py = ny;
+        run(16);
+        g_glide_sub |= ui_popup_sub_is_open();
+    }
+}
+
+static lv_obj_t *item_of(const char *text)
+{
+    lv_obj_t *l = find(text, 1);
+    return l ? lv_obj_get_parent(l) : NULL;
+}
+
+static void coords_of(const char *text, lv_area_t *a)
+{
+    lv_obj_t *o = item_of(text);
+    if (o) lv_obj_get_coords(o, a);
+    else *a = (lv_area_t){ 0, 0, 0, 0 };
+}
+
+/* Split opens under a pointer resting on it, as a desktop menu's
+ * submenu does; another item closes it, a diagonal way into it does not. */
+static void test_submenu_hover(void)
+{
+    lv_area_t sp, di, ex, sub, menu;
+    move_to(300, 200);
+    button(BTN_RIGHT);
+    run(50);
+    coords_of("Split", &sp);
+    coords_of("Display", &di);
+    coords_of("Exit", &ex);
+    lv_obj_get_coords(lv_obj_get_parent(item_of("Split")), &menu);
+    int sx = (sp.x1 + sp.x2) / 2, sy = (sp.y1 + sp.y2) / 2;
+    int dx = (di.x1 + di.x2) / 2, dy = (di.y1 + di.y2) / 2;
+
+    /* A sweep down the menu opens nothing on the way. */
+    glide(dx, dy, 8);
+    g_glide_sub = 0;
+    glide((ex.x1 + ex.x2) / 2, (ex.y1 + ex.y2) / 2, 8);
+    run(VG_DURATION_SUBMENU_OPEN + 100);
+    CHECK(ui_popup_is_open() && !g_glide_sub && !ui_popup_sub_is_open(), "hover: a sweep across Split opens nothing");
+
+    /* Resting on Split: open after the delay, not before. */
+    glide(sx, sy, 8);
+    run(VG_DURATION_SUBMENU_OPEN - 60);
+    CHECK(!ui_popup_sub_is_open(), "hover: Split not open %d ms after the pointer came",
+          VG_DURATION_SUBMENU_OPEN - 60);
+    run(80);
+    CHECK(ui_popup_sub_is_open() && find("1 window", 1) && find("4 windows", 1),
+          "hover: Split open %d ms after", VG_DURATION_SUBMENU_OPEN + 20);
+    lv_obj_get_coords(lv_obj_get_parent(item_of("4 windows")), &sub);
+    CHECK(sub.x1 > menu.x2 && sub.y1 <= sp.y1, "hover: the submenu to the right of the menu, level with Split");
+    shot("split_hover");
+
+    /* Another item: closed after the longer delay. */
+    glide(dx, dy, 8);
+    CHECK(ui_popup_sub_is_open(), "hover: Display does not close it at once");
+    run(VG_DURATION_SUBMENU_CLOSE + 20);
+    CHECK(ui_popup_is_open() && !ui_popup_sub_is_open(), "hover: Display closes it after %d ms",
+          VG_DURATION_SUBMENU_CLOSE);
+
+    /* Diagonally from Split into the submenu, across Exit: kept. */
+    glide(sx, sy, 8);
+    run(VG_DURATION_SUBMENU_OPEN + 20);
+    CHECK(ui_popup_sub_is_open(), "hover: open again");
+    lv_obj_get_coords(lv_obj_get_parent(item_of("4 windows")), &sub);
+    lv_area_t four;
+    coords_of("4 windows", &four);
+    glide(ex.x2 - 6, (ex.y1 + ex.y2) / 2, 8);           /* over Exit, near the submenu */
+    lv_point_t p = { (int32_t)g_px, (int32_t)g_py };
+    lv_obj_t *under = lv_indev_search_obj(lv_layer_top(), &p);
+    CHECK(under == item_of("Exit"), "hover: the way to the submenu crosses Exit");
+    run(60);
+    glide((four.x1 + four.x2) / 2, (four.y1 + four.y2) / 2, 8);
+    run(VG_DURATION_SUBMENU_CLOSE + 100);
+    CHECK(ui_popup_sub_is_open() && find("4 windows", 1), "hover: the diagonal way keeps the submenu");
+
+    /* Out of both menus: everything stays. */
+    glide(200, 650, 16);
+    run(VG_DURATION_SUBMENU_CLOSE + 200);
+    CHECK(ui_popup_is_open() && ui_popup_sub_is_open(), "hover: leaving both menus closes nothing");
+
+    /* Clicking Split opens it at once, and a second click keeps it. */
+    button(BTN_RIGHT);                                  /* closes the submenu */
+    CHECK(ui_popup_is_open() && !ui_popup_sub_is_open(), "the right button closes the submenu first");
+    move_to(dx, dy);
+    run(VG_DURATION_SUBMENU_CLOSE + 50);
+    move_to(sx, sy);
+    button(BTN_LEFT);
+    CHECK(ui_popup_sub_is_open(), "a click on Split opens it before the hover delay");
+    button(BTN_LEFT);
+    run(VG_DURATION_SUBMENU_OPEN + 50);
+    CHECK(ui_popup_sub_is_open(), "a second click keeps it open");
+    click_text("1 window");
+    CHECK(!ui_popup_is_open() && g_tiles[0].w == W && g_tiles[1].w == 0, "hover-opened Split: 1 window");
+
+    /* Near the right edge the submenu opens to the left of the menu. */
+    move_to(W - 40, 200);
+    button(BTN_RIGHT);
+    run(50);
+    coords_of("Split", &sp);
+    lv_obj_get_coords(lv_obj_get_parent(item_of("Split")), &menu);
+    glide((sp.x1 + sp.x2) / 2, (sp.y1 + sp.y2) / 2, 8);
+    run(VG_DURATION_SUBMENU_OPEN + 20);
+    CHECK(ui_popup_sub_is_open(), "hover: Split open near the edge");
+    lv_obj_get_coords(lv_obj_get_parent(item_of("4 windows")), &sub);
+    CHECK(sub.x2 < menu.x1 && sub.x1 >= 0, "near the right edge: the submenu on the menu's left");
+    click_text("4 windows");
+    CHECK(!ui_popup_is_open() && g_tiles[0].w == 640 && g_tiles[3].w == 640, "back to 2x2");
+}
+
 static void test_menu_and_settings(void)
 {
     move_to(W / 2, H - 1);
@@ -3941,7 +4065,8 @@ static void test_session(void)
     move_to(300, 200);
     button(BTN_RIGHT);
     click_text("Exit");
-    CHECK(ui_popup_is_open() && find("Shutdown", 1) && find("the on-screen login is off", 1), "Exit: the chooser");
+    CHECK(ui_popup_is_open() && find("Shutdown", 1) && !find("the on-screen login is off", 1),
+          "Exit: the chooser, without a note under it");
     lv_obj_t *out = find("Logout", 1);
     CHECK(out && lv_obj_has_state(lv_obj_get_parent(out), LV_STATE_DISABLED), "Logout: off without a login");
     shot("exit");
@@ -4962,6 +5087,7 @@ int main(int argc, char **argv)
     test_live();
     test_navbar();
     test_context_and_full_screen();
+    test_submenu_hover();
     test_menu_and_settings();
     test_cameras();
     test_channels_discovery();

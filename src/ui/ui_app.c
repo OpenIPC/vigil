@@ -33,13 +33,30 @@ static lv_obj_t   *g_popup;         /* the full-screen catcher; the panel is its
 static lv_group_t *g_popup_group;
 static lv_obj_t   *g_popup_panel, *g_sub, *g_sub_item;
 static int         g_help;          /* the popup is the help */
+#define SUB_OPENERS 4
+static struct {
+    lv_obj_t *item;
+    void    (*open)(lv_obj_t *item);
+} g_opener[SUB_OPENERS];            /* the popup's items with a submenu */
+static int         g_n_openers;
+static lv_timer_t *g_hover_timer;   /* paused, or acting for g_hover_item */
+static lv_obj_t   *g_hover_item;
 static lv_obj_t   *g_toast;
 static lv_timer_t *g_toast_timer;
 
 const ui_model_t *ui_model(void) { return g_model; }
 lv_subject_t *ui_subject_channel(int ch) { return &g_subj_ch[ch]; }
 const ui_chan_t *ui_channel(int ch) { return &g_status[ch]; }
-void ui_app_set_pointer(lv_indev_t *indev) { g_pointer = indev; }
+static void hover_cb(lv_event_t *e);
+
+void ui_app_set_pointer(lv_indev_t *indev)
+{
+    if (indev == g_pointer) return;
+    g_pointer = indev;
+    /* On the indev, not on each item: every pointer (a USB mouse, the zero
+     * channel's) reaches LVGL through it. */
+    if (indev) lv_indev_add_event_cb(indev, hover_cb, LV_EVENT_HOVER_OVER, NULL);
+}
 int ui_keyboard_in_use(void) { return g_kbd_used; }
 
 /* Over the live view, a panel's rounded corners would blend with the
@@ -242,6 +259,8 @@ static void refresh_cb(lv_timer_t *t)
 
 /* ---- popups ------------------------------------------------------------------------ */
 
+static void hover_timer_cb(lv_timer_t *t);
+
 static void popup_outside_cb(lv_event_t *e)
 {
     if (lv_event_get_target(e) == lv_event_get_current_target(e)) ui_popup_close();
@@ -274,6 +293,8 @@ lv_obj_t *ui_popup_open(const lv_point_t *at, int w)
     g_popup_panel = panel;
     over_video(panel);
     g_popup_group = lv_group_create();
+    g_hover_timer = lv_timer_create(hover_timer_cb, VG_DURATION_SUBMENU_OPEN, NULL);
+    lv_timer_pause(g_hover_timer);
     focus_sync();
     return panel;
 }
@@ -380,6 +401,100 @@ void ui_popup_sub_close(void)
 
 int ui_popup_sub_is_open(void) { return g_sub != NULL; }
 
+/* ---- submenus under the pointer ---------------------------------------------------------- */
+
+static void (*opener_of(lv_obj_t *item))(lv_obj_t *)
+{
+    for (int i = 0; i < g_n_openers; ++i)
+        if (g_opener[i].item == item) return g_opener[i].open;
+    return NULL;
+}
+
+static int sub_open_on(lv_obj_t *item) { return g_sub && g_sub_item == item; }
+
+static void hover_cancel(void)
+{
+    g_hover_item = NULL;
+    if (g_hover_timer) lv_timer_pause(g_hover_timer);
+}
+
+static void hover_start(lv_obj_t *item, uint32_t ms)
+{
+    g_hover_item = item;
+    lv_timer_set_period(g_hover_timer, ms);
+    lv_timer_reset(g_hover_timer);
+    lv_timer_resume(g_hover_timer);
+}
+
+static void sub_open_now(lv_obj_t *item)
+{
+    void (*open)(lv_obj_t *) = opener_of(item);
+    hover_cancel();
+    if (open && !sub_open_on(item)) open(item);
+}
+
+/* The pointer rested on g_hover_item: its submenu, or none. */
+static void hover_timer_cb(lv_timer_t *t)
+{
+    lv_obj_t *item = g_hover_item;
+    lv_timer_pause(t);
+    g_hover_item = NULL;
+    if (opener_of(item)) sub_open_now(item);
+    else ui_popup_sub_close();
+}
+
+static int inside(lv_obj_t *o, lv_obj_t *anc)
+{
+    for (; o; o = lv_obj_get_parent(o))
+        if (o == anc) return 1;
+    return 0;
+}
+
+/* LVGL's HOVER_OVER for the object now under the pointer (it comes only
+ * while no button is down, when the pointer moves to another object). */
+static void hover_cb(lv_event_t *e)
+{
+    lv_obj_t *o = lv_event_get_param(e);
+    if (!g_popup || !g_n_openers) return;
+    if (g_sub && inside(o, g_sub)) {        /* reached the submenu: it stays */
+        hover_cancel();
+        return;
+    }
+    lv_obj_t *item = o;
+    while (item && lv_obj_get_parent(item) != g_popup_panel) item = lv_obj_get_parent(item);
+    if (!item) {
+        /* Between two items (the panel's own padding): what is pending
+         * goes on. Outside both menus: nothing changes. */
+        if (o != g_popup_panel) hover_cancel();
+        return;
+    }
+    if (item == g_hover_item) return;
+    if (sub_open_on(item) || (!g_sub && !opener_of(item))) {
+        hover_cancel();
+        return;
+    }
+    /* With a submenu open, the longer delay: the pointer may only be
+     * crossing this item on its way to the submenu. */
+    hover_start(item, g_sub ? VG_DURATION_SUBMENU_CLOSE : VG_DURATION_SUBMENU_OPEN);
+}
+
+static void sub_item_click_cb(lv_event_t *e) { sub_open_now(lv_event_get_current_target(e)); }
+
+static void sub_item_key_cb(lv_event_t *e)
+{
+    lv_obj_t *item = lv_event_get_current_target(e);
+    if (lv_event_get_key(e) == LV_KEY_RIGHT && !g_sub) sub_open_now(item);
+}
+
+void ui_popup_sub_item(lv_obj_t *item, void (*open)(lv_obj_t *item))
+{
+    if (!g_popup || g_n_openers >= SUB_OPENERS) return;
+    g_opener[g_n_openers].item = item;
+    g_opener[g_n_openers++].open = open;
+    lv_obj_add_event_cb(item, sub_item_click_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(item, sub_item_key_cb, LV_EVENT_KEY, NULL);
+}
+
 void ui_popup_close(void)
 {
     if (!g_popup) return;
@@ -387,6 +502,10 @@ void ui_popup_close(void)
     g_popup = NULL;
     g_popup_panel = g_sub = g_sub_item = NULL;
     g_help = 0;
+    g_n_openers = 0;
+    g_hover_item = NULL;
+    lv_timer_delete(g_hover_timer);
+    g_hover_timer = NULL;
     lv_group_delete(g_popup_group);
     g_popup_group = NULL;
     focus_sync();

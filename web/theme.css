@@ -66,4 +66,6 @@
   --vg-duration-toast: 2500ms;
   --vg-duration-double-click: 400ms;
   --vg-duration-flash: 3000ms;
+  --vg-duration-submenu-open: 200ms;
+  --vg-duration-submenu-close: 300ms;
 }

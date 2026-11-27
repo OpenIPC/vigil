@@ -160,6 +160,22 @@ placeholders for what comes next.
 
 ![Context menu with Split](../tests/ui/split_menu16.png)
 
+**A submenu opens under the pointer**, as on a desktop: resting on Split
+for 200 ms (`duration.submenu_open` in `src/ui/theme.json`) opens it, so
+sweeping across the menu opens nothing; a click (or Enter, or Right)
+opens it at once, and a second click leaves it open. With it open, the
+pointer on another item closes it after 300 ms (`duration.submenu_close`)
+unless the pointer reaches the submenu first, so the diagonal way from
+Split to a layout may cross Exit. Leaving both menus changes nothing;
+a click outside, the right button or Esc close them as before. The
+submenu sits to the right of the menu, level with its item, or to the
+left when there is no room, and is kept on the screen. The hover comes
+from LVGL's pointer, so a USB mouse and the zero channel's browser do
+the same (`ui_popup_sub_item` in `src/ui/ui_app.c`, for any popup item
+with a submenu).
+
+![Split opened by the pointer resting on it](../tests/ui/split_hover.png)
+
 **Split** offers 1, 4, 8, 9, 16, 32 and 64 windows, those up to the
 number of channels the platform can show (`hal_caps()->max_channels`;
 today every platform reports 4, so 1 and 4); the current one is checked.
@@ -844,7 +860,9 @@ keyboards and go through the real evdev reader, settings go through the real con
 store (a file in the build directory), and only the channels, events and
 clock are fakes. It walks through the screens with the mouse, checks the
 widget states (tile texts, the navigation bar showing and hiding, the
-context menu, full screen and back with the rectangles handed to the
+context menu, its Split submenu opening under a resting pointer (and not
+for a pointer sweeping past, kept on a diagonal way into it), full screen
+and back with the rectangles handed to the
 platform, a validation error with nothing saved, a change saved and in
 force, the camera password kept) and writes a screenshot of each step.
 Then it does it again with the keyboard: moving the selection over the

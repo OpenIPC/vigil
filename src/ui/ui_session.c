@@ -312,11 +312,6 @@ void ui_exit_open(void)
     lv_obj_t *first = exit_item(items, LV_SYMBOL_REFRESH, TR(S_REBOOT), 1);
     exit_item(items, LV_SYMBOL_POWER, TR(S_SHUTDOWN), 2);
     exit_item(items, LV_SYMBOL_CLOSE, TR(S_CANCEL), 3);
-    if (!S.required) {
-        lv_obj_t *n = ui_label(panel, TR(S_LOGIN_OFF), VG_FONT_SM_LV, UI_C(TEXT2));
-        lv_obj_set_width(n, LV_PCT(100));
-        lv_label_set_long_mode(n, LV_LABEL_LONG_WRAP);
-    }
     ui_popup_focus(items, S.in && S.required ? out : first, LV_GRIDNAV_CTRL_ROLLOVER);
     ui_popup_place(NULL);
 }
