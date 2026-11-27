@@ -40,7 +40,7 @@ typedef struct {
     int            sec;             /* the cameras section */
     lv_obj_t      *kb;
     lv_obj_t      *proto, *search, *status, *user, *pass, *hint;
-    lv_obj_t      *add, *chip, *mass, *autoadd, *all;
+    lv_obj_t      *add, *chip, *mass, *autoadd, *manual, *all;
     lv_obj_t      *devs, *chans;
     lv_obj_t      *state_cell[UI_MAX_CHANNELS];
     lv_timer_t    *timer;
@@ -740,7 +740,9 @@ static void change_ip_cb(lv_event_t *e)
     change_ip_open(c, i);
 }
 
+static void manual_open(chans_t *c);
 static void mass_cb(lv_event_t *e) { mass_open(lv_event_get_user_data(e)); }
+static void manual_cb(lv_event_t *e) { manual_open(lv_event_get_user_data(e)); }
 static void autoadd_cb(lv_event_t *e) { autoadd_open(lv_event_get_user_data(e)); }
 
 static void settings_cb(lv_event_t *e)
@@ -760,6 +762,8 @@ static void buttons_sync(chans_t *c)
         if (off) lv_obj_add_state(need_dev[i], LV_STATE_DISABLED);
         else lv_obj_remove_state(need_dev[i], LV_STATE_DISABLED);
     }
+    if (busy || !M()->disc_assign_manual) lv_obj_add_state(c->manual, LV_STATE_DISABLED);
+    else lv_obj_remove_state(c->manual, LV_STATE_DISABLED);
     lv_obj_t *other[] = { c->search, c->mass, c->autoadd };
     for (size_t i = 0; i < sizeof other / sizeof other[0]; ++i) {
         if (busy || !M()->disc_scan || (other[i] != c->search && !c->n_dev)) lv_obj_add_state(other[i], LV_STATE_DISABLED);
@@ -825,8 +829,7 @@ static void poll_cb(lv_timer_t *t)
         char s[128];
         if (j->running && j->kind == UI_JOB_SCAN) snprintf(s, sizeof s, LV_SYMBOL_REFRESH " Searching... %d%%", j->progress);
         else if (j->running) snprintf(s, sizeof s, LV_SYMBOL_REFRESH " %s", j->msg);
-        else if (j->kind == UI_JOB_SCAN) snprintf(s, sizeof s, "%s", j->msg);
-        else s[0] = 0;
+        else s[0] = 0;                  /* the count beside it says how many */
         if (strcmp(lv_label_get_text(c->status), s)) lv_label_set_text(c->status, s);
         if (c->job && j->id == c->job && !j->running) job_done(c);
     }
@@ -904,25 +907,29 @@ void ui_channels_open(void)
     pane_title(r1, &ui_icon_search, "Search");
     c->proto = lv_dropdown_create(r1);
     lv_dropdown_set_options(c->proto, "All protocols\nNETIP\nONVIF\nDHIP");
-    lv_obj_set_width(c->proto, 160);
+    lv_obj_set_width(c->proto, 150);
     ui_focus_style(c->proto);
     lv_group_add_obj(p->group, c->proto);
     c->search = toolbar_btn(r1, c, LV_SYMBOL_REFRESH, "Search", search_cb);
     ui_btn_accent(c->search);
-    c->status = ui_label(r1, "", VG_FONT_SM_LV, UI_C(TEXT2));
-    lv_obj_set_width(c->status, 1);
-    lv_obj_set_flex_grow(c->status, 1);
-    lv_label_set_long_mode(c->status, LV_LABEL_LONG_DOT);
+    lv_obj_t *gap = lv_obj_create(r1);
+    ui_plain(gap);
+    lv_obj_set_size(gap, 1, 1);
+    lv_obj_set_flex_grow(gap, 1);
     c->add = toolbar_btn(r1, c, LV_SYMBOL_PLUS, "Add", add_cb);
     c->chip = toolbar_btn(r1, c, LV_SYMBOL_EDIT, "Change IP...", change_ip_cb);
     c->mass = toolbar_btn(r1, c, LV_SYMBOL_LIST, "Mass change...", mass_cb);
     c->autoadd = toolbar_btn(r1, c, LV_SYMBOL_SHUFFLE, "Auto add all", autoadd_cb);
+    c->manual = toolbar_btn(r1, c, LV_SYMBOL_KEYBOARD, "Manual add", manual_cb);
 
     lv_obj_t *r2 = row_box(sp, VG_SPACE_SM);
     c->all = toolbar_btn(r2, c, LV_SYMBOL_OK, "Select all", select_all_cb);
     c->hint = ui_label(r2, "", VG_FONT_SM_LV, UI_C(TEXT2));
-    lv_obj_set_width(c->hint, 1);
-    lv_obj_set_flex_grow(c->hint, 1);
+    /* What the search does, or found, beside the count. */
+    c->status = ui_label(r2, "", VG_FONT_SM_LV, UI_C(TEXT2));
+    lv_obj_set_width(c->status, 1);
+    lv_obj_set_flex_grow(c->status, 1);
+    lv_label_set_long_mode(c->status, LV_LABEL_LONG_DOT);
     ui_label(r2, "Add with user", VG_FONT_SM_LV, UI_C(TEXT2));
     c->user = field(r2, p, c->kb, "admin", 150, 0, NULL, 63);
     ui_label(r2, "password", VG_FONT_SM_LV, UI_C(TEXT2));
@@ -1205,4 +1212,323 @@ static void autoadd_open(chans_t *c)
     lv_obj_set_width(l, LV_PCT(100));
     lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
     sub_finish(s, "Add all");
+}
+
+/* ---- Manual add: a camera entered by hand --------------------------------------------------- */
+
+static const char *const k_manual_opts = "NETIP (XMeye)\nONVIF\nDahua (DHIP/RTSP)\nGeneric RTSP";
+
+static int manual_port(int kind) { return kind == UI_MANUAL_NETIP ? 34567 : kind == UI_MANUAL_ONVIF ? 80 : 554; }
+
+typedef struct {
+    chans_t       *c;
+    ui_page_t     *page;
+    lv_obj_t      *kb;
+    lv_obj_t      *proto, *host, *port, *user, *pass, *devch, *mainp, *subp, *target, *name;
+    lv_obj_t      *row_devch, *row_main, *row_sub, *port_hint;
+    lv_obj_t      *test, *save, *result, *detail;
+    lv_timer_t    *timer;
+    unsigned       job;
+    int            saving, kind;
+    int            target_ch[UI_MAX_CHANNELS];      /* dropdown index -> channel (1-based) */
+    int            occupied[UI_MAX_CHANNELS];
+    ui_disc_job_t *jb;
+} man_t;
+
+static int man_back(ui_page_t *p) { return osk_back(((man_t *)p->user)->kb); }
+
+static void man_close(ui_page_t *p)
+{
+    man_t *m = p->user;
+    if (m->timer) lv_timer_delete(m->timer);
+    lv_async_call(refresh_async, m->c);
+    lv_free(m->jb);
+    lv_free(m);
+}
+
+/* The rows a protocol has: an NVR's channel except for plain RTSP, the
+ * paths only for it. */
+static void man_rows(man_t *m)
+{
+    int rtsp = m->kind == UI_MANUAL_RTSP;
+    if (rtsp) lv_obj_add_flag(m->row_devch, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_remove_flag(m->row_devch, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t *paths[] = { m->row_main, m->row_sub };
+    for (int i = 0; i < 2; ++i) {
+        if (rtsp) lv_obj_remove_flag(paths[i], LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(paths[i], LV_OBJ_FLAG_HIDDEN);
+    }
+    static const char *const hint[] = {
+        "Main and sub-stream over NETIP (sub-stream: stream=extra).",
+        "The streams are asked from the camera (GetProfiles, GetStreamUri).",
+        "RTSP port; main and sub-stream: /cam/realmonitor?channel=N&subtype=0 and 1.",
+        "A path (/stream1) or a whole rtsp:// URL for each stream.",
+    };
+    lv_label_set_text(m->port_hint, hint[m->kind]);
+}
+
+static void man_proto_cb(lv_event_t *e)
+{
+    man_t *m = lv_event_get_user_data(e);
+    int old = m->kind;
+    m->kind = (int)lv_dropdown_get_selected(m->proto);
+    /* A port still at the old protocol's default follows the new one. */
+    const char *t = lv_textarea_get_text(m->port);
+    char buf[8];
+    if (!*t || atoi(t) == manual_port(old)) {
+        snprintf(buf, sizeof buf, "%d", manual_port(m->kind));
+        lv_textarea_set_text(m->port, buf);
+    }
+    man_rows(m);
+}
+
+static void man_read(man_t *m, ui_manual_t *u)
+{
+    memset(u, 0, sizeof *u);
+    u->kind = (ui_manual_kind_t)m->kind;
+    snprintf(u->host, sizeof u->host, "%s", lv_textarea_get_text(m->host));
+    u->port = atoi(lv_textarea_get_text(m->port));
+    snprintf(u->user, sizeof u->user, "%s", lv_textarea_get_text(m->user));
+    snprintf(u->pass, sizeof u->pass, "%s", lv_textarea_get_text(m->pass));
+    u->dev_channel = atoi(lv_textarea_get_text(m->devch));
+    if (u->dev_channel < 1) u->dev_channel = 1;
+    if (m->kind == UI_MANUAL_RTSP) {
+        snprintf(u->main_path, sizeof u->main_path, "%s", lv_textarea_get_text(m->mainp));
+        snprintf(u->sub_path, sizeof u->sub_path, "%s", lv_textarea_get_text(m->subp));
+    }
+}
+
+/* The words for a failure: the tiles' (Authentication error, Offline,
+ * ...), and what the device said underneath. */
+static const char *fail_word(const ui_disc_res_t *r)
+{
+    if (!strcmp(r->error, "auth")) return "Authentication error";
+    if (!strcmp(r->error, "unreachable")) return "Offline";
+    if (!strcmp(r->error, "codec")) return "Unsupported codec";
+    if (!strcmp(r->error, "timeout")) return strstr(r->msg, "no video") ? "No video" : "No answer";
+    if (strstr(r->msg, "not an ONVIF device")) return "Not an ONVIF device";
+    if (!strcmp(r->error, "invalid")) return "Check the values";
+    return "Error";
+}
+
+static void man_show(man_t *m, const char *word, const char *detail, lv_color_t col)
+{
+    lv_label_set_text(m->result, word);
+    lv_obj_set_style_text_color(m->result, col, 0);
+    lv_label_set_text(m->detail, detail);
+}
+
+static void man_busy(man_t *m, int busy)
+{
+    lv_obj_t *b[] = { m->test, m->save };
+    for (int i = 0; i < 2; ++i) {
+        if (busy) lv_obj_add_state(b[i], LV_STATE_DISABLED);
+        else lv_obj_remove_state(b[i], LV_STATE_DISABLED);
+    }
+}
+
+static void man_poll_cb(lv_timer_t *t)
+{
+    man_t *m = lv_timer_get_user_data(t);
+    if (!m->job || !M()->disc_job) return;
+    M()->disc_job(m->jb);
+    const ui_disc_job_t *j = m->jb;
+    if (j->id != m->job) return;
+    if (j->running) {
+        char s[128];
+        snprintf(s, sizeof s, LV_SYMBOL_REFRESH " %s...", j->msg[0] ? j->msg : "working");
+        man_show(m, s, "", UI_C(TEXT2));
+        return;
+    }
+    m->job = 0;
+    man_busy(m, 0);
+    const ui_disc_res_t *r = j->n ? &j->r[0] : NULL;
+    if (!r) {
+        man_show(m, "Error", j->msg, UI_C(BAD));
+        return;
+    }
+    if (m->saving) {
+        m->saving = 0;
+        if (r->ok) {
+            ui_toast(UI_TOAST_OK, "Added to channel %d", r->channel);
+            ui_page_close(m->page);
+        } else {
+            man_show(m, fail_word(r), r->msg, UI_C(BAD));
+        }
+        return;
+    }
+    if (r->ok) {
+        char s[64];
+        if (r->width) snprintf(s, sizeof s, LV_SYMBOL_OK " OK: %s %dx%d", r->codec, r->width, r->height);
+        else snprintf(s, sizeof s, LV_SYMBOL_OK " OK: %s", r->codec);
+        man_show(m, s, "", UI_C(OK));
+    } else {
+        char s[64];
+        snprintf(s, sizeof s, LV_SYMBOL_WARNING " %s", fail_word(r));
+        man_show(m, s, r->msg, UI_C(BAD));
+    }
+}
+
+static void man_test_cb(lv_event_t *e)
+{
+    man_t *m = lv_event_get_user_data(e);
+    ui_manual_t u;
+    char err[96] = "";
+    man_read(m, &u);
+    int id = M()->disc_test ? M()->disc_test(&u, err, sizeof err) : -1;
+    memset(&u, 0, sizeof u);
+    if (id < 0) {
+        man_show(m, "Not tested", err[0] ? err : "cannot start", UI_C(BAD));
+        return;
+    }
+    m->job = (unsigned)id;
+    m->saving = 0;
+    man_busy(m, 1);
+    man_show(m, LV_SYMBOL_REFRESH " Connecting...", "", UI_C(TEXT2));
+}
+
+static void man_save(man_t *m, int replace)
+{
+    ui_manual_t u;
+    char err[96] = "";
+    man_read(m, &u);
+    uint32_t sel = lv_dropdown_get_selected(m->target);
+    int ch = sel < UI_MAX_CHANNELS ? m->target_ch[sel] : 0;
+    int id = M()->disc_assign_manual ? M()->disc_assign_manual(&u, ch, lv_textarea_get_text(m->name), replace,
+                                                               err, sizeof err)
+                                     : -1;
+    memset(&u, 0, sizeof u);
+    if (id < 0) {
+        man_show(m, "Not saved", err[0] ? err : "cannot start", UI_C(BAD));
+        return;
+    }
+    m->job = (unsigned)id;
+    m->saving = 1;
+    man_busy(m, 1);
+    man_show(m, LV_SYMBOL_REFRESH " Saving...", "", UI_C(TEXT2));
+}
+
+static void man_replace_yes(void *u) { man_save(u, 1); }
+
+static void man_save_cb(lv_event_t *e)
+{
+    man_t *m = lv_event_get_user_data(e);
+    uint32_t sel = lv_dropdown_get_selected(m->target);
+    if (sel < UI_MAX_CHANNELS && m->occupied[sel]) {
+        char q[96];
+        snprintf(q, sizeof q, "Channel %d has a camera. Replace it?", m->target_ch[sel]);
+        ui_confirm(q, "Replace", man_replace_yes, m);
+        return;
+    }
+    man_save(m, 0);
+}
+
+static lv_obj_t *man_row(man_t *m, const char *label, lv_obj_t **row)
+{
+    lv_obj_t *r = row_box(m->page->body, VG_SPACE_LG);
+    lv_obj_t *l = ui_label(r, label, VG_FONT_MD_LV, UI_C(TEXT));
+    lv_obj_set_width(l, 200);
+    if (row) *row = r;
+    return r;
+}
+
+static void manual_open(chans_t *c)
+{
+    man_t *m = lv_malloc_zeroed(sizeof *m);
+    if (!m) return;
+    m->jb = lv_malloc_zeroed(sizeof *m->jb);
+    ui_page_t *p = ui_page_push("Manual add");
+    if (!p || !m->jb) {
+        lv_free(m->jb);
+        lv_free(m);
+        return;
+    }
+    m->c = c;
+    m->page = p;
+    p->user = m;
+    p->on_back = man_back;
+    p->on_close = man_close;
+    lv_obj_set_style_pad_row(p->body, VG_SPACE_SM, 0);
+    lv_obj_set_style_pad_ver(p->body, VG_SPACE_LG, 0);
+    m->kb = osk_for(p);
+    const char *user, *pass;
+    creds(c, &user, &pass);
+
+    lv_obj_t *r = man_row(m, "Protocol", NULL);
+    m->proto = lv_dropdown_create(r);
+    lv_dropdown_set_options(m->proto, k_manual_opts);
+    lv_obj_set_width(m->proto, 320);
+    ui_focus_style(m->proto);
+    lv_group_add_obj(p->group, m->proto);
+    lv_obj_add_event_cb(m->proto, man_proto_cb, LV_EVENT_VALUE_CHANGED, m);
+    m->host = field(man_row(m, "Address", NULL), p, m->kb, "", 320, 0, NULL, 127);
+    lv_textarea_set_placeholder_text(m->host, "192.168.1.10 or a host name");
+    r = man_row(m, "Port", NULL);
+    m->port = field(r, p, m->kb, "34567", 120, 0, "0123456789", 5);
+    m->port_hint = ui_label(r, "", VG_FONT_SM_LV, UI_C(TEXT2));
+    lv_obj_set_flex_grow(m->port_hint, 1);
+    lv_label_set_long_mode(m->port_hint, LV_LABEL_LONG_WRAP);
+    m->user = field(man_row(m, "User", NULL), p, m->kb, user, 320, 0, NULL, 63);
+    m->pass = field(man_row(m, "Password", NULL), p, m->kb, pass, 320, 1, NULL, 63);
+    r = man_row(m, "Device channel", &m->row_devch);
+    m->devch = field(r, p, m->kb, "1", 120, 0, "0123456789", 3);
+    ui_label(r, "of an NVR or DVR; 1 for a camera", VG_FONT_SM_LV, UI_C(TEXT2));
+    m->mainp = field(man_row(m, "Main stream", &m->row_main), p, m->kb, "", 520, 0, NULL, 255);
+    lv_textarea_set_placeholder_text(m->mainp, "/stream1  or  rtsp://...");
+    m->subp = field(man_row(m, "Sub-stream", &m->row_sub), p, m->kb, "", 520, 0, NULL, 255);
+    lv_textarea_set_placeholder_text(m->subp, "optional");
+
+    /* Every channel; the first empty one chosen, a camera's name shown. */
+    r = man_row(m, "Channel", NULL);
+    m->target = lv_dropdown_create(r);
+    char opts[UI_MAX_CHANNELS * 48] = "", url[1024], nm[64];
+    int first = -1, n = 0;
+    for (int ch = 0; ch < M()->channels && ch < UI_MAX_CHANNELS; ++ch) {
+        slot_value(c, ch, "url", url, sizeof url);
+        m->target_ch[n] = ch + 1;
+        m->occupied[n] = url[0] != 0;
+        size_t l = strlen(opts);
+        if (url[0]) {
+            slot_value(c, ch, "name", nm, sizeof nm);
+            if (!nm[0]) ui_chan_title(ch, nm, sizeof nm);
+            snprintf(opts + l, sizeof opts - l, "%s%d  %.24s (replace)", n ? "\n" : "", ch + 1, nm);
+        } else {
+            snprintf(opts + l, sizeof opts - l, "%s%d  empty", n ? "\n" : "", ch + 1);
+            if (first < 0) first = n;
+        }
+        ++n;
+    }
+    lv_dropdown_set_options(m->target, opts);
+    if (first >= 0) lv_dropdown_set_selected(m->target, (uint32_t)first);
+    lv_obj_set_width(m->target, 320);
+    ui_focus_style(m->target);
+    lv_group_add_obj(p->group, m->target);
+    m->name = field(man_row(m, "Name", NULL), p, m->kb, "", 320, 0, NULL, 31);
+    lv_textarea_set_placeholder_text(m->name, "optional");
+
+    r = row_box(p->body, VG_SPACE_MD);
+    m->test = ui_btn(r, LV_SYMBOL_REFRESH, "Test");
+    lv_obj_add_event_cb(m->test, man_test_cb, LV_EVENT_CLICKED, m);
+    lv_group_add_obj(p->group, m->test);
+    m->save = ui_btn(r, LV_SYMBOL_SAVE, "Save");
+    ui_btn_accent(m->save);
+    lv_obj_add_event_cb(m->save, man_save_cb, LV_EVENT_CLICKED, m);
+    lv_group_add_obj(p->group, m->save);
+    p->save = m->save;
+    lv_obj_t *col = lv_obj_create(r);
+    ui_plain(col);
+    lv_obj_set_height(col, LV_SIZE_CONTENT);
+    lv_obj_set_flex_grow(col, 1);
+    lv_obj_set_layout(col, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    m->result = ui_label(col, "", VG_FONT_MD_LV, UI_C(TEXT2));
+    m->detail = ui_label(col, "", VG_FONT_SM_LV, UI_C(TEXT2));
+    lv_obj_set_width(m->detail, LV_PCT(100));
+    lv_label_set_long_mode(m->detail, LV_LABEL_LONG_WRAP);
+
+    m->kind = UI_MANUAL_NETIP;
+    man_rows(m);
+    m->timer = lv_timer_create(man_poll_cb, POLL_MS, m);
+    if (m->kb) lv_obj_move_foreground(m->kb);
+    ui_page_ready(p);
 }

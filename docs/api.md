@@ -348,6 +348,7 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `POST /api/v1/discovery/ip` | Change devices' addresses, or (`dry_run`) show the plan. |
 | `POST /api/v1/channels/<n>/assign` | Add a device found to channel n. |
 | `POST /api/v1/discovery/autoadd` | Add every new device to the empty channels. |
+| `POST /api/v1/devices/test` | Connect to a camera described by hand: codec and size, or why not. |
 
 A `PUT` is validated as a whole (every error is reported, at most 16 listed,
 `more_errors` counts the rest); unknown keys are errors here, to catch
@@ -622,11 +623,60 @@ After a change the device is looked for at its new address for up to 10 s
 ### `POST /api/v1/channels/<n>/assign`
 
 `{"device": "...", "user": "admin", "password": "...", "protocol": "onvif",
-"name": "Gate", "replace": false}` puts the device on channel n (the
+"name": "Gate", "replace": false}` puts a device found on channel n (the
 channels before it, if empty, stay empty). `protocol` (default: the order
 above) and `name` (default: the device's) are optional. A channel with a
 camera is refused unless `replace`; a device already on a channel is
 refused.
+
+A camera that discovery does not find (another subnet, a host name, a
+plain RTSP camera) is described by hand instead of `device`:
+
+```json
+{ "manual": { "protocol": "netip", "address": "192.168.5.20", "port": 34567,
+              "user": "admin", "password": "...", "channel": 1 },
+  "name": "Gate", "replace": false }
+```
+
+| `manual.` | |
+|---|---|
+| `protocol` | `netip` (Xiongmai XMeye), `onvif`, `dahua` (or `dhip`), `rtsp` |
+| `address` | IPv4 address or host name |
+| `port` | default 34567, 80, 554 (Dahua: the RTSP port, not 37777), 554 |
+| `user`, `password` | default `admin` (plain RTSP: none) and empty |
+| `channel` | the device's video channel, 1-based: an NVR's or DVR's; default 1 |
+| `main`, `sub` | `rtsp` only: the main and the (optional) sub-stream, each a path (`/stream1`) or a whole `rtsp://` URL |
+
+NETIP gives `netip://user:pass@host:port/?ch=N-1&stream=main` (sub-stream
+derived), Dahua `rtsp://…/cam/realmonitor?channel=N&subtype=0` and
+`subtype=1`, ONVIF the URIs the device names for its channel's two
+profiles (GetProfiles, GetStreamUri, at the time of the request), RTSP the
+paths given. The results show the URLs, redacted (`url`, `sub_url`). A
+manual device is not refused for being on another channel already (an NVR's
+channels share an address).
+
+### `POST /api/v1/devices/test`
+
+The same description as `manual` above, as the body. The job connects as
+a channel would (NETIP login and stream, RTSP DESCRIBE/SETUP/PLAY; ONVIF
+first asks for the stream URIs) and waits up to 6 s for the first
+keyframe. Its one result:
+
+```json
+{ "device": "192.168.5.20", "ip": "192.168.5.20", "protocol": "netip",
+  "url": "netip://admin:***@192.168.5.20:34567/?ch=0&stream=main",
+  "codec": "H.264", "width": 1920, "height": 1080, "done": true, "ok": true,
+  "message": "H.264 1920x1080" }
+```
+
+or `"ok": false` with `error`: `auth` (the device refused the user or the
+password), `unreachable` (nothing answers: offline), `codec` (neither
+H.264 nor H.265), `unsupported` (for ONVIF, "not an ONVIF device": a web
+server, but no SOAP), `timeout` (connected, no video), `invalid` (an
+address or credentials a URL cannot carry), `protocol`; `message` has the
+device's words. The classification is the tiles' (`status` in
+`GET /api/v1/status`). A test is a job like the others, and its refused
+passwords count against the limit.
 
 ### `POST /api/v1/discovery/autoadd`
 

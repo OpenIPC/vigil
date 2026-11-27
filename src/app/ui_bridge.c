@@ -397,7 +397,9 @@ static int system_info(ui_info_t *info, int max)
 _Static_assert(UI_DISC_NETIP == DISC_NETIP && UI_DISC_ONVIF == DISC_ONVIF && UI_DISC_DHIP == DISC_DHIP,
                "UI_DISC_* are DISC_*");
 _Static_assert(UI_DISC_MAX >= DISC_JOB_MAX && UI_DISC_MAX >= DISC_MAX, "the UI holds every result");
-_Static_assert((int)UI_JOB_SCAN == (int)DISC_JOB_SCAN && (int)UI_JOB_AUTOADD == (int)DISC_JOB_AUTOADD,
+_Static_assert((int)UI_JOB_SCAN == (int)DISC_JOB_SCAN && (int)UI_JOB_AUTOADD == (int)DISC_JOB_AUTOADD &&
+                   (int)UI_JOB_TEST == (int)DISC_JOB_TEST && (int)UI_MANUAL_RTSP == (int)DISC_MANUAL_RTSP &&
+                   (int)UI_MANUAL_DAHUA == (int)DISC_MANUAL_DAHUA,
                "ui_job_kind_t follows disc_job_kind_t");
 
 static void job_err(char *err, size_t cap)
@@ -470,6 +472,10 @@ static void disc_job_ui(ui_disc_job_t *out)
         u->ok = r->done && r->rc == DISC_OK;
         u->reprobed = r->reprobed;
         snprintf(u->msg, sizeof u->msg, "%s", r->msg);
+        if (r->done && r->rc != DISC_OK) snprintf(u->error, sizeof u->error, "%s", disc_rc_name(r->rc));
+        snprintf(u->codec, sizeof u->codec, "%s", r->codec);
+        u->width = r->width;
+        u->height = r->height;
     }
     free(j);
 }
@@ -504,6 +510,42 @@ static int disc_autoadd_ui(const char *user, const char *pass, char *err, size_t
     return id;
 }
 
+static void manual_to_core(const ui_manual_t *u, disc_manual_t *m)
+{
+    memset(m, 0, sizeof *m);
+    m->kind = (disc_manual_kind_t)u->kind;
+    snprintf(m->host, sizeof m->host, "%s", u->host);
+    m->port = u->port;
+    snprintf(m->user, sizeof m->user, "%s", u->user);
+    snprintf(m->pass, sizeof m->pass, "%s", u->pass);
+    m->dev_channel = u->dev_channel;
+    snprintf(m->main_path, sizeof m->main_path, "%s", u->main_path);
+    snprintf(m->sub_path, sizeof m->sub_path, "%s", u->sub_path);
+}
+
+static int disc_test_ui(const ui_manual_t *u, char *err, size_t cap)
+{
+    disc_manual_t m;
+    manual_to_core(u, &m);
+    int id = disc_test_job(&m);
+    if (id < 0) job_err(err, cap);
+    volatile char *w = (volatile char *)&m;
+    for (size_t i = 0; i < sizeof m; ++i) w[i] = 0;
+    return id;
+}
+
+static int disc_assign_manual_ui(const ui_manual_t *u, int channel, const char *name, int replace, char *err,
+                                 size_t cap)
+{
+    disc_manual_t m;
+    manual_to_core(u, &m);
+    int id = disc_assign_manual_job(&m, channel, name, replace);
+    if (id < 0) job_err(err, cap);
+    volatile char *w = (volatile char *)&m;
+    for (size_t i = 0; i < sizeof m; ++i) w[i] = 0;
+    return id;
+}
+
 int ui_bridge_init(ui_model_t *m)
 {
     if (!g_sections && sections_build() < 0) return -1;
@@ -530,6 +572,8 @@ int ui_bridge_init(ui_model_t *m)
     m->disc_ip = disc_ip_ui;
     m->disc_assign = disc_assign_ui;
     m->disc_autoadd = disc_autoadd_ui;
+    m->disc_test = disc_test_ui;
+    m->disc_assign_manual = disc_assign_manual_ui;
     g_ev_cursor = 0;                    /* every event still kept, the start-up ones too */
     m->mgmt = ui_mgmt_model();
     return 0;

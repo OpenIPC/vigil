@@ -44,6 +44,7 @@ typedef enum {
     DISC_EUNREACHABLE,              /* no connection */
     DISC_EPROTO,                    /* an answer we could not use */
     DISC_EINVAL,                    /* bad arguments */
+    DISC_ECODEC,                    /* video, but neither H.264 nor H.265 */
 } disc_rc_t;
 
 const char *disc_rc_name(disc_rc_t rc);   /* "ok", "auth", "unsupported", ... */
@@ -60,9 +61,10 @@ typedef struct {
 int disc_http_post(const char *host, int port, const char *path, const char *ctype, const char *auth,
                    const char *body, int timeout_ms, disc_http_t *r, char *err, size_t errcap);
 
-/* ONVIF: the main and sub-stream RTSP URLs (the first two media
- * profiles), with user:pass put into them. `sub` may come back "". */
-disc_rc_t disc_onvif_stream_uris(const disc_device_t *d, const char *user, const char *pass,
+/* ONVIF: the main and sub-stream RTSP URLs of video channel `channel`
+ * (0-based: media profiles 2 * channel and the one after), with user:pass
+ * put into them. `sub` may come back "". */
+disc_rc_t disc_onvif_stream_uris(const disc_device_t *d, const char *user, const char *pass, int channel,
                                  char *url, size_t ucap, char *sub, size_t scap, char *err, size_t errcap);
 
 /* ONVIF: the device's address to ip/mask (static) and the default gateway. */

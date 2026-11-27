@@ -379,6 +379,9 @@ class OnvifHttp(Quiet):
 class DahuaHttp(Quiet):
     def do_POST(self):
         dev, a = self.server.device, self.server.device.args
+        if self.path not in ("/RPC2_Login", "/RPC2"):
+            self.body()
+            return self.reply(404, "<html><body>Not Found</body></html>", "text/html")
         js = json.loads(self.body() or "{}")
         m, p = js.get("method"), js.get("params") or {}
         if self.path == "/RPC2_Login":

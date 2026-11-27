@@ -137,7 +137,7 @@ typedef struct {
     int      channel;               /* 1-based channel whose camera is this address; 0 none */
 } ui_disc_dev_t;
 
-typedef enum { UI_JOB_NONE, UI_JOB_SCAN, UI_JOB_IP, UI_JOB_ASSIGN, UI_JOB_AUTOADD } ui_job_kind_t;
+typedef enum { UI_JOB_NONE, UI_JOB_SCAN, UI_JOB_IP, UI_JOB_ASSIGN, UI_JOB_AUTOADD, UI_JOB_TEST } ui_job_kind_t;
 
 typedef struct {
     char     key[24], ip[16], new_ip[16];
@@ -145,6 +145,10 @@ typedef struct {
     int      channel;
     int      done, ok, reprobed;
     char     msg[96];
+    char     error[16];             /* not ok: "auth", "unreachable", "codec", "unsupported",
+                                       "timeout", "protocol", "invalid" */
+    char     codec[8];              /* TEST: the main stream's */
+    int      width, height;
 } ui_disc_res_t;
 
 typedef struct {
@@ -160,6 +164,18 @@ typedef struct {
     char key[24];
     char ip[16];                    /* "": the next free one from the start address */
 } ui_disc_ip_t;
+
+/* A camera entered by hand (Channels -> Manual add). */
+typedef enum { UI_MANUAL_NETIP, UI_MANUAL_ONVIF, UI_MANUAL_DAHUA, UI_MANUAL_RTSP } ui_manual_kind_t;
+
+typedef struct {
+    ui_manual_kind_t kind;
+    char host[128];                 /* address or host name */
+    int  port;                      /* 0: the protocol's */
+    char user[64], pass[64];
+    int  dev_channel;               /* 1-based, of an NVR/DVR */
+    char main_path[256], sub_path[256];     /* RTSP: paths or whole URLs */
+} ui_manual_t;
 
 
 /* ---- management pages (NULL members: not there in this build) ------------------- */
@@ -373,6 +389,11 @@ typedef struct ui_model {
     int  (*disc_assign)(const char *key, int channel, const char *user, const char *pass, int replace,
                         char *err, size_t cap);
     int  (*disc_autoadd)(const char *user, const char *pass, char *err, size_t cap);
+    /* A camera entered by hand: test it (one result: codec and size, or
+     * why not), or put it on `channel` (1-based). Jobs as above. */
+    int  (*disc_test)(const ui_manual_t *m, char *err, size_t cap);
+    int  (*disc_assign_manual)(const ui_manual_t *m, int channel, const char *name, int replace, char *err,
+                               size_t cap);
 
     /* The management pages (NULL: none in this build). */
     const ui_mgmt_t *mgmt;

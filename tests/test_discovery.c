@@ -463,6 +463,48 @@ static void test_creds(void)
     CHECK(disc_url_with_creds("10.0.0.5/x", "a", "b", u, sizeof u) < 0, "no scheme");
 }
 
+/* ---- devices entered by hand ---------------------------------------------------------- */
+
+static void test_manual(void)
+{
+    char u[512], sub[512], err[96];
+    disc_manual_t m = { .kind = DISC_MANUAL_NETIP, .host = "192.168.1.30", .pass = "pw", .dev_channel = 3 };
+    CHECK(disc_manual_urls(&m, u, sizeof u, sub, sizeof sub, err, sizeof err) == DISC_OK &&
+          !strcmp(u, "netip://admin:pw@192.168.1.30:34567/?ch=2&stream=main") && !sub[0], "netip %s", u);
+    m = (disc_manual_t){ .kind = DISC_MANUAL_DAHUA, .host = "nvr.local", .user = "op", .pass = "x" };
+    CHECK(disc_manual_urls(&m, u, sizeof u, sub, sizeof sub, err, sizeof err) == DISC_OK &&
+          !strcmp(u, "rtsp://op:x@nvr.local:554/cam/realmonitor?channel=1&subtype=0") &&
+          !strcmp(sub, "rtsp://op:x@nvr.local:554/cam/realmonitor?channel=1&subtype=1"), "dahua %s %s", u, sub);
+    m = (disc_manual_t){ .kind = DISC_MANUAL_RTSP, .host = "10.0.0.5", .port = 8554, .main_path = "live" };
+    CHECK(disc_manual_urls(&m, u, sizeof u, sub, sizeof sub, err, sizeof err) == DISC_OK &&
+          !strcmp(u, "rtsp://10.0.0.5:8554/live") && !sub[0], "rtsp without user %s", u);
+    m = (disc_manual_t){ .kind = DISC_MANUAL_RTSP, .host = "10.0.0.5", .user = "a", .pass = "b",
+                         .main_path = "rtsp://10.0.0.6:10554/x?y=1", .sub_path = "rtsp://c:d@10.0.0.6/s" };
+    CHECK(disc_manual_urls(&m, u, sizeof u, sub, sizeof sub, err, sizeof err) == DISC_OK &&
+          !strcmp(u, "rtsp://a:b@10.0.0.6:10554/x?y=1") && !strcmp(sub, "rtsp://c:d@10.0.0.6/s"),
+          "whole URLs %s %s", u, sub);
+    static const disc_manual_t bad[] = {
+        { .kind = DISC_MANUAL_NETIP, .host = "" },
+        { .kind = DISC_MANUAL_NETIP, .host = "a b" },
+        { .kind = DISC_MANUAL_NETIP, .host = "x@y" },
+        { .kind = DISC_MANUAL_NETIP, .host = "10.0.0.1", .pass = "p@ss" },
+        { .kind = DISC_MANUAL_NETIP, .host = "10.0.0.1", .port = 70000 },
+        { .kind = DISC_MANUAL_RTSP, .host = "10.0.0.1" },
+        { .kind = DISC_MANUAL_RTSP, .host = "10.0.0.1", .main_path = "a b" },
+        { .kind = 9, .host = "10.0.0.1" },
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; ++i)
+        CHECK(disc_manual_urls(&bad[i], u, sizeof u, sub, sizeof sub, err, sizeof err) == DISC_EINVAL && !u[0],
+              "bad manual %zu: %s", i, u);
+    CHECK(disc_manual_port(DISC_MANUAL_NETIP) == 34567 && disc_manual_port(DISC_MANUAL_ONVIF) == 80 &&
+          disc_manual_port(DISC_MANUAL_DAHUA) == 554 && disc_manual_port(DISC_MANUAL_RTSP) == 554, "ports");
+    CHECK(disc_manual_kind("DHIP") == DISC_MANUAL_DAHUA && disc_manual_kind("rtsp") == DISC_MANUAL_RTSP &&
+          disc_manual_kind("x") < 0, "kinds");
+    char codec[8];
+    int w, h;
+    CHECK(disc_test_url("capture:0", 1, codec, &w, &h, err, sizeof err) == DISC_EINVAL, "a local input is no camera");
+}
+
 int main(int argc, char **argv)
 {
     g_data = argc > 1 ? argv[1] : "tests/data";
@@ -471,6 +513,7 @@ int main(int argc, char **argv)
     test_dhip();
     test_devices();
     test_creds();
+    test_manual();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

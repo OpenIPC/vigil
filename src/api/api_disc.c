@@ -17,6 +17,7 @@
 #define _DEFAULT_SOURCE
 #include <errno.h>
 #include <pthread.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -136,7 +137,7 @@ static cJSON *device_json(const disc_device_t *d, time_t now)
 static const char *kind_name(disc_job_kind_t k)
 {
     return k == DISC_JOB_SCAN ? "scan" : k == DISC_JOB_IP ? "ip" : k == DISC_JOB_ASSIGN ? "assign"
-         : k == DISC_JOB_AUTOADD ? "autoadd" : "none";
+         : k == DISC_JOB_AUTOADD ? "autoadd" : k == DISC_JOB_TEST ? "test" : "none";
 }
 
 static cJSON *job_json(const disc_job_t *j)
@@ -163,6 +164,12 @@ static cJSON *job_json(const disc_job_t *j)
         if (r->proto) cJSON_AddStringToObject(e, "protocol", disc_proto_name(r->proto));
         if (r->channel) cJSON_AddNumberToObject(e, "channel", r->channel);
         if (r->url[0]) cJSON_AddStringToObject(e, "url", r->url);
+        if (r->sub_url[0]) cJSON_AddStringToObject(e, "sub_url", r->sub_url);
+        if (r->codec[0]) {
+            cJSON_AddStringToObject(e, "codec", r->codec);
+            cJSON_AddNumberToObject(e, "width", r->width);
+            cJSON_AddNumberToObject(e, "height", r->height);
+        }
         cJSON_AddBoolToObject(e, "done", r->done);
         cJSON_AddBoolToObject(e, "ok", r->done && r->rc == DISC_OK);
         if (r->done && r->rc != DISC_OK) cJSON_AddStringToObject(e, "error", disc_rc_name(r->rc));
@@ -335,11 +342,88 @@ static int do_ip(struct mg_connection *conn)
     return answer_job(conn, (unsigned)id, WAIT_MS);
 }
 
+/* A device described by hand: {"protocol", "address", "port", "user",
+ * "password", "channel", "main", "sub"}. 0, or -1 (malformed). */
+static int manual_from(const cJSON *o, disc_manual_t *m)
+{
+    memset(m, 0, sizeof *m);
+    if (!cJSON_IsObject(o)) return -1;
+    int kind = disc_manual_kind(jstr(o, "protocol", ""));
+    if (kind < 0) return -1;
+    m->kind = (disc_manual_kind_t)kind;
+    static const struct { const char *key; size_t off, size; } S[] = {
+        { "address", offsetof(disc_manual_t, host), sizeof m->host },
+        { "user", offsetof(disc_manual_t, user), sizeof m->user },
+        { "password", offsetof(disc_manual_t, pass), sizeof m->pass },
+        { "main", offsetof(disc_manual_t, main_path), sizeof m->main_path },
+        { "sub", offsetof(disc_manual_t, sub_path), sizeof m->sub_path },
+    };
+    for (size_t i = 0; i < sizeof S / sizeof S[0]; ++i) {
+        const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, S[i].key);
+        if (v && !cJSON_IsString(v)) return -1;
+        if (v && strlen(v->valuestring) >= S[i].size) return -1;
+        if (v) memcpy((char *)m + S[i].off, v->valuestring, strlen(v->valuestring) + 1);
+    }
+    const cJSON *port = cJSON_GetObjectItemCaseSensitive(o, "port");
+    const cJSON *ch = cJSON_GetObjectItemCaseSensitive(o, "channel");
+    if ((port && (!cJSON_IsNumber(port) || port->valuedouble < 1 || port->valuedouble > 65535)) ||
+        (ch && (!cJSON_IsNumber(ch) || ch->valuedouble < 1 || ch->valuedouble > 256)))
+        return -1;
+    m->port = port ? (int)port->valuedouble : 0;
+    m->dev_channel = ch ? (int)ch->valuedouble : 1;
+    return m->host[0] ? 0 : -1;
+}
+
+static void manual_wipe(disc_manual_t *m) { wipe(m, sizeof *m); }
+
+static int do_test(struct mg_connection *conn)
+{
+    int rc;
+    cJSON *b = body_object(conn, &rc);
+    if (!b) return rc;
+    disc_manual_t m;
+    int bad = manual_from(b, &m) < 0, wait = 0, id = -1;
+    wipe_json_secret(b, "password");
+    cJSON_Delete(b);
+    if (bad) {
+        manual_wipe(&m);
+        return send_error(conn, 400, "invalid device: protocol (netip, onvif, dahua, rtsp), address, port, "
+                                     "user, password, channel, main, sub", NULL);
+    }
+    if ((wait = cred_rate()) > 0) id = -2;
+    else id = disc_test_job(&m);
+    manual_wipe(&m);
+    if (id == -2) return rate_limited(conn, wait);
+    if (id < 0) return job_refused(conn);
+    return answer_job(conn, (unsigned)id, WAIT_MS);
+}
+
+static int do_assign_manual(struct mg_connection *conn, int ch, cJSON *b)
+{
+    disc_manual_t m;
+    const cJSON *rep = cJSON_GetObjectItemCaseSensitive(b, "replace");
+    const char *name = jstr(b, "name", "");
+    int bad = manual_from(cJSON_GetObjectItemCaseSensitive(b, "manual"), &m) < 0 || (rep && !cJSON_IsBool(rep)) ||
+              strlen(name) >= 32;
+    int wait = 0, id = -1;
+    if (!bad && (wait = cred_rate()) > 0) id = -2;
+    else if (!bad) id = disc_assign_manual_job(&m, ch, name, cJSON_IsTrue(rep));
+    manual_wipe(&m);
+    cJSON *man = cJSON_GetObjectItemCaseSensitive(b, "manual");
+    wipe_json_secret(man, "password");
+    cJSON_Delete(b);
+    if (bad) return send_error(conn, 400, "invalid request: manual (protocol, address, ...), name, replace", NULL);
+    if (id == -2) return rate_limited(conn, wait);
+    if (id < 0) return job_refused(conn);
+    return answer_job(conn, (unsigned)id, WAIT_MS);
+}
+
 static int do_assign(struct mg_connection *conn, int ch)
 {
     int rc;
     cJSON *b = body_object(conn, &rc);
     if (!b) return rc;
+    if (cJSON_GetObjectItemCaseSensitive(b, "manual")) return do_assign_manual(conn, ch, b);
     const char *key = jstr(b, "device", NULL), *proto = jstr(b, "protocol", "");
     unsigned bits = *proto ? disc_proto_bits(proto) : 0;
     const cJSON *rep = cJSON_GetObjectItemCaseSensitive(b, "replace");
@@ -417,6 +501,7 @@ int api_disc_request(struct mg_connection *conn, const char *uri, const char *m)
         { "/api/v1/discovery/scan", do_scan },
         { "/api/v1/discovery/ip", do_ip },
         { "/api/v1/discovery/autoadd", do_autoadd },
+        { "/api/v1/devices/test", do_test },
     };
     for (size_t i = 0; i < sizeof posts / sizeof posts[0]; ++i)
         if (!strcmp(uri, posts[i].path)) return post ? posts[i].fn(conn) : method_not_allowed(conn, "POST");

@@ -2,6 +2,7 @@
 /* discovery.c — the device table, the scanner and the jobs (see
  * discovery.h). */
 #define _GNU_SOURCE
+#include <ctype.h>
 #include <errno.h>
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -23,6 +24,8 @@
 #include "discovery.h"
 #include "log.h"
 #include "schema.h"
+#include "source.h"
+#include "sps.h"
 
 #define IFACE_MAX   16
 #define ROUNDS      3                /* searches per scan, a second apart */
@@ -265,6 +268,8 @@ typedef struct {
     char             key[24];
     int              channel, dry_run, replace;
     unsigned         proto;
+    disc_manual_t    manual;        /* TEST, and ASSIGN with is_manual */
+    int              is_manual;
 } job_args_t;
 
 static void *job_main(void *arg);
@@ -1012,7 +1017,7 @@ static unsigned device_urls(const disc_device_t *d, unsigned proto, const char *
     for (int p = 0; p < np && !g_stop; ++p) {
         *tried = order[p];
         if (order[p] == DISC_ONVIF) {
-            *rc = disc_onvif_stream_uris(d, user, pass, url, ucap, sub, scap, err, errcap);
+            *rc = disc_onvif_stream_uris(d, user, pass, 0, url, ucap, sub, scap, err, errcap);
         } else if (disc_url(d, order[p], user, pass, url, ucap, sub, scap) == 0) {
             *rc = DISC_OK;
         } else {
@@ -1231,6 +1236,305 @@ static void with_config(job_args_t *a)
     free(c);
 }
 
+/* ---- a device entered by hand ----------------------------------------------------------- */
+
+static const char *const k_manual_names[] = { "netip", "onvif", "dahua", "rtsp" };
+
+int disc_manual_port(disc_manual_kind_t kind)
+{
+    return kind == DISC_MANUAL_NETIP ? 34567 : kind == DISC_MANUAL_ONVIF ? 80 : 554;
+}
+
+int disc_manual_kind(const char *name)
+{
+    for (int i = 0; i < 4; ++i)
+        if (name && !strcasecmp(name, k_manual_names[i])) return i;
+    if (name && !strcasecmp(name, "dhip")) return DISC_MANUAL_DAHUA;
+    return -1;
+}
+
+const char *disc_manual_name(disc_manual_kind_t kind)
+{
+    return (unsigned)kind < 4 ? k_manual_names[kind] : "";
+}
+
+/* A host name or an IPv4 address, nothing a URL would read as more. */
+static int host_ok(const char *h)
+{
+    if (!*h || strlen(h) > 127 || *h == '-' || *h == '.') return 0;
+    for (const char *p = h; *p; ++p)
+        if (!(isalnum((unsigned char)*p) || *p == '-' || *p == '.' || *p == '_')) return 0;
+    return 1;
+}
+
+/* An RTSP URL from a path or a whole URL, with the credentials put in
+ * when there are some and the URL has none. */
+static int rtsp_from(const disc_manual_t *m, int port, const char *path, char *out, size_t cap)
+{
+    while (*path == ' ') ++path;
+    if (!strncasecmp(path, "rtsp://", 7)) {
+        const char *auth = path + 7;
+        size_t n = strcspn(auth, "/?#");
+        if (!m->user[0] || memchr(auth, '@', n)) return snprintf(out, cap, "%s", path) < (int)cap ? 0 : -1;
+        return disc_url_with_creds(path, m->user, m->pass, out, cap);
+    }
+    if (strpbrk(path, " \"\t\r\n")) return -1;
+    int n = m->user[0] ? snprintf(out, cap, "rtsp://%s:%s@%s:%d%s%s", m->user, m->pass, m->host, port,
+                                  *path == '/' ? "" : "/", path)
+                       : snprintf(out, cap, "rtsp://%s:%d%s%s", m->host, port, *path == '/' ? "" : "/", path);
+    return n > 0 && (size_t)n < cap ? 0 : -1;
+}
+
+disc_rc_t disc_manual_urls(const disc_manual_t *m, char *url, size_t ucap, char *sub, size_t scap, char *err,
+                           size_t errcap)
+{
+    if (ucap) url[0] = 0;
+    if (scap) sub[0] = 0;
+    err[0] = 0;
+    const char *user = m->user[0] || m->kind == DISC_MANUAL_RTSP ? m->user : "admin";
+    int port = m->port > 0 && m->port < 65536 ? m->port : disc_manual_port(m->kind);
+    int ch = m->dev_channel > 0 ? m->dev_channel : 1;
+    if (!host_ok(m->host)) {
+        snprintf(err, errcap, "not an address or host name");
+        return DISC_EINVAL;
+    }
+    if (m->port < 0 || m->port > 65535 || ch > 256) {
+        snprintf(err, errcap, m->port < 0 || m->port > 65535 ? "port out of range" : "channel out of range");
+        return DISC_EINVAL;
+    }
+    if ((user[0] && !disc_cred_ok(user, 1)) || !disc_cred_ok(m->pass, 0)) {
+        snprintf(err, errcap, "the user or password has characters a camera URL cannot carry");
+        return DISC_EINVAL;
+    }
+    int n = 0, k = 0;
+    switch (m->kind) {
+    case DISC_MANUAL_NETIP:
+        n = snprintf(url, ucap, "netip://%s:%s@%s:%d/?ch=%d&stream=main", user, m->pass, m->host, port, ch - 1);
+        break;
+    case DISC_MANUAL_DAHUA:
+        n = snprintf(url, ucap, "rtsp://%s:%s@%s:%d/cam/realmonitor?channel=%d&subtype=0", user, m->pass, m->host,
+                     port, ch);
+        k = snprintf(sub, scap, "rtsp://%s:%s@%s:%d/cam/realmonitor?channel=%d&subtype=1", user, m->pass, m->host,
+                     port, ch);
+        break;
+    case DISC_MANUAL_RTSP:
+        if (!m->main_path[0]) {
+            snprintf(err, errcap, "the main stream's path or URL is missing");
+            return DISC_EINVAL;
+        }
+        n = 1;                                  /* rtsp_from checked the length */
+        if (rtsp_from(m, port, m->main_path, url, ucap) < 0 ||
+            (m->sub_path[0] && rtsp_from(m, port, m->sub_path, sub, scap) < 0)) {
+            snprintf(err, errcap, "the stream path or URL is not usable");
+            if (ucap) url[0] = 0;
+            if (scap) sub[0] = 0;
+            return DISC_EINVAL;
+        }
+        break;
+    case DISC_MANUAL_ONVIF: {
+        disc_device_t d;
+        memset(&d, 0, sizeof d);
+        d.dhcp = -1;
+        d.http_port = port;
+        size_t hl = strlen(m->host);
+        if (hl < sizeof d.ip) memcpy(d.ip, m->host, hl + 1);
+        snprintf(d.xaddr, sizeof d.xaddr, "http://%s:%d/onvif/device_service", m->host, port);
+        d.protos = DISC_ONVIF;
+        return disc_onvif_stream_uris(&d, user, m->pass, ch - 1, url, ucap, sub, scap, err, errcap);
+    }
+    default:
+        snprintf(err, errcap, "unknown protocol");
+        return DISC_EINVAL;
+    }
+    if (n <= 0 || (size_t)n >= ucap || k < 0 || (size_t)k >= scap) {
+        if (ucap) url[0] = 0;
+        if (scap) sub[0] = 0;
+        snprintf(err, errcap, "too long for a camera URL");
+        return DISC_EINVAL;
+    }
+    /* What the configuration would refuse is refused here. */
+    source_t *t = source_create(url, 0);
+    if (!t) {
+        snprintf(err, errcap, "not a usable camera URL");
+        url[0] = 0;
+        if (scap) sub[0] = 0;
+        return DISC_EINVAL;
+    }
+    source_destroy(t);
+    return DISC_OK;
+}
+
+typedef struct {
+    vg_codec_t codec;
+    int        got, width, height;
+} probe_t;
+
+static void probe_size(probe_t *p, vg_codec_t c, const uint8_t *nal, size_t len)
+{
+    int t = c == VG_CODEC_H264 ? nal[0] & 0x1f : (nal[0] >> 1) & 0x3f;
+    vg_stream_info_t si;
+    memset(&si, 0, sizeof si);
+    if (((c == VG_CODEC_H264 && t == 7) || (c == VG_CODEC_H265 && t == 33)) && sps_parse(c, nal, len, &si) == 0 &&
+        si.width) {
+        p->width = (int)si.width;
+        p->height = (int)si.height;
+    }
+}
+
+static void probe_au(void *user, const vg_au_t *au)
+{
+    probe_t *p = user;
+    if (p->got || !au->key || (au->codec != VG_CODEC_H264 && au->codec != VG_CODEC_H265)) return;
+    p->codec = au->codec;
+    size_t pos = 0, nl;
+    const uint8_t *nal;
+    while ((nal = au_next_nal(au->data, au->len, &pos, &nl)) != NULL)
+        if (nl) probe_size(p, au->codec, nal, nl);
+    p->got = 1;
+}
+
+static disc_rc_t fail_rc(src_fail_t f)
+{
+    return f == SRC_FAIL_AUTH ? DISC_EAUTH : f == SRC_FAIL_UNREACHABLE ? DISC_EUNREACHABLE
+         : f == SRC_FAIL_CODEC ? DISC_ECODEC : DISC_EPROTO;
+}
+
+disc_rc_t disc_test_url(const char *url, int secs, char codec[8], int *width, int *height, char *err,
+                        size_t errcap)
+{
+    codec[0] = 0;
+    *width = *height = 0;
+    source_t *s = source_create(url, 0);
+    if (!s) {
+        snprintf(err, errcap, "not a usable camera URL");
+        return DISC_EINVAL;
+    }
+    if (s->ops->self_displayed) {
+        source_destroy(s);
+        snprintf(err, errcap, "not a network camera");
+        return DISC_EINVAL;
+    }
+    s->stop = &g_stop;              /* disc_shutdown ends a test at once */
+    disc_rc_t rc;
+    if (s->ops->open(s) < 0) {
+        rc = fail_rc(s->fail);
+        snprintf(err, errcap, "%s", s->err[0] ? s->err : "cannot connect");
+        source_destroy(s);
+        return rc;
+    }
+    probe_t p = { .codec = s->codec };
+    for (int i = 0; i < s->ps_n; ++i)
+        if (s->ps_len[i]) probe_size(&p, s->codec, s->ps[i], s->ps_len[i]);
+    long long end = mono_ms() + secs * 1000LL;
+    rc = DISC_ETIMEOUT;
+    snprintf(err, errcap, "connected, but no video within %d s", secs);
+    while (!p.got && !g_stop && mono_ms() < end) {
+        if (s->ops->poll(s, probe_au, &p) < 0) {
+            rc = fail_rc(s->fail);
+            snprintf(err, errcap, "%s", s->err[0] ? s->err : "connection lost");
+            break;
+        }
+    }
+    if (p.got) {
+        rc = DISC_OK;
+        snprintf(codec, 8, "%s", vg_codec_name(p.codec));
+        *width = p.width;
+        *height = p.height;
+        err[0] = 0;
+    } else if (rc == DISC_ETIMEOUT && s->codec != VG_CODEC_NONE && s->codec != VG_CODEC_H264 &&
+               s->codec != VG_CODEC_H265) {
+        rc = DISC_ECODEC;
+        snprintf(err, errcap, "video, but neither H.264 nor H.265");
+    }
+    s->ops->close(s);
+    source_destroy(s);
+    return rc;
+}
+
+#define TEST_SECS 6
+
+static void run_test(job_args_t *a)
+{
+    disc_result_t r = { .done = 1 };
+    snprintf(r.key, sizeof r.key, "%.23s", a->manual.host);
+    snprintf(r.ip, sizeof r.ip, "%.15s", a->manual.host);
+    r.proto = a->manual.kind == DISC_MANUAL_NETIP ? DISC_NETIP : a->manual.kind == DISC_MANUAL_ONVIF ? DISC_ONVIF
+            : a->manual.kind == DISC_MANUAL_DAHUA ? DISC_DHIP : 0;
+    char url[512], sub[512];
+    job_msg("%s", a->manual.kind == DISC_MANUAL_ONVIF ? "asking for the streams" : "connecting");
+    r.rc = disc_manual_urls(&a->manual, url, sizeof url, sub, sizeof sub, r.msg, sizeof r.msg);
+    if (r.rc == DISC_OK) {
+        schema_redact_url(url, r.url, sizeof r.url);
+        if (sub[0]) schema_redact_url(sub, r.sub_url, sizeof r.sub_url);
+        job_msg("connecting");
+        r.rc = disc_test_url(url, TEST_SECS, r.codec, &r.width, &r.height, r.msg, sizeof r.msg);
+        if (r.rc == DISC_OK) {
+            if (r.width) snprintf(r.msg, sizeof r.msg, "%s %dx%d", r.codec, r.width, r.height);
+            else snprintf(r.msg, sizeof r.msg, "%s", r.codec);
+        }
+    }
+    job_result(0, &r);
+    job_msg("%s", r.rc == DISC_OK ? "OK" : r.msg);
+    wipe(url, sizeof url);
+    wipe(sub, sizeof sub);
+}
+
+static void run_assign_manual(job_args_t *a)
+{
+    disc_result_t r = { .done = 1 };
+    snprintf(r.key, sizeof r.key, "%.23s", a->manual.host);
+    snprintf(r.ip, sizeof r.ip, "%.15s", a->manual.host);
+    vigil_config_t *c = malloc(sizeof *c);
+    char url[512], sub[512], *cams = NULL, *text = NULL;
+    url[0] = sub[0] = 0;
+    int ch = a->channel;
+    if (!c) {
+        r.rc = DISC_EPROTO;
+        snprintf(r.msg, sizeof r.msg, "out of memory");
+        goto out;
+    }
+    unsigned gen = config_get(c);
+    if (!ch) ch = first_empty(c, 0);
+    if (ch < 1 || ch > g_max_ch) {
+        r.rc = DISC_EINVAL;
+        snprintf(r.msg, sizeof r.msg, a->channel ? "no channel %d" : "no empty channel", a->channel);
+        goto out;
+    }
+    if (ch <= c->n_cameras && c->cameras[ch - 1].url[0] && !a->replace) {
+        r.rc = DISC_EINVAL;
+        snprintf(r.msg, sizeof r.msg, "channel %d has a camera", ch);
+        goto out;
+    }
+    r.channel = ch;
+    job_msg("adding %s to channel %d", a->manual.host, ch);
+    r.rc = disc_manual_urls(&a->manual, url, sizeof url, sub, sizeof sub, r.msg, sizeof r.msg);
+    if (r.rc != DISC_OK) goto out;
+    char name[32];
+    snprintf(name, sizeof name, "%s", a->name);
+    cams = config_get_json("cameras", 0);
+    text = cams ? disc_cameras_with(cams, ch, url, sub, name) : NULL;
+    if (!text) {
+        r.rc = DISC_EPROTO;
+        snprintf(r.msg, sizeof r.msg, "out of memory");
+        goto out;
+    }
+    r.rc = save_cameras(text, gen, r.msg, sizeof r.msg);
+    schema_redact_url(url, r.url, sizeof r.url);
+    if (sub[0]) schema_redact_url(sub, r.sub_url, sizeof r.sub_url);
+    if (r.rc == DISC_OK) snprintf(r.msg, sizeof r.msg, "added to channel %d", ch);
+out:
+    job_result(0, &r);
+    job_msg("%s", r.msg);
+    if (cams) wipe(cams, strlen(cams));
+    if (text) wipe(text, strlen(text));
+    free(cams);
+    free(text);
+    wipe(url, sizeof url);
+    wipe(sub, sizeof sub);
+    if (c) wipe(c, sizeof *c);
+    free(c);
+}
+
 static void *job_main(void *arg)
 {
     job_args_t *a = arg;
@@ -1238,7 +1542,8 @@ static void *job_main(void *arg)
     switch (a->kind) {
     case DISC_JOB_SCAN:    run_scan(a); break;
     case DISC_JOB_IP:      run_ip(a); break;
-    case DISC_JOB_ASSIGN:  run_assign(a); break;
+    case DISC_JOB_TEST:    run_test(a); break;
+    case DISC_JOB_ASSIGN:  if (a->is_manual) run_assign_manual(a); else run_assign(a); break;
     case DISC_JOB_AUTOADD: run_autoadd(a); break;
     default: break;
     }
@@ -1318,6 +1623,41 @@ int disc_assign_job(const char *key, int channel, unsigned proto, const char *us
     a->channel = channel;
     a->proto = proto;
     a->replace = replace;
+    return job_start(a);
+}
+
+static int manual_ok(const disc_manual_t *m)
+{
+    return (unsigned)m->kind < 4 && m->host[0] && memchr(m->host, 0, sizeof m->host) &&
+           memchr(m->user, 0, sizeof m->user) && memchr(m->pass, 0, sizeof m->pass) &&
+           memchr(m->main_path, 0, sizeof m->main_path) && memchr(m->sub_path, 0, sizeof m->sub_path);
+}
+
+int disc_test_job(const disc_manual_t *m)
+{
+    if (!manual_ok(m)) {
+        errno = EINVAL;
+        return -1;
+    }
+    job_args_t *a = args_new(DISC_JOB_TEST, NULL, NULL);
+    if (!a) return -1;
+    a->manual = *m;
+    return job_start(a);
+}
+
+int disc_assign_manual_job(const disc_manual_t *m, int channel, const char *name, int replace)
+{
+    if (!manual_ok(m) || channel < 0 || channel > CHANNEL_MAX || (name && strlen(name) >= 32)) {
+        errno = EINVAL;
+        return -1;
+    }
+    job_args_t *a = args_new(DISC_JOB_ASSIGN, NULL, NULL);
+    if (!a) return -1;
+    a->manual = *m;
+    a->is_manual = 1;
+    a->channel = channel;
+    a->replace = replace;
+    snprintf(a->name, sizeof a->name, "%s", name ? name : "");
     return job_start(a);
 }
 
