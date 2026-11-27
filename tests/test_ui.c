@@ -2571,6 +2571,19 @@ static lv_obj_t *first_tile(void)
     return grid ? lv_obj_get_child(grid, 0) : NULL;
 }
 
+/* The alarm frame on tile `t` (display.alert_frame): shown, in the
+ * theme's alarm colour. */
+static int alarm_frame_shown(lv_obj_t *t)
+{
+    for (uint32_t i = 0; t && i < lv_obj_get_child_count(t); ++i) {
+        lv_obj_t *o = lv_obj_get_child(t, (int32_t)i);
+        if (lv_obj_get_style_border_width(o, 0) == 3 &&
+            lv_color_eq(lv_obj_get_style_border_color(o, 0), lv_color_hex(VG_COLOR_BAD)) && visible(o))
+            return 1;
+    }
+    return 0;
+}
+
 static int put_display(const char *json)
 {
     schema_errors_t e;
@@ -2637,7 +2650,7 @@ static void test_display_pages(void)
     button(BTN_RIGHT);
     click_text("Display");
     CHECK(find("Display", 1) && find("Output", 0) && find("Clock", 0) && find("Camera names", 0) &&
-          find("Status icons", 0) && find("Video", 0), "Display: its five parts");
+          find("Status icons", 0) && find("Video", 0) && find("Tiles", 0), "Display: its six parts");
 
     /* A new resolution, kept: switched, then saved. */
     int sets = g_mode_sets;
@@ -2803,6 +2816,49 @@ static void test_display_pages(void)
     CHECK(put_display("{\"clock_position\":\"off\",\"name_position\":\"off\"}") == CONFIG_OK, "no clock");
     CHECK(!osd_clock() && !find("Gate", 0) && icon_shown(first_tile(), &ui_icon_rec),
           "no clock, no names; the icons stay");
+
+    /* The switches: REC off on Status icons; Tiles without lines, with
+     * the alarm frame, which the first tile's events (motion) bring up. */
+    lv_obj_t *t0 = first_tile();
+    CHECK(t0 && lv_obj_get_style_border_width(t0, 0) == 1 && !alarm_frame_shown(t0),
+          "by default: a line around the tile, no alarm frame");
+    button(BTN_RIGHT);
+    click_text("Display");
+    click_text("Status icons");
+    lv_obj_t *rec_sw = nth_of(&lv_switch_class, 0), *ev_sw = nth_of(&lv_switch_class, 1);
+    CHECK(find("REC", 0) && find("Alarms", 0) && rec_sw && ev_sw && lv_obj_has_state(rec_sw, LV_STATE_CHECKED) &&
+              lv_obj_has_state(ev_sw, LV_STATE_CHECKED),
+          "Status icons: REC and Alarms, both on");
+    if (rec_sw) click_obj(rec_sw);
+    click_text(SAVE);
+    run(300);
+    click_text("Tiles");
+    lv_obj_t *div_sw = nth_of(&lv_switch_class, 0), *frame_sw = nth_of(&lv_switch_class, 1);
+    CHECK(find("Lines between tiles", 0) && find("Alarm frame", 0) && div_sw && frame_sw &&
+              lv_obj_has_state(div_sw, LV_STATE_CHECKED) && !lv_obj_has_state(frame_sw, LV_STATE_CHECKED),
+          "Tiles: lines on, the alarm frame off");
+    if (div_sw) click_obj(div_sw);
+    if (frame_sw) click_obj(frame_sw);
+    click_text(SAVE);
+    run(300);
+    config_get(&c);
+    CHECK(!c.display.rec_icon && c.display.alarm_icons && !c.display.tile_dividers && c.display.alert_frame,
+          "switches saved: %d %d %d %d", c.display.rec_icon, c.display.alarm_icons, c.display.tile_dividers,
+          c.display.alert_frame);
+    button(BTN_RIGHT);
+    CHECK(!ui_page_top(), "back on the live view");
+    t0 = first_tile();
+    CHECK(t0 && !icon_shown(t0, &ui_icon_rec) && icon_shown(t0, &ui_icon_ev_motion), "no REC, the motion icon");
+    CHECK(t0 && lv_obj_get_style_border_width(t0, 0) == 0, "no line around the tile");
+    int seen = 0;
+    for (int i = 0; i < 8; ++i) {
+        run(250);
+        seen |= alarm_frame_shown(first_tile()) ? 1 : 2;
+    }
+    CHECK(seen == 3, "the alarm frame on the first tile, blinking (%d)", seen);
+    CHECK(put_display("{\"alarm_icons\":false}") == CONFIG_OK && !icon_shown(first_tile(), &ui_icon_ev_motion) &&
+              !alarm_frame_shown(first_tile()),
+          "alarm icons off; the frame back off with the defaults");
     CHECK(put_display("{}") == CONFIG_OK, "the defaults");
     clk = osd_clock();
     CHECK(clk && lv_obj_get_style_bg_opa(clk, 0) == LV_OPA_TRANSP, "an outlined clock by default");

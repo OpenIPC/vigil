@@ -225,6 +225,9 @@ typedef struct {
     int clock, clock_size, clock_bg;
     int name, name_size, name_bg;
     int icons, icons_bg;
+    int rec, alarms;                /* REC, the events: shown in the icons' corner */
+    int dividers;                   /* a line around each tile */
+    int alert_frame;                /* a frame on a tile while its camera reports an event */
 } ui_osd_t;
 /* The values display.* takes, by index: positions (UI_POS_*), sizes,
  * backgrounds (ui_osd_bg_t). */

@@ -2605,6 +2605,9 @@ static void test_display_config(void)
           !strcmp(c.display.name_position, "bottom-left") && !strcmp(c.display.name_background, "outline") &&
           !strcmp(c.display.icons_position, "bottom-right") && !strcmp(c.display.icons_background, "outline"),
           "display defaults: 720p60, an outlined clock at the top right, names bottom left, icons bottom right");
+    CHECK(c.display.rec_icon == 1 && c.display.alarm_icons == 1 && c.display.tile_dividers == 1 &&
+              c.display.alert_frame == 0,
+          "display defaults: REC and alarm icons, lines between tiles, no alarm frame");
 
     unsigned w = 0, h = 0, hz = 0;
     CHECK(config_output_mode("1920x1080@50", &w, &h, &hz) == 0 && w == 1920 && h == 1080 && hz == 50,
@@ -2623,7 +2626,10 @@ static void test_display_config(void)
                      "  clock_background: box\n"
                      "  name_position: \"off\"\n"
                      "  icons_position: top-left\n"
-                     "  icons_background: none\n");
+                     "  icons_background: none\n"
+                     "  rec_icon: false\n"
+                     "  tile_dividers: false\n"
+                     "  alert_frame: true\n");
     schema_errors_t e = { 0 };
     CHECK(config_load_file(path, &c, &e) == 0, "display read: %s %s", e.n ? e.e[0].path : "", e.n ? e.e[0].msg : "");
     CHECK(!strcmp(c.display.output, "1920x1080@60") && !strcmp(c.display.clock_position, "bottom-center") &&
@@ -2631,6 +2637,9 @@ static void test_display_config(void)
           !strcmp(c.display.name_position, "off") && !strcmp(c.display.name_size, "medium") &&
           !strcmp(c.display.icons_position, "top-left") && !strcmp(c.display.icons_background, "none"),
           "display as written, the rest defaults");
+    CHECK(!c.display.rec_icon && c.display.alarm_icons && !c.display.tile_dividers && c.display.alert_frame,
+          "display switches as written, alarm_icons by default: %d %d %d %d", c.display.rec_icon,
+          c.display.alarm_icons, c.display.tile_dividers, c.display.alert_frame);
 
     /* written back with its help, and read again the same */
     CHECK(config_save_file(path, &c, err, sizeof err) == 0, "save: %s", err);
@@ -2638,7 +2647,8 @@ static void test_display_config(void)
     CHECK(raw && strstr(raw, "\n# Display: The HDMI/VGA output") && strstr(raw, "\ndisplay:\n") &&
           strstr(raw, "  output: \"1920x1080@60\"\n") && strstr(raw, "  clock_background: box\n") &&
           strstr(raw, "  name_position: \"off\"\n") && strstr(raw, "  icons_background: none\n") &&
-          strstr(raw, "  # Clock background: outline: hard-edged text"),
+          strstr(raw, "  # Clock background: outline: hard-edged text") && strstr(raw, "  rec_icon: false\n") &&
+          strstr(raw, "  alarm_icons: true\n") && strstr(raw, "  alert_frame: true\n"),
           "display in the YAML, with its help:\n%s", raw ? raw : "");
     free(raw);
     vigil_config_t d;
@@ -2655,6 +2665,7 @@ static void test_display_config(void)
         { "display:\n  icons_position: \"off\"\n", "display.icons_position" },
         { "display:\n  clock_size: huge\n", "display.clock_size" },
         { "display:\n  name_background: shadow\n", "display.name_background" },
+        { "display:\n  alert_frame: sometimes\n", "display.alert_frame" },
     };
     for (size_t i = 0; i < sizeof bad / sizeof bad[0]; ++i) {
         write_file(path, bad[i].yaml);

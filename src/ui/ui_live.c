@@ -57,6 +57,7 @@ typedef struct {
     lv_obj_t   *add, *add_caption;     /* centre: a small "+" on an empty slot */
     lv_obj_t   *flash;
     lv_timer_t *flash_timer;
+    lv_obj_t   *alert;                 /* display.alert_frame: on while the camera reports an event */
     int         tiny;                  /* small tile: one line of state, a smaller "+" */
 } cell_t;
 
@@ -83,6 +84,8 @@ static struct {
     lv_color_t hole;
     lv_opa_t   hole_opa;
     ui_osd_t   osd;                     /* display.*, as the screen shows it */
+    lv_timer_t *alert_timer;            /* the alarm frames' blink */
+    unsigned   alert_tick;
 } L;
 
 static int n_channels(void)
@@ -118,7 +121,8 @@ static int key_index(const char *const *keys, int n, const char *v, int def)
 void ui_osd_get(ui_osd_t *o)
 {
     *o = (ui_osd_t){ .clock = UI_POS_TR, .clock_size = 1, .clock_bg = UI_OSD_OUTLINE, .name = UI_POS_BL,
-                     .name_size = 1, .name_bg = UI_OSD_OUTLINE, .icons = UI_POS_BR, .icons_bg = UI_OSD_OUTLINE };
+                     .name_size = 1, .name_bg = UI_OSD_OUTLINE, .icons = UI_POS_BR, .icons_bg = UI_OSD_OUTLINE,
+                     .rec = 1, .alarms = 1, .dividers = 1, .alert_frame = 0 };
     const ui_model_t *m = ui_model();
     for (int s = 0; s < m->n_sections; ++s) {
         if (strcmp(m->sections[s].key, "display")) continue;
@@ -134,6 +138,10 @@ void ui_osd_get(ui_osd_t *o)
             else if (!strcmp(k, "name_background")) o->name_bg = key_index(ui_bg_keys, UI_N_BGS, v, 0);
             else if (!strcmp(k, "icons_position")) o->icons = key_index(ui_pos_keys, UI_N_POS, v, o->icons);
             else if (!strcmp(k, "icons_background")) o->icons_bg = key_index(ui_bg_keys, UI_N_BGS, v, 0);
+            else if (!strcmp(k, "rec_icon")) o->rec = v[0] == '1';
+            else if (!strcmp(k, "alarm_icons")) o->alarms = v[0] == '1';
+            else if (!strcmp(k, "tile_dividers")) o->dividers = v[0] == '1';
+            else if (!strcmp(k, "alert_frame")) o->alert_frame = v[0] == '1';
         }
     }
     /* In a tile there is no middle of an edge, and the icons are always shown. */
@@ -222,6 +230,25 @@ static const char *status_text(const ui_chan_t *st, lv_color_t *col, const char 
     }
 }
 
+/* The alarm frame: while the camera reports an event and
+ * display.alert_frame is on, blinking (L.alert_tick: 3 of 4 on). On and
+ * off, never fading: a translucent edge over a colour-keyed hole would
+ * show the key colour through it. */
+static void alert_show(cell_t *c)
+{
+    int on = L.osd.alert_frame && c->ch >= 0 && ui_channel(c->ch)->events && L.alert_tick % 4 != 3;
+    if (on == !lv_obj_has_flag(c->alert, LV_OBJ_FLAG_HIDDEN)) return;   /* no redraw */
+    show(c->alert, on);
+}
+
+static void alert_tick_cb(lv_timer_t *t)
+{
+    (void)t;
+    if (!L.osd.alert_frame) return;
+    ++L.alert_tick;
+    for (int i = 0; i < L.n_cells; ++i) alert_show(&L.cells[i]);
+}
+
 static void cell_update(cell_t *c)
 {
     if (c->ch < 0) {                    /* past the platform's channels */
@@ -229,6 +256,7 @@ static void cell_update(cell_t *c)
         show(c->icons, 0);
         show(c->mid, 0);
         show(c->add, 0);
+        show(c->alert, 0);
         return;
     }
     const ui_chan_t *st = ui_channel(c->ch);
@@ -240,13 +268,15 @@ static void cell_update(cell_t *c)
         ui_outlined_set_color(c->name, empty ? UI_C(TEXT2) : UI_C(TEXT));
     }
 
-    show(c->rec, st->recording);
-    int any = st->recording;
+    int rec = L.osd.rec && st->recording, any = rec;
+    show(c->rec, rec);
     for (int i = 0; i < N_EVENT_ICONS; ++i) {
-        show(c->ev[i], (st->events >> i) & 1);
-        any |= (st->events >> i) & 1;
+        int on = L.osd.alarms && ((st->events >> i) & 1);
+        show(c->ev[i], on);
+        any |= on;
     }
     show(c->icons, any);
+    alert_show(c);
 
     show(c->add, empty);
     if (!empty) show(c->add_caption, 0);
@@ -414,8 +444,11 @@ static void cell_build(cell_t *c, const ui_cell_t *g)
      * match every pixel. */
     lv_obj_set_style_bg_color(o, L.hole, 0);
     lv_obj_set_style_bg_opa(o, L.hole_opa, 0);
+    /* The dividers: each tile's edge, 2 px between two. Without them the
+     * holes touch and so do the pictures (the tiles share their edges,
+     * and so do the video windows they are mapped to). */
     lv_obj_set_style_border_color(o, UI_C(LINE), 0);
-    lv_obj_set_style_border_width(o, 1, 0);
+    lv_obj_set_style_border_width(o, L.osd.dividers ? 1 : 0, 0);
     lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE);
     /* The focus ring inside the tile's edge, over the video's outermost
      * pixels: outside it would cover the neighbour. */
@@ -482,6 +515,14 @@ static void cell_build(cell_t *c, const ui_cell_t *g)
     ui_outlined_set_text(c->add_caption, TR(S_ADD_CAMERA));
     lv_obj_align(c->add_caption, LV_ALIGN_CENTER, 0, VG_SIZE_ADD_DISC / 2 + VG_SPACE_MD);
     lv_obj_add_flag(c->add_caption, LV_OBJ_FLAG_HIDDEN);
+
+    c->alert = lv_obj_create(o);
+    ui_plain(c->alert);
+    lv_obj_set_size(c->alert, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_border_color(c->alert, UI_C(BAD), 0);
+    lv_obj_set_style_border_width(c->alert, 3, 0);
+    ui_inert(c->alert);
+    lv_obj_add_flag(c->alert, LV_OBJ_FLAG_HIDDEN);
 
     c->flash = lv_obj_create(o);
     ui_plain(c->flash);
@@ -1078,5 +1119,6 @@ lv_obj_t *ui_live_create(void)
     make_nav();
     set_layout(n_channels() > 1 && layout_offered(4) ? 4 : 1, 0);
     lv_subject_add_observer_obj(&ui_subj_config, osd_cb, L.scr, NULL);
+    L.alert_timer = lv_timer_create(alert_tick_cb, 250, NULL);
     return L.scr;
 }

@@ -481,6 +481,17 @@ static const schema_field_t display_fields[] = {
               "just above the name (below it at the top)." },
     { .key = "icons_background", ENUM(config_display_t, icons_background, osd_backgrounds),
       .def_str = "outline", .live = 1, .label = "Status icons background", .help = OSD_BG_HELP },
+    { .key = "rec_icon", BOOL(config_display_t, rec_icon), .def_int = 1, .live = 1, .label = "REC icon",
+      .help = "REC in the status icons' corner of each tile while its channel records." },
+    { .key = "alarm_icons", BOOL(config_display_t, alarm_icons), .def_int = 1, .live = 1, .label = "Alarm icons",
+      .help = "The events the camera reports (motion, human, face, vehicle) as icons in the status "
+              "icons' corner, while they last." },
+    { .key = "tile_dividers", BOOL(config_display_t, tile_dividers), .def_int = 1, .live = 1,
+      .label = "Lines between tiles",
+      .help = "A thin line around each tile of the live view. Off: the pictures touch." },
+    { .key = "alert_frame", BOOL(config_display_t, alert_frame), .def_int = 0, .live = 1, .label = "Alarm frame",
+      .help = "A red frame, blinking, inside the edge of a tile while its camera reports an event "
+              "(the alarm icons' events); none otherwise." },
 };
 
 static const schema_field_t api_fields[] = {

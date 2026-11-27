@@ -33,7 +33,7 @@ live view                  tiles over the whole screen, clock in a corner
       |               +-> Channel info: every channel's state, stream, codec,
       |                   size, fps, main stream, recording, events
       +-> DISPLAY          settings screen: Output, Clock, Camera names,
-                           Status icons
+                           Status icons, Video, Tiles
 ```
 
 **Live view.** The tiles take the whole screen (2x2 on a 1280x720 output:
@@ -47,7 +47,15 @@ on the picture (see below); in another (bottom right), icons only, a red
 dot while the channel records and an amber icon for each event the camera
 reports now (motion, human, face, vehicle; each held 5 s after the camera's
 last report). Where they go, their size and what they stand on are
-`display.*` (Display, below). The stream's codec, size
+`display.*` (Display, below), and so are whether REC and the event icons
+are shown at all, the 1-pixel line around each tile (2 px between two;
+without it the pictures touch), and an alarm frame: a red 3-pixel frame
+inside the edge of a tile while its camera reports any event, blinking
+(750 ms on, 250 ms off; on and off, never faded, as a translucent edge over
+a colour-keyed hole would show the key colour), off by default. The events
+come from `channels_report_events` (NETIP alarms and ONVIF events are to
+come) or from outside, `POST /api/v1/channels/<n>/events`
+([API](api.md)). The stream's codec, size
 and frame rate are not on the tiles but on the Channel info page
 (System). The middle of a tile says something only when there is no
 picture, outlined like the name. It is about the stream on screen: a small
@@ -303,7 +311,10 @@ with one mode says so. *Clock*: position (off, a corner, the middle of the
 top or bottom edge), size, background, and the date and time formats (the
 same settings as System, General). *Camera names*: position (off or a
 tile corner), size (a step smaller in tiles under 400 pixels wide),
-background. *Status icons*: the corner, background. *Video*:
+background. *Status icons*: REC and Alarms (`display.rec_icon`,
+`display.alarm_icons`, switches, on by default), the corner, background.
+*Tiles*: Lines between tiles (`display.tile_dividers`, on) and Alarm frame
+(`display.alert_frame`, off). *Video*:
 `display.video_aspect`, Fit (the default: each picture at its camera's
 shape inside its tile or the full screen, black bars where the shapes
 differ, a sub-stream at its main stream's shape; see

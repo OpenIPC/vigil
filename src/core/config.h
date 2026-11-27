@@ -143,6 +143,11 @@ typedef struct {
     char name_background[8];
     char icons_position[16];        /* a tile corner */
     char icons_background[8];
+    /* What the tiles show besides the video (booleans). */
+    int  rec_icon;                  /* REC while the channel records */
+    int  alarm_icons;               /* the camera's events (motion, human, face, vehicle) */
+    int  tile_dividers;             /* a line between the tiles */
+    int  alert_frame;               /* a frame around a tile while its camera reports an event */
 } config_display_t;
 
 typedef struct {

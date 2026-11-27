@@ -381,6 +381,19 @@ def main():
         st, _, d = api.json("GET", "/api/v1/status")
         check(d["config"]["generation"] > gen and d["channels"][0]["live"], "generation moved, still live")
 
+        # ---- events from outside: held a few seconds, in the status
+        st, _, d = api.json("POST", "/api/v1/channels/1/events", {"events": ["motion", "human"]})
+        check(st == 200 and d == {"channel": 1, "events": ["motion", "human"]},
+              "POST events: motion and human held (%s %s)" % (st, d))
+        check(api.json("GET", "/api/v1/status")[2]["channels"][0]["events"] == ["motion", "human"],
+              "and in the status")
+        st, _, _ = api.json("POST", "/api/v1/channels/1/events", {"events": ["smoke"]})
+        check(st == 400, "an unknown event: 400 (%s)" % st)
+        st, _, _ = api.json("POST", "/api/v1/channels/9/events", {"events": ["motion"]})
+        check(st == 404, "no such channel: 404 (%s)" % st)
+        check(wait_for(lambda: api.json("GET", "/api/v1/status")[2]["channels"][0]["events"] == [], 8),
+              "gone a few seconds later")
+
         # ---- a recording setting restarts the camera, which comes back
         st, _, _ = api.json("PUT", "/api/v1/config/record", {"path": rec, "segment": 120, "allow_rootfs": True})
         check(st == 200 and wait_for(lambda: ws.find(lambda m: m["type"] == "event" and
@@ -527,6 +540,8 @@ def main():
         check(st == 403 and err["needs"] == "system", "viewer: config 403 (%s)" % st)
         st, _, err = vera.json("PUT", "/api/v1/config/record", {"path": rec, "allow_rootfs": True})
         check(st == 403 and err["needs"] == "storage", "viewer: PUT record 403 (%s)" % st)
+        st, _, err = vera.json("POST", "/api/v1/channels/1/events", {"events": ["motion"]})
+        check(st == 403 and err["needs"] == "cameras", "viewer: POST events 403 (%s)" % st)
         st, _, _ = vera.json("GET", "/api/v1/users")
         check(st == 403, "viewer: users 403 (%s)" % st)
         st, _, me = vera.json("GET", "/api/v1/me")
