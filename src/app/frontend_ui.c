@@ -51,6 +51,7 @@ int frontend_run(int run_secs, volatile sig_atomic_t *stop, void (*tick)(void))
         usleep((ms > LV_DEF_REFR_PERIOD ? LV_DEF_REFR_PERIOD : ms) * 1000u);
         if (run_secs > 0 && time(NULL) - t0 >= run_secs) break;
     }
+    ui_app_flush();                     /* a layout chosen just before the stop */
     kvm_detach();
     input_evdev_delete();
     lv_deinit();

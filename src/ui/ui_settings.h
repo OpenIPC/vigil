@@ -49,8 +49,7 @@ void ui_storage_open(int first);
 void ui_sysset_open(int first);
 void ui_account_open(int first);
 /* Display (ui_set_display.c; ui_display_open in ui_app.h: Output first). */
-enum { UI_DISPLAY_OUTPUT, UI_DISPLAY_CLOCK, UI_DISPLAY_NAMES, UI_DISPLAY_ICONS, UI_DISPLAY_VIDEO,
-       UI_DISPLAY_TILES };
+enum { UI_DISPLAY_OUTPUT, UI_DISPLAY_OSD };
 void ui_display_open_at(int first);
 
 /* Storage's sub-pages, for the context menu's Record. */

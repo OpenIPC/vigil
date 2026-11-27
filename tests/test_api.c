@@ -561,6 +561,7 @@ static void test_perm_table(void)
         { "PUT", "/api/v1/config/ddns", PERM_NETWORK },
         { "PUT", "/api/v1/config/time", PERM_SYSTEM },
         { "PUT", "/api/v1/config/ui", PERM_SYSTEM },
+        { "PUT", "/api/v1/config/live", PERM_LIVE },
         { "PUT", "/api/v1/config/api", PERM_USERS },
         { "GET", "/api/v1/config/unknown", PERM_SYSTEM },
         { "PUT", "/api/v1/network/ethernet", PERM_NETWORK },

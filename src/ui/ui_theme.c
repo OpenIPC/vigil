@@ -234,6 +234,59 @@ const lv_font_t *ui_hard_font(const lv_font_t *base)
     return &g_hard[i].font;
 }
 
+/* Digits of equal width (tabular figures), for a clock: Montserrat's are
+ * proportional ("1" narrower than "8"), so a clock that changes every
+ * second also changes its width, and one placed by its right edge or its
+ * centre moves sideways. Every digit here takes the widest one's advance,
+ * its glyph centred in it, and nothing is kerned (a digit next to ':'
+ * would be by a different amount). A copy of `base` (a hard font too)
+ * with its own glyph description, so it serves every style. */
+#define TNUM_FONTS 12
+static struct {
+    const lv_font_t *base;
+    lv_font_t        font;
+    uint16_t         adv;               /* the widest digit's */
+} g_tnum[TNUM_FONTS];
+
+static bool tnum_glyph_dsc(const lv_font_t *font, lv_font_glyph_dsc_t *g, uint32_t letter, uint32_t next)
+{
+    int i;
+    for (i = 0; i < TNUM_FONTS && &g_tnum[i].font != font; ++i) {}
+    if (i == TNUM_FONTS) return false;
+    /* The base's own description of the glyph, from the copy's tables. */
+    if (!g_tnum[i].base->get_glyph_dsc(font, g, letter, next)) return false;
+    if (letter >= '0' && letter <= '9' && g->adv_w < g_tnum[i].adv) {
+        g->ofs_x += (int16_t)((g_tnum[i].adv - g->adv_w) / 2);
+        g->adv_w = g_tnum[i].adv;
+    }
+    return true;
+}
+
+const lv_font_t *ui_tnum_font(const lv_font_t *base)
+{
+    int i;
+    for (i = 0; i < TNUM_FONTS && g_tnum[i].base; ++i)
+        if (g_tnum[i].base == base || &g_tnum[i].font == base) return &g_tnum[i].font;
+    if (i == TNUM_FONTS || !base->get_glyph_dsc) return base;
+    uint16_t adv = 0;
+    for (uint32_t d = '0'; d <= '9'; ++d) {
+        lv_font_glyph_dsc_t g;
+        memset(&g, 0, sizeof g);
+        if (base->get_glyph_dsc(base, &g, d, 0) && g.adv_w > adv) adv = g.adv_w;
+    }
+    g_tnum[i].base = base;
+    g_tnum[i].adv = adv;
+    g_tnum[i].font = *base;
+    g_tnum[i].font.get_glyph_dsc = tnum_glyph_dsc;
+    g_tnum[i].font.kerning = LV_FONT_KERNING_NONE;
+    return &g_tnum[i].font;
+}
+
+void ui_tnum(lv_obj_t *label)
+{
+    lv_obj_set_style_text_font(label, ui_tnum_font(lv_obj_get_style_text_font(label, LV_PART_MAIN)), 0);
+}
+
 /* Eight dark copies a pixel away in each direction, drawn before the
  * label draws its text: one object, not nine (64 tiles of them would not
  * fit LVGL's heap). */

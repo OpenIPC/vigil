@@ -74,11 +74,7 @@ ICONS = [
     ("nav_users", "users.svg", 22, 2),
     ("nav_groups", "users-group.svg", 22, 2),
     ("nav_output", "device-desktop.svg", 22, 2),
-    ("nav_clock", "clock.svg", 22, 2),
-    ("nav_names", "device-cctv.svg", 22, 2),
-    ("nav_icons", "activity.svg", 22, 2),
-    ("nav_aspect", "aspect-ratio.svg", 22, 2),
-    ("nav_tiles", "layout-grid.svg", 22, 2),
+    ("nav_osd", "clock.svg", 22, 2),
 ]
 
 

@@ -18,7 +18,12 @@
  *
  * Changing the layout or the page, and double-clicking a tile (that channel
  * full screen, and back), moves the video through model->show_tiles. The
- * right button opens a context menu with the same actions. Events that
+ * right button opens a context menu with the same actions. The layout and
+ * the page the user picks are kept in live.* (saved SAVE_DELAY after the
+ * last change, and by ui_live_flush when vigild stops), so a restart comes
+ * back to them; a full screen by double click is a moment's look and is
+ * not kept, the grid it came from is. live.* set through the API is shown
+ * at once. Events that
  * need attention become toasts (event_toast).
  *
  * Keyboard: the grid is an lv_gridnav container, so the arrows select a
@@ -27,6 +32,7 @@
  * focus. The shortcuts (1, 4, pages, menu) are in ui_live_key.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "hal_ui.h"
@@ -41,6 +47,7 @@
 #define NAV_POLL   100          /* ms */
 #define ARROW_EDGE 80           /* px from the left or right edge that bring up a page arrow */
 #define ARROW_IDLE 2000         /* ms without the pointer moving that put it away */
+#define SAVE_DELAY 3000         /* ms after the last layout or page change that it is saved */
 
 #define N_EVENT_ICONS 4
 #define NAME_W        200       /* px a name takes at most, for keeping it off the clock */
@@ -75,6 +82,9 @@ static struct {
     int        sw, sh;
     int        layout, page;
     int        fs, fs_layout, fs_page;  /* full screen by double click: where back goes */
+    int        want_layout, want_page;  /* the grid to keep in live.* (never the double click's) */
+    int        cfg_layout, cfg_page;    /* live.* as last read (0: none) */
+    lv_timer_t *save_timer;             /* want_* waits to be saved */
     cell_t     cells[UI_LAYOUT_MAX];
     int        n_cells;
     uint32_t   click_ms;
@@ -300,6 +310,7 @@ static void cell_observer_cb(lv_observer_t *o, lv_subject_t *s)
 }
 
 static void set_layout(int layout, int page);
+static void show_layout(int layout, int page);
 
 static void toggle_full_screen(int ch)
 {
@@ -313,7 +324,7 @@ static void toggle_full_screen(int ch)
     } else {
         L.fs_layout = L.layout;
         L.fs_page = L.page;
-        set_layout(1, ch);
+        show_layout(1, ch);
         L.fs = 1;
     }
 }
@@ -580,7 +591,9 @@ static void cells_build(ui_rect_t *tiles)
     }
 }
 
-static void set_layout(int layout, int page)
+/* The layout and page, shown (not kept: the double click's full screen,
+ * or what live.* already holds). */
+static void show_layout(int layout, int page)
 {
     if (!ui_layout_valid(layout)) return;
     int n = n_channels(), pages = ui_layout_pages(layout, n);
@@ -594,6 +607,128 @@ static void set_layout(int layout, int page)
     cells_build(tiles);
     if (ui_model()->show_tiles && !ui_model()->fixed_tiles) ui_model()->show_tiles(tiles, n);
     if (L.nav) nav_update();
+}
+
+/* ---- live.*: the grid kept across restarts --------------------------------------------- */
+
+/* live.layout as windows (0: none stored) and live.page from 0. */
+static void live_stored(int *layout, int *page)
+{
+    *layout = *page = 0;
+    int s = section_of("live");
+    if (s < 0) return;
+    const ui_section_t *u = &ui_model()->sections[s];
+    for (int f = 0; f < u->n_fields; ++f) {
+        char v[16];
+        ui_model()->get_value(s, -1, f, v, sizeof v);
+        if (!strcmp(u->fields[f].key, "page")) *page = atoi(v) > 1 ? atoi(v) - 1 : 0;
+        else if (!strcmp(u->fields[f].key, "layout"))
+            for (int i = 0; i < ui_n_layouts; ++i)
+                if (!strcmp(ui_layout_name(ui_layouts[i]), v)) *layout = ui_layouts[i];
+    }
+}
+
+static int default_layout(void) { return n_channels() > 1 && layout_offered(4) ? 4 : 1; }
+
+/* What `layout` windows become on this board: the largest layout offered
+ * that is not larger (a file from a board with more channels). */
+static int layout_fit(int layout)
+{
+    int best = 0;
+    for (int i = 0; i < ui_n_layouts; ++i)
+        if (ui_layouts[i] <= layout && layout_offered(ui_layouts[i])) best = ui_layouts[i];
+    return best ? best : default_layout();
+}
+
+static int page_fit(int layout, int page)
+{
+    int pages = ui_layout_pages(layout, n_channels());
+    return page < 0 ? 0 : page >= pages ? pages - 1 : page;
+}
+
+/* want_* into live.*, now (when it differs). */
+static void live_save(void)
+{
+    if (L.save_timer) lv_timer_delete(L.save_timer);
+    L.save_timer = NULL;
+    int s = section_of("live"), layout, page;
+    if (s < 0 || !L.want_layout) return;
+    live_stored(&layout, &page);
+    if (layout == L.want_layout && page == L.want_page) return;
+    const ui_section_t *u = &ui_model()->sections[s];
+    char buf[4][16];
+    const char *v[4];
+    for (int f = 0; f < u->n_fields && f < 4; ++f) {
+        if (!strcmp(u->fields[f].key, "layout")) snprintf(buf[f], sizeof buf[f], "%s", ui_layout_name(L.want_layout));
+        else if (!strcmp(u->fields[f].key, "page")) snprintf(buf[f], sizeof buf[f], "%d", L.want_page + 1);
+        else ui_model()->get_value(s, -1, f, buf[f], sizeof buf[f]);
+        v[f] = buf[f];
+    }
+    ui_errors_t errs;
+    memset(&errs, 0, sizeof errs);
+    /* No generation: live.* is the live view's own, the last change wins. */
+    ui_save_rc_t rc = u->n_fields <= 4 ? ui_model()->save(s, 1, v, NULL, 0, &errs) : UI_SAVE_FAILED;
+    if (rc == UI_SAVE_OK || rc == UI_SAVE_UNSYNCED) {
+        L.cfg_layout = L.want_layout;
+        L.cfg_page = L.want_page;
+    } else {
+        ui_toast(UI_TOAST_WARN, "The live view's layout was not saved: %s", errs.n ? errs.e[0].msg : "failed");
+    }
+}
+
+static void save_timer_cb(lv_timer_t *t)
+{
+    (void)t;
+    L.save_timer = NULL;                /* deleted after this (one run) */
+    live_save();
+}
+
+/* The grid shown is the one to keep: saved SAVE_DELAY after the last
+ * change, so a run of page flips is one write to the flash. */
+static void live_remember(void)
+{
+    if (ui_model()->fixed_tiles || (L.layout == L.want_layout && L.page == L.want_page)) return;
+    L.want_layout = L.layout;
+    L.want_page = L.page;
+    if (L.save_timer) {
+        lv_timer_reset(L.save_timer);
+        return;
+    }
+    L.save_timer = lv_timer_create(save_timer_cb, SAVE_DELAY, NULL);
+    lv_timer_set_repeat_count(L.save_timer, 1);
+}
+
+void ui_live_flush(void)
+{
+    if (L.save_timer) live_save();
+}
+
+/* live.* changed (the API; or our own save coming back): shown at once,
+ * over a change of ours still waiting to be saved. */
+static void live_cfg_cb(lv_observer_t *o, lv_subject_t *s)
+{
+    (void)o;
+    (void)s;
+    int layout, page;
+    live_stored(&layout, &page);
+    if (!layout || (layout == L.cfg_layout && page == L.cfg_page)) return;
+    L.cfg_layout = layout;
+    L.cfg_page = page;
+    if (L.save_timer) lv_timer_delete(L.save_timer);
+    L.save_timer = NULL;
+    layout = layout_fit(layout);
+    page = page_fit(layout, page);
+    L.want_layout = layout;
+    L.want_page = page;
+    int shown = L.fs ? L.fs_layout : L.layout, shown_page = L.fs ? L.fs_page : L.page;
+    if (layout != shown || page != shown_page) show_layout(layout, page);
+}
+
+/* A layout or page the user chose: shown and kept. */
+static void set_layout(int layout, int page)
+{
+    show_layout(layout, page);
+    live_remember();
 }
 
 /* ---- clock and totals ------------------------------------------------------------------- */
@@ -623,6 +758,7 @@ static void make_clock(void)
     if (L.osd.clock == UI_POS_OFF) return;
     L.clock = ui_osd_text(L.scr, osd_font(L.osd.clock_size), VG_COLOR_TEXT, L.osd.clock_bg);
     if (L.osd.clock_bg == UI_OSD_BOX) lv_obj_set_style_pad_hor(L.clock, VG_SPACE_MD, 0);
+    ui_tnum(L.clock);
     lv_label_bind_text(L.clock, &ui_subj_clock, NULL);
     osd_place(L.clock, L.osd.clock, 0);
     lv_obj_move_to_index(L.clock, 1);
@@ -855,6 +991,7 @@ static void make_nav(void)
     for (int i = 0; i < n_channels(); ++i)
         lv_subject_add_observer_obj(ui_subject_channel(i), summary_cb, L.summary, NULL);
     lv_obj_t *clk = ui_label(L.nav, "", VG_FONT_MD_LV, UI_C(TEXT));
+    ui_tnum(clk);
     lv_label_bind_text(clk, &ui_subj_clock, NULL);
     lv_obj_set_style_pad_left(clk, VG_SPACE_LG, 0);
 
@@ -1117,8 +1254,13 @@ lv_obj_t *ui_live_create(void)
     make_clock();
     make_arrows();
     make_nav();
-    set_layout(n_channels() > 1 && layout_offered(4) ? 4 : 1, 0);
+    /* As it was left (live.*), on this board's layouts. */
+    live_stored(&L.cfg_layout, &L.cfg_page);
+    L.want_layout = L.cfg_layout ? layout_fit(L.cfg_layout) : default_layout();
+    L.want_page = page_fit(L.want_layout, L.cfg_page);
+    show_layout(L.want_layout, L.want_page);
     lv_subject_add_observer_obj(&ui_subj_config, osd_cb, L.scr, NULL);
+    lv_subject_add_observer_obj(&ui_subj_config, live_cfg_cb, L.scr, NULL);
     L.alert_timer = lv_timer_create(alert_tick_cb, 250, NULL);
     return L.scr;
 }

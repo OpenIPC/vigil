@@ -158,6 +158,14 @@ typedef struct {
     int  alert_frame;               /* a frame around a tile while its camera reports an event */
 } config_display_t;
 
+/* What the live view shows, as the user left it: kept so that a restart
+ * comes back to it (ui_live.c saves it a few seconds after a change). */
+#define LIVE_PAGE_MAX 64            /* one channel a page, the UI's most channels */
+typedef struct {
+    char layout[8];                 /* "1x1" | "2x2" | "1+7" | "3x3" | "4x4" | "8x4" | "8x8" */
+    int  page;                      /* 1..: which `layout` channels (1: the first ones) */
+} config_live_t;
+
 typedef struct {
     char listen[64];                /* "addr:port", "port"; "" = no API */
     int  auth;
@@ -219,6 +227,7 @@ typedef struct {
     config_time_t   time;
     config_ui_t     ui;
     config_display_t display;
+    config_live_t   live;
     config_api_t    api;
     config_web_t    web;
     config_netip_server_t netip_server;

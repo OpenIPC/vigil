@@ -32,8 +32,8 @@ live view                  tiles over the whole screen, clock in a corner
       +-> OPERATION        platform, version, uptime, memory, storage (read-only)
       |               +-> Channel info: every channel's state, stream, codec,
       |                   size, fps, main stream, recording, events
-      +-> DISPLAY          settings screen: Output, Clock, Camera names,
-                           Status icons, Video, Tiles
+      +-> DISPLAY          settings screen: Output, OSD (Clock, Camera names,
+                           Status icons, Video, Tiles on one page)
 ```
 
 **Live view.** The tiles take the whole screen (2x2 on a 1280x720 output:
@@ -118,6 +118,26 @@ the bottom edge of the screen and hides 3 s after the pointer leaves it,
 unless pinned. Besides the actions it shows the LIVE and REC totals and the
 clock. **Double-clicking** a tile shows that channel full screen;
 double-clicking again returns to the layout before.
+
+**Kept across restarts.** The layout and the page the user picks (Split,
+the navigation bar, the page arrows, the keys) are saved in `live.layout`
+and `live.page` 3 s after the last change, so a run of page flips is one
+write to the flash, and at once when vigild stops (the Exit menu's Reboot
+and Shutdown, a SIGTERM): the next start shows the same windows and the
+same cameras. A double click's full screen is not kept: it is a look at one
+camera, and the grid it came from is what comes back (a grid still waiting
+to be saved is saved meanwhile, a stop in full screen saves the grid). The
+tiles always show the channels in order (page *p*
+of *n* windows: channels *(p-1)n+1* to *pn*), so there is no window order to
+keep. Set through the API (`PUT /api/v1/config/live`), the layout and page
+are shown at once, over a change of the user's still waiting to be saved.
+A layout larger than the board's channels (a file from another board)
+shows the largest one that fits; a page past the last, the last.
+
+The clock, here and on every page's header, has digits of equal width
+(`ui_tnum_font`: the widest digit's advance for each, the glyph centred in
+it, no kerning), so it does not move sideways as the seconds change; the
+zero channel shows the same pixels.
 
 **Page arrows.** With more channels than windows, a round arrow comes up
 while the pointer moves within 80 pixels of the left or right edge in the
@@ -343,21 +363,23 @@ while it is dragged and saved when it is let go (from the keyboard, at each
 step); **Sound (HDMI)**, a volume slider 0..100 and Mute
 (`display.hdmi_volume`, `display.hdmi_mute`), with a note that nothing
 plays yet (vigild does not decode the cameras' sound), kept for when it
-does. *Clock*: position (off, a corner, the middle of the
-top or bottom edge), size, background, and the date and time formats (the
-same settings as System, General). *Camera names*: position (off or a
-tile corner), size (a step smaller in tiles under 400 pixels wide),
-background. *Status icons*: REC and Alarms (`display.rec_icon`,
-`display.alarm_icons`, switches, on by default), the corner, background.
-*Tiles*: Lines between tiles (`display.tile_dividers`, on) and Alarm frame
-(`display.alert_frame`, off). *Video*:
+does. *OSD*: everything drawn over the video, on one page that scrolls,
+in sections, with one Save (one write per settings section changed:
+`display`, and `ui` for the clock's format). **Clock**: position (off, a
+corner, the middle of the top or bottom edge), size, background, and the
+date and time formats (the same settings as System, General). **Camera
+names**: position (off or a tile corner), size (a step smaller in tiles
+under 400 pixels wide), background. **Status icons**: REC and Alarms
+(`display.rec_icon`, `display.alarm_icons`, switches, on by default), the
+corner, background. **Video**:
 `display.video_aspect`, Fit (the default: each picture at its camera's
 shape inside its tile or the full screen, black bars where the shapes
 differ, a sub-stream at its main stream's shape; see
 [architecture](architecture.md)), Stretch (the picture fills the tile,
 whatever its shape) or Fill (the picture keeps its shape and covers the
 whole tile, what overflows cut off: the top and bottom of a 4:3 camera in a
-16:9 tile).
+16:9 tile). **Tiles**: Lines between tiles (`display.tile_dividers`, on) and
+Alarm frame (`display.alert_frame`, off).
 Sizes are Small,
 Medium, Large and Extra large (Montserrat 14, 16, 20, 24: the only font
 built in; another family would cost the firmware's flash). Backgrounds are
@@ -367,6 +389,8 @@ of earlier versions). A save applies to the live view at once.
 
 ![Display, Output](../tests/ui/display.png)
 ![Display, Output: picture, margins, sound](../tests/ui/display_output.png)
+![Display, OSD](../tests/ui/display_osd.png)
+![Display, OSD, scrolled to the end](../tests/ui/display_osd_end.png)
 
 ## Login and Exit
 
@@ -410,7 +434,7 @@ src/ui/ui_menu.c        main menu
 src/ui/ui_form.c        settings forms and lists, from the schema
 src/ui/ui_channels.c    Channels: camera search (discovery jobs) and the channel table
 src/ui/ui_system.c      System page
-src/ui/ui_set_display.c Display: the output resolution (with its keep-or-undo question), picture, margins, HDMI volume, clock, names, icons
+src/ui/ui_set_display.c Display: Output (the resolution with its keep-or-undo question, picture, margins, HDMI volume) and OSD (clock, names, icons, video, tiles)
 src/ui/ui_layout.c      tile geometry (plain C, shared with frontend_tiles)
 src/ui/ui_theme.c       LVGL styles from the design tokens
 src/ui/ui_cursor.c      the mouse pointer's arrow
@@ -446,7 +470,8 @@ the page) and remembers the tiles for channels that start later; the
 platform fits the picture inside its tile at the shape the core gives it
 (`hal_display_set_aspect`, below). The same
 `ui_layout_cells` gives `frontend_tiles()` the start-up 2x2 tiles, so the
-holes and the video cannot disagree.
+holes and the video cannot disagree; the live view then puts the kept
+layout (`live.*`) in place as it is built, before the first picture.
 
 **Sub-streams in small tiles.** The tile size also picks the stream: a
 tile of a quarter of the screen or less (2x2 and smaller, the small
