@@ -4065,7 +4065,8 @@ static void test_session(void)
     move_to(300, 200);
     button(BTN_RIGHT);
     click_text("Exit");
-    CHECK(ui_popup_is_open() && find("Shutdown", 1) && find("the on-screen login is off", 1), "Exit: the chooser");
+    CHECK(ui_popup_is_open() && find("Shutdown", 1) && !find("the on-screen login is off", 1),
+          "Exit: the chooser, without a note under it");
     lv_obj_t *out = find("Logout", 1);
     CHECK(out && lv_obj_has_state(lv_obj_get_parent(out), LV_STATE_DISABLED), "Logout: off without a login");
     shot("exit");
