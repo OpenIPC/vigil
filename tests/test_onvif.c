@@ -152,18 +152,64 @@ static void test_digest(void)
     CHECK(onvif_digest_parse("Digest username=\"unterminated", &d) < 0, "unterminated quote");
 
     unsigned char key[16] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }, other[16] = { 0 };
-    char nonce[33];
-    onvif_digest_nonce(key, 1000, nonce);
-    CHECK(strlen(nonce) == 32, "nonce: %s", nonce);
+    char nonce[41], again[41];
+    onvif_digest_nonce(key, 1000, 7, nonce);
+    CHECK(strlen(nonce) == 40, "nonce: %s", nonce);
     CHECK(onvif_digest_nonce_age(key, nonce, 1000) == 0 && onvif_digest_nonce_age(key, nonce, 1300) == 300,
           "a nonce's age");
+    onvif_digest_nonce(key, 1000, 8, again);
+    CHECK(strcmp(nonce, again) != 0 && onvif_digest_nonce_age(key, again, 1000) == 0,
+          "two nonces of the same second differ");
     CHECK(onvif_digest_nonce_age(other, nonce, 1000) < 0, "another key's nonce");
-    nonce[31] ^= 1;
+    nonce[39] ^= 1;
     CHECK(onvif_digest_nonce_age(key, nonce, 1000) < 0, "a changed nonce");
-    onvif_digest_nonce(key, 1000, nonce);
+    onvif_digest_nonce(key, 1000, 7, nonce);
     nonce[7] = nonce[7] == '0' ? '1' : '0';             /* its time moved */
     CHECK(onvif_digest_nonce_age(key, nonce, 5000) < 0, "a nonce whose time was changed");
+    onvif_digest_nonce(key, 1000, 7, nonce);
+    nonce[15] = nonce[15] == '0' ? '1' : '0';           /* its serial */
+    CHECK(onvif_digest_nonce_age(key, nonce, 1000) < 0, "a nonce whose serial was changed");
     CHECK(onvif_digest_nonce_age(key, "short", 1000) < 0, "not a nonce");
+
+    /* Replays: each nonce count once. */
+    static onvif_nc_t nc;
+    memset(&nc, 0, sizeof nc);
+    onvif_digest_t r;
+    memset(&r, 0, sizeof r);
+    snprintf(r.nonce, sizeof r.nonce, "n1");
+    snprintf(r.qop, sizeof r.qop, "auth");
+    snprintf(r.cnonce, sizeof r.cnonce, "c1");
+    snprintf(r.nc, sizeof r.nc, "00000001");
+    CHECK(onvif_nc_use(&nc, &r, 1000, 1000, 300) == 1, "a first request");
+    CHECK(onvif_nc_use(&nc, &r, 1000, 1001, 300) == 0, "the same request again: a replay");
+    snprintf(r.nc, sizeof r.nc, "00000002");
+    CHECK(onvif_nc_use(&nc, &r, 1000, 1001, 300) == 1, "the next count");
+    snprintf(r.nc, sizeof r.nc, "00000001");
+    CHECK(onvif_nc_use(&nc, &r, 1000, 1001, 300) == 0, "an older count");
+    snprintf(r.cnonce, sizeof r.cnonce, "c2");
+    CHECK(onvif_nc_use(&nc, &r, 1000, 1001, 300) == 1, "another client's cnonce on the same nonce");
+    snprintf(r.nc, sizeof r.nc, "0");
+    CHECK(onvif_nc_use(&nc, &r, 1000, 1001, 300) == 0, "count 0");
+    onvif_digest_t p = r;
+    p.qop[0] = p.nc[0] = p.cnonce[0] = 0;
+    snprintf(p.nonce, sizeof p.nonce, "n2");
+    CHECK(onvif_nc_use(&nc, &p, 1000, 1001, 300) == 1 && onvif_nc_use(&nc, &p, 1000, 1001, 300) == 0,
+          "without qop: a nonce once");
+    /* Full: the oldest go, and their time's nonces turn stale. */
+    snprintf(r.nc, sizeof r.nc, "1");
+    for (int i = 0; i < ONVIF_NC_MAX; ++i) {
+        snprintf(r.nonce, sizeof r.nonce, "m%d", i);
+        onvif_nc_use(&nc, &r, 1100 + i, 1200, 300);
+    }
+    snprintf(r.nonce, sizeof r.nonce, "n1");
+    snprintf(r.cnonce, sizeof r.cnonce, "c1");
+    snprintf(r.nc, sizeof r.nc, "00000001");
+    CHECK(onvif_nc_use(&nc, &r, 1000, 1200, 300) == -1, "a forgotten nonce's request again: stale");
+    snprintf(r.nonce, sizeof r.nonce, "m%d", ONVIF_NC_MAX - 1);
+    snprintf(r.cnonce, sizeof r.cnonce, "c2");
+    CHECK(onvif_nc_use(&nc, &r, 1100 + ONVIF_NC_MAX - 1, 1200, 300) == 0, "a kept one's: a replay");
+    snprintf(r.nonce, sizeof r.nonce, "late");
+    CHECK(onvif_nc_use(&nc, &r, 1500, 1500, 300) == 1 && nc.n < ONVIF_NC_MAX, "expired counts make room");
 }
 
 /* ONVIF Device Manager's probe: default namespaces, wsa on each element,

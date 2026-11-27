@@ -74,7 +74,11 @@ no NTP yet) only the nonce is checked, so a client is not locked out by
 the recorder's wrong time. Clients that follow the ONVIF guide ask
 `GetSystemDateAndTime` first and correct for the difference. HTTP Digest
 nonces are good for 5 minutes (then `stale=true`); they carry their own
-time and a keyed check, so the server keeps no table of them.
+time and a keyed check, so the server keeps no table of the nonces it
+gave. It keeps each nonce's last count (`nc`, per `cnonce`; the last 128
+nonces used): a request whose count is not above it, a replay of a whole
+request, is answered `stale=true` and does nothing. Without `qop` a
+nonce is good once.
 
 Failed logins count with the API's and the zero channel's: each is
 answered a second late, and an address with 5 failures in a row is locked

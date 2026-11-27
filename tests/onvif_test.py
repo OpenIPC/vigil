@@ -95,8 +95,9 @@ class Onvif:
                         "/onvif/media_service" if ns == MEDIA else "/onvif/device_service")
         return self.post(path, envelope(ns, op, args, header))
 
-    def digest(self, ns, op, user, password, args=""):
-        """HTTP Digest: the challenge, then the answer to it."""
+    def digest(self, ns, op, user, password, args="", replay=False):
+        """HTTP Digest: the challenge, then the answer to it (`replay`: and
+        the same request again, whose answer is returned)."""
         path = "/onvif/media_service" if ns == MEDIA else "/onvif/device_service"
         st, hdr, _ = self.call(ns, op, args)
         www = hdr.get("WWW-Authenticate", "")
@@ -110,7 +111,8 @@ class Onvif:
         resp = hashlib.md5(("%s:%s:00000001:%s:auth:%s" % (ha1, nonce.group(1), cn, ha2)).encode()).hexdigest()
         auth = ('Digest username="%s", realm="%s", nonce="%s", uri="%s", response="%s", qop=auth, nc=00000001, '
                 'cnonce="%s", algorithm=MD5' % (user, realm.group(1), nonce.group(1), path, resp, cn))
-        return self.post(path, envelope(ns, op, args), {"Authorization": auth})
+        first = self.post(path, envelope(ns, op, args), {"Authorization": auth})
+        return self.post(path, envelope(ns, op, args), {"Authorization": auth}) if replay else first
 
 
 def api(port, method, path, body=None):
@@ -275,6 +277,9 @@ def main():
         check(st == 200 and 'token="ch1_main"' in b, "GetProfiles with HTTP Digest (%s)" % st)
         st, _, _ = o.digest(MEDIA, "GetProfiles", "anna", "nope")
         check(st == 401, "HTTP Digest, wrong password (%s)" % st)
+        st, hdr, _ = o.digest(MEDIA, "GetProfiles", "anna", "annapw", replay=True)
+        check(st == 401 and "stale=true" in hdr.get("WWW-Authenticate", ""),
+              "HTTP Digest, the same request again: refused, a new nonce asked for (%s)" % st)
 
         # ---- permissions
         st, _, b = o.call(MEDIA, "GetProfiles", header=wsse("bob", "bobpw1"))

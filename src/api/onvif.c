@@ -85,6 +85,8 @@ static unsigned char     g_key[16];         /* HTTP Digest nonces */
 static pthread_mutex_t   g_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned char     g_seen[SEEN_N][16];    /* md5 of UsernameToken nonces */
 static int               g_seen_at;
+static onvif_nc_t        g_nc;                  /* HTTP Digest nonce counts used */
+static atomic_uint       g_nonce_serial;
 
 typedef struct {
     char mac[18];
@@ -1185,7 +1187,7 @@ static int authenticate(req_t *q, unsigned *perms)
     if (!strncasecmp(hdr, "Digest", 6)) {
         onvif_digest_t d;
         if (onvif_digest_parse(hdr, &d) < 0 || strcmp(d.realm, REALM) != 0) return AUTH_BAD;
-        long age = onvif_digest_nonce_age(g_key, d.nonce, mono());
+        long now = mono(), age = onvif_digest_nonce_age(g_key, d.nonce, now);
         if (age < 0) return AUTH_BAD;
         if (age > NONCE_SECS) return AUTH_STALE;
         /* The uri it signed is the one it asked for. */
@@ -1194,6 +1196,20 @@ static int authenticate(req_t *q, unsigned *perms)
         snprintf(q->user, sizeof q->user, "%.*s", (int)sizeof q->user - 1, d.username);
         digest_ctx_t c = { &d, ri->request_method };
         rc = api_login_with(addr, d.username, digest_check, &c, perms, &retry);
+        if (rc == 1) {
+            /* A request seen before, word for word (its nonce count used),
+             * is a replay: it would do again what it did (SystemReboot).
+             * Stale rather than refused: a client that sent its counts
+             * out of order gets a new nonce and tries again. */
+            pthread_mutex_lock(&g_lock);
+            int fresh = onvif_nc_use(&g_nc, &d, now - age, now, NONCE_SECS);
+            pthread_mutex_unlock(&g_lock);
+            if (fresh == 0) vg_log("onvif: %s from %s: a Digest nonce count used before (a replay?)", d.username, addr);
+            if (fresh <= 0) {
+                *perms = 0;
+                return AUTH_STALE;
+            }
+        }
         return rc == 1 ? AUTH_OK : rc == -2 ? AUTH_LOCKED : AUTH_BAD;
     }
     char user[USERS_NAME_MAX + 32], pass[256];
@@ -1324,8 +1340,8 @@ static int handler(struct mg_connection *conn, void *cbdata)
     } else if (!parsed && !n && !mg_get_header(conn, "Authorization")) {
         /* An HTTP client that logs in first (curl --digest) sends no
          * body until it has been asked to. */
-        char nonce[33], www[160];
-        onvif_digest_nonce(g_key, mono(), nonce);
+        char nonce[41], www[160];
+        onvif_digest_nonce(g_key, mono(), atomic_fetch_add(&g_nonce_serial, 1), nonce);
         snprintf(www, sizeof www, "Digest realm=\"" REALM "\", qop=\"auth\", nonce=\"%s\", algorithm=MD5", nonce);
         fault(q, 401, "s:Sender", "ter:NotAuthorized", NULL, "Sender not authorized");
         rc = send_fault(q, "WWW-Authenticate", www);
@@ -1343,8 +1359,8 @@ static int handler(struct mg_connection *conn, void *cbdata)
         if (a == AUTH_NONE || a == AUTH_STALE || (a == AUTH_BAD && !q->soap.has_token)) {
             /* No (or a stale) HTTP login: ask for one. A client that sent
              * a UsernameToken is told by the fault below instead. */
-            char nonce[33], www[160];
-            onvif_digest_nonce(g_key, mono(), nonce);
+            char nonce[41], www[160];
+            onvif_digest_nonce(g_key, mono(), atomic_fetch_add(&g_nonce_serial, 1), nonce);
             snprintf(www, sizeof www, "Digest realm=\"" REALM "\", qop=\"auth\", nonce=\"%s\", algorithm=MD5%s", nonce,
                      a == AUTH_STALE ? ", stale=true" : "");
             fault(q, 401, "s:Sender", "ter:NotAuthorized", NULL, "Sender not authorized");

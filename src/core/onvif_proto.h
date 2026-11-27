@@ -82,10 +82,31 @@ int onvif_digest_parse(const char *hdr, onvif_digest_t *d);
 /* The response the client should have sent for `method` with `pass`. */
 void onvif_digest_expect(const onvif_digest_t *d, const char *method, const char *pass, char out[33]);
 
-/* A nonce for time `t` (seconds, monotonic) under `key`: 32 hex digits. */
-void onvif_digest_nonce(const unsigned char key[16], long t, char out[33]);
+/* A nonce for time `t` (seconds, monotonic) under `key`, told apart from
+ * the others of that second by `serial`: 40 hex digits. */
+void onvif_digest_nonce(const unsigned char key[16], long t, unsigned serial, char out[41]);
 /* How old a nonce of ours is at `now`; -1 if it is not one of ours. */
 long onvif_digest_nonce_age(const unsigned char key[16], const char *nonce, long now);
+
+/* Against replays of a whole request: each nonce count used once. */
+#define ONVIF_NC_MAX 128
+typedef struct {
+    struct {
+        char          id[33];       /* md5 of nonce:cnonce */
+        unsigned long nc;           /* the highest count seen */
+        long          issued;       /* the nonce's time */
+    } e[ONVIF_NC_MAX];
+    int  n;
+    int  floor_set;
+    long floor;                     /* nonces of this time or before: stale (their counts were forgotten) */
+} onvif_nc_t;
+
+/* After a request's response checked out (`issued`: its nonce's time,
+ * from onvif_digest_nonce_age): its nonce count must be above the last
+ * one seen with that nonce and cnonce; without qop, the nonce must be new.
+ * Counts of nonces older than `life` are forgotten. 1: fresh, remembered;
+ * 0: used before (a replay); -1: stale, ask for a new nonce. */
+int onvif_nc_use(onvif_nc_t *t, const onvif_digest_t *d, long issued, long now, long life);
 
 /* ---- WS-Discovery --------------------------------------------------------- */
 

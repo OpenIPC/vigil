@@ -311,38 +311,83 @@ void onvif_digest_expect(const onvif_digest_t *d, const char *method, const char
     wipe(all, sizeof all);
 }
 
-static void nonce_mac(const unsigned char key[16], const char *ts, char out[25])
+/* The first 24 hex digits of md5(key | stamp): `stamp` is the nonce's
+ * time and serial, 16 hex digits. */
+static void nonce_mac(const unsigned char key[16], const char *stamp, char out[25])
 {
-    unsigned char buf[16 + 9];
+    unsigned char buf[16 + 17];
     char hex[33];
     memcpy(buf, key, 16);
-    memcpy(buf + 16, ts, 8);
-    buf[24] = 0;
-    md5_hex(buf, 24, hex);
+    memcpy(buf + 16, stamp, 16);
+    buf[32] = 0;
+    md5_hex(buf, 32, hex);
     memcpy(out, hex, 24);
     out[24] = 0;
 }
 
-void onvif_digest_nonce(const unsigned char key[16], long t, char out[33])
+void onvif_digest_nonce(const unsigned char key[16], long t, unsigned serial, char out[41])
 {
     char mac[25];
-    snprintf(out, 9, "%08lx", (unsigned long)t & 0xffffffffUL);
+    snprintf(out, 17, "%08lx%08x", (unsigned long)t & 0xffffffffUL, serial);
     nonce_mac(key, out, mac);
-    memcpy(out + 8, mac, 25);
+    memcpy(out + 16, mac, 25);
 }
 
 long onvif_digest_nonce_age(const unsigned char key[16], const char *nonce, long now)
 {
-    if (strlen(nonce) != 32) return -1;
-    char ts[9], mac[25];
-    memcpy(ts, nonce, 8);
+    if (strlen(nonce) != 40) return -1;
+    char stamp[17], ts[9], mac[25];
+    memcpy(stamp, nonce, 16);
+    stamp[16] = 0;
+    for (int i = 0; i < 16; ++i)
+        if (!isxdigit((unsigned char)stamp[i])) return -1;
+    nonce_mac(key, stamp, mac);
+    if (!onvif_equal(mac, nonce + 16)) return -1;
+    memcpy(ts, stamp, 8);
     ts[8] = 0;
-    for (int i = 0; i < 8; ++i)
-        if (!isxdigit((unsigned char)ts[i])) return -1;
-    nonce_mac(key, ts, mac);
-    if (!onvif_equal(mac, nonce + 8)) return -1;
     long t = (long)strtoul(ts, NULL, 16);
     return now >= t ? now - t : -1;
+}
+
+int onvif_nc_use(onvif_nc_t *t, const onvif_digest_t *d, long issued, long now, long life)
+{
+    if (t->floor_set && issued <= t->floor) return -1;
+    unsigned long nc = 0;
+    if (d->qop[0]) {
+        char *end;
+        nc = strtoul(d->nc, &end, 16);
+        if (*end || !nc) return 0;
+    }
+    char buf[sizeof d->nonce + sizeof d->cnonce + 1], id[33];
+    snprintf(buf, sizeof buf, "%s:%s", d->nonce, d->qop[0] ? d->cnonce : "");
+    md5_hex(buf, strlen(buf), id);
+    int oldest = -1;
+    for (int i = 0; i < t->n;) {
+        if (t->e[i].issued < now - life) {
+            t->e[i] = t->e[--t->n];
+            continue;
+        }
+        if (!strcmp(t->e[i].id, id)) {
+            if (nc <= t->e[i].nc) return 0;
+            t->e[i].nc = nc;
+            return 1;
+        }
+        if (oldest < 0 || t->e[i].issued < t->e[oldest].issued) oldest = i;
+        ++i;
+    }
+    if (t->n == ONVIF_NC_MAX) {
+        /* No room: the oldest nonce's counts go, and with them every nonce
+         * of its time or before, which a client then gets anew. */
+        t->floor = t->e[oldest].issued;
+        t->floor_set = 1;
+        t->e[oldest] = t->e[--t->n];
+        if (issued <= t->floor) return -1;
+    }
+    memcpy(t->e[t->n].id, id, sizeof id);
+    t->e[t->n].nc = nc;
+    t->e[t->n].issued = issued;
+    ++t->n;
+    return 1;
 }
 
 /* ---- WS-Discovery ----------------------------------------------------------------- */
