@@ -496,7 +496,9 @@ of request it does not serve is logged once (`netip server: ...`).
   logs in, with the session's id in its header, and the start on the
   logged-in one, which answers it (1411); the media go to the claiming
   connection. A start may come before its claim. A `Stop` closes the
-  media connection; so does the session's logout or loss.
+  media connection; so does the session's logout or loss. Session ids are
+  random (31 bits), and a claim is taken only from the address that
+  logged in; any other gets `Ret 105` and the connection ends.
 - *python-dvr, vigil's own NETIP source*: claim and start on the logged-in
   connection, the media on it right after the start, which gets no answer
   (a reply among the media would be read as a frame).

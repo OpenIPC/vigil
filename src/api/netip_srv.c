@@ -120,7 +120,6 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static conn_t          g_conn[CONN_MAX];
 static size_t          g_ring_used;     /* under g_lock */
 static int             g_streams;       /* under g_lock */
-static uint32_t        g_next_session;  /* under g_lock */
 static pthread_t       g_listen_th;
 static int             g_running, g_tcp = -1, g_udp = -1, g_stop_pipe[2] = { -1, -1 };
 static atomic_int      g_stop;
@@ -531,6 +530,18 @@ static void login_result(uint32_t ip, int ok)
     pthread_mutex_unlock(&g_lock);
 }
 
+/* A session id nobody can guess: a second connection that names it gets
+ * its login's media (do_monitor). 31 bits, never 0: some clients read
+ * "0x%08X" into a signed int. 0, or -1 without randomness. */
+static int session_id(uint32_t *s)
+{
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    ssize_t n = fd < 0 ? -1 : read(fd, s, sizeof *s);
+    if (fd >= 0) close(fd);
+    *s &= 0x7fffffffu;
+    return n == (ssize_t)sizeof *s ? 0 : -1;
+}
+
 static int do_login(conn_t *c, const netip_hdr_t *h, const cJSON *req)
 {
     const char *user = jstr(req, "UserName"), *pass = jstr(req, "PassWord");
@@ -550,10 +561,15 @@ static int do_login(conn_t *c, const netip_hdr_t *h, const cJSON *req)
     }
     login_result(c->peer, 1);
     pthread_mutex_lock(&g_lock);
-    uint32_t s;
+    uint32_t s = 0;
     for (int clash = 1; clash;) {
-        s = ++g_next_session ? g_next_session : ++g_next_session;
-        clash = 0;
+        if (session_id(&s) < 0) {
+            pthread_mutex_unlock(&g_lock);
+            vg_log("netip server: %s: no random numbers (/dev/urandom) for a session", c->peer_s);
+            reply_ret(c, h, "", 101);
+            return -1;
+        }
+        clash = !s;
         for (int i = 0; i < CONN_MAX; ++i) clash |= g_conn[i].used && g_conn[i].session == s;
     }
     c->session = s;
@@ -873,12 +889,14 @@ static int do_monitor(conn_t *c, const netip_hdr_t *h, const cJSON *req)
     if (claim) {
         int ret = 100;
         if (!c->session && !c->owner) {
-            /* A new connection claiming a logged-in session's media. */
+            /* A new connection claiming a logged-in session's media: only
+             * from the address that logged in (a client opens both), the
+             * id being random; a wrong one ends the connection. */
             uint32_t s = h->session;
             const char *js = jstr(req, "SessionID");
             if (js) netip_session_parse(js, &s);
             conn_t *o = session_conn(s);
-            if (!o) ret = 105;
+            if (!o || o->peer != c->peer) ret = 105;
             else {
                 c->owner = s;
                 c->perms = o->perms;
@@ -1280,10 +1298,6 @@ static int serve(const config_netip_server_t *cfg, char *why, size_t cap)
      * becomes video when its stream starts. */
     qos_mark(g_tcp, QOS_MANAGEMENT, 1);
     if (g_udp >= 0) qos_mark(g_udp, QOS_MANAGEMENT, 1);
-    if (!g_next_session) {
-        uint32_t r = (uint32_t)time(NULL) ^ (uint32_t)getpid() << 16;
-        g_next_session = r & 0x7fffffu;
-    }
     make_serial();
     g_cfg = *cfg;
     atomic_store(&g_stop, 0);

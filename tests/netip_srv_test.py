@@ -65,8 +65,9 @@ def free_port(kind=socket.SOCK_STREAM):
 
 
 class Conn:
-    def __init__(self, port):
-        self.s = socket.create_connection(("127.0.0.1", port), timeout=5)
+    def __init__(self, port, src=None):
+        self.s = socket.create_connection(("127.0.0.1", port), timeout=5,
+                                          source_address=(src, 0) if src else None)
         self.session = 0
         self.seq = 0
 
@@ -324,6 +325,17 @@ def run(vigild, h264, h265, tmp, procs):
     b = Conn(port)
     rid, r = b.reply(1413, monitor_req(0x7777, "Claim", 0, "Main"))
     check(r.get("Ret") == 105 and closed(b), "a claim for no session: 105, closed")
+    a = Conn(port)
+    a.login("viewer", "secret")
+    a2 = Conn(port)
+    a2.login("viewer", "secret")
+    check(a.session and a2.session and abs(a.session - a2.session) > 1 and a.session < 0x80000000,
+          "session ids: random, 31 bits (0x%08X, 0x%08X)" % (a.session, a2.session))
+    a2.close()
+    b = Conn(port, src="127.0.0.2")
+    rid, r = b.reply(1413, monitor_req(a.session, "Claim", 0, "Main"))
+    check(r.get("Ret") == 105 and closed(b), "a claim of a live session from another address: 105, closed")
+    a.close()
 
     n = Conn(port)
     rid, r = n.login("nolive", "secret")
