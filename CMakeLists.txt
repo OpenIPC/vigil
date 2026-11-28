@@ -81,6 +81,7 @@ endif()
 # ---- core: hardware-agnostic, builds and tests on any host ------------------
 add_library(vigil_core STATIC
   src/core/aspect.c
+  src/core/cam_events.c
   src/core/au_norm.c
   src/core/channel.c
   src/core/config.c
@@ -95,6 +96,7 @@ add_library(vigil_core STATIC
   src/core/netip_proto.c
   src/core/overscan.c
   src/core/picture.c
+  src/core/onvif_events.c
   src/core/ptz.c
   src/core/ptz_netip.c
   src/core/ptz_onvif.c

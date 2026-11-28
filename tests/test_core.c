@@ -22,6 +22,7 @@
 #include "aspect.h"
 #include "au_norm.h"
 #include "gop_cache.h"
+#include "cam_events.h"
 #include "channel.h"
 #include "cJSON.h"
 #include "config.h"
@@ -1254,6 +1255,9 @@ static void test_config_file(void)
     snprintf(c.cameras[1].url, sizeof c.cameras[1].url, "netip://admin:@10.0.0.3/?ch=1&stream=extra");
     c.cameras[1].enabled = 0;
     /* Items built in C carry their defaults themselves (an array's are zeroed). */
+    snprintf(c.cameras[0].events, sizeof c.cameras[0].events, "auto");
+    snprintf(c.cameras[1].events, sizeof c.cameras[1].events, "onvif");
+    snprintf(c.cameras[1].onvif_url, sizeof c.cameras[1].onvif_url, "http://10.0.0.3:8899/onvif/device_service");
     snprintf(c.cameras[0].ptz, sizeof c.cameras[0].ptz, "auto");
     snprintf(c.cameras[1].ptz, sizeof c.cameras[1].ptz, "netip");
     snprintf(c.record.path, sizeof c.record.path, "/mnt/sda1/rec");
@@ -1686,7 +1690,7 @@ static void test_events(void)
     CHECK(events_next(&slow, &ev) && ev.missed == 5 && !strcmp(ev.text, "e5"), "missed %u, %s", ev.missed, ev.text);
     int n = 1;
     while (events_next(&slow, &ev)) ++n;
-    CHECK(n == EVENTS_KEEP && !strcmp(ev.text, "e68"), "kept %d, last %s", n, ev.text);
+    CHECK(n == EVENTS_KEEP && !strcmp(ev.text, "e132"), "kept %d, last %s", n, ev.text);
 }
 
 /* ---- rec_place: where a recording may go ------------------------------------ */
@@ -2666,6 +2670,45 @@ static void send_frame(source_t *src, const uint8_t *head, size_t hl, const uint
     free(f);
 }
 
+/* NETIP AlarmInfo (msgid 1504) as XM cameras and OpenIPC majestic push them. */
+static void test_netip_alarm_parse(void)
+{
+    netip_alarm_t a;
+    /* An XM camera's, spaced as Sofia prints, with the "\n\0" tail. */
+    static const char xm[] = "{ \"AlarmInfo\" : { \"Channel\" : 0, \"Event\" : \"VideoMotion\", "
+                             "\"StartTime\" : \"2026-11-28 10:00:00\", \"Status\" : \"Start\" }, "
+                             "\"Name\" : \"AlarmInfo\", \"SessionID\" : \"0x00000003\" }\n";
+    CHECK(netip_alarm_parse(xm, sizeof xm, &a) == 0 && a.channel == 0 && a.type == CH_EV_MOTION &&
+              a.what == CAM_EV_START && a.known && !strcmp(a.event, "VideoMotion"),
+          "XM VideoMotion Start (%d %u %d %s)", a.channel, a.type, a.what, a.event);
+    static const char maj[] = "{\"AlarmInfo\":{\"Channel\":0,\"Event\":\"appEventHumanDetectAlarm\","
+                              "\"StartTime\":\"2026-11-27 04:44:10\",\"Status\":\"Stop\"},\"Name\":\"AlarmInfo\","
+                              "\"SessionID\":\"0x0000000b\"}";
+    CHECK(netip_alarm_parse(maj, strlen(maj), &a) == 0 && a.type == CH_EV_HUMAN && a.what == CAM_EV_STOP,
+          "majestic's human detection, Stop");
+    static const char dvr[] = "{\"AlarmInfo\":{\"Channel\":\"3\",\"Event\":\"VideoLoss\",\"Status\":\"START\"},"
+                              "\"Name\":\"AlarmInfo\"}";
+    CHECK(netip_alarm_parse(dvr, strlen(dvr), &a) == 0 && a.channel == 3 && a.type == CH_EV_VIDEO_LOSS &&
+              a.what == CAM_EV_START,
+          "a DVR's channel 4 lost its video (channel as text, status in capitals)");
+    static const char bare[] = "{\"Event\":\"LocalAlarm\",\"Channel\":0}";
+    CHECK(netip_alarm_parse(bare, strlen(bare), &a) == 0 && a.type == CH_EV_ALARM_IN && a.what == CAM_EV_PULSE,
+          "no Status: a moment; the bare object taken");
+    static const char odd[] = "{\"Name\":\"AlarmInfo\",\"AlarmInfo\":{\"Event\":\"SmartLightFlash\"}}";
+    CHECK(netip_alarm_parse(odd, strlen(odd), &a) == 0 && a.type == CH_EV_OTHER && !a.known && a.channel == -1,
+          "an unknown event: other, no channel");
+    static const char noev[] = "{\"AlarmInfo\":{\"Status\":\"Start\"}}";
+    CHECK(netip_alarm_parse(noev, strlen(noev), &a) < 0 &&
+              netip_alarm_parse("not json", 8, &a) < 0 && netip_alarm_parse("", 0, &a) < 0,
+          "no Event, not JSON: refused");
+    CHECK(netip_alarm_type("VideoBlind") == CH_EV_TAMPER && netip_alarm_type("CarShapeDetect") == CH_EV_VEHICLE &&
+              netip_alarm_type("FaceDetect") == CH_EV_FACE && netip_alarm_type("VideoAnalyze") == CH_EV_OTHER &&
+              netip_alarm_type("PedestrianDetect") == CH_EV_HUMAN && netip_alarm_type("TripwireAlarm") == CH_EV_LINE &&
+              netip_alarm_type("PerimeterAlarm") == CH_EV_INTRUSION && netip_alarm_type("Offline") == 0 &&
+              netip_alarm_type("") == 0 && netip_alarm_type(NULL) == 0,
+          "names to types");
+}
+
 static void test_netip_server_proto(void)
 {
     /* The header. */
@@ -3069,6 +3112,113 @@ static void test_channel_events(void)
     channel_status_t st;
     channels_status(5, &st);
     CHECK(st.events == 0 && st.status == CH_EMPTY, "an empty slot shows no events");
+    CHECK(!strcmp(ch_event_name(4), "line_crossing") && !strcmp(ch_event_name(9), "other") &&
+              ch_event_bit("tamper") == 7 && ch_event_bit("video_loss") == 6 && ch_event_bit("nope") < 0 &&
+              ch_event_bit(NULL) < 0,
+          "the new types' names");
+    CHECK(ch_events_mode("auto") == CH_EVENTS_AUTO && ch_events_mode("onvif") == CH_EVENTS_ONVIF &&
+              ch_events_mode("off") == CH_EVENTS_OFF && ch_events_mode("") < 0,
+          "events modes");
+    cam_events_reset();
+}
+
+/* What the hub's subscriber heard. */
+static struct {
+    int         n;
+    cam_event_t ev[32];
+    unsigned    held_seen;          /* cam_events_held from inside the callback */
+} g_cev;
+
+static void cev_cb(void *user, const cam_event_t *ev)
+{
+    (void)user;
+    if (g_cev.n < 32) g_cev.ev[g_cev.n++] = *ev;
+    g_cev.held_seen = cam_events_held(ev->channel, ev->time);
+}
+
+static int cev_is(int i, int ch, unsigned type, int active)
+{
+    return i < g_cev.n && g_cev.ev[i].channel == ch && g_cev.ev[i].type == type && g_cev.ev[i].active == active;
+}
+
+/* cam_events.h: holding by start and stop, by pulses, several origins,
+ * an origin cleared, the edges a subscriber and the events ring see. */
+static void test_cam_events(void)
+{
+    cam_events_reset();
+    memset(&g_cev, 0, sizeof g_cev);
+    int id = cam_events_subscribe(cev_cb, NULL);
+    CHECK(id >= 0, "subscribed");
+    uint64_t cur = events_head();
+    time_t t = 1800000000;
+
+    /* A start holds until its stop, however long. */
+    cam_event_report_at(2, CH_EV_MOTION, CAM_EV_START, CAM_EV_SRC_NETIP, "VideoMotion", t);
+    CHECK(cam_events_held(2, t) == CH_EV_MOTION && cev_is(0, 2, CH_EV_MOTION, 1) && g_cev.n == 1,
+          "start: held, one edge");
+    CHECK(!strcmp(g_cev.ev[0].detail, "VideoMotion") && g_cev.ev[0].source == CAM_EV_SRC_NETIP &&
+              g_cev.ev[0].time == t && g_cev.held_seen == CH_EV_MOTION,
+          "the edge: detail, origin, time; the state readable from the callback");
+    cam_event_report_at(2, CH_EV_MOTION, CAM_EV_START, CAM_EV_SRC_NETIP, "VideoMotion", t + 1);
+    cam_events_tick(t + 600);
+    CHECK(cam_events_held(2, t + 600) == CH_EV_MOTION && g_cev.n == 1, "a repeated start, ten minutes: no news");
+    cam_event_report_at(2, CH_EV_MOTION, CAM_EV_STOP, CAM_EV_SRC_NETIP, NULL, t + 601);
+    CHECK(cam_events_held(2, t + 601) == 0 && cev_is(1, 2, CH_EV_MOTION, 0) && g_cev.n == 2,
+          "stop: off at once, an edge");
+    CHECK(!strcmp(g_cev.ev[1].detail, "VideoMotion"), "the stop keeps what began it");
+
+    /* A pulse: held CHANNEL_EVENT_HOLD s, its stop from the tick. */
+    cam_event_report_at(0, CH_EV_LINE | CH_EV_HUMAN, CAM_EV_PULSE, CAM_EV_SRC_ONVIF, "Crossed", t);
+    CHECK(cam_events_held(0, t) == (CH_EV_LINE | CH_EV_HUMAN) && g_cev.n == 4, "a pulse of two types: two starts");
+    cam_events_tick(t + CHANNEL_EVENT_HOLD - 1);
+    CHECK(g_cev.n == 4, "still held before the hold runs out");
+    cam_event_report_at(0, CH_EV_LINE, CAM_EV_PULSE, CAM_EV_SRC_ONVIF, "Crossed", t + 3);
+    cam_events_tick(t + CHANNEL_EVENT_HOLD);
+    CHECK(g_cev.n == 5 && cev_is(4, 0, CH_EV_HUMAN, 0) && cam_events_held(0, t + CHANNEL_EVENT_HOLD) == CH_EV_LINE,
+          "the other pulse renewed the line's hold; human ended");
+    cam_events_tick(t + 3 + CHANNEL_EVENT_HOLD);
+    CHECK(g_cev.n == 6 && cev_is(5, 0, CH_EV_LINE, 0), "then the line's");
+
+    /* Two origins: held until both are done. */
+    cam_event_report_at(1, CH_EV_TAMPER, CAM_EV_START, CAM_EV_SRC_NETIP, "VideoBlind", t);
+    cam_event_report_at(1, CH_EV_TAMPER, CAM_EV_START, CAM_EV_SRC_ONVIF, "GlobalSceneChange", t);
+    cam_event_report_at(1, CH_EV_TAMPER, CAM_EV_STOP, CAM_EV_SRC_ONVIF, NULL, t + 1);
+    CHECK(cam_events_held(1, t + 1) == CH_EV_TAMPER && g_cev.n == 7, "one origin's stop leaves the other's start");
+    /* An origin that lost its camera ends what it held. */
+    cam_event_report_at(1, CH_EV_VIDEO_LOSS, CAM_EV_START, CAM_EV_SRC_NETIP, "VideoLoss", t + 1);
+    cam_events_clear_at(1, CAM_EV_SRC_NETIP, t + 2);
+    CHECK(cam_events_held(1, t + 2) == 0 && g_cev.n == 10, "cleared: both of its events end");
+    /* A stop from someone else does not end an API pulse. */
+    cam_event_report_at(3, CH_EV_MOTION, CAM_EV_PULSE, CAM_EV_SRC_API, NULL, t);
+    cam_event_report_at(3, CH_EV_MOTION, CAM_EV_STOP, CAM_EV_SRC_ONVIF, NULL, t + 1);
+    CHECK(cam_events_held(3, t + 1) == CH_EV_MOTION, "another origin's stop leaves the pulse");
+    cam_event_report_at(3, CH_EV_MOTION, CAM_EV_STOP, CAM_EV_SRC_API, NULL, t + 1);
+    CHECK(cam_events_held(3, t + 1) == 0, "its own ends it");
+    cam_event_report_at(-1, CH_EV_MOTION, CAM_EV_START, CAM_EV_SRC_API, NULL, t);
+    cam_event_report_at(CHANNEL_MAX, CH_EV_MOTION, CAM_EV_START, CAM_EV_SRC_API, NULL, t);
+    CHECK(g_cev.n == 12, "out-of-range channels ignored (%d)", g_cev.n);
+
+    /* The events ring: each edge, with its type and state. */
+    event_t e;
+    int n = 0, ok = 1;
+    while (events_next(&cur, &e)) {
+        if (!e.cam_type) continue;
+        const cam_event_t *c = &g_cev.ev[n];
+        ok &= n < g_cev.n && e.ch == c->channel + 1 && e.cam_type == c->type && e.cam_active == c->active &&
+              !strcmp(e.cam_detail, c->detail);
+        ++n;
+    }
+    CHECK(ok && n == g_cev.n, "the ring has every edge (%d of %d)", n, g_cev.n);
+    CHECK(g_cev.n > 0 && !strcmp(g_cev.ev[0].detail, "VideoMotion"), "first detail");
+
+    cam_events_unsubscribe(id);
+    cam_event_report_at(4, CH_EV_OTHER, CAM_EV_PULSE, CAM_EV_SRC_API, NULL, t);
+    CHECK(g_cev.n == 12, "unsubscribed: not called");
+    int ids[CAM_EV_SUBS + 1];
+    for (int i = 0; i <= CAM_EV_SUBS; ++i) ids[i] = cam_events_subscribe(cev_cb, NULL);
+    CHECK(ids[CAM_EV_SUBS] < 0, "at most CAM_EV_SUBS subscribers");
+    for (int i = 0; i < CAM_EV_SUBS; ++i) cam_events_unsubscribe(ids[i]);
+    cam_events_reset();
 }
 
 
@@ -3793,7 +3943,9 @@ int main(int argc, char **argv)
     test_channel_stream_states();
     test_camera_slots();
     test_fail_kinds();
+    test_netip_alarm_parse();
     test_channel_events();
+    test_cam_events();
     test_rec_policies();
     test_secrets();
     test_config_seal();

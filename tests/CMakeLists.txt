@@ -7,7 +7,7 @@ target_link_libraries(test_discovery PRIVATE vigil_core)
 add_test(NAME discovery COMMAND test_discovery ${CMAKE_CURRENT_SOURCE_DIR}/data)
 add_executable(test_onvif test_onvif.c)
 target_link_libraries(test_onvif PRIVATE vigil_core)
-add_test(NAME onvif COMMAND test_onvif)
+add_test(NAME onvif COMMAND test_onvif ${CMAKE_CURRENT_SOURCE_DIR}/data)
 add_executable(test_ptz test_ptz.c)
 target_link_libraries(test_ptz PRIVATE vigil_core)
 add_test(NAME ptz COMMAND test_ptz ${CMAKE_CURRENT_BINARY_DIR})
@@ -88,7 +88,7 @@ if(Python3_FOUND)
   add_test(NAME netip_wide
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_netip.sh $<TARGET_FILE:vigild>
                    ${CMAKE_CURRENT_SOURCE_DIR}/data/majestic_1080p.h265 wide)
-  foreach(case title notitle)
+  foreach(case title notitle alarms noalarms)
     add_test(NAME netip_${case}
              COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_netip.sh $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264 ${case})
@@ -134,6 +134,11 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/secrets_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
     set_tests_properties(secrets_e2e PROPERTIES RUN_SERIAL TRUE)
+    # The cameras' events: NETIP alarms and ONVIF events from fake cameras,
+    # held, ended, through the status and the WebSocket.
+    add_test(NAME events_e2e
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/events_test.py $<TARGET_FILE:vigild>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
     # PTZ through the API against the NETIP emulator's simulated head:
     # moves that stop on their own, presets, refusals, permissions.
     add_test(NAME ptz_e2e

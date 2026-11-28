@@ -10,14 +10,8 @@ static event_t         g_ring[EVENTS_KEEP];
 static uint64_t        g_last;          /* seq of the newest event, 0 = none */
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 
-void events_push(int ch, const char *fmt, ...)
+static void push(int ch, const char *text, unsigned cam_type, int active, const char *detail)
 {
-    char text[sizeof g_ring[0].text];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(text, sizeof text, fmt, ap);
-    va_end(ap);
-
     pthread_mutex_lock(&g_lock);
     event_t *e = &g_ring[g_last % EVENTS_KEEP];
     e->seq = ++g_last;
@@ -25,7 +19,27 @@ void events_push(int ch, const char *fmt, ...)
     e->time = time(NULL);
     e->missed = 0;
     snprintf(e->text, sizeof e->text, "%s", text);
+    e->cam_type = cam_type;
+    e->cam_active = active;
+    snprintf(e->cam_detail, sizeof e->cam_detail, "%s", detail ? detail : "");
     pthread_mutex_unlock(&g_lock);
+}
+
+void events_push(int ch, const char *fmt, ...)
+{
+    char text[sizeof g_ring[0].text];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(text, sizeof text, fmt, ap);
+    va_end(ap);
+    push(ch, text, 0, 0, NULL);
+}
+
+void events_push_camera(int ch, unsigned cam_type, int active, const char *name, const char *detail)
+{
+    char text[sizeof g_ring[0].text];
+    snprintf(text, sizeof text, "%s %s", name, active ? "start" : "stop");
+    push(ch, text, cam_type, active, detail);
 }
 
 int events_next(uint64_t *cursor, event_t *ev)

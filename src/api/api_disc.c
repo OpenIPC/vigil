@@ -32,6 +32,7 @@
 #include "cJSON.h"
 
 #include "api_int.h"
+#include "cam_events.h"
 #include "channel.h"
 #include "discovery.h"
 #include "log.h"
@@ -447,27 +448,46 @@ static int do_assign(struct mg_connection *conn, int ch)
     return answer_job(conn, (unsigned)id, WAIT_MS);
 }
 
-/* {"events": ["motion", ...]}: as if the camera had reported them now
- * (channels_report_events, held CHANNEL_EVENT_HOLD s); the answer has
- * the events held now. Nothing else of the channel changes. */
+/* {"events": ["motion", ...], "state": "start" | "stop"}: as if the
+ * camera had reported them now. Without a state, a moment (held
+ * CHANNEL_EVENT_HOLD s, channels_report_events); a start holds until its
+ * stop (cam_events.h, origin "api"). The answer has the events held now.
+ * Nothing else of the channel changes. */
 static int do_events(struct mg_connection *conn, int ch)
 {
     int rc;
     cJSON *b = body_object(conn, &rc);
     if (!b) return rc;
     const cJSON *ev = cJSON_GetObjectItemCaseSensitive(b, "events"), *e;
+    const cJSON *state = cJSON_GetObjectItemCaseSensitive(b, "state");
     unsigned bits = 0;
-    int bad = !cJSON_IsArray(ev);
+    int bad = !cJSON_IsArray(ev), what = CAM_EV_PULSE;
     cJSON_ArrayForEach(e, ev) {
-        int bit = -1;
-        for (int k = 0; cJSON_IsString(e) && ch_event_name(k); ++k)
-            if (!strcmp(e->valuestring, ch_event_name(k))) bit = k;
+        int bit = cJSON_IsString(e) ? ch_event_bit(e->valuestring) : -1;
         if (bit < 0) bad = 1;
         else bits |= 1u << bit;
     }
+    if (state && !cJSON_IsNull(state)) {
+        if (cJSON_IsString(state) && !strcmp(state->valuestring, "start")) what = CAM_EV_START;
+        else if (cJSON_IsString(state) && !strcmp(state->valuestring, "stop")) what = CAM_EV_STOP;
+        else if (!cJSON_IsString(state) || strcmp(state->valuestring, "pulse")) bad = 1;
+    }
     cJSON_Delete(b);
-    if (bad) return send_error(conn, 400, "invalid request: events (motion, human, face, vehicle)", NULL);
-    channels_report_events(ch - 1, bits);
+    if (bad) {
+        char names[256];
+        size_t len = 0;
+        names[0] = 0;
+        for (int k = 0; ch_event_name(k) && len < sizeof names; ++k) {
+            int n = snprintf(names + len, sizeof names - len, "%s%s", k ? ", " : "", ch_event_name(k));
+            if (n < 0) break;
+            len += (size_t)n;
+        }
+        char msg[320];
+        snprintf(msg, sizeof msg, "invalid request: events (%s), state (start, stop, pulse)", names);
+        return send_error(conn, 400, msg, NULL);
+    }
+    if (what == CAM_EV_PULSE) channels_report_events(ch - 1, bits);
+    else cam_event_report(ch - 1, bits, what, CAM_EV_SRC_API, NULL);
     channel_status_t st;
     channels_status(ch - 1, &st);
     cJSON *doc = cJSON_CreateObject(), *held = cJSON_AddArrayToObject(doc, "events");

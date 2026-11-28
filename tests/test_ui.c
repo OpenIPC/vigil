@@ -164,6 +164,11 @@ static int        g_tile_calls;
  * tile shows its sub-stream (Channel info only). */
 static int g_xm_chan4;
 
+/* The first tile's events, when set (test_camera_event_icons): as a
+ * camera's alarms would make them, start to stop. */
+static int      g_ev0_set;
+static unsigned g_ev0;
+
 static void fake_status(int idx, ui_chan_t *st)
 {
     switch (idx) {
@@ -199,6 +204,7 @@ static void fake_status(int idx, ui_chan_t *st)
                                .codec = "H.264", .width = 640, .height = 360, .fps = 15, .view = "sub" };
         break;
     }
+    if (idx == 0 && g_ev0_set) st->events = g_ev0;
 }
 
 static const ui_event_t k_events[] = {
@@ -3208,6 +3214,54 @@ static lv_indev_t *test_cursor_plane(lv_display_t *disp)
     return ptr;
 }
 
+/* Every event type a camera reports has its icon on the tile, and the
+ * alarm frame follows them: on while any is, off at the last one's stop. */
+static void test_camera_event_icons(void)
+{
+    static const struct { unsigned bit; const lv_image_dsc_t *img; } k[] = {
+        { UI_EV_MOTION, &ui_icon_ev_motion }, { UI_EV_HUMAN, &ui_icon_ev_human },
+        { UI_EV_FACE, &ui_icon_ev_face }, { UI_EV_VEHICLE, &ui_icon_ev_vehicle },
+        { UI_EV_LINE, &ui_icon_ev_line }, { UI_EV_INTRUSION, &ui_icon_ev_intrusion },
+        { UI_EV_VIDEO_LOSS, &ui_icon_ev_video_loss }, { UI_EV_TAMPER, &ui_icon_ev_tamper },
+        { UI_EV_ALARM_IN, &ui_icon_ev_alarm_in }, { UI_EV_OTHER, &ui_icon_ev_other },
+    };
+    CHECK(sizeof k / sizeof k[0] == UI_EV_N, "an icon for each of the %d types", UI_EV_N);
+    CHECK(put_display("{\"alert_frame\":true}") == CONFIG_OK, "the alarm frame on");
+    g_ev0_set = 1;
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; ++i) {
+        g_ev0 = k[i].bit;
+        run(300);
+        int others = 0;
+        for (size_t j = 0; j < sizeof k / sizeof k[0]; ++j)
+            if (j != i) others |= icon_shown(first_tile(), k[j].img);
+        CHECK(icon_shown(first_tile(), k[i].img) && !others, "type %zu alone: its icon, no other", i);
+    }
+    /* A camera tampered with, its alarm input on and a line crossed. */
+    g_ev0 = UI_EV_TAMPER | UI_EV_ALARM_IN | UI_EV_LINE | UI_EV_INTRUSION;
+    int seen = 0;
+    for (int i = 0; i < 8; ++i) {
+        run(250);
+        seen |= alarm_frame_shown(first_tile()) ? 1 : 2;
+    }
+    CHECK(seen == 3 && icon_shown(first_tile(), &ui_icon_ev_tamper) && icon_shown(first_tile(), &ui_icon_ev_alarm_in),
+          "several at once: their icons, the frame blinking (%d)", seen);
+    while (!alarm_frame_shown(first_tile())) run(50);
+    shot("live_events");
+    /* The camera's stop: icons and frame gone. */
+    g_ev0 = 0;
+    run(600);
+    seen = 0;
+    for (int i = 0; i < 6; ++i) {
+        run(250);
+        seen |= alarm_frame_shown(first_tile());
+        for (size_t j = 0; j < sizeof k / sizeof k[0]; ++j) seen |= icon_shown(first_tile(), k[j].img) << 1;
+    }
+    CHECK(!seen, "all stopped: no icon, no frame (%d)", seen);
+    g_ev0_set = 0;
+    CHECK(put_display("{}") == CONFIG_OK, "the defaults");
+    run(300);
+}
+
 static void test_display_pages(void)
 {
     run(VG_DURATION_TOAST);
@@ -5583,6 +5637,7 @@ int main(int argc, char **argv)
     test_system_pages();
     test_account_pages();
     test_display_pages();
+    test_camera_event_icons();
     test_clock_digits();
     test_cursor_plane(disp);
 

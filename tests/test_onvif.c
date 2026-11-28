@@ -8,8 +8,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cam_events.h"
+#include "channel.h"
 #include "disc_proto.h"
 #include "hal_capture.h"
+#include "onvif_events.h"
 #include "onvif_proto.h"
 
 static int g_fail, g_checks;
@@ -335,12 +338,151 @@ static void test_probe(void)
     CHECK(onvif_xml_escape("<&>", esc, sizeof esc) == 0 && !strcmp(esc, "&lt;&amp;&gt;"), "escape");
 }
 
-int main(void)
+/* ---- the client's side: a camera's events (onvif_events.h) --------------------- */
+
+static const char *g_data = "tests/data";
+
+static char *sample(const char *name)
 {
+    char path[512];
+    snprintf(path, sizeof path, "%s/onvif_events/%s", g_data, name);
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    static char buf[16384];
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    return strdup(buf);
+}
+
+typedef struct {
+    int          n;
+    onvif_note_t note[16];
+} notes_t;
+
+static void note_cb(void *user, const onvif_note_t *n)
+{
+    notes_t *t = user;
+    if (t->n < 16) t->note[t->n++] = *n;
+}
+
+static int note_is(const notes_t *t, int i, unsigned type, int what)
+{
+    return i < t->n && t->note[i].type == type && t->note[i].what == what;
+}
+
+static int parse_sample(const char *name, notes_t *t)
+{
+    memset(t, 0, sizeof *t);
+    char *x = sample(name);
+    if (!x) return -2;
+    int n = onvif_ev_parse(x, strlen(x), note_cb, t);
+    /* Cut anywhere, it must stay in bounds. */
+    size_t len = strlen(x);
+    for (size_t k = 0; k < len; k += 7) {
+        char *b = malloc(k ? k : 1);
+        memcpy(b, x, k);
+        onvif_ev_parse(b, k, NULL, NULL);
+        free(b);
+    }
+    free(x);
+    return n;
+}
+
+static void test_events_parse(void)
+{
+    notes_t t;
+    /* Hikvision: motion and field rules, the scene change's initial state,
+     * a line crossed (no state: a moment). */
+    CHECK(parse_sample("hik_pull.xml", &t) == 4, "hik: 4 notifications (%d)", t.n);
+    CHECK(note_is(&t, 0, CH_EV_MOTION, CAM_EV_START) && !strcmp(t.note[0].state, "IsMotion=true") &&
+              strstr(t.note[0].source, "Rule=MyMotionDetectorRule;") &&
+              !strcmp(t.note[0].topic, "tns1:RuleEngine/CellMotionDetector/Motion"),
+          "hik: CellMotionDetector IsMotion true (%u %d %s)", t.note[0].type, t.note[0].what, t.note[0].source);
+    CHECK(note_is(&t, 1, CH_EV_INTRUSION, CAM_EV_START), "hik: FieldDetector ObjectsInside: intrusion");
+    CHECK(note_is(&t, 2, CH_EV_TAMPER, CAM_EV_STOP) && t.note[2].initialized,
+          "hik: GlobalSceneChange initialized false: tamper, off");
+    CHECK(note_is(&t, 3, CH_EV_LINE, CAM_EV_PULSE), "hik: LineDetector Crossed (ObjectId): a moment");
+
+    /* Dahua: MotionAlarm State, a digital input, the tamper rule, the
+     * processor's load (not an alarm). */
+    CHECK(parse_sample("dahua_pull.xml", &t) == 4, "dahua: 4 notifications");
+    CHECK(note_is(&t, 0, CH_EV_MOTION, CAM_EV_START) && !strcmp(t.note[0].source, "Source=000;"),
+          "dahua: VideoSource/MotionAlarm State true");
+    CHECK(note_is(&t, 1, CH_EV_ALARM_IN, CAM_EV_START) && !strcmp(t.note[1].state, "LogicalState=true"),
+          "dahua: DigitalInput LogicalState true");
+    CHECK(note_is(&t, 2, CH_EV_TAMPER, CAM_EV_STOP), "dahua: TamperDetector IsTamper false");
+    CHECK(t.n > 3 && t.note[3].type == 0, "dahua: Monitoring/ProcessorUsage is not an alarm");
+
+    /* An XM / Reolink-style camera: MyRuleDetector's people, vehicles,
+     * faces, pets; a signal lost. */
+    CHECK(parse_sample("xm_pull.xml", &t) == 6, "xm: 6 notifications");
+    CHECK(note_is(&t, 0, CH_EV_MOTION, CAM_EV_STOP) && note_is(&t, 1, CH_EV_HUMAN, CAM_EV_START) &&
+              note_is(&t, 2, CH_EV_VEHICLE, CAM_EV_START) && note_is(&t, 3, CH_EV_FACE, CAM_EV_START) &&
+              note_is(&t, 4, CH_EV_OTHER, CAM_EV_START) && note_is(&t, 5, CH_EV_VIDEO_LOSS, CAM_EV_START),
+          "xm: motion off, people, vehicle, face, dog/cat (other), signal loss");
+
+    /* Axis: an I/O port ("state" 1), its own VMD topic ("active"), an
+     * object detector that says the class, day/night (not an alarm). */
+    CHECK(parse_sample("axis_pull.xml", &t) == 4, "axis: 4 notifications");
+    CHECK(note_is(&t, 0, CH_EV_ALARM_IN, CAM_EV_START) && note_is(&t, 1, CH_EV_MOTION, CAM_EV_START) &&
+              note_is(&t, 2, CH_EV_HUMAN, CAM_EV_START) && t.n > 3 && t.note[3].type == 0,
+          "axis: port, VMD, human by its class, day/night skipped (%u %u %u %u)", t.note[0].type, t.note[1].type,
+          t.note[2].type, t.n > 3 ? t.note[3].type : 99);
+
+    CHECK(onvif_ev_parse("<a>no</a>", 9, note_cb, &t) < 0, "not a PullMessagesResponse");
+
+    /* Topic names alone. */
+    CHECK(onvif_ev_topic_type("tns1:RuleEngine/MotionRegionDetector/Motion", NULL) == CH_EV_MOTION &&
+              onvif_ev_topic_type("tns1:VideoSource/ImageTooBlurry/AnalyticsService", NULL) == CH_EV_TAMPER &&
+              onvif_ev_topic_type("tns1:Device/Trigger/Relay", NULL) == 0 &&
+              onvif_ev_topic_type("tns1:Monitoring/OperatingTime/LastReboot", NULL) == 0 &&
+              onvif_ev_topic_type("tnshik:RuleEngine/LineCrossing/People", NULL) == CH_EV_LINE &&
+              onvif_ev_topic_type("tns1:RuleEngine/ObjectDetector/Object", "ObjectType=Vehicle;") == CH_EV_VEHICLE &&
+              onvif_ev_topic_type("", NULL) == 0 && onvif_ev_topic_type(NULL, NULL) == 0,
+          "topics");
+
+    /* Subscribing: the address, reference parameters, the life. */
+    char addr[256], refs[256];
+    long life = -1;
+    char *x = sample("hik_subscribe.xml");
+    CHECK(x && onvif_ev_subscription(x, strlen(x), addr, sizeof addr, refs, sizeof refs, &life) == 0 &&
+              !strcmp(addr, "http://192.168.1.64/onvif/Events/PullSubManager_2026-11-28T10:00:00Z_0") && !refs[0] &&
+              life == 120,
+          "hik subscription: %s, %ld s", addr, life);
+    free(x);
+    x = sample("axis_subscribe.xml");
+    CHECK(x && onvif_ev_subscription(x, strlen(x), addr, sizeof addr, refs, sizeof refs, &life) == 0 &&
+              !strcmp(addr, "http://192.168.0.90/onvif/services") &&
+              !strcmp(refs, "<dom0:SubscriptionId xmlns:dom0=\"http://www.axis.com/2009/event\">7</dom0:SubscriptionId>") &&
+              life == 3600,
+          "axis subscription with its reference parameters: %s", refs);
+    free(x);
+    CHECK(onvif_ev_subscription("<x/>", 4, addr, sizeof addr, refs, sizeof refs, &life) < 0, "no address: refused");
+    x = sample("dahua_pull.xml");
+    CHECK(x && onvif_ev_life(x, strlen(x)) == 10, "a PullMessages answer's life");
+    free(x);
+
+    char svc[160];
+    x = sample("capabilities.xml");
+    CHECK(x && onvif_ev_service(x, strlen(x), svc, sizeof svc) == 0 && !strcmp(svc, "http://192.168.1.64/onvif/Events"),
+          "GetCapabilities: the events service %s", svc);
+    free(x);
+    x = sample("services.xml");
+    CHECK(x && onvif_ev_service(x, strlen(x), svc, sizeof svc) == 0 &&
+              !strcmp(svc, "http://10.0.0.7:8000/onvif/event_service"),
+          "GetServices: the events service %s", svc);
+    free(x);
+}
+
+int main(int argc, char **argv)
+{
+    if (argc > 1) g_data = argv[1];
     test_soap();
     test_wsse();
     test_digest();
     test_probe();
+    test_events_parse();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }

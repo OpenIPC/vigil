@@ -75,6 +75,12 @@ struct source {
     /* Set by the channel: drivers abandon connects and waits when *stop is
      * set, so a stop never waits for a slow camera. */
     const volatile int *stop;
+    /* Set by the channel, at any time: this source is where channel
+     * `index`'s camera events come from (its main session, events auto or
+     * netip). A driver whose protocol carries them (NETIP alarms) asks for
+     * them and reports them to cam_events.h as they come, and clears what
+     * it reported when the connection ends or this is unset. */
+    volatile int events;
     void       *priv;
 };
 

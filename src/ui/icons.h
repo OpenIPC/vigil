@@ -23,6 +23,12 @@ extern const lv_image_dsc_t ui_icon_ev_motion;    /* 20 px, activity.svg */
 extern const lv_image_dsc_t ui_icon_ev_human;    /* 20 px, walk.svg */
 extern const lv_image_dsc_t ui_icon_ev_face;    /* 20 px, face-id.svg */
 extern const lv_image_dsc_t ui_icon_ev_vehicle;    /* 20 px, car.svg */
+extern const lv_image_dsc_t ui_icon_ev_line;    /* 20 px, arrow-bar-both.svg */
+extern const lv_image_dsc_t ui_icon_ev_intrusion;    /* 20 px, fence.svg */
+extern const lv_image_dsc_t ui_icon_ev_video_loss;    /* 20 px, video-off.svg */
+extern const lv_image_dsc_t ui_icon_ev_tamper;    /* 20 px, eye-off.svg */
+extern const lv_image_dsc_t ui_icon_ev_alarm_in;    /* 20 px, bell-bolt.svg */
+extern const lv_image_dsc_t ui_icon_ev_other;    /* 20 px, alert-triangle.svg */
 extern const lv_image_dsc_t ui_icon_add;    /* 20 px, plus.svg */
 extern const lv_image_dsc_t ui_icon_search;    /* 24 px, search.svg */
 extern const lv_image_dsc_t ui_icon_channels;    /* 24 px, device-cctv.svg */

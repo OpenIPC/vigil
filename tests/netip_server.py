@@ -14,7 +14,20 @@ bits 8-9 in the codec byte's high nibble (0x13: H.265, 2048 or more wide).
     netip_server.py FILE [--port 34567] [--user admin] [--password ''] [--fps 25]
                     [--width 640 --height 360] [--title NAME] [--title-objects]
                     [--chatty] [--stall] [--video-frames N] [--no-title]
+                    [--alarm-script S] [--alarm-ctl PORT] [--alarm-refuse] [--drop-after SECS]
                     [--ptz-log FILE] [--no-ptz]
+
+Alarms: a client that sends AlarmSet (1500) is answered 1501 and pushed
+AlarmInfo (1504) messages, {"AlarmInfo": {"Channel", "Event", "StartTime",
+"Status"}, "Name": "AlarmInfo", "SessionID"}, as XM devices do:
+  --alarm-script S  after each AlarmSet, the script "SECS:Event:Status[:Channel],..."
+                    (Status Start, Stop or "-" for none), timed from the AlarmSet
+  --alarm-ctl PORT  UDP on 127.0.0.1: each datagram "Event Status [Channel]" goes
+                    to every client that asked for alarms
+  --alarm-refuse    answer AlarmSet with Ret 103 and push nothing
+  --drop-after SECS the first connection that asks for alarms is closed SECS
+                    after it does (a camera rebooting: the client reconnects and
+                    must ask for them again)
 
 PTZ (OPPTZControl, 1400 -> 1401 Ret 100): a simulated head. A Direction*
 or Zoom* command with Preset 65535 (or 0) starts moving at its Step (pan
@@ -134,6 +147,17 @@ class Head:
             with open(self.log, "a") as f:
                 f.write(json.dumps(line) + "\n")
         print("netip_server: ptz %s" % json.dumps(line), flush=True)
+CLIENTS = set()
+CLIENTS_LOCK = threading.Lock()
+DROPPED = [False]
+
+
+def alarm_body(session, event, status, channel):
+    info = {"Channel": channel, "Event": event,
+            "StartTime": time.strftime("%Y-%m-%d %H:%M:%S")}
+    if status != "-":
+        info["Status"] = status
+    return {"AlarmInfo": info, "Name": "AlarmInfo", "SessionID": "0x%08X" % session}
 
 
 class Client(threading.Thread):
@@ -141,7 +165,38 @@ class Client(threading.Thread):
         super().__init__(daemon=True)
         self.s, self.args, self.aus, self.h265, self.head = sock, args, aus, h265, head
         self.session, self.streaming = 0x1234ABCD, False
+        self.alarms = False
         self.lock = threading.Lock()
+
+    def alarm(self, event, status, channel=0):
+        if not self.alarms:
+            return
+        try:
+            self.send(1504, alarm_body(self.session, event, status, channel))
+            print("netip_server: alarm %s %s ch%d sent" % (event, status, channel), flush=True)
+        except OSError:
+            pass
+
+    def alarm_script(self):
+        t0 = time.monotonic()
+        for step in self.args.alarm_script.split(","):
+            parts = step.strip().split(":")
+            if len(parts) < 3:
+                continue
+            at, event, status = float(parts[0]), parts[1], parts[2]
+            channel = int(parts[3]) if len(parts) > 3 else 0
+            time.sleep(max(0.0, t0 + at - time.monotonic()))
+            if not self.alarms:
+                return
+            self.alarm(event, status, channel)
+
+    def drop_later(self):
+        time.sleep(self.args.drop_after)
+        print("netip_server: dropping the connection", flush=True)
+        try:
+            self.s.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
 
     def send(self, msgid, body, raw=False):
         if not raw:
@@ -224,11 +279,43 @@ class Client(threading.Thread):
                 elif msgid == 1410 and not self.streaming:
                     self.streaming = True
                     threading.Thread(target=self.stream, daemon=True).start()
+                elif msgid == 1500:
+                    print("netip_server: alarm subscription", flush=True)
+                    if self.args.alarm_refuse:
+                        self.send(1501, {"Name": "", "Ret": 103, "SessionID": "0x%08X" % self.session})
+                        continue
+                    self.send(1501, {"Name": "", "Ret": 100, "SessionID": "0x%08X" % self.session})
+                    self.alarms = True
+                    with CLIENTS_LOCK:
+                        CLIENTS.add(self)
+                    if self.args.alarm_script:
+                        threading.Thread(target=self.alarm_script, daemon=True).start()
+                    if self.args.drop_after and not DROPPED[0]:
+                        DROPPED[0] = True
+                        threading.Thread(target=self.drop_later, daemon=True).start()
         except (ConnectionError, OSError, ValueError):
             pass
         finally:
             self.streaming = False
+            self.alarms = False
+            with CLIENTS_LOCK:
+                CLIENTS.discard(self)
             self.s.close()
+
+
+def alarm_ctl(port):
+    """Each datagram "Event Status [Channel]" to every subscribed client."""
+    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    u.bind(("127.0.0.1", port))
+    while True:
+        words = u.recv(256).decode(errors="replace").split()
+        if len(words) < 2:
+            continue
+        channel = int(words[2]) if len(words) > 2 else 0
+        with CLIENTS_LOCK:
+            targets = list(CLIENTS)
+        for c in targets:
+            c.alarm(words[0], words[1], channel)
 
 
 def main():
@@ -248,6 +335,10 @@ def main():
     ap.add_argument("--no-title", action="store_true")
     ap.add_argument("--ptz-log", help="append each PTZ command (JSON lines)")
     ap.add_argument("--no-ptz", action="store_true", help="answer PTZ with Ret 607")
+    ap.add_argument("--alarm-script", default="")
+    ap.add_argument("--alarm-ctl", type=int, default=0)
+    ap.add_argument("--alarm-refuse", action="store_true")
+    ap.add_argument("--drop-after", type=float, default=0)
     args = ap.parse_args()
     h265 = args.file.endswith((".h265", ".hevc", ".265"))
     aus = access_units(open(args.file, "rb").read(), h265)
@@ -257,6 +348,8 @@ def main():
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("0.0.0.0", args.port))
     srv.listen(8)
+    if args.alarm_ctl:
+        threading.Thread(target=alarm_ctl, args=(args.alarm_ctl,), daemon=True).start()
     print("netip_server: %d frames on :%d" % (len(aus), args.port), flush=True)
     head = Head(args.ptz_log)
     while True:
