@@ -660,6 +660,8 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `POST /api/v1/discovery/ip` | Change devices' addresses, or (`dry_run`) show the plan. |
 | `POST /api/v1/channels/<n>/assign` | Add a device found to channel n. |
 | `POST /api/v1/channels/<n>/events` | Events of channel n's camera, reported from outside ([below](#post-apiv1channelsnevents)). |
+| `GET /api/v1/channels/<n>/ptz` | Channel n's PTZ: state, capabilities, presets ([PTZ](#ptz)). |
+| `POST /api/v1/channels/<n>/ptz` | Move channel n's camera, stop it, a preset, home, a tour ([PTZ](#ptz)). |
 | `POST /api/v1/discovery/autoadd` | Add every new device to the empty channels. |
 | `POST /api/v1/devices/test` | Connect to a camera described by hand: codec and size, or why not. |
 
@@ -1135,6 +1137,110 @@ while sleep 2; do
   curl -s -u root:PASSWORD -d '{"events": ["motion"]}' $NVR/api/v1/channels/1/events
 done
 ```
+
+## PTZ
+
+A camera that moves (pan, tilt, zoom; its lens's focus and iris;
+presets, tours, a home position) is driven over its own protocol, per
+camera by `cameras[].ptz`: `auto` (the default) uses NETIP's
+`OPPTZControl` for a `netip://` camera and ONVIF's PTZ service (with
+Imaging for focus and iris) for the others when the camera has one;
+`netip` or `onvif` forces one (`netip` on an RTSP camera: NETIP on port
+34567 of its host); `off`, none. The camera is asked what it can do the
+first time anyone looks (the screen's PTZ panel, a `GET` here). Commands
+go out from a thread of the channel's own, so a request only queues them
+and is answered at once. Both need the `ptz` permission. The camera's
+password is the one in its URL; nothing here shows it.
+
+### `GET /api/v1/channels/<n>/ptz`
+
+```json
+{ "channel": 1, "state": "ready", "backend": "netip",
+  "capabilities": ["pan_tilt", "zoom", "focus", "iris", "presets", "tours"],
+  "presets": [ { "id": "1", "name": "Gate" }, { "id": "5", "name": "Road" } ],
+  "tours": 8, "moving": false, "error": "" }
+```
+
+`state`: `off` (no camera, disabled, `ptz: off`, or a `capture:` input),
+`probing` (being asked), `ready`, `none` (the camera has no PTZ: a NETIP
+camera answering `Ret 118` or `607`, an ONVIF one without a PTZ service),
+`error` (it could not be reached, or refused the login; `error` says why,
+and it is asked again a few seconds later). `capabilities`: what of
+`pan_tilt`, `zoom`, `focus`, `focus_auto`, `iris`, `presets`, `tours`,
+`home` it can do. `error` is also the last command's failure. `?wait=MS`
+(up to 10000) waits that long for a camera being asked.
+
+### `POST /api/v1/channels/<n>/ptz`
+
+One of:
+
+| Body | Does |
+|---|---|
+| `{"move": {"pan": -1..1, "tilt": -1..1, "zoom": -1..1}}` | A continuous move: pan + right, tilt + up, zoom + in; the size is the speed (NETIP: Step 1..8, one direction of eight, then zoom, at a time). |
+| `{"stop": true}` | Stop whatever moves. |
+| `{"focus": -1..1}`, `{"focus": "auto"}` | Focus + far, - near; or the camera's own focus. |
+| `{"iris": -1..1}` | Iris + open, - close. |
+| `{"preset": {"goto": ID}}` | Go to a preset. |
+| `{"preset": {"set": ID or null, "name": "Gate"}}` | Store the position now as preset ID (null: a new one; NETIP: the lowest free number 1..255). |
+| `{"preset": {"rename": ID, "name": "Lane"}}` | A new name (kept by vigild: the camera's position is not touched). |
+| `{"preset": {"remove": ID}}` | Delete a preset. |
+| `{"home": true}` | The home position. |
+| `{"tour": {"start": N}}`, `{"tour": {"stop": N}}` | A tour (patrol) the camera has, 1..`tours`. |
+
+**A move ends on its own**: it lasts `timeout` milliseconds (100..10000,
+in `move` or beside it; default 1000) and is stopped then, unless the same
+or another move or a stop comes first. A client holding a button repeats
+the move (every few hundred milliseconds) and sends a stop on release; a
+client that goes away leaves nothing moving. A stop the camera does not
+take is sent three times, then the control connection is dropped (majestic
+ends a move when its client hangs up); `vigild` stopping, or the camera's
+URL changing, stops a move first.
+
+The answer is `202` with the state as `GET` gives it (the command is queued;
+a failure shows in `error` afterwards, and on the screen). `400` a bad
+body (an unknown member, a value out of range, two of `move`, `stop`,
+`focus`, `iris` at once, two preset operations), `404` no such channel,
+`409` no PTZ on the channel or not something it can do (`home` and
+`focus: "auto"` on NETIP), `503` too many commands waiting.
+
+```sh
+# pan left at half speed for 2 s, then the preset named Gate
+curl -s -u root:PASSWORD -d '{"move": {"pan": -0.5}, "timeout": 2000}' $NVR/api/v1/channels/1/ptz
+curl -s -u root:PASSWORD -d '{"preset": {"goto": 1}}' $NVR/api/v1/channels/1/ptz
+```
+
+**Presets** are ids: a NETIP camera's are numbers (`"1"` .. `"255"`), an
+ONVIF camera's its own tokens (often `"1"`, `"Preset_1"`). XM cameras keep
+no names and list nothing, so vigild keeps the list of what was stored
+through it, with the names, in `vigil.ptz.json` beside the configuration
+file (`/etc/vigil.ptz.json`), per camera (address, port and channel of an
+NVR), with no password; a rename is kept there too for an ONVIF camera,
+over the name the camera gives.
+
+**NETIP** (XM cameras and NVRs, majestic with `netip`): message 1400 on a
+connection of its own, logged in with the URL's user and password,
+`{"Command": "DirectionLeft", "Parameter": {"Channel": 0, "Preset":
+65535, "Step": 5, "Tour": 0, ...}}` to start and the same with `"Preset":
+-1` to stop; `ZoomTile`/`ZoomWide`, `FocusNear`/`FocusFar`,
+`IrisLarge`/`IrisSmall`, `SetPreset`/`GotoPreset`/`ClearPreset`,
+`StartTour`/`StopTour`. There is no home position or automatic focus.
+
+**ONVIF**: the device service at `cameras[].onvif_url`, else the address
+discovery heard, else `http://<host>/onvif/device_service` on port 80 and
+8899 (as for the camera's events), logged in with the URL's user and
+password (WS-UsernameToken in the camera's clock, HTTP Digest when it asks).
+`GetCapabilities` (or `GetServices`) for the Media, PTZ and Imaging
+services; `GetProfiles`: the first profile with a PTZ configuration (the
+main stream's), its video source and node; `GetNode`: continuous pan/tilt
+and zoom, presets, home, preset tours. A move is `ContinuousMove` (`PanTilt
+x, y`, `Zoom x`) with `Timeout PT2S`, sent again every second while it
+lasts so the camera ends it by itself if vigild goes quiet (a camera that
+refuses the Timeout gets none), and `Stop`; focus is the Imaging service's
+`Move` (`Continuous Speed`) and `Stop`, automatic focus `SetImagingSettings`
+`AutoFocusMode AUTO`; presets `GetPresets`, `GotoPreset`, `SetPreset`,
+`RemovePreset`; `GotoHomePosition`; tours `GetPresetTours` and
+`OperatePresetTour` (tour N is the camera's Nth). ONVIF has no continuous
+iris move, so there is no iris.
 
 ### `POST /api/v1/devices/test`
 

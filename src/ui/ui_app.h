@@ -49,12 +49,19 @@ uint32_t ui_app_key(uint32_t key, unsigned mods);
 
 /* The mouse wheel, `steps` notches (> 0: up): what is under the pointer
  * scrolls (the nearest list or page that can go that way), not what has
- * the focus. */
+ * the focus; over the PTZ panel's picture, it zooms. */
 void ui_app_wheel(int steps);
+
+/* A key let go (input_hooks_t.key_up): the PTZ panel stops what the key
+ * moved. */
+void ui_app_key_up(uint32_t key);
 
 /* `n` keyboards are plugged in; with none, the UI is for the mouse again
  * (no focus shown, the on-screen keyboard back). */
 void ui_app_keyboards(int n);
+
+/* The keypad's group changed (the PTZ panel opened or closed). */
+void ui_app_focus_changed(void);
 
 /* A keyboard has been used (and is still plugged in). */
 int ui_keyboard_in_use(void);
@@ -223,6 +230,23 @@ void       ui_form_embed_reset(ui_form_t *f);      /* the widgets show what is s
 void       ui_form_embed_free(ui_form_t *f);
 void      ui_system_open(void);
 void      ui_display_open(void);
+/* PTZ (ui_ptz.c): the panel over channel `ch`'s picture on the live
+ * screen `scr` (full screen: ui_live_ptz puts it so); `on_close` after it
+ * closed. Closing stops whatever the camera was doing. ui_ptz_key and
+ * ui_ptz_wheel return 1 for what they took. */
+void        ui_ptz_open(lv_obj_t *scr, int ch, void (*on_close)(void));
+void        ui_ptz_close(void);
+int         ui_ptz_is_open(void);
+int         ui_ptz_channel(void);           /* -1: closed */
+lv_group_t *ui_ptz_group(void);
+int         ui_ptz_key(uint32_t key, unsigned mods);
+void        ui_ptz_key_up(uint32_t key);
+int         ui_ptz_wheel(int steps);
+/* The live view's way in (context menu, P): channel `ch` full screen,
+ * the panel over it, the grid back when it closes; asks for a login with
+ * the ptz permission first when the on-screen login is on. */
+void        ui_live_ptz(int ch);
+
 /* Every channel: state, stream on screen, codec, size, fps, recording,
  * events (System -> Channel info). */
 void      ui_channel_info_open(void);

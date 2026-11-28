@@ -1259,6 +1259,8 @@ static void test_config_file(void)
     snprintf(c.cameras[0].events, sizeof c.cameras[0].events, "auto");
     snprintf(c.cameras[1].events, sizeof c.cameras[1].events, "onvif");
     snprintf(c.cameras[1].onvif_url, sizeof c.cameras[1].onvif_url, "http://10.0.0.3:8899/onvif/device_service");
+    snprintf(c.cameras[0].ptz, sizeof c.cameras[0].ptz, "auto");
+    snprintf(c.cameras[1].ptz, sizeof c.cameras[1].ptz, "netip");
     snprintf(c.record.path, sizeof c.record.path, "/mnt/sda1/rec");
     c.record.segment = 300;
     /* A world-readable file and a symlink where an older vigild put its

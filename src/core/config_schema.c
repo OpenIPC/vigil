@@ -251,6 +251,7 @@ static int check_onvif_url(const char *v, char *msg, size_t cap)
 }
 
 static const char *const events_modes[] = { "auto", "netip", "onvif", "off", NULL };
+static const char *const ptz_modes[] = { "auto", "netip", "onvif", "off", NULL };
 static const char *const on_full_values[] = { "overwrite", "stop", NULL };
 static const char *const nas_types[] = { "none", "cifs", "nfs", NULL };
 static const char *const ddns_providers[] = { "dyndns", "noip", "custom", NULL };
@@ -321,8 +322,12 @@ static const schema_field_t camera_fields[] = {
               "when it has them; netip; onvif (a NETIP camera's too); off." },
     { .key = "onvif_url", STR(config_camera_t, onvif_url), .def_str = "", .live = 1, .check = check_onvif_url,
       .label = "ONVIF address",
-      .help = "Its ONVIF device service for the events, http://host[:port]/onvif/device_service; "
+      .help = "Its ONVIF device service for the events and PTZ, http://host[:port]/onvif/device_service; "
               "the URL's user and password log in. Empty: found from its address." },
+    { .key = "ptz", ENUM(config_camera_t, ptz, ptz_modes), .def_str = "auto", .live = 1, .label = "PTZ",
+      .help = "How the camera is moved (pan, tilt, zoom, focus, presets). auto: NETIP's PTZ control for a "
+              "netip:// camera, ONVIF's PTZ service for the others when the camera has one; netip, onvif: "
+              "that one (an RTSP camera's NETIP on port 34567 of its host); off: no PTZ for this camera." },
 };
 
 static const schema_field_t record_fields[] = {

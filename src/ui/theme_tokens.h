@@ -70,6 +70,8 @@
 #define VG_SIZE_PAGE_HEADER          56
 #define VG_SIZE_BUTTON               40
 #define VG_SIZE_CURSOR               19
+#define VG_SIZE_PTZ_PANEL            320
+#define VG_SIZE_PTZ_PAD              52
 
 #define VG_DURATION_FAST             150
 #define VG_DURATION_NORMAL           250
@@ -79,5 +81,7 @@
 #define VG_DURATION_FLASH            3000
 #define VG_DURATION_SUBMENU_OPEN     200
 #define VG_DURATION_SUBMENU_CLOSE    300
+#define VG_DURATION_PTZ_REPEAT       250
+#define VG_DURATION_PTZ_HOLD         1000
 
 #endif /* THEME_TOKENS_H */

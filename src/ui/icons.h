@@ -53,5 +53,25 @@ extern const lv_image_dsc_t ui_icon_nav_users;    /* 22 px, users.svg */
 extern const lv_image_dsc_t ui_icon_nav_groups;    /* 22 px, users-group.svg */
 extern const lv_image_dsc_t ui_icon_nav_output;    /* 22 px, device-desktop.svg */
 extern const lv_image_dsc_t ui_icon_nav_osd;    /* 22 px, clock.svg */
+extern const lv_image_dsc_t ui_icon_ptz_up;    /* 24 px, arrow-up.svg */
+extern const lv_image_dsc_t ui_icon_ptz_down;    /* 24 px, arrow-down.svg */
+extern const lv_image_dsc_t ui_icon_ptz_left;    /* 24 px, arrow-left.svg */
+extern const lv_image_dsc_t ui_icon_ptz_right;    /* 24 px, arrow-right.svg */
+extern const lv_image_dsc_t ui_icon_ptz_up_left;    /* 24 px, arrow-up-left.svg */
+extern const lv_image_dsc_t ui_icon_ptz_up_right;    /* 24 px, arrow-up-right.svg */
+extern const lv_image_dsc_t ui_icon_ptz_down_left;    /* 24 px, arrow-down-left.svg */
+extern const lv_image_dsc_t ui_icon_ptz_down_right;    /* 24 px, arrow-down-right.svg */
+extern const lv_image_dsc_t ui_icon_ptz_home;    /* 24 px, home.svg */
+extern const lv_image_dsc_t ui_icon_ptz_zoom;    /* 20 px, zoom-in.svg */
+extern const lv_image_dsc_t ui_icon_ptz_focus;    /* 20 px, focus-2.svg */
+extern const lv_image_dsc_t ui_icon_ptz_iris;    /* 20 px, aperture.svg */
+extern const lv_image_dsc_t ui_icon_ptz_minus;    /* 20 px, minus.svg */
+extern const lv_image_dsc_t ui_icon_ptz_plus;    /* 20 px, plus.svg */
+extern const lv_image_dsc_t ui_icon_ptz_save;    /* 18 px, device-floppy.svg */
+extern const lv_image_dsc_t ui_icon_ptz_edit;    /* 18 px, pencil.svg */
+extern const lv_image_dsc_t ui_icon_ptz_delete;    /* 18 px, trash.svg */
+extern const lv_image_dsc_t ui_icon_ptz_play;    /* 18 px, player-play.svg */
+extern const lv_image_dsc_t ui_icon_ptz_stop;    /* 18 px, player-stop.svg */
+extern const lv_image_dsc_t ui_icon_ptz_close;    /* 20 px, x.svg */
 
 #endif /* ICONS_H */

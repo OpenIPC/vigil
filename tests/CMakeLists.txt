@@ -8,6 +8,9 @@ add_test(NAME discovery COMMAND test_discovery ${CMAKE_CURRENT_SOURCE_DIR}/data)
 add_executable(test_onvif test_onvif.c)
 target_link_libraries(test_onvif PRIVATE vigil_core)
 add_test(NAME onvif COMMAND test_onvif ${CMAKE_CURRENT_SOURCE_DIR}/data)
+add_executable(test_ptz test_ptz.c)
+target_link_libraries(test_ptz PRIVATE vigil_core)
+add_test(NAME ptz COMMAND test_ptz ${CMAKE_CURRENT_BINARY_DIR})
 
 # src/sys on a fake root: fake /etc, /sys, /proc and /dev files, and a
 # recorder in place of ifup, mkfs, mount, date, ntpd, hostname, curl.
@@ -148,6 +151,11 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/backup_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
     set_tests_properties(backup_e2e PROPERTIES RUN_SERIAL TRUE)
+    # PTZ through the API against the NETIP emulator's simulated head:
+    # moves that stop on their own, presets, refusals, permissions.
+    add_test(NAME ptz_e2e
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/ptz_test.py $<TARGET_FILE:vigild>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
     add_test(NAME api_e2e
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/api_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)

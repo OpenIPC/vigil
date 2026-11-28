@@ -582,6 +582,7 @@ static int request_handler(struct mg_connection *conn, void *cbdata)
     int rc = api_backup_request(conn, uri, m);
     if (!rc) rc = api_mgmt_request(conn, uri, m);
     if (rc) return rc;
+    if ((rc = api_ptz_request(conn, uri, m)) != 0) return rc;
     if (!strncmp(uri, "/api/v1/discovery", 17) || !strncmp(uri, "/api/v1/channels/", 17) ||
         !strncmp(uri, "/api/v1/devices/", 16))
         return api_disc_request(conn, uri, m);

@@ -53,6 +53,7 @@ typedef struct {
     int  enabled;
     char events[8];                 /* "auto" | "netip" | "onvif" | "off" (ch_events_mode) */
     char onvif_url[160];            /* "": found from the camera's address */
+    char ptz[8];                    /* "auto" | "netip" | "onvif" | "off" (ptz.h) */
 } config_camera_t;
 
 typedef struct {
