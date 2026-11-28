@@ -212,7 +212,7 @@ static void diff_section(const cJSON *a, const cJSON *b, char *out, size_t cap)
             char f[LOG_DETAIL] = "";
             diff_object(x, y, f, sizeof f);
             size_t n = strlen(out);
-            snprintf(out + n, cap - n, "%s[%d] %s", n && out[n - 1] != ' ' ? "; " : "", i + 1, f);
+            snprintf(out + n, cap - n, "%s[%d] %.100s", n && out[n - 1] != ' ' ? "; " : "", i + 1, f);
         }
         size_t n = strlen(out);
         while (n && (out[n - 1] == ' ' || out[n - 1] == ';')) out[--n] = 0;

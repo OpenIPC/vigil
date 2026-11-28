@@ -130,7 +130,7 @@ void alarm_feed_poll(time_t now)
                 } else {
                     const char *why = ev.text + 4;      /* after "REC " */
                     if (!strcmp(F.rec_off[k], why)) continue;
-                    snprintf(F.rec_off[k], sizeof F.rec_off[k], "%s", why);
+                    snprintf(F.rec_off[k], sizeof F.rec_off[k], "%.23s", why);
                     snprintf(detail, sizeof detail, "%s", why);
                 }
             }
