@@ -38,6 +38,7 @@
 #include "qos.h"
 #include "rec_place.h"
 #include "rec_sched.h"
+#include "rec_store.h"
 #include "secret.h"
 #include "rtp_depay.h"
 #include "source.h"
@@ -1286,8 +1287,9 @@ static void test_config_file(void)
           strstr(raw, "@10.0.0.2/stream\"\n    name: Gate\n    enabled: true\n") &&
           strstr(raw, "\nrecord:\n  # Recording directory: Where the streams are recorded") &&
           strstr(raw, "\n  path: /mnt/sda1/rec\n") &&
-          strstr(raw, "  # Segment length (s): A new file starts at the first keyframe after this\n"
-                      "  # many seconds. 10..3600, default 60.\n  segment: 300\n") &&
+          strstr(raw, "  # after this many seconds. Cameras go into the pool. 10..3600, default 60.\n"
+                      "  segment: 300\n") &&
+          strstr(raw, "  # pool is made; a pool keeps its own. 4..1024, default 256.\n  chunk_mb: 256\n") &&
           strstr(raw, "# Cameras: In tile order: the first is CAM1. At most 16. Each one:\n#   url: Source URL.") &&
           strstr(raw, "\n  listen: \"0.0.0.0:8080\"\n") && strstr(raw, "not kept"),
           "YAML with the help as comments:\n%s", raw ? raw : "");
@@ -2268,6 +2270,14 @@ static void test_channel_substream(void)
     vg_rect_t none[CHANNEL_MAX] = { { 0 } };
     channels_config_t cc = { .urls = { url, rtsp }, .n = 2, .seg_secs = 60, .rec_dir = dir,
                              .allow_rootfs = 1 };
+    /* The cameras are recorded into the pool (rec_store.h). */
+    rec_store_cfg_t rc = { .allow_rootfs = 1 };
+    snprintf(rc.pool.path, sizeof rc.pool.path, "%.191s", dir);
+    rc.pool.chunk_mb = 4;
+    rc.pool.pool_mb = 16;
+    rc.pool.fragment_s = 4;
+    rc.pool.index_save_s = 300;
+    rec_store_configure(&rc);
     CHECK(channels_start(&cc, quad) == 0, "start");
 
     /* 2x2: the sub-stream, derived from the NETIP URL; the main stream
@@ -2320,12 +2330,23 @@ static void test_channel_substream(void)
     WAIT_FOR(atomic_load(&g_cam.last_channel) == 7 && view_is(0, "sub", 640), 5000);
     CHECK(atomic_load(&g_cam.last_channel) == 7 && view_is(0, "sub", 640), "the sub_url given is used");
 
-    /* All along: one recording, never broken by the view changes. */
+    /* All along: one recording, never broken by the view changes: one
+     * chunk, no gap in it. */
     channels_status(0, &st);
-    CHECK(st.recording && dir_files(dir) == 1, "one segment through every switch (%d files)", dir_files(dir));
+    rec_store_status_t rs;
+    rec_store_status(&rs);
+    rec_pool_t *pool = rec_store_pool();
+    int gaps = 0;
+    pthread_mutex_lock(&pool->mu);
+    for (uint32_t i = 0; i < pool->n; ++i)
+        gaps += pool->tab[i].cam == 1 && (pool->tab[i].flags & RCF_GAPS);
+    pthread_mutex_unlock(&pool->mu);
+    CHECK(st.recording && rs.cam[0].chunks == 1 && !gaps, "one recording through every switch (%u chunks, %d gaps)",
+          rs.cam[0].chunks, gaps);
     CHECK(atomic_load(&g_cam.streaming[0]) == 1, "the main connection never restarted");
 
     channels_stop();
+    rec_store_shutdown();
     cam_stop();
     channels_set_screen(0, 0);
     g_fake_caps.dec_shown_only = 0;

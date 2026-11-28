@@ -54,11 +54,16 @@ typedef struct {
 } config_camera_t;
 
 typedef struct {
-    char path[192];                 /* seg_writer_t.dir; "" = not recording */
-    int  segment;                   /* seconds */
-    int  keep;                      /* segments per camera, 0 = all */
+    char path[192];                 /* the pool's directory (rec_store.h); "" = not recording */
+    int  segment;                   /* seconds; local inputs' segments only (seg_writer.h) */
+    int  keep;                      /* segments per camera, 0 = all; local inputs only */
     int  allow_rootfs;              /* the root filesystem counts as a disk (rec_place.h) */
-    char on_full[12];               /* "overwrite" | "stop" (seg_writer.h) */
+    char on_full[12];               /* "overwrite" | "stop" */
+    int  chunk_mb;                  /* chunk size of a new pool */
+    int  pool_mb;                   /* the most the pool takes; 0: the target less its reserve */
+    int  fragment_s;                /* longest fragment */
+    int  flush_s;                   /* 0: by the medium */
+    int  index_save_s;              /* chunk table save interval */
 } config_record_t;
 
 /* A camera's week: one letter per half hour, 48 a day (rec_sched.h). */
@@ -252,6 +257,11 @@ void config_defaults(vigil_config_t *c);
 void config_trim(vigil_config_t *c);
 
 void config_to_channels(const vigil_config_t *c, channels_config_t *cc);
+
+/* The recording store's settings (rec_store.h); owner and host are the
+ * caller's to fill. */
+struct rec_store_cfg;
+void config_to_store(const vigil_config_t *c, struct rec_store_cfg *rc);
 
 /* The cameras' weeks (record schedule) for rec_sched_set; returns the
  * number of entries (CHANNEL_MAX). A camera listed twice: the last wins. */

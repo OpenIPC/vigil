@@ -49,6 +49,7 @@
 #include "log.h"
 #include "rec_place.h"
 #include "rec_sched.h"
+#include "rec_store.h"
 #include "schema.h"
 #include "seg_writer.h"
 #include "source.h"
@@ -115,6 +116,9 @@ struct channel {
     uint64_t        quota_bytes;
     time_t          quota_age;
     int             self_displayed; /* the platform shows its source (local capture) */
+    /* Recorded into the pool (rec_store.h): every camera but a board's own
+     * inputs, which keep their segment files (seg_writer.h) for now. */
+    int             store;
     char            title[32];      /* the camera's name for the channel (under lock) */
 
     sess_t          s[S_N];
@@ -220,6 +224,9 @@ void channels_report_events(int idx, unsigned bits)
     for (int b = 0; b < CH_EV_TYPES; ++b)
         if (bits & (1u << b)) g_ev_last[idx][b] = now;
     pthread_mutex_unlock(&g_locks[idx]);
+    /* Into the pool's event log: CH_EV_* bit b is REC_EV_* type b + 1. */
+    for (int b = 0; b < CH_EV_TYPES; ++b)
+        if (bits & (1u << b)) rec_store_event(idx, b + 1);
 }
 
 /* What a failed source means for the tile. */
@@ -307,8 +314,25 @@ void channels_status(int idx, channel_status_t *st)
         snprintf(st->view, sizeof st->view, "%s", view_name(holder != VIEW_NONE ? holder : view));
         st->recording = c->rec_on && c->seg.f != NULL;
         st->rec_bytes = c->seg.bytes;
-        /* Set up: say how it goes. Not set up: the reason, kept by rec_setup. */
-        if (c->rec_on)
+        if (c->store && c->rec_on) {
+            rec_stream_status_t rs;
+            rec_store_stream(c->idx, 0, &rs);
+            st->recording = rs.writing;     /* a chunk open and data going into it */
+            st->rec_bytes = rs.bytes;
+            if (c->rec_why[0]) {
+                snprintf(st->rec_state, sizeof st->rec_state, "%s", c->rec_why);
+            } else if (!rs.on) {
+                rec_store_status_t ss;
+                rec_store_status(&ss);
+                snprintf(st->rec_state, sizeof st->rec_state, "%s",
+                         ss.state == RP_WAITING && ss.place[0] ? ss.place
+                         : ss.state == RP_READONLY ? "read-only"
+                         : ss.state == RP_READY ? "paused" : "error");
+            } else {
+                snprintf(st->rec_state, sizeof st->rec_state, "%s",
+                         rs.full ? "disk full" : rs.failed ? "failed" : rs.open ? "recording" : "ready");
+            }
+        } else if (c->rec_on)
             snprintf(st->rec_state, sizeof st->rec_state, "%s",
                      c->rec_why[0] ? c->rec_why
                      : c->rec_fail_told ? "failed" : st->recording ? "recording" : "ready");
@@ -683,7 +707,8 @@ int channels_rec_hold(const char *dir, int timeout_ms)
     pthread_mutex_lock(&g_hold_lock);
     snprintf(g_hold, sizeof g_hold, "%s", dir);
     pthread_mutex_unlock(&g_hold_lock);
-    int open = 0;
+    int open = rec_store_hold(dir, timeout_ms);
+    if (open) return open;
     for (int waited = 0;; waited += 100) {
         open = 0;
         for (int i = 0; i < CHANNEL_MAX; ++i) {
@@ -703,6 +728,49 @@ void channels_rec_release(void)
     pthread_mutex_lock(&g_hold_lock);
     g_hold[0] = 0;
     pthread_mutex_unlock(&g_hold_lock);
+    rec_store_release();
+}
+
+/* The main stream into the pool: the writer thread does the rest. The
+ * schedule and the hold are looked at once a second; a stream that stops
+ * being recorded tells the writer, so what follows is a new span. */
+static void rec_feed(channel_t *c, const vg_au_t *au)
+{
+    if (!c->rec_on) return;
+    const char *why = rec_blocked(c, time(NULL));
+    if (why) {
+        pthread_mutex_lock(c->lock);
+        int was = c->rec_why[0] != 0;
+        if (*why) snprintf(c->rec_why, sizeof c->rec_why, "%s", why);
+        else c->rec_why[0] = 0;
+        pthread_mutex_unlock(c->lock);
+        if (*why && !was) {
+            vg_log("CAM%d: not recording: %s", c->idx + 1, why);
+            rec_store_break(c->idx, 0);
+        }
+        rec_stream_status_t rs;
+        rec_store_stream(c->idx, 0, &rs);
+        if (rs.full != c->full_told) {
+            c->full_told = rs.full;
+            if (rs.full) {
+                vg_log("CAM%d: the disk is full; recording stops until there is room (record.on_full: stop)",
+                       c->idx + 1);
+                events_push(c->idx + 1, "REC disk full");
+            } else {
+                vg_log("CAM%d: room on the disk again; recording", c->idx + 1);
+                events_push(c->idx + 1, "REC on");
+            }
+        }
+        if (rs.failed != c->rec_fail_told) {
+            c->rec_fail_told = rs.failed;
+            if (rs.failed) {
+                vg_log("CAM%d: recording failed", c->idx + 1);
+                events_push(c->idx + 1, "REC failed");
+            }
+        }
+    }
+    if (c->rec_why[0]) return;
+    rec_store_put(c->idx, 0, au);
 }
 
 /* ---- per-session thread --------------------------------------------------- */
@@ -724,6 +792,10 @@ static void on_au(void *user, const vg_au_t *au)
     }
     ++s->frames;
     if (s->id != S_MAIN) return;            /* recording is the main stream's */
+    if (c->store) {
+        rec_feed(c, au);
+        return;
+    }
 
     if (!c->rec_on && c->rec_dir[0] && au->key) rec_retry(c, au->codec);
     if (c->rec_on) {
@@ -915,6 +987,7 @@ static void *sess_thread(void *arg)
             }
         }
         s->src->ops->close(s->src);
+        if (main && c->store) rec_store_break(c->idx, 0);
         pthread_mutex_lock(c->lock);
         if (main) rec_close(c);
         s->fps = 0;
@@ -1069,6 +1142,7 @@ static void slot_teardown(channel_t *c)
     pthread_mutex_lock(c->lock);
     rec_close(c);
     pthread_mutex_unlock(c->lock);
+    if (c->store) rec_store_break(c->idx, 0);
 }
 
 static int slot_start(int i, const channels_config_t *cfg)
@@ -1108,7 +1182,11 @@ static int slot_start(int i, const channels_config_t *cfg)
     c->quota_age = cfg->quota_age[i];
     c->st.configured = 1;
     snprintf(c->st.name, sizeof c->st.name, "%s", name);
-    if (cfg->rec_dir) {
+    c->store = !c->self_displayed;
+    if (cfg->rec_dir && c->store) {
+        /* The store looks after the place itself (rec_store.h). */
+        c->rec_on = 1;
+    } else if (cfg->rec_dir) {
         rec_setup(c, VG_CODEC_NONE);
         if (!c->rec_on) c->rec_retry_at = time(NULL);
     }

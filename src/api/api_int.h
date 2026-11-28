@@ -51,6 +51,9 @@ int  api_login_with(const char *addr, const char *user, int (*check)(const char 
 const char *api_request_user(void);
 unsigned    api_request_perms(void);
 
+/* /api/v1/record/... (api_rec.c); 0 when `uri` is not one of them. */
+int api_rec_request(struct mg_connection *conn, const char *uri, const char *method);
+
 /* /api/v1/me, /api/v1/users..., /api/v1/groups... (api_users.c). */
 int api_users_request(struct mg_connection *conn, const char *uri, const char *method);
 

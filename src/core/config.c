@@ -13,6 +13,7 @@
 
 #include "cJSON.h"
 #include "config.h"
+#include "rec_store.h"
 #include "log.h"
 #include "schema_yaml.h"
 #include "secret.h"
@@ -54,6 +55,25 @@ void config_to_channels(const vigil_config_t *c, channels_config_t *cc)
     cc->seg_secs = c->record.segment;
     cc->keep = c->record.keep;
     cc->allow_rootfs = c->record.allow_rootfs;
+}
+
+void config_to_store(const vigil_config_t *c, rec_store_cfg_t *rc)
+{
+    memset(rc, 0, sizeof *rc);
+    snprintf(rc->pool.path, sizeof rc->pool.path, "%s", c->record.path);
+    rc->allow_rootfs = c->record.allow_rootfs;
+    rc->pool.chunk_mb = (unsigned)c->record.chunk_mb;
+    rc->pool.pool_mb = (unsigned)c->record.pool_mb;
+    rc->pool.fragment_s = (unsigned)c->record.fragment_s;
+    rc->pool.flush_s = (unsigned)c->record.flush_s;
+    rc->pool.index_save_s = (unsigned)c->record.index_save_s;
+    rc->pool.stop_when_full = !strcmp(c->record.on_full, "stop");
+    for (int i = 0; i < c->n_quotas; ++i) {
+        int k = c->quota[i].camera - 1;
+        if (k < 0 || k >= REC_CAMS) continue;
+        rc->pool.quota_bytes[k] = (uint64_t)c->quota[i].max_gb * 1000000000ull;
+        rc->pool.quota_age[k] = (time_t)c->quota[i].max_days * 86400;
+    }
 }
 
 int config_to_schedule(const vigil_config_t *c, rec_week_t weeks[CHANNEL_MAX])

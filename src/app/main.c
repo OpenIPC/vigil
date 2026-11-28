@@ -18,6 +18,7 @@
  *      (channels_apply)
  *   -> SIGINT/SIGTERM: api_stop, channels_stop, hal_shutdown.
  */
+#include <dirent.h>
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>
@@ -43,6 +44,7 @@
 #include "net.h"
 #include "source.h"
 #include "onvif.h"
+#include "rec_store.h"
 #include "rtsp_server.h"
 #include "secret.h"
 #include "web.h"
@@ -349,6 +351,45 @@ static int listen_check(const char *what, const char *listen, char *err, size_t 
     return net_listen_check(listen, err, cap);
 }
 
+/* Who owns a recording pool (vigil-rec.id): this recorder's MAC address
+ * (the first interface that has one, by name), and its host name. */
+static void recorder_id(char *id, size_t cap, char *host, size_t hcap)
+{
+    id[0] = 0;
+    if (gethostname(host, hcap) < 0) host[0] = 0;
+    host[hcap - 1] = 0;
+    DIR *d = opendir("/sys/class/net");
+    char best[32] = "";
+    struct dirent *e;
+    while (d && (e = readdir(d))) {
+        if (e->d_name[0] == '.' || !strcmp(e->d_name, "lo") || strlen(e->d_name) > 15) continue;
+        if (best[0] && strcmp(e->d_name, best) > 0) continue;
+        char path[64], mac[32] = "";
+        snprintf(path, sizeof path, "/sys/class/net/%.15s/address", e->d_name);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        if (!fgets(mac, sizeof mac, f)) mac[0] = 0;
+        fclose(f);
+        mac[strcspn(mac, "\r\n")] = 0;
+        if (strlen(mac) != 17 || !strcmp(mac, "00:00:00:00:00:00")) continue;
+        snprintf(best, sizeof best, "%.15s", e->d_name);
+        snprintf(id, cap, "%s", mac);
+    }
+    if (d) closedir(d);
+    if (!id[0]) snprintf(id, cap, "%s", host);
+}
+
+static void apply_store(const vigil_config_t *c)
+{
+    static char id[32], host[64];
+    if (!id[0]) recorder_id(id, sizeof id, host, sizeof host);
+    rec_store_cfg_t rc;
+    config_to_store(c, &rc);
+    snprintf(rc.pool.owner, sizeof rc.pool.owner, "%s", id);
+    snprintf(rc.pool.host, sizeof rc.pool.host, "%s", host);
+    rec_store_configure(&rc);
+}
+
 static void apply_config(void)
 {
     if (mgmt_power_pending() != MGMT_POWER_NONE) g_stop = 1;    /* reboot or shutdown: stop first */
@@ -360,6 +401,7 @@ static void apply_config(void)
     rec_week_t weeks[CHANNEL_MAX];
     rec_sched_set(weeks, config_to_schedule(&c, weeks));
     apply_qos(&c);
+    apply_store(&c);
     int failed = channels_apply(&cc);
     apply_output(c.display.output);
     apply_output_adj(&c.display, 0);
@@ -529,6 +571,7 @@ int main(int argc, char **argv)
     rec_week_t weeks[CHANNEL_MAX];
     rec_sched_set(weeks, config_to_schedule(&running, weeks));
     apply_qos(&running);
+    apply_store(&running);
     if (channels_start(&cc, caps->display ? tiles : NULL) == 0) {
         config_mark_applied(g_applied_gen);
         if (mgmt_start() < 0) vg_log("mgmt: cannot start its threads; the management pages will not act");
@@ -548,6 +591,7 @@ int main(int argc, char **argv)
         mgmt_stop();
         channels_stop();
     }
+    rec_store_shutdown();               /* the open chunks closed, the index saved */
     hal_shutdown();
     vg_log("stopped");
     /* Reboot or shutdown asked for (UI, API): after the clean stop. */

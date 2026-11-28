@@ -43,6 +43,9 @@ unsigned api_perm_needed(const char *method, const char *uri)
             if (!strcmp(uri + 15, SECTIONS[i].key)) return SECTIONS[i].perm;
         return PERM_SYSTEM;
     }
+    /* Recordings: playing and exporting them; freeing or taking a pool over is storage work. */
+    if (at(uri, "/api/v1/record"))
+        return get ? PERM_PLAYBACK : PERM_STORAGE;
     if (at(uri, "/api/v1/network")) return PERM_NETWORK;
     if (at(uri, "/api/v1/system")) return PERM_SYSTEM;
     if (!strncmp(uri, "/api/v1/disks", 13) || at(uri, "/api/v1/storage")) return PERM_STORAGE;

@@ -573,6 +573,12 @@ static void test_perm_table(void)
         { "POST", "/api/v1/channels/3/assign", PERM_CAMERAS },
         { "GET", "/api/v1/users", PERM_USERS },
         { "DELETE", "/api/v1/groups/viewer", PERM_USERS },
+        { "GET", "/api/v1/record/days", PERM_PLAYBACK },
+        { "GET", "/api/v1/record/export.mp4", PERM_PLAYBACK },
+        { "HEAD", "/api/v1/record/fragments", PERM_PLAYBACK },
+        { "DELETE", "/api/v1/record/recordings", PERM_STORAGE },
+        { "POST", "/api/v1/record/takeover", PERM_STORAGE },
+        { "GET", "/api/v1/recordings", PERM_SYSTEM },
         { "GET", "/api/v1/networking", PERM_SYSTEM },
         { "GET", "/api/v1/whatever", PERM_SYSTEM },
     };

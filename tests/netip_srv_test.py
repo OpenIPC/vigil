@@ -406,26 +406,16 @@ def run(vigild, h264, h265, tmp, procs):
     rec = os.path.join(tmp, "rec")
     bcfg = os.path.join(tmp, "b.yaml")
     with open(bcfg, "w") as f:
-        f.write("record:\n  allow_rootfs: true\napi:\n  listen: \"\"\nweb:\n  enabled: false\n"
-                "netip_server:\n  enabled: false\n")
+        f.write("record:\n  allow_rootfs: true\n  chunk_mb: 4\n  pool_mb: 24\napi:\n  listen: \"\"\n"
+                "web:\n  enabled: false\nnetip_server:\n  enabled: false\n")
     out = subprocess.run([vigild, "-t", "7", "-f", bcfg, "-S", "60", "-o", rec,
                           "-c", "netip://viewer:secret@127.0.0.1:%d/?ch=0" % port,
                           "-c", "netip://viewer:secret@127.0.0.1:%d/?ch=1" % port],
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=30).stdout
-    files = sorted(os.listdir(rec)) if os.path.isdir(rec) else []
-    check(len(files) == 2 and files[0].endswith(".h264") and files[1].endswith(".h265"),
-          "vigil's NETIP source records both: %s" % files)
+    rc = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "rec_check.py"),
+                         rec, "--cameras", "2", "--codec", "h264", "--codec", "hevc"], capture_output=True, text=True)
+    check(rc.returncode == 0, "vigil's NETIP source records both, and they decode: %s" % rc.stdout.strip())
     check('the camera calls it "Gate"' in out, "... and takes the names")
-    if shutil.which("ffprobe"):
-        for name in files:
-            p = os.path.join(rec, name)
-            info = subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-show_entries",
-                                   "stream=codec_name,nb_read_frames", "-of", "csv=p=0", p],
-                                  stdout=subprocess.PIPE, text=True).stdout.strip()
-            errs = subprocess.run(["ffmpeg", "-v", "error", "-i", p, "-f", "null", "-"],
-                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True).stdout.strip()
-            frames = int(info.split(",")[-1]) if info else 0
-            check(frames >= 50 and not errs, "%s decodes: %s, errors %r" % (name, info, errs[:200]))
 
     # ---- five wrong logins lock the address out, even for the right one
     for _ in range(5):

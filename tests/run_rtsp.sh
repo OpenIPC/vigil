@@ -10,7 +10,7 @@ PORT=$((20000 + $$ % 20000))
 # In the build tree, not /tmp: recordings need a disk (tmpfs is refused),
 # and allow_rootfs lets the build tree be on the root filesystem.
 TMP=$(mktemp -d "$PWD/vigil-test.XXXXXX")
-printf 'record:\n  allow_rootfs: true\n' > "$TMP/vigil.yaml"
+printf 'record:\n  allow_rootfs: true\n  chunk_mb: 4\n  pool_mb: 16\n' > "$TMP/vigil.yaml"
 trap 'kill $SRV 2>/dev/null; rm -rf "$TMP"' EXIT
 
 SAUTH=$AUTH
@@ -33,13 +33,5 @@ if [ "$AUTH" = wrong ]; then
     grep -q "DESCRIBE: 401" "$TMP/vigild.log" && echo "PASS: 401" && exit 0
     echo "FAIL: no 401"; exit 1
 fi
-FILE=$(ls "$TMP"/rec/CAM1_* 2>/dev/null | head -1)
-[ -n "$FILE" ] || { echo "FAIL: nothing recorded"; exit 1; }
-if command -v ffprobe >/dev/null; then
-    out=$(ffprobe -v error -count_frames -show_entries stream=codec_name,nb_read_frames -of csv=p=0 "$FILE")
-    errs=$(ffmpeg -v error -i "$FILE" -f null - 2>&1 | wc -l)
-    echo "recorded: $FILE -> $out, decode errors $errs"
-    frames=${out##*,}
-    [ "$frames" -ge 50 ] && [ "$errs" -eq 0 ] || { echo FAIL; exit 1; }
-fi
+python3 "$HERE/rec_check.py" "$TMP/rec" || exit 1
 echo PASS

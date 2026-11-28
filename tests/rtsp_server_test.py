@@ -311,24 +311,14 @@ def run(vigild, data, tmp, procs):
     rec = os.path.join(tmp, "rec")
     cfg2 = os.path.join(tmp, "vigil2.yaml")
     with open(cfg2, "w") as f:
-        f.write("record:\n  allow_rootfs: true\napi:\n  listen: \"\"\nweb:\n  enabled: false\n"
-                "rtsp_server:\n  enabled: false\n")
+        f.write("record:\n  allow_rootfs: true\n  chunk_mb: 4\n  pool_mb: 16\napi:\n  listen: \"\"\n"
+                "web:\n  enabled: false\nrtsp_server:\n  enabled: false\n")
     r = subprocess.run([vigild, "-t", "6", "-f", cfg2, "-S", "60", "-o", rec, "-c",
                         "rtsp://anna:secret@127.0.0.1:%d/ch1/main" % port],
                        capture_output=True, text=True, timeout=30)
-    files = sorted(os.listdir(rec)) if os.path.isdir(rec) else []
-    if check(files and files[0].endswith(".h264"), "a second vigild records it over RTSP: %s" % files):
-        if shutil.which("ffprobe"):
-            f = os.path.join(rec, files[0])
-            out = subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-show_entries",
-                                  "stream=codec_name,nb_read_frames", "-of", "csv=p=0", f],
-                                 capture_output=True, text=True).stdout.strip()
-            errs = subprocess.run(["ffmpeg", "-v", "error", "-i", f, "-f", "null", "-"],
-                                  capture_output=True, text=True).stderr.strip()
-            name, _, frames = out.partition(",")
-            check(name == "h264" and frames.isdigit() and int(frames) >= 50 and not errs,
-                  "the recording decodes: %s frames, errors: %s" % (frames, errs or "none"))
-    else:
+    rc = subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "rec_check.py"),
+                         rec, "--codec", "h264"], capture_output=True, text=True)
+    if not check(rc.returncode == 0, "a second vigild records it over RTSP, and it decodes: %s" % rc.stdout.strip()):
         print(r.stderr[-2000:])
     log.flush()
     text = open(os.path.join(tmp, "vigild.log")).read()

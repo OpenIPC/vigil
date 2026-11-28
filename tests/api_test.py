@@ -33,6 +33,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 HASH = ("$6$vigiltestsalt$YNf0cVVTPqcmB27N7LaoJSiqJTsS7DvT6GejoILXrgfuBwdj8rCp9"
         "lnFrtSM5TO4kEOwYmcBLCsL4TzvT5U4b1")
 CAM_PASS = "camsecret"
+# A recording pool of a few small chunks: a test fills no disk.
+SMALL_POOL = {"chunk_mb": 4, "pool_mb": 16}
 
 failures = []
 
@@ -196,6 +198,8 @@ def main():
                 "  segment: 60\n"
                 "  keep: 3\n"
                 "  allow_rootfs: yes\n"
+                "  chunk_mb: 4\n"
+                "  pool_mb: 16\n"
                 "api:\n"
                 "  listen: 127.0.0.1:%d\n"
                 "  auth: on\n"
@@ -427,7 +431,8 @@ def main():
               "gone a few seconds later")
 
         # ---- a recording setting restarts the camera, which comes back
-        st, _, _ = api.json("PUT", "/api/v1/config/record", {"path": rec, "segment": 120, "allow_rootfs": True})
+        st, _, _ = api.json("PUT", "/api/v1/config/record", {**SMALL_POOL,
+                                                             "path": rec, "segment": 120, "allow_rootfs": True})
         check(st == 200 and wait_for(lambda: ws.find(lambda m: m["type"] == "event" and
                                                      m["data"]["text"] == "restarted"), 5),
               "record changed: CAM1 restarted")
@@ -436,7 +441,7 @@ def main():
         # ---- a recording directory that cannot be made yet is tried again
         blocker = os.path.join(tmp, "blocker")
         open(blocker, "w").close()                  # a file where a directory must go
-        st, _, _ = api.json("PUT", "/api/v1/config/record", {"path": os.path.join(blocker, "rec"),
+        st, _, _ = api.json("PUT", "/api/v1/config/record", {**SMALL_POOL, "path": os.path.join(blocker, "rec"),
                                                              "allow_rootfs": True})
 
         def recording(want):
@@ -458,7 +463,7 @@ def main():
                 return ch and ch[0]["live"] and not ch[0]["recording"] and ch[0]["rec_state"] == want
             return f
         onroot = "/vigil-test-%d-%d" % (os.getpid(), api_port)   # its parent is "/": the root filesystem
-        st, _, body = api.json("PUT", "/api/v1/config/record", {"path": onroot + "/rec"})
+        st, _, body = api.json("PUT", "/api/v1/config/record", {**SMALL_POOL, "path": onroot + "/rec"})
         check(st == 200 and body["path"] == onroot + "/rec" and not body["allow_rootfs"],
               "record.path on the root filesystem: accepted, allow_rootfs off by default")
         check(wait_for(rec_state("waiting for disk"), 10), "status: live, not recording, rec_state waiting for disk")
@@ -471,12 +476,13 @@ def main():
               "the configured path is kept, in force and in the file")
         if os.path.isdir("/dev/shm") and os.path.exists("/proc/self/mountinfo"):
             shm = "/dev/shm/vigil-test-%d-%d" % (os.getpid(), api_port)
-            st, _, _ = api.json("PUT", "/api/v1/config/record", {"path": shm + "/rec", "allow_rootfs": True})
+            st, _, _ = api.json("PUT", "/api/v1/config/record", {**SMALL_POOL,
+                                                                 "path": shm + "/rec", "allow_rootfs": True})
             check(st == 200 and wait_for(rec_state("not a disk"), 10) and not os.path.exists(shm),
                   "record.path in RAM (/dev/shm): not a disk, nothing created")
-        st, _, err = api.json("PUT", "/api/v1/config/record", {"path": rec + "/../../escape"})
+        st, _, err = api.json("PUT", "/api/v1/config/record", {**SMALL_POOL, "path": rec + "/../../escape"})
         check(st == 400 and err["errors"][0]["path"] == "record.path", "record.path with \"..\": 400")
-        api.json("PUT", "/api/v1/config/record", {"path": rec, "segment": 120, "allow_rootfs": True})
+        api.json("PUT", "/api/v1/config/record", {**SMALL_POOL, "path": rec, "segment": 120, "allow_rootfs": True})
         check(wait_for(recording(True), 20, 0.5) and
               api.json("GET", "/api/v1/status")[2]["channels"][0]["rec_state"] == "recording",
               "back on the build tree: recording, rec_state recording")
@@ -570,7 +576,7 @@ def main():
         check(st == 200, "viewer: status 200 (%s)" % st)
         st, _, err = vera.json("GET", "/api/v1/config")
         check(st == 403 and err["needs"] == "system", "viewer: config 403 (%s)" % st)
-        st, _, err = vera.json("PUT", "/api/v1/config/record", {"path": rec, "allow_rootfs": True})
+        st, _, err = vera.json("PUT", "/api/v1/config/record", {**SMALL_POOL, "path": rec, "allow_rootfs": True})
         check(st == 403 and err["needs"] == "storage", "viewer: PUT record 403 (%s)" % st)
         st, _, err = vera.json("POST", "/api/v1/channels/1/events", {"events": ["motion"]})
         check(st == 403 and err["needs"] == "cameras", "viewer: POST events 403 (%s)" % st)
@@ -582,7 +588,8 @@ def main():
         check(wait_for(lambda: vws.find(lambda m: m["type"] == "status"), 5), "viewer: WebSocket status")
         vws.close()
         kim = Api(api_port, user="kim", password="kimpw1")
-        st, _, _ = kim.json("PUT", "/api/v1/config/record", {"path": rec, "segment": 90, "allow_rootfs": True})
+        st, _, _ = kim.json("PUT", "/api/v1/config/record", {**SMALL_POOL,
+                                                             "path": rec, "segment": 90, "allow_rootfs": True})
         check(st == 200, "storage user: PUT record 200 (%s)" % st)
         st, _, _ = kim.json("PUT", "/api/v1/config/api", {"listen": "127.0.0.1:%d" % api_port})
         check(st == 403, "storage user: PUT api 403 (%s)" % st)

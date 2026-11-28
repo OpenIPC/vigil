@@ -33,14 +33,15 @@ cameras:
 
 # Recording
 record:
-  # Recording directory: Where the streams are recorded, as received. Empty:
-  # no recording.
+  # Recording directory: Where the streams are recorded, as received: the pool
+  # of chunks and its index (docs/recording.md). Empty: no recording.
   path: /mnt/sda1/rec
-  # Segment length (s): A new file starts at the first keyframe after this
-  # many seconds. 10..3600, default 60.
+  # Segment length (s): Local inputs (a DVR board's own encoder) only,
+  # recorded as files of their own: a new file starts at the first keyframe
+  # after this many seconds. Cameras go into the pool. 10..3600, default 60.
   segment: 60
-  # Segments kept per camera: 0: all (the oldest recordings are deleted anyway
-  # when the disk runs low). 0..64, default 3.
+  # Segments kept per camera: Local inputs only. 0: all (the oldest recordings
+  # are deleted anyway when the disk runs low). 0..64, default 3.
   keep: 0
   # Record onto the root filesystem: Off: recording waits until a disk is
   # mounted where the path leads, and never writes to the root filesystem (on
@@ -52,6 +53,25 @@ record:
   # made them, make room; stop: recording stops (event "REC disk full") until
   # there is room again. One of: overwrite, stop. Default overwrite.
   on_full: overwrite
+  # Chunk size (MiB): The pool's files, all this size, each one camera's
+  # stream for a while (256 MiB: about 8 minutes at 4 Mbit/s). Set when the
+  # pool is made; a pool keeps its own. 4..1024, default 256.
+  chunk_mb: 256
+  # Pool size (MiB): The most the pool takes on the disk. 0: all of it but a
+  # reserve (2%, at least 1 GiB, less on small media). A pool grows to a
+  # larger value, never shrinks. 0..100000000, default 0.
+  pool_mb: 0
+  # Longest fragment (s): A fragment starts at every keyframe and at least
+  # this often. 1..10, default 4.
+  fragment_s: 4
+  # Flush interval (s): How often what was written is forced to the disk: at
+  # most this much is lost in a power cut. 0: 2 s on hard disks and shares, 5
+  # s on flash (fewer small writes). 0..60, default 0.
+  flush_s: 0
+  # Index save interval (s): How often the chunk table is saved whole (and at
+  # every chunk closed); the journal covers what came between. 30..3600,
+  # default 300.
+  index_save_s: 300
 
 # Recording schedule: A week per camera; a camera without one records all the
 # time. Each day is 48 letters, one per half hour from 00:00: C continuous, M

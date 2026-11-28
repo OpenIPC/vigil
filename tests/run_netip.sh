@@ -13,7 +13,7 @@ PORT=$((20000 + $$ % 20000))
 # In the build tree, not /tmp: recordings need a disk (tmpfs is refused),
 # and allow_rootfs lets the build tree be on the root filesystem.
 TMP=$(mktemp -d "$PWD/vigil-test.XXXXXX")
-printf 'record:\n  allow_rootfs: true\nnetip_server:\n  enabled: false\n' > "$TMP/vigil.yaml"
+printf 'record:\n  allow_rootfs: true\n  chunk_mb: 4\n  pool_mb: 16\nnetip_server:\n  enabled: false\n' > "$TMP/vigil.yaml"
 trap 'kill $SRV 2>/dev/null; rm -rf "$TMP"' EXIT
 
 ARGS=
@@ -34,7 +34,7 @@ cat "$TMP/vigild.log"
 
 if [ "$MODE" = badpass ]; then
     grep -q "login refused (Ret 203)" "$TMP/vigild.log" || { echo "FAIL: no login error"; exit 1; }
-    [ -z "$(ls "$TMP/rec" 2>/dev/null)" ] || { echo "FAIL: recorded with a bad password"; exit 1; }
+    python3 "$HERE/rec_check.py" "$TMP/rec" --none || { echo "FAIL: recorded with a bad password"; exit 1; }
     echo "PASS: bad password refused"
     exit 0
 fi
@@ -46,16 +46,6 @@ if [ "$MODE" = wide ]; then
     grep -q "I-frame, codec byte 0x1[23] " "$TMP/vigild.log" || { echo "FAIL: no wide I-frame header"; exit 1; }
 fi
 
-FILE=$(ls "$TMP"/rec/CAM1_* 2>/dev/null | head -1)
-[ -n "$FILE" ] || { echo "FAIL: nothing recorded"; exit 1; }
 case "$CLIP" in *.h264) want=h264 ;; *) want=hevc ;; esac
-case "$FILE" in *.h264) [ $want = h264 ] ;; *.h265) [ $want = hevc ] ;; *) false ;; esac ||
-    { echo "FAIL: wrong extension $FILE"; exit 1; }
-if command -v ffprobe >/dev/null; then
-    out=$(ffprobe -v error -count_frames -show_entries stream=codec_name,nb_read_frames -of csv=p=0 "$FILE")
-    errs=$(ffmpeg -v error -i "$FILE" -f null - 2>&1 | wc -l)
-    echo "recorded: $FILE -> $out, decode errors $errs"
-    codec=${out%%,*} frames=${out##*,}
-    [ "$codec" = $want ] && [ "$frames" -ge 50 ] && [ "$errs" -eq 0 ] || { echo "FAIL"; exit 1; }
-fi
+python3 "$HERE/rec_check.py" "$TMP/rec" --codec $want || exit 1
 echo PASS

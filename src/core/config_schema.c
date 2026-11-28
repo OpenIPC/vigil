@@ -302,14 +302,17 @@ static const schema_field_t camera_fields[] = {
 static const schema_field_t record_fields[] = {
     { .key = "path", STR(config_record_t, path), .def_str = "", .live = 1, .check = check_rec_path,
       .label = "Recording directory",
-      .help = "Where the streams are recorded, as received. Empty: no recording." },
+      .help = "Where the streams are recorded, as received: the pool of chunks and its index "
+              "(docs/recording.md). Empty: no recording." },
     { .key = "segment", INT(config_record_t, segment), .def_int = 60, .min = 10, .max = 3600,
       .live = 1, .label = "Segment length (s)",
-      .help = "A new file starts at the first keyframe after this many seconds." },
+      .help = "Local inputs (a DVR board's own encoder) only, recorded as files of their own: a new "
+              "file starts at the first keyframe after this many seconds. Cameras go into the pool." },
     /* The writer remembers the files it made in a ring of SEG_KEEP_MAX. */
     { .key = "keep", INT(config_record_t, keep), .def_int = 3, .min = 0, .max = SEG_KEEP_MAX,
       .live = 1, .label = "Segments kept per camera",
-      .help = "0: all (the oldest recordings are deleted anyway when the disk runs low)." },
+      .help = "Local inputs only. 0: all (the oldest recordings are deleted anyway when the disk runs "
+              "low)." },
     { .key = "allow_rootfs", BOOL(config_record_t, allow_rootfs), .def_int = 0, .live = 1,
       .label = "Record onto the root filesystem",
       .help = "Off: recording waits until a disk is mounted where the path leads, and never "
@@ -320,6 +323,26 @@ static const schema_field_t record_fields[] = {
       .live = 1, .label = "When the disk is full",
       .help = "overwrite: the oldest recordings, whichever camera made them, make room; stop: "
               "recording stops (event \"REC disk full\") until there is room again." },
+    /* docs/recording.md: the pool, its chunks and its index. */
+    { .key = "chunk_mb", INT(config_record_t, chunk_mb), .def_int = 256, .min = 4, .max = 1024, .live = 1,
+      .label = "Chunk size (MiB)",
+      .help = "The pool's files, all this size, each one camera's stream for a while (256 MiB: about "
+              "8 minutes at 4 Mbit/s). Set when the pool is made; a pool keeps its own." },
+    { .key = "pool_mb", INT(config_record_t, pool_mb), .def_int = 0, .min = 0, .max = 100000000, .live = 1,
+      .label = "Pool size (MiB)",
+      .help = "The most the pool takes on the disk. 0: all of it but a reserve (2%, at least 1 GiB, "
+              "less on small media). A pool grows to a larger value, never shrinks." },
+    { .key = "fragment_s", INT(config_record_t, fragment_s), .def_int = 4, .min = 1, .max = 10, .live = 1,
+      .label = "Longest fragment (s)",
+      .help = "A fragment starts at every keyframe and at least this often." },
+    { .key = "flush_s", INT(config_record_t, flush_s), .def_int = 0, .min = 0, .max = 60, .live = 1,
+      .label = "Flush interval (s)",
+      .help = "How often what was written is forced to the disk: at most this much is lost in a "
+              "power cut. 0: 2 s on hard disks and shares, 5 s on flash (fewer small writes)." },
+    { .key = "index_save_s", INT(config_record_t, index_save_s), .def_int = 300, .min = 30, .max = 3600,
+      .live = 1, .label = "Index save interval (s)",
+      .help = "How often the chunk table is saved whole (and at every chunk closed); the journal "
+              "covers what came between." },
 };
 
 

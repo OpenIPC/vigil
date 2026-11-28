@@ -135,6 +135,13 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/secrets_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
     set_tests_properties(secrets_e2e PROPERTIES RUN_SERIAL TRUE)
+    # The recording store end to end: two minutes of two cameras into a
+    # small pool (the ring goes round), a gap, an event, SIGKILL and the
+    # recovery, the queries, exports checked with ffprobe, the MSE pieces.
+    add_test(NAME rec_e2e
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/rec_test.py $<TARGET_FILE:vigild>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data)
+    set_tests_properties(rec_e2e PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 400)
     add_test(NAME api_e2e
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/api_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
