@@ -438,6 +438,13 @@ static void test_alarm_feed(void)
     CHECK(n == 1 && !strcmp(r[0].type, "disk_smart") && r[0].ch == 0, "pushed directly");
 }
 
+static int logs_on(const char *dir)
+{
+    char cur[300];
+    logbook_disk(logs_ops(), cur, sizeof cur);
+    return !strcmp(cur, dir);
+}
+
 static void test_disk_dir(void)
 {
     char rec[600], out[700], want[700];
@@ -464,11 +471,24 @@ static void test_disk_dir(void)
     rm_rf(want);
     CHECK(logs_start(flash, NULL) == 0, "start");
     oplog_push("root", "api", "disk_format", "sdz1 as ext4");
+    for (int i = 0; i < 40 && !logs_on(want); ++i) usleep(50 * 1000);
+    CHECK(logs_on(want), "on the disk");
+    /* Disk work on its mount: off it at once, not back until released. */
+    snprintf(up, sizeof up, "%s/mnt", g_dir);
+    logs_hold(up);
+    CHECK(!logs_on(want), "held: the files closed");
+    oplog_push("root", "api", "disk_unmount", "sdz1");
+    usleep(1200 * 1000);
+    CHECK(!logs_on(want), "and not taken back");
+    logs_release();
+    for (int i = 0; i < 40 && !logs_on(want); ++i) usleep(50 * 1000);
+    CHECK(logs_on(want), "released: back on it");
     logs_stop();
     char p[800];
     snprintf(p, sizeof p, "%s/operations.log", want);
     char *t = slurp(p);
-    CHECK(t && strstr(t, "\tdisk_format\tsdz1 as ext4\n"), "on the disk");
+    CHECK(t && strstr(t, "\tdisk_format\tsdz1 as ext4\n") && strstr(t, "\tdisk_unmount\tsdz1\n"),
+          "on the disk, what came while held too");
     free(t);
     snprintf(p, sizeof p, "%s/operations-recent.log", flash);
     t = slurp(p);

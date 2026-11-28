@@ -170,6 +170,7 @@ static int hold_for(const char *name)
         if (c->record.path[0] && !strncmp(c->record.path, mnts[i], l) &&
             (c->record.path[l] == '/' || !c->record.path[l])) {
             int open = channels_rec_hold(mnts[i], 5000);
+            logs_hold(mnts[i]);             /* the logs' files are there too */
             vg_log("mgmt: recording held off %s for %s%s", mnts[i], name, open ? " (segments still open)" : "");
             held = 1;
         }
@@ -298,7 +299,10 @@ static int run_job(slot_t *s, char *msg, size_t cap)
     case J_FORMAT: {
         int held = hold_for(s->a);
         rc = sys_disk_format(s->a, s->b, err, sizeof err);
-        if (held) channels_rec_release();
+        if (held) {
+            channels_rec_release();
+            logs_release();
+        }
         snprintf(msg, cap, "%s", err);
         vg_log("mgmt: format %s as %s: %s", s->a, s->b, err);
         events_push(0, rc ? "disk %s: format failed" : "disk %s formatted", s->a);
@@ -315,7 +319,10 @@ static int run_job(slot_t *s, char *msg, size_t cap)
         /* Unmounted, the hold has nothing left to protect: recording
          * waits for the disk by itself (rec_place). Still busy: it goes
          * on recording there. */
-        if (held) channels_rec_release();
+        if (held) {
+            channels_rec_release();
+            logs_release();
+        }
         snprintf(msg, cap, "%s", err);
         vg_log("mgmt: unmount %s: %s", s->a, err);
         return rc;
@@ -339,8 +346,10 @@ static int run_job(slot_t *s, char *msg, size_t cap)
             /* new settings: off the old share first */
             int open = channels_rec_hold(MGMT_NAS_MOUNT, 5000);
             (void)open;
+            logs_hold(MGMT_NAS_MOUNT);
             rc = sys_nas_umount(MGMT_NAS_MOUNT, err, sizeof err);
             channels_rec_release();
+            logs_release();
             if (rc < 0) {
                 snprintf(msg, cap, "%s", err);
                 svc_set(&g_svc.nas, 0, err);

@@ -303,6 +303,38 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_wake = PTHREAD_COND_INITIALIZER;
 static time_t          g_sync_at, g_disk_at;
 static char            g_disk[300];
+static pthread_mutex_t g_disk_lock = PTHREAD_MUTEX_INITIALIZER;  /* the disk's choice */
+static char            g_held[256];         /* a mount under disk work: not used */
+
+static int under(const char *path, const char *mount)
+{
+    size_t l = strlen(mount);
+    while (l > 1 && mount[l - 1] == '/') --l;
+    return l && !strncmp(path, mount, l) && (path[l] == '/' || !path[l]);
+}
+
+void logs_hold(const char *mount)
+{
+    pthread_mutex_lock(&g_disk_lock);
+    snprintf(g_held, sizeof g_held, "%s", mount ? mount : "");
+    char a[300], o[300];
+    logbook_disk(logs_alarms(), a, sizeof a);
+    logbook_disk(logs_ops(), o, sizeof o);
+    if (g_held[0] && (under(a, g_held) || under(o, g_held))) {
+        logbook_set_disk(logs_alarms(), NULL);
+        logbook_set_disk(logs_ops(), NULL);
+        vg_log("logs: off %s while the disk is worked on", g_held);
+    }
+    pthread_mutex_unlock(&g_disk_lock);
+}
+
+void logs_release(void)
+{
+    pthread_mutex_lock(&g_disk_lock);
+    g_held[0] = 0;
+    g_disk_at = 0;                          /* looked for again at the next tick */
+    pthread_mutex_unlock(&g_disk_lock);
+}
 
 static void disk_check(void)
 {
@@ -312,11 +344,16 @@ static void disk_check(void)
     char dir[300] = "";
     if (logs_disk_dir(c->record.path, c->record.allow_rootfs, dir, sizeof dir) < 0) dir[0] = 0;
     free(c);
+    pthread_mutex_lock(&g_disk_lock);
+    if (g_held[0] && under(dir, g_held)) dir[0] = 0;
     char a[300], o[300];
     logbook_disk(logs_alarms(), a, sizeof a);
     logbook_disk(logs_ops(), o, sizeof o);
     /* A new place, or one a book let go after a failure. */
-    if (!strcmp(dir, g_disk) && !strcmp(a, dir) && !strcmp(o, dir)) return;
+    if (!strcmp(dir, g_disk) && !strcmp(a, dir) && !strcmp(o, dir)) {
+        pthread_mutex_unlock(&g_disk_lock);
+        return;
+    }
     if (dir[0]) {
         int ra = logbook_set_disk(logs_alarms(), dir), ro = logbook_set_disk(logs_ops(), dir);
         if (ra < 0 || ro < 0) {
@@ -327,9 +364,10 @@ static void disk_check(void)
     } else {
         logbook_set_disk(logs_alarms(), NULL);
         logbook_set_disk(logs_ops(), NULL);
-        if (g_disk[0]) vg_log("logs: %s is gone; kept in memory (and a copy on flash)", g_disk);
+        if (g_disk[0] && !g_held[0]) vg_log("logs: %s is gone; kept in memory (and a copy on flash)", g_disk);
     }
     snprintf(g_disk, sizeof g_disk, "%s", dir);
+    pthread_mutex_unlock(&g_disk_lock);
 }
 
 static void (*g_feed)(time_t now);

@@ -64,6 +64,13 @@ void logs_stop(void);
 /* One pass of the thread's work at `now` (monotonic): the tests'. */
 void logs_tick(time_t now, int final);
 
+/* Disk work on the mount `mount` (a format, an unmount: mgmt.c, beside
+ * channels_rec_hold): the logs close their files there now and do not
+ * come back to it until logs_release; what comes meanwhile waits in RAM
+ * and is written when they do. Any thread. */
+void logs_hold(const char *mount);
+void logs_release(void);
+
 /* Where the logs go on the disk for recording directory `rec_path`
  * (allow_rootfs: record.allow_rootfs): 0 with `out` when it is on a disk
  * now, -1 when not. Its parent's vigil-logs when that is on the same

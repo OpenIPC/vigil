@@ -254,7 +254,9 @@ would wear it out in months. So:
   tab-separated; past 2 MiB (alarms) or 512 KiB (operations) a file is
   rotated, 8 and 4 files kept: about 16 MiB and 2 MiB of history. A disk
   that comes later gets what happened meanwhile; one that fails is let go
-  (logged) and taken back when it is there again. Mode 0600.
+  (logged) and taken back when it is there again. A format or an unmount
+  of that disk (Disk Manager, the API) closes the files first, as it holds
+  recording off, so the logs never keep it busy. Mode 0600.
 - **The flash**, rarely and small: the newest 200 operations in
   `/etc/vigil-logs/operations-recent.log` (beside `vigil.yaml`), written
   whole and atomically (a new file, fsync, rename) at most every 10
