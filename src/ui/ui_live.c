@@ -49,9 +49,9 @@
 #define ARROW_IDLE 2000         /* ms without the pointer moving that put it away */
 #define SAVE_DELAY 3000         /* ms after the last layout or page change that it is saved */
 
-#define N_EVENT_ICONS 4
+#define N_EVENT_ICONS UI_EV_N
 #define NAME_W        200       /* px a name takes at most, for keeping it off the clock */
-#define ICONS_W       140       /* ... the icons, all of them shown */
+#define ICONS_W       140       /* ... the icons: REC and a few events at once */
 #define ICON_PX       20        /* the icons' size (icons.h) */
 
 typedef struct {
@@ -488,8 +488,10 @@ static void cell_build(cell_t *c, const ui_cell_t *g)
 
     /* Icons only, small, in the design tokens' colours; past the name
      * when they share its corner. */
-    static const lv_image_dsc_t *const ev_img[N_EVENT_ICONS] = { &ui_icon_ev_motion, &ui_icon_ev_human,
-                                                                 &ui_icon_ev_face, &ui_icon_ev_vehicle };
+    static const lv_image_dsc_t *const ev_img[N_EVENT_ICONS] = {
+        &ui_icon_ev_motion, &ui_icon_ev_human,      &ui_icon_ev_face,   &ui_icon_ev_vehicle,  &ui_icon_ev_line,
+        &ui_icon_ev_intrusion, &ui_icon_ev_video_loss, &ui_icon_ev_tamper, &ui_icon_ev_alarm_in, &ui_icon_ev_other,
+    };
     c->icons = icon_row(o, osd->icons_bg);
     int icons_h = ICON_PX + (osd->icons_bg == UI_OSD_BOX ? 2 * VG_SPACE_XS : 2);
     int icons_dy = osd->icons == osd->name ? name_dy + name_h + VG_SPACE_XS

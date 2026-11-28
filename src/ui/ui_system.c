@@ -109,7 +109,8 @@ static lv_color_t status_color(ui_ch_status_t s)
 
 static void ci_fill(ci_t *ci)
 {
-    static const char *const ev[] = { "motion", "human", "face", "vehicle" };
+    static const char *const ev[UI_EV_N] = { "motion", "human", "face", "vehicle", "line", "intrusion",
+                                             "video loss", "tamper", "alarm in", "other" };
     for (int ch = 0; ch < ci->n; ++ch) {
         const ui_chan_t *st = ui_channel(ch);
         char v[CI_COLS][64];
@@ -130,7 +131,7 @@ static void ci_fill(ci_t *ci)
         snprintf(v[7], sizeof v[7], "%s", has_main ? status_word(st->main_status, 0, st->main_state) : "-");
         snprintf(v[8], sizeof v[8], "%s", st->rec_state[0] ? st->rec_state : "off");
         v[9][0] = 0;
-        for (int b = 0; b < 4; ++b)
+        for (int b = 0; b < UI_EV_N; ++b)
             if (st->events & (1u << b)) {
                 size_t n = strlen(v[9]);
                 snprintf(v[9] + n, sizeof v[9] - n, "%s%s", n ? ", " : "", ev[b]);

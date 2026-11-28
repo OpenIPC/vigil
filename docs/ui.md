@@ -53,9 +53,15 @@ without it the pictures touch), and an alarm frame: a red 3-pixel frame
 inside the edge of a tile while its camera reports any event, blinking
 (750 ms on, 250 ms off; on and off, never faded, as a translucent edge over
 a colour-keyed hole would show the key colour), off by default. The events
-come from `channels_report_events` (NETIP alarms and ONVIF events are to
-come) or from outside, `POST /api/v1/channels/<n>/events`
-([API](api.md)). The stream's codec, size
+are the camera's own (its NETIP alarms or ONVIF events, `cameras[].events`,
+[API](api.md#camera-events)) or reported from outside,
+`POST /api/v1/channels/<n>/events`; an icon is on while its event goes on
+and goes off at its stop (5 s after a momentary one, a line crossed). One
+icon per type, Tabler's: motion (activity), human (walk), face (face-id),
+vehicle (car), line crossing (arrow-bar-both), intrusion (fence), video
+loss (video-off), tamper (eye-off), alarm input (bell-bolt), other
+(alert-triangle). Camera events are not toasts and do not flash the tile:
+the icons and the frame say them. The stream's codec, size
 and frame rate are not on the tiles but on the Channel info page
 (System). The middle of a tile says something only when there is no
 picture, outlined like the name. It is about the stream on screen: a small
@@ -96,10 +102,10 @@ would meet the clock move inward (down from the top, up from the bottom)
 past it, in whichever tile and corner that happens; icons in the names'
 corner go just past the name.
 
-Camera events are wired through (`channels_report_events`, `events` in the
-channel status, the API and `ui_chan_t`) but nothing reports them yet:
-the icons appear once a source does (camera alarms over NETIP and ONVIF
-events are the next step).
+Camera events come through `cam_events.h` into `events` of the channel
+status, the API and `ui_chan_t` (the same bits, `UI_EV_*` = `CH_EV_*`);
+`test_ui` injects each type and checks its icon and the frame
+(`live_events.png`).
 
 **Events.** The live view has no event list; the HTTP API's WebSocket
 carries every event. A tile shows its channel's state all the time, so
