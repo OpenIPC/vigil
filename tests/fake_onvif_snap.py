@@ -5,6 +5,7 @@ GetSnapshotUri and the JPEG behind it, and a plain snapshot URL.
 
     fake_onvif_snap.py [--host 127.0.0.1] [--port 8899] [--user admin]
                        [--password ''] [--snapshot FILE] [--no-snapshot-uri]
+                       [--advertise HOST:PORT]
 
 Over HTTP:
   POST /onvif/device_service  GetSystemDateAndTime (no login), GetCapabilities
@@ -17,7 +18,9 @@ Over HTTP:
 SOAP calls carry a checked WS-UsernameToken (as fake_onvif_events.py's).
   GET /webcapture.jpg         the JPEG, behind HTTP Digest (MD5, qop auth)
   GET /cgi-bin/snapshot.cgi   the JPEG, behind HTTP Basic
-Prints one line per call.
+The addresses it gives are http://HOST:PORT, or --advertise's (a camera
+reached through a forward, as from an emulator's guest). Prints one line
+per call.
 """
 import argparse
 import base64
@@ -96,7 +99,7 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode(errors="replace")
         m = re.search(r"<s:Body>\s*<(?:\w+:)?(\w+)", body)
         op = m.group(1) if m else "?"
-        base = "http://%s:%d" % (a.host, a.port)
+        base = "http://" + (a.advertise or "%s:%d" % (a.host, a.port))
         if op == "GetSystemDateAndTime":
             t = time.gmtime()
             return self.reply(200, "<tds:GetSystemDateAndTimeResponse><tds:SystemDateAndTime><tt:UTCDateTime>"
@@ -180,6 +183,7 @@ def main():
     ap.add_argument("--password", default="")
     ap.add_argument("--snapshot", default=os.path.join(HERE, "data", "snapshot_640x360.jpg"))
     ap.add_argument("--no-snapshot-uri", action="store_true")
+    ap.add_argument("--advertise", default="")
     args = ap.parse_args()
     srv = Server((args.host, args.port), Handler)
     srv.args = args

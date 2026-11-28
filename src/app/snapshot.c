@@ -63,6 +63,19 @@ static struct {
     time_t fail_until;              /* not asked again before then */
 } g_onvif[CHANNEL_MAX];
 
+/* A camera found to have no snapshot of its own: "auto" goes straight to
+ * the decoder's picture for SNAPSHOT_ONVIF_RETRY s (a NETIP camera that
+ * never answers OPSNAP would otherwise cost every request CAMERA_MS). */
+static struct {
+    char   key[sizeof g_onvif[0].key + 256];
+    time_t until;
+} g_nocam[CHANNEL_MAX];
+
+static void cam_key(const config_camera_t *cam, char *out, size_t cap)
+{
+    snprintf(out, cap, "%s|%s|%s", cam->url, cam->onvif_url, cam->snapshot_url);
+}
+
 static int self_onvif_port(const vigil_config_t *c) { return c->onvif_server.enabled ? c->onvif_server.port : 0; }
 
 static snap_rc_t by_onvif(const vigil_config_t *c, int ch, const char *user, const char *pass, snap_jpeg_t *j,
@@ -203,10 +216,21 @@ static int take_cfg(const vigil_config_t *c, int ch, snapshot_src_t src, unsigne
         snprintf(err, cap, "no camera on channel %d", ch + 1);
         return -1;
     }
-    char cerr[160] = "";
-    if (src != SNAPSHOT_NVR) {
+    char cerr[160] = "", key[sizeof g_nocam[0].key];
+    cam_key(&c->cameras[ch], key, sizeof key);
+    time_t now = time(NULL);
+    pthread_mutex_lock(&g_onvif_lock);
+    long none_for = !strcmp(g_nocam[ch].key, key) && g_nocam[ch].until > now ? (long)(g_nocam[ch].until - now) : 0;
+    pthread_mutex_unlock(&g_onvif_lock);
+    if (src == SNAPSHOT_AUTO && none_for)
+        snprintf(cerr, sizeof cerr, "it has no snapshot of its own (asked again in %ld s)", none_for);
+    else if (src != SNAPSHOT_NVR) {
         snap_jpeg_t j;
         snap_rc_t rc = by_camera(c, ch, &j, used, ucap, cerr, sizeof cerr);
+        pthread_mutex_lock(&g_onvif_lock);
+        snprintf(g_nocam[ch].key, sizeof g_nocam[ch].key, "%s", key);
+        g_nocam[ch].until = rc == SNAP_EUNSUPPORTED ? now + SNAPSHOT_ONVIF_RETRY : 0;
+        pthread_mutex_unlock(&g_onvif_lock);
         if (rc == SNAP_OK) {
             *jpeg = j.p;
             *len = j.len;

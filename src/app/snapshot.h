@@ -4,9 +4,10 @@
  * Where a picture comes from (snapshot.source, or the caller's choice):
  *   camera  the camera's own JPEG (snap_cam.h): cameras[].snapshot_url
  *           when set, else NETIP's snapshot for a netip:// camera, else
- *           ONVIF's GetSnapshotUri (remembered per camera; a camera without
- *           one is not asked again for SNAPSHOT_ONVIF_RETRY s). Full size,
- *           the camera's encoder.
+ *           ONVIF's GetSnapshotUri (remembered per camera). Full size, the
+ *           camera's encoder. A camera found to have none is not asked
+ *           again for SNAPSHOT_ONVIF_RETRY s, by ONVIF nor, under auto, at
+ *           all.
  *   nvr     the picture the recorder decodes for the screen
  *           (hal_display_still), encoded here (jpeg_enc.h) at
  *           snapshot.quality: at the size it is decoded at, and only for a
