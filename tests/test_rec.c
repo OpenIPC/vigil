@@ -277,7 +277,8 @@ static void test_records(void)
     rec_event_encode(&e, pool, eb);
     CHECK(rec_event_decode(&f, pool, eb) == 0 && !memcmp(&e, &f, sizeof e), "event record round trip");
     CHECK(rec_event_type("vehicle") == REC_EV_VEHICLE && !strcmp(rec_event_name(REC_EV_MOTION), "motion") &&
-          !rec_event_type("nope") && !rec_event_name(0), "event names");
+          !rec_event_type("nope") && !rec_event_name(0) && rec_event_type("line_crossing") == REC_EV_LINE &&
+          !strcmp(rec_event_name(REC_EV_OTHER), "other"), "event names");
 
     rec_frag_t fr[3] = { { 0, 2000, 4800, 70000 | REC_FRAG_KEY }, { 2000, 2000, 74800, 60000 },
                          { 9000, 1000, 134800, 9000 | REC_FRAG_KEY | REC_FRAG_GAP } };
@@ -378,10 +379,11 @@ static void test_pool_basic(void)
     rec_pool_break(&p, 0, 0);
     t = record(&p, &g_h264, 0, t + 10000000, 20);
     record(&p, &g_h265, 1, T0, 20);
-    rec_pool_event(&p, 0, REC_EV_MOTION, T0 + 5000000);
-    rec_pool_event(&p, 0, REC_EV_MOTION, T0 + 7000000);
+    rec_pool_event(&p, 0, REC_EV_MOTION, 1, T0 + 5000000);
+    rec_pool_event(&p, 0, REC_EV_MOTION, 1, T0 + 6000000);   /* going on: no second record */
+    rec_pool_event(&p, 0, REC_EV_MOTION, 0, T0 + 12000000);
     rec_pool_tick(&p, (time_t)(T0 / 1000000) + 20, T0 + 20000000);
-    rec_pool_event(&p, 1, REC_EV_HUMAN, T0 + 21000000);
+    rec_pool_event(&p, 1, REC_EV_HUMAN, 1, T0 + 21000000);
     rec_pool_unmount(&p);
 
     CHECK(mount_full(&p, &cfg) == 0, "mounted again");
@@ -526,8 +528,10 @@ static void test_rebuild(void)
     for (int k = 0; k < 6; ++k) {
         t = record(&p, &g_h264, 0, t, 40);
         record(&p, &g_h265, 1, t - 40000000, 40);
-        rec_pool_event(&p, 0, REC_EV_MOTION, t - 1000000);
-        rec_pool_event(&p, 1, REC_EV_VEHICLE, t - 500000);
+        rec_pool_event(&p, 0, REC_EV_MOTION, 1, t - 1000000);
+        rec_pool_event(&p, 1, REC_EV_VEHICLE, 1, t - 500000);
+        rec_pool_event(&p, 0, REC_EV_MOTION, 0, t + 4000000);
+        rec_pool_event(&p, 1, REC_EV_VEHICLE, 0, t + 4500000);
         rec_pool_tick(&p, (time_t)(t / 1000000) + 6, t + 6000000);
         rec_pool_break(&p, 0, 0);
         t += 5000000;

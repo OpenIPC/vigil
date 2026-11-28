@@ -199,11 +199,14 @@ int rec_q_events(rec_pool_t *p, int cam, int type, uint64_t from, uint64_t to, i
     s.pend = s.npend ? malloc(s.npend * sizeof *s.pend) : NULL;
     if (s.pend) memcpy(s.pend, p->ev_pend, s.npend * sizeof *s.pend);
     else s.npend = 0;
-    /* Events still being reported have their duration so far. */
+    /* Events going on have their duration so far. */
     rec_active_t act[REC_CAMS][REC_EV_TYPES];
     memcpy(act, p->active, sizeof act);
     pthread_mutex_unlock(&p->mu);
     if (limit <= 0 || limit > 100000) limit = 100000;
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    uint64_t now = (uint64_t)ts.tv_sec * 1000000 + (uint64_t)ts.tv_nsec / 1000;
     /* The log is in time order: the first at or after `from`, the first at or after `to`. */
     uint32_t a = lo, b = head;
     while (a < b) {
@@ -228,7 +231,7 @@ int rec_q_events(rec_pool_t *p, int cam, int type, uint64_t from, uint64_t to, i
         if ((cam && e.cam != cam) || (type && e.type != type)) continue;
         if (e.cam >= 1 && e.cam <= REC_CAMS && e.type < REC_EV_TYPES) {
             const rec_active_t *ac = &act[e.cam - 1][e.type];
-            if (ac->on && ac->seq == e.seq) e.dur_ms = (uint32_t)((ac->last - ac->start) / 1000);
+            if (ac->on && ac->seq == e.seq && now > ac->start) e.dur_ms = (uint32_t)((now - ac->start) / 1000);
         }
         if (n == cap) {
             cap = cap ? cap * 2 : 64;

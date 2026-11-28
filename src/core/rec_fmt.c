@@ -208,7 +208,8 @@ void rec_frag_decode(rec_frag_t *f, const uint8_t in[REC_FRAG])
 /* ---- events ---- */
 
 static const char *const k_ev_names[REC_EV_TYPES] = {
-    NULL, "motion", "human", "face", "vehicle", "line", "intrusion", "video_loss", "tamper", "alarm_in", "disk",
+    NULL, "motion", "human", "face", "vehicle", "line_crossing", "intrusion", "video_loss", "tamper", "alarm_input",
+    "other", "disk",
 };
 
 const char *rec_event_name(int type)

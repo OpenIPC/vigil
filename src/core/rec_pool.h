@@ -25,7 +25,6 @@
 #define REC_CAMS        16
 #define REC_STREAMS     2
 #define REC_PS_BYTES    256
-#define REC_EV_HOLD_US  5000000ull       /* an event lasts until it was last reported this long ago */
 #define REC_IDLE_CLOSE  60              /* a stream silent this long closes its chunk (s) */
 
 /* The pool's file operations, replaceable by the power-cut tests. */
@@ -117,8 +116,7 @@ typedef enum {
     RP_ERROR,                           /* cannot be set up: `why` */
 } rec_pstate_t;
 
-/* An event being reported: its record in the log, when it began and was
- * last reported. */
+/* An event going on: its record in the log, when it began (and ended). */
 typedef struct {
     uint32_t seq;
     uint64_t start, last;
@@ -208,8 +206,9 @@ void rec_pool_prealloc(rec_pool_t *p, volatile int *stop);
 int  rec_pool_rebuild_due(rec_pool_t *p);
 int  rec_pool_prealloc_due(rec_pool_t *p);
 
-/* An event of camera `cam` (0-based) of `type` (REC_EV_*) reported now. */
-void rec_pool_event(rec_pool_t *p, int cam, int type, uint64_t now_us);
+/* An event of camera `cam` (0-based) of `type` (REC_EV_*) begins
+ * (`active`) or ends now (cam_events.h's edges). */
+void rec_pool_event(rec_pool_t *p, int cam, int type, int active, uint64_t now_us);
 
 /* Free the chunks of `cam` (1-based; 0 every camera) wholly inside
  * [from, to); returns how many. */

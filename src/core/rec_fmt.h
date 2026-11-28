@@ -137,10 +137,11 @@ typedef struct {
     uint32_t seq;                       /* its number in the log, from 0 */
 } rec_event_t;
 
-/* Types: the camera events (channel.h CH_EV_* bit + 1), then the rest. */
+/* Types: the camera events (channel.h's CH_EV_* bit b is type b + 1, the
+ * same names), then the recorder's own. */
 enum {
     REC_EV_MOTION = 1, REC_EV_HUMAN, REC_EV_FACE, REC_EV_VEHICLE,
-    REC_EV_LINE, REC_EV_INTRUSION, REC_EV_VIDEO_LOSS, REC_EV_TAMPER, REC_EV_ALARM_IN, REC_EV_DISK,
+    REC_EV_LINE, REC_EV_INTRUSION, REC_EV_VIDEO_LOSS, REC_EV_TAMPER, REC_EV_ALARM_IN, REC_EV_OTHER, REC_EV_DISK,
     REC_EV_TYPES
 };
 /* "motion", ...; NULL for an unknown type. */

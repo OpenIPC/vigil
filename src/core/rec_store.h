@@ -11,7 +11,8 @@
  * keyframe, the gap marked. A background thread rebuilds a lost index
  * and creates the chunk files still wanted. The target is used only
  * where rec_place.h allows, checked again every few seconds; it is set
- * up by itself once its disk is there.
+ * up by itself once its disk is there. The cameras' events
+ * (cam_events.h) go into the pool's event log as they begin and end.
  *
  * Cameras are 0-based here (as channel.c), streams 0 main, 1 sub.
  */
@@ -49,8 +50,6 @@ rec_au_t *rec_au_from(int cam, int stream, const vg_au_t *au, uint64_t wall_us, 
 
 /* The stream stops (a reconnect, a pause): what comes next follows a gap. */
 void rec_store_break(int cam, int stream);
-/* An event (REC_EV_*) of camera `cam` reported now. Any thread. */
-void rec_store_event(int cam, int type);
 
 /* Disk work under `dir` (an unmount, a format): the pool there closes
  * its files and opens none until rec_store_release. 0 when it is closed

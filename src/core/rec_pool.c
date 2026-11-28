@@ -1463,16 +1463,49 @@ void rec_pool_break(rec_pool_t *p, int cam, int stream)
 
 /* ---- events ------------------------------------------------------------------- */
 
-void rec_pool_event(rec_pool_t *p, int cam, int type, uint64_t now_us)
+/* End event (c, t) at its `last` time: its record gets the duration,
+ * in the log and in the vgix of the chunk it began in while that is still
+ * open. Under mu. */
+static void event_end(rec_pool_t *p, int c, int t)
+{
+    rec_active_t *a = &p->active[c][t];
+    a->on = 0;
+    rec_wstream_t *w = &p->ws[c][0];
+    uint32_t dur = (uint32_t)((a->last - a->start) / 1000);
+    for (uint32_t i = w->nev; i-- > 0;)
+        if (w->ev[i].seq == a->seq) {
+            w->ev[i].dur_ms = dur;
+            ev_pend(p, &w->ev[i]);
+            return;
+        }
+    /* Not in an open chunk any more: rewrite it from what it was. */
+    rec_event_t e = { .time_us = a->start, .dur_ms = dur, .cam = (uint8_t)(c + 1), .type = (uint8_t)t,
+                      .seq = a->seq, .chunk = REC_NONE, .frag = REC_NONE };
+    int found = 0;
+    for (uint32_t i = p->n_ev_pend; i-- > 0;)
+        if (p->ev_pend[i].seq == a->seq) {
+            e = p->ev_pend[i];
+            found = 1;
+            break;
+        }
+    rec_event_t d;
+    if (!found && p->events_fd >= 0 && ev_read(p, p->events_fd, a->seq, &d) == 0) e = d;
+    e.dur_ms = dur;
+    ev_pend(p, &e);
+}
+
+void rec_pool_event(rec_pool_t *p, int cam, int type, int active, uint64_t now_us)
 {
     if (cam < 0 || cam >= REC_CAMS || type <= 0 || type >= REC_EV_TYPES) return;
     pthread_mutex_lock(&p->mu);
-    if (!p->mounted || p->state != RP_READY || !p->ev_cap) {
+    rec_active_t *a = &p->active[cam][type];
+    if (!p->mounted || p->state != RP_READY || !p->ev_cap || a->on == !!active) {
         pthread_mutex_unlock(&p->mu);
         return;
     }
-    if (p->active[cam][type].on) {
-        p->active[cam][type].last = now_us;
+    if (!active) {
+        a->last = now_us;
+        event_end(p, cam, type);
         pthread_mutex_unlock(&p->mu);
         return;
     }
@@ -1482,9 +1515,9 @@ void rec_pool_event(rec_pool_t *p, int cam, int type, uint64_t now_us)
     int rec = w->open && (uint64_t)w->last_write * 1000000 + 3000000 >= now_us;
     rec_event_t e = { .time_us = now_us, .cam = (uint8_t)(cam + 1), .type = (uint8_t)type, .seq = p->ev_head++,
                       .chunk = rec ? w->idx : REC_NONE, .frag = rec ? w->nfrag : REC_NONE };
-    p->active[cam][type].seq = e.seq;
-    p->active[cam][type].start = p->active[cam][type].last = now_us;
-    p->active[cam][type].on = 1;
+    a->seq = e.seq;
+    a->start = a->last = now_us;
+    a->on = 1;
     ev_pend(p, &e);
     if (rec && w->nev < EV_PER_CHUNK) {
         if (w->nev == w->cap_ev) {
@@ -1504,42 +1537,16 @@ void rec_pool_event(rec_pool_t *p, int cam, int type, uint64_t now_us)
     pthread_mutex_unlock(&p->mu);
 }
 
-/* Events no longer reported end: their records get the duration. */
-static void events_end(rec_pool_t *p, uint64_t now_us, int all)
+/* Every event still on ends now (a clean stop: the next start begins them again). */
+static void events_end_all(rec_pool_t *p, uint64_t now_us)
 {
     pthread_mutex_lock(&p->mu);
     for (int c = 0; c < REC_CAMS; ++c)
-        for (int t = 1; t < REC_EV_TYPES; ++t) {
-            rec_active_t *a = &p->active[c][t];
-            if (!a->on || (!all && now_us < a->last + REC_EV_HOLD_US)) continue;
-            a->on = 0;
-            rec_wstream_t *w = &p->ws[c][0];
-            uint32_t dur = (uint32_t)((a->last - a->start + REC_EV_HOLD_US) / 1000);
-            for (uint32_t i = w->nev; i-- > 0;)
-                if (w->ev[i].seq == a->seq) {
-                    w->ev[i].dur_ms = dur;
-                    ev_pend(p, &w->ev[i]);
-                    goto next;
-                }
-            /* Not in an open chunk any more: rewrite it from what it was. */
-            rec_event_t e = { .time_us = a->start, .dur_ms = dur, .cam = (uint8_t)(c + 1), .type = (uint8_t)t,
-                              .seq = a->seq, .chunk = REC_NONE, .frag = REC_NONE };
-            for (uint32_t i = p->n_ev_pend; i-- > 0;)
-                if (p->ev_pend[i].seq == a->seq) {
-                    e = p->ev_pend[i];
-                    e.dur_ms = dur;
-                    break;
-                }
-            if (e.chunk == REC_NONE && p->events_fd >= 0) {
-                rec_event_t d;
-                if (ev_read(p, p->events_fd, a->seq, &d) == 0) {
-                    e = d;
-                    e.dur_ms = dur;
-                }
+        for (int t = 1; t < REC_EV_TYPES; ++t)
+            if (p->active[c][t].on) {
+                p->active[c][t].last = now_us;
+                event_end(p, c, t);
             }
-            ev_pend(p, &e);
-        next:;
-        }
     pthread_mutex_unlock(&p->mu);
 }
 
@@ -1599,7 +1606,6 @@ static void age_quota(rec_pool_t *p, uint64_t now_us)
 void rec_pool_tick(rec_pool_t *p, time_t now, uint64_t now_us)
 {
     if (!p->mounted || p->state != RP_READY) return;
-    events_end(p, now_us, 0);
     for (int c = 0; c < REC_CAMS; ++c)
         for (int s = 0; s < REC_STREAMS; ++s) {
             rec_wstream_t *w = &p->ws[c][s];
@@ -1631,7 +1637,7 @@ void rec_pool_unmount(rec_pool_t *p)
     if (p->mounted && p->state == RP_READY) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        events_end(p, (uint64_t)ts.tv_sec * 1000000 + (uint64_t)ts.tv_nsec / 1000, 1);
+        events_end_all(p, (uint64_t)ts.tv_sec * 1000000 + (uint64_t)ts.tv_nsec / 1000);
         for (int c = 0; c < REC_CAMS; ++c)
             for (int s = 0; s < REC_STREAMS; ++s) chunk_close(p, &p->ws[c][s]);
         rec_pool_save(p);

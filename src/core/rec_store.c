@@ -10,6 +10,8 @@
 #include <time.h>
 
 #include "au_norm.h"
+#include "cam_events.h"
+#include "channel.h"
 #include "events.h"
 #include "log.h"
 #include "rec_place.h"
@@ -56,7 +58,8 @@ static struct {
     int             told;
     rec_place_t     told_place;
     int             bg_kick;
-} g = { .once = PTHREAD_ONCE_INIT };
+    int             ev_sub;             /* cam_events subscription, -1 none */
+} g = { .once = PTHREAD_ONCE_INIT, .ev_sub = -1 };
 
 static void init_once(void)
 {
@@ -203,10 +206,28 @@ void rec_store_break(int cam, int stream)
     pthread_mutex_unlock(&g.qmu);
 }
 
-void rec_store_event(int cam, int type)
+/* The cameras' events (cam_events.h), as they begin and end: into the
+ * pool's event log. Quick: a record queued under the pool's lock. */
+_Static_assert((int)REC_EV_OTHER == (int)CH_EV_TYPES && CH_EV_OTHER == 1u << (REC_EV_OTHER - 1),
+               "REC_EV_* type b + 1 is CH_EV_* bit b");
+
+static void on_cam_event(void *user, const cam_event_t *ev)
 {
-    pthread_once(&g.once, init_once);
-    rec_pool_event(&g.pool, cam, type, now_us());
+    (void)user;
+    for (int b = 0; b < CH_EV_TYPES; ++b)
+        if (ev->type & (1u << b)) rec_pool_event(&g.pool, ev->channel, b + 1, ev->active, now_us());
+}
+
+/* Events going on when the pool is mounted: they begin now in its log. */
+static void events_late_start(void)
+{
+    time_t now = time(NULL);
+    uint64_t us = now_us();
+    for (int ch = 0; ch < REC_CAMS; ++ch) {
+        unsigned bits = cam_events_held(ch, now);
+        for (int b = 0; b < CH_EV_TYPES; ++b)
+            if (bits & (1u << b)) rec_pool_event(&g.pool, ch, b + 1, 1, us);
+    }
 }
 
 /* ---- the writer --------------------------------------------------------------- */
@@ -272,6 +293,7 @@ static void try_mount(const rec_store_cfg_t *cfg, time_t now)
     g.told_place = REC_PLACE_OK;
     g.checked_at = now;
     g.bg_kick = 1;
+    events_late_start();
 }
 
 static void commands(void)
@@ -438,6 +460,7 @@ void rec_store_configure(const rec_store_cfg_t *cfg)
     if (start) {
         g.stop = 0;
         g.running = 1;
+        if (g.ev_sub < 0) g.ev_sub = cam_events_subscribe(on_cam_event, NULL);
     }
     pthread_cond_signal(&g.qcond);
     pthread_mutex_unlock(&g.qmu);
@@ -459,6 +482,8 @@ void rec_store_shutdown(void)
     pthread_cond_broadcast(&g.qcond);
     pthread_mutex_unlock(&g.qmu);
     if (!running) return;
+    if (g.ev_sub >= 0) cam_events_unsubscribe(g.ev_sub);
+    g.ev_sub = -1;
     pthread_join(g.bg, NULL);
     pthread_join(g.writer, NULL);
     g.running = 0;

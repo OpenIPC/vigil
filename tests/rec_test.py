@@ -219,7 +219,7 @@ def run(vigild, data, secs, here, tmp, procs):
           "the motion event is in its span (%s)" % [round(e["time"] - t_start, 1) for e in motion])
     st, ev = api.json("GET", "/api/v1/record/events?from=%.3f&to=%.3f" % (t_start - 60, t_now + 60))
     check(st == 200 and len(ev["events"]) == 1 and ev["events"][0]["camera"] == 1 and
-          ev["events"][0]["recorded"] and ev["events"][0]["duration"] >= 5,
+          ev["events"][0]["recorded"] and ev["events"][0]["duration"] >= 3,
           "events: CAM1's motion, recorded, %s s" % (ev["events"][0]["duration"] if st == 200 and ev["events"] else "?"))
     st, ev = api.json("GET", "/api/v1/record/events?camera=2&from=%.3f&to=%.3f" % (t_start - 60, t_now + 60))
     check(st == 200 and ev["events"] == [], "events: none for CAM2")
