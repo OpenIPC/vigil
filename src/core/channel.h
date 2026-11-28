@@ -2,8 +2,9 @@
 /* channel.h — a camera channel: source -> au_norm -> decoder + recorder.
  *
  * A thread per channel opens the camera's main stream (any protocol,
- * source.h), normalizes its access units, records them as-is
- * (seg_writer.h) and decodes them into the channel's tile when the
+ * source.h), normalizes its access units, records them as they are (into
+ * the pool, rec_store.h; a board's own inputs as segment files,
+ * seg_writer.h) and decodes them into the channel's tile when the
  * platform has a decoder (hal_decoder.h, sized from the stream's SPS;
  * rebuilt when the stream changes). A camera with a sub-stream has a
  * second thread for it, connected as long as the main one, whatever the
@@ -132,7 +133,8 @@ typedef struct {
     char       view[8];             /* the stream on screen (or about to be): "main",
                                        "sub", or "" (off screen, or none to decode);
                                        codec, size and fps are that stream's */
-    int        recording;           /* a segment is open */
+    int        recording;           /* being recorded: data going into an open chunk
+                                       (or a segment open, for a local input) */
     char       rec_state[24];       /* "" (no recording asked for); set up: "recording",
                                        "ready" (no segment open yet: waiting for a keyframe
                                        or the camera), "failed" (the last write failed),

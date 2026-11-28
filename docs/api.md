@@ -76,11 +76,16 @@ defaults, commented.
 | `cameras[].sub_url` | string | `""` | The sub-stream for small tiles; empty: derived for NETIP, else the main stream. |
 | `cameras[].events` | `auto`, `netip`, `onvif`, `off` | `auto` | Where the camera's events come from ([Camera events](#camera-events)): `auto` NETIP alarms for a `netip://` camera, else ONVIF events if it has them. Changes without reconnecting the streams. |
 | `cameras[].onvif_url` | `http://…`, no user or password | `""` | Its ONVIF device service, for the events (the URL's user and password log in). Empty: found from its address. Set when a camera is added over ONVIF. |
-| `record.path` | absolute path, no `.` or `..` | `""` | Where streams are recorded. Empty: no recording. Used only on a disk: see [Where recordings may go](#where-recordings-may-go). |
-| `record.segment` | integer 10..3600 | 60 | Segment length in seconds. |
-| `record.keep` | integer 0..64 | 3 | Segments kept per camera; 0 keeps all (the free-space reserve still applies). 64 is what the segment writer can track. |
+| `record.path` | absolute path, no `.` or `..` | `""` | Where streams are recorded: the pool of chunks and its index ([recording.md](recording.md)). Empty: no recording. Used only on a disk: see [Where recordings may go](#where-recordings-may-go). |
+| `record.segment` | integer 10..3600 | 60 | Local inputs only (a DVR board's own encoder, recorded as files of their own): segment length in seconds. |
+| `record.keep` | integer 0..64 | 3 | Local inputs only: segments kept per camera; 0 keeps all (the free-space reserve still applies). 64 is what the segment writer can track. |
 | `record.allow_rootfs` | boolean | `false` | Count the root filesystem as a disk. For a host whose root filesystem is one; never on a board, where it is the flash. |
 | `record.on_full` | `overwrite` or `stop` | `overwrite` | A full disk: the oldest recordings make room, or recording stops (`REC disk full`) until there is room. |
+| `record.chunk_mb` | integer 4..1024 | 256 | The pool's chunk size in MiB, set when the pool is made (an existing pool keeps its own). |
+| `record.pool_mb` | integer 0..100000000 | 0 | The most the pool takes, MiB; 0: the target less a reserve (2 %, at least 1 GiB, less on small media). A pool grows to a larger value, never shrinks. |
+| `record.fragment_s` | integer 1..10 | 4 | Longest fragment: one starts at every keyframe and at least this often. |
+| `record.flush_s` | integer 0..60 | 0 | How often the recording is forced to the disk (at most this is lost in a power cut); 0: 2 s on disks and shares, 5 s on flash. |
+| `record.index_save_s` | integer 30..3600 | 300 | How often the chunk table is saved whole (and at every chunk closed); the journal covers what is between. |
 | `schedule[]` | array, up to 16 | `[]` | A week per camera ([management.md](management.md#recording-policies)); a camera without one records all the time. |
 | `schedule[].camera` | integer 1..16, required | | The camera's channel. |
 | `schedule[].mon` … `sun` | 48 letters of `C`, `M`, `-` | all `C` | One per half hour from 00:00 local time: continuous, motion only, off. |
@@ -169,12 +174,13 @@ created, on a disk. The deepest part of `record.path` that exists decides:
 - it must not be mounted read-only.
 
 Only the part below that directory is created, so nothing is ever made
-above the mount point. Otherwise the channel does not record. It reports why
-(`rec_state`), and it looks again every 10 s, at a keyframe, so recording
+above the mount point. Otherwise nothing is recorded. The channels report
+why (`rec_state`), and the store looks again every 10 s, so recording
 starts by itself once the disk is mounted. While recording, the directory is
-looked at again before every new segment and after a failed write, so a disk
-that goes away stops recording before a segment could be opened on the
-mount point left behind; the channel then waits for it the same way. The
+looked at again every 5 s, so a disk that goes away stops recording before
+a chunk could be written on the mount point left behind; the store then
+waits for it the same way. (A local input recorded as segment files looks
+before every new segment, and after a failed write.) The
 configuration is not changed: `record.path` stays what was set.
 
 ## What applies when
@@ -184,7 +190,8 @@ of a second and:
 
 - **renames** a camera without touching its stream;
 - **restarts** only the cameras whose URL or enabled flag changed; a change
-  to `record` restarts every camera (each opens a new segment);
+  to `record` restarts every camera; a new `record.path` closes the pool and
+  opens the one there;
 - leaves the others alone: their video and recordings go on.
 
 The result is reported as events (`config applied`, `CAMn added`,
@@ -337,6 +344,8 @@ saved over it until it is fixed or removed.
 | `/network/…` | `network` |
 | `/system/…` | `system` |
 | `/disks…`, `/storage/…` | `storage` |
+| `GET /record/…` | `playback` |
+| `DELETE /record/recordings`, `POST /record/takeover` | `storage` |
 | `/discovery…`, `/channels/…` | `cameras` |
 | `/users…`, `/groups…` | `users` |
 | anything else | `system` |
@@ -661,6 +670,7 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `POST /api/v1/channels/<n>/events` | Events of channel n's camera, reported from outside ([below](#post-apiv1channelsnevents)). |
 | `POST /api/v1/discovery/autoadd` | Add every new device to the empty channels. |
 | `POST /api/v1/devices/test` | Connect to a camera described by hand: codec and size, or why not. |
+| `GET /api/v1/record/…` | The recordings: status, days, spans, events, MSE pieces, export ([Recordings](#recordings)). |
 
 A `PUT` is validated as a whole (every error is reported, at most 16 listed,
 `more_errors` counts the rest); unknown keys are errors here, to catch
@@ -757,13 +767,17 @@ it. `events` are the events the camera reports now: `motion`, `human`,
 (`cameras[].events`, [Camera events](#camera-events)) or the `POST` below;
 each is held while the camera says it goes on, and 5 s after a momentary
 report;
-`recording`: a segment is open; `rec_state` is `off` (no `record.path`);
-when recording is set up, `recording`, `ready` (no segment open yet: waiting
-for a keyframe or for the camera) or `failed` (the last write failed); when it
-is not, why: `waiting for disk` (the path leads onto the root filesystem:
-nothing is mounted there), `not a disk` (RAM or flash), `read-only`, `error`
-(not a directory, no permission, mountinfo unreadable; the log says which);
-`rec_bytes` counts what was written since the channel started; `decoding`: a
+`recording`: the main stream is going into the pool (an open chunk,
+written within the last 3 s); `rec_state` is `off` (no `record.path`);
+when recording is set up, `recording`, `ready` (no chunk open yet: waiting
+for a keyframe or for the camera), `failed` (the last write failed) or
+`disk full` (`record.on_full: stop`), or what holds it: `schedule off`,
+`waiting for motion`, `paused` (disk work); when it is not set up, why:
+`waiting for disk` (the path leads onto the root filesystem: nothing is
+mounted there), `not a disk` (RAM or flash), `read-only` (the disk, or
+another recorder's pool), `error` (not a directory, no permission,
+mountinfo unreadable; the log says which);
+`rec_bytes` counts what was written since vigild started; `decoding`: a
 decoder shows the channel; `no_decoder`: the tile wants a picture but the
 platform could not give a decoder (media memory, decoder channels), asked
 for again; `view`: the stream on screen, or about to be
@@ -1072,6 +1086,31 @@ a channel goes to the next empty channel, in address order, with these
 credentials (one URL per device: for an NVR or DVR found this way, its
 first channel). The configuration is saved once, at the end; the results
 say which device went where.
+
+## Recordings
+
+The pool of [recording.md](recording.md), read back. Times are Unix seconds
+(decimals allowed: `1795700819.25`), cameras 1-based, `stream` `main` (the
+default) or `sub`. Reading needs `playback`. With no pool mounted (no
+`record.path`, the disk not there yet) the answer is `503` with the reason.
+
+| Method and path | |
+|---|---|
+| `GET /api/v1/record/status` | The pool: `state` (`ready`, `waiting` with `place`, `read-only`, `error`, `off`), `why`, `path`, `pool` (`id`, `chunk_mb`, `chunks`, `wanted`, `free`, `open`, `closed`, `bad`, `size_bytes`, `used_bytes`), `rebuild` (`running`, `done`, `total`), `media` (`disk`, `flash`, `share`), `flush_s`, `write_kbps`, `queue` (`bytes`, `max`), `dropped` (AUs dropped for a disk that did not keep up), `oldest`, `newest`, `days_kept` (the pool at the write rate now), `cameras[]` (`camera`, `oldest`, `newest`, `chunks`, `bytes`). |
+| `GET /api/v1/record/days?camera=&stream=&month=YYYY-MM` | `{"days": [1, 5, 28]}`: the days of the month (local time) with video. |
+| `GET /api/v1/record/spans?camera=&stream=&from=&to=` | `{"spans": [{"from", "to", "events": [{"time", "type", "duration"}]}]}`: the recorded spans in the range, in time order, each with the events in it. |
+| `GET /api/v1/record/events?camera=&type=&from=&to=&limit=&order=asc\|desc` | `{"events": [{"time", "duration", "camera", "type", "recorded"}]}`: events starting in the range (camera and type optional; types as in [Camera events](#camera-events)); `recorded`: the camera's stream was being recorded then; `duration` so far for one going on. `limit` 1..100000, default 1000. |
+| `GET /api/v1/record/init?camera=&stream=&at=` | The MSE init segment (`ftyp`+`moov`) of the video at or after `at`; `X-Vigil-Codecs` has the codecs string for `MediaSource.isTypeSupported` (`avc1.640028`, `hvc1.1.6.L120.90`). |
+| `GET /api/v1/record/fragments?camera=&stream=&from=&count=&cont=&base=` | `count` (1..64, default 4) fragments (`moof`+`mdat`), from the one holding `from` back to its keyframe, or with `cont=1` from the first starting at or after `from`. Their decode times are seconds since `base` (default: local midnight of `from`, in `X-Vigil-Base`), so requests one after another make one timeline; `X-Vigil-Next` is where the next request starts (`cont=1`). `X-Vigil-Format-Change: 1`: the video after these is of another format: ask for a new init there. |
+| `GET /api/v1/record/export.mp4?camera=&stream=&from=&to=&gaps=&layout=frag` | The range as one fragmented MP4, made while it is sent (`Content-Length` known ahead, `Content-Disposition` `CAM1_YYYYmmdd_HHMMSS.mp4`): the init segment with an edit list that starts the picture at `from`, then the fragments from the keyframe at or before `from` to the one holding `to`. `gaps=keep` (default) keeps the gaps on the clock; `remove` plays the spans one after the other; `split` answers `{"files": [{"from", "to", "url"}]}`, one export per span. A change of format inside the range ends the file there (`X-Vigil-Format-Change`). `layout=faststart` is not there yet (`501`). `404`: no video in the range. |
+| `DELETE /api/v1/record/recordings?camera=&from=&to=` | Frees the chunks of the camera (0 or none: every camera) wholly inside the range: `{"freed": n}`. Needs `storage`. |
+| `POST /api/v1/record/takeover` | Another recorder's pool (`state` `read-only`) becomes this one's: answered with the status. `409` when it is ours already. Needs `storage`. |
+
+```sh
+# today's spans of camera 1, then 10 minutes of it as a file
+curl -u root:pw "http://nvr:8080/api/v1/record/spans?camera=1&from=$(date -d 00:00 +%s)&to=$(date +%s)"
+curl -u root:pw -OJ "http://nvr:8080/api/v1/record/export.mp4?camera=1&from=1795700000&to=1795700600"
+```
 
 ## Inside
 

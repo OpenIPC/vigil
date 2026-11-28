@@ -43,7 +43,7 @@ decoder and capture inputs can mix the two.
    |                        |                |
 src/core                 src/ui           src/api      HTTP/WebSocket API
  channel  source/*  au_norm  sps          (CivetWeb, crypt)
- seg_writer  events  net  md5
+ rec_store/pool  mp4  events  net
  config  schema                LVGL app: live view, menus, schema-driven
                                settings; sees only ui_model.h and hal_ui.h
    |                        |                |
@@ -91,7 +91,9 @@ Rules that keep the layers apart:
     +--> hal_dec_* (if the platform decodes and the source is not shown
     |               by the platform itself) --> tile on screen
     |
-    +--> seg_writer (if recording) --> <dir>/CAMn_<date>_<time>.h264|h265
+    +--> rec_store (if recording) --> writer thread --> <dir>/pool/c<n>.mp4
+    |                                                   <dir>/index/...
+    +--> seg_writer (local inputs only) --> <dir>/CAMn_<date>_<time>.h264
 ```
 
 Each channel runs on its own thread (`src/core/channel.c`). The thread:
@@ -159,7 +161,7 @@ stream), and all of them 24 MiB (`GOP_CACHE_BUDGET`): one that outgrows
 either is dropped until the next keyframe, and a switch to it waits for
 that keyframe. A camera has at most two connections; full screen, the
 display and the recording share the main one. A view change never touches
-the main session, so recording goes on in the same segment.
+the main session, so recording goes on unbroken in the same chunk.
 
 The same access units go to vigild's own servers, which pass the cameras
 on to other clients (`stream_tap.c`): a server opens a tap on a channel's
@@ -201,30 +203,40 @@ loses a strip at the top and at the bottom).
 
 ### Recording
 
-`seg_writer.c` writes the compressed elementary stream (no re-encoding,
-no container) into segments of `-S` seconds. What it writes is the
-normalizer's output, so it is not a byte-for-byte copy of the network
-data: cached parameter sets are added to keyframes that lack them,
-picture-less units are merged into the next picture, and anything before
-the first keyframe is dropped. The pictures themselves are untouched.
-Every segment starts at a keyframe, carrying all the parameter sets the
-camera has sent by then. So once a camera has supplied them, which is
-normally with its first keyframe or in the SDP, each file plays on its own
-(`ffplay CAM1_….h265`). `-K` limits how many segments each camera keeps.
+The design is [recording.md](recording.md): a pool of pre-allocated chunk
+files on the recording target, each a fragmented MP4 of one camera's
+stream, used as a ring, with an index of its own. `rec_store.c` runs it.
+The main session hands each access unit to `rec_store_put` after the
+schedule and the hold say it may: a copy, its NAL units given 4-byte
+lengths and its parameter sets put beside it, into a bounded queue (~10 s
+of what comes in, 4..24 MiB). The session thread never waits on the disk;
+a stream whose AU does not fit drops to its next keyframe, the gap marked.
+One writer thread empties the queue into the pool (`rec_pool.c`): it maps
+the camera's timestamps onto the wall clock, cuts a fragment at each
+keyframe, writes the samples as they come and the fragment's `moof` into
+room kept before them, closes a chunk when the next GOP would not fit or
+the format changes, and every `record.flush_s` syncs the chunks and then
+the journal. A background thread creates the chunk files still wanted
+and rebuilds a lost index. Readers (`rec_read.c`, the API's `record/`
+endpoints) take the chunk table and open chunks' fragment tables under
+the pool's lock and read the chunk files themselves.
 
-Independently, the writer tries to keep 10% of the filesystem (at least
-8 MiB) free. Below that it deletes the oldest finished recording in the
-directory, so a disk filled by recordings rolls over instead of stopping
-them. If nothing can be deleted (there are no finished recordings, or the
-space is used by other files), writing fails: the channel reports the
-failure and retries at the next keyframe.
+What is recorded is the normalizer's output, so it is not a byte-for-byte
+copy of the network data: picture-less units are merged into the next
+picture, and anything before the first keyframe is dropped. The pictures
+themselves are untouched; the parameter sets are in each chunk's init
+segment. Every closed chunk plays as it is in VLC or ffmpeg.
 
-Before a segment writer is set up, `rec_place.c` decides whether the
-directory may be recorded to at all: only on a disk, never on the root
-filesystem (a board's flash) unless `record.allow_rootfs` says it is a disk,
-never on RAM or flash filesystems ([api.md](api.md#where-recordings-may-go)).
-A channel whose directory is refused, or whose disk goes away, keeps its
-video and tries again every 10 s.
+`seg_writer.c` remains for a DVR board's own inputs (hi3520dv200's local
+encoder): elementary stream segments of `-S` seconds, `-K` kept per
+camera, the oldest deleted below a free-space reserve.
+
+Before anything is written, `rec_place.c` decides whether the directory
+may be recorded to at all: only on a disk, never on the root filesystem (a
+board's flash) unless `record.allow_rootfs` says it is a disk, never on RAM
+or flash filesystems ([api.md](api.md#where-recordings-may-go)). A target
+refused, or whose disk goes away, is looked at again every 10 s; the
+channels keep their video meanwhile.
 
 ### Status and events
 
@@ -289,7 +301,8 @@ slow changes run as jobs on worker threads (the API answers 202 and a job
 id, the UI polls), and a timer thread undoes a network change nobody
 confirmed, keeps NTP, DDNS and the network storage going and passes events
 to the alarm center and the mail. It holds recording off a disk before it
-is unmounted or formatted (`channels_rec_hold`).
+is unmounted or formatted (`channels_rec_hold`: the store closes its pool
+there and opens it again after).
 
 ## Configuration
 
@@ -339,6 +352,8 @@ page having put them in force already as the user moved them.
 | main | `hal_init`, the frontend loop (LVGL or headless), applying configurations, `hal_shutdown` |
 | one per channel | main stream: source → `au_norm` → recorder, and the decoder for large tiles (`channel.c`) |
 | one per channel in a small tile | sub-stream: source → `au_norm` → decoder (`channel.c`) |
+| recording writer | the queue of AUs into the pool's chunks, flushes, the index (`rec_store.c`, `rec_pool.c`) |
+| recording background | creates the chunk files, rebuilds a lost index (`rec_store.c`) |
 | platform threads | e.g. capture readers (hi3520dv200), as each platform needs |
 | CivetWeb master + up to 8 workers (started on demand) | HTTP requests and WebSocket sessions (`src/api`) |
 | API pusher | gathers status, events and configuration changes for the WebSocket clients |

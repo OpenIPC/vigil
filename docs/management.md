@@ -22,7 +22,7 @@ The same actions are in the HTTP API ([api.md](api.md#management)).
 | | Alarm center | works | Every event POSTed as JSON to `http://server:port/path`, and a heartbeat. |
 | | QoS | works | DSCP marking of vigild's own packets (`qos`): off, standard (RFC 4594: video AF41, management CS2, cameras AF41, alarms AF21) or custom values 0..63 per class; applied at once. Other programs (sshd, ntpd) are not marked: the firmware's kernel has no netfilter, so no iptables `DSCP` target. |
 | | P2P | none | vigil has no P2P service; the page says so. |
-| Storage | Basic | works | When the disk is full: overwrite the oldest recordings, or stop (event `REC disk full`); segment length in minutes; the recording directory. |
+| Storage | Basic | works | The recording pool's state: size, chunks, free and recording, the medium, the oldest video of each camera, a rebuild's progress ([recording.md](recording.md)); when the disk is full: overwrite the oldest recordings, or stop (event `REC disk full`); segment length in minutes (local inputs only); the recording directory. |
 | | Schedule | works | A week per camera in half hours: continuous, motion only, off. Motion only records while the camera reports motion, which no source does yet. |
 | | Disk Manager | works | Disks and partitions with their state; format (ext4 by default where `mkfs.ext4` exists, else exFAT; FAT32), mount, unmount. |
 | | Disk Maintenance | works | SMART of a SATA disk or a USB enclosure that passes ATA commands (verdict, identity, attributes with the important ones highlighted, self-tests and their log); a surface scan (Read, Verify, Write) with a sector map. |
@@ -99,8 +99,8 @@ kernel's `root=`, or is mounted somewhere other than under `/mnt`) is never
 formatted or unmounted, nor is a disk with such a partition.
 
 **Format** asks for the disk's name to be typed. Recording onto the disk is
-held first (the channels close their segments and open none until the job
-ends), its partitions are unmounted, and then:
+held first (the recording pool there closes its chunks and files, and
+opens again when the job ends), its partitions are unmounted, and then:
 
 - a whole disk gets a new MBR with one partition from sector 2048 (type
   0x07 for exFAT, 0x0c for FAT32, 0x83 for ext4); over 2 TiB, where an MBR
@@ -108,8 +108,9 @@ ends), its partitions are unmounted, and then:
   automount also mounts;
 - the start of the partition is zeroed before `mkfs`, so the firmware's
   automount, which reacts to the new partition, finds nothing to mount;
-- `mkfs.ext4 -F -L vigil` (e2fsprogs; the default where it is there: a
-  journal, so a power cut costs the open segment, not the filesystem),
+- `mkfs.ext4 -F -T largefile4 -L vigil` (e2fsprogs; the default where it
+  is there: a journal, so a power cut costs the unflushed tail, not the
+  filesystem; an inode per 4 MiB, for the pool's few large files),
   `mkfs.exfat -L VIGIL` (exfatprogs; the default otherwise, readable by any
   computer) or `mkfs.vfat -F 32` (busybox). e2fsprogs 1.47 turns on
   `orphan_file` and `metadata_csum_seed`; the ssr621q's 4.9 kernel mounted
@@ -182,22 +183,31 @@ each LBA range once.
 
 ## Recording policies
 
-- `record.on_full`: `overwrite` (the default, what vigild always did): below
-  the free-space reserve the oldest recording in the directory goes,
-  whichever camera made it. `stop`: nothing is deleted; the segment is
-  closed and recording stops with the event `REC disk full` and the state
-  `disk full`, until there is room again.
-- `quota`: per camera, the most gigabytes and the most days. Checked when a
-  segment opens, at most once a minute: the camera's oldest files go beyond
-  the size, and files older than the days. Other cameras' files are never
-  touched.
+The cameras are recorded into a pool of chunk files used as a ring
+([recording.md](recording.md)); a DVR board's own inputs still as segment
+files.
+
+- `record.on_full`: `overwrite` (the default): when no chunk is free, the
+  one holding the oldest video is reused, whichever camera it held.
+  `stop`: nothing is reused; a stream that needs a chunk stops with the
+  event `REC disk full` and the state `disk full`, until one is free
+  (recordings deleted, `DELETE /api/v1/record/recordings`).
+- `quota`: per camera, the most gigabytes and the most days. A camera
+  whose chunks (counted at their full size) would go over its size takes
+  back its own oldest chunk instead of a free one; once a minute, its
+  chunks whose video ended more than its days ago are freed. Other
+  cameras' recordings are never touched.
 - `schedule`: per camera, 7 strings of 48 letters, one per half hour from
   00:00 local time, Monday first: `C` continuous, `M` motion only, `-` off.
-  Off, the channel closes its segment and keeps its stream; recording
-  resumes at the next keyframe in an on slot. A schedule change restarts
-  nothing.
-- `record.segment` stays in seconds in the file and the API, so existing
-  files, `-S` and clients keep working; the UI shows minutes.
+  Off, the channel stops handing its stream to the pool (what follows is a
+  new span) and keeps its stream; recording resumes at the next keyframe
+  in an on slot. A schedule change restarts nothing.
+- `record.chunk_mb`, `pool_mb`, `fragment_s`, `flush_s`, `index_save_s`:
+  the pool's ([api.md](api.md#the-configuration-file)). A pool keeps the
+  chunk size it was made with.
+- `record.segment` (local inputs only) stays in seconds in the file and the
+  API, so existing files, `-S` and clients keep working; the UI shows
+  minutes.
 
 ## Time
 

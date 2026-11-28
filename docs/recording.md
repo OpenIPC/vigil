@@ -6,7 +6,9 @@ This replaces the raw elementary-stream segments of `seg_writer`
 (`CAMn_YYYYmmdd_HHMMSS.h264|h265`), which carry no timestamps, no audio
 and no events, and so cannot be searched or played by time.
 
-Status: design. The phases at the end say what is built in which order.
+Status: phase 1 is built (the store, recovery and rebuild, the read API,
+fMP4 export; "Phase 1 as built" at the end says where it settles what
+this page left open or differs from it). The phases say what comes next.
 
 ## What it must do
 
@@ -71,9 +73,11 @@ carries all it needs to be played elsewhere:
 
 ### The chunk pool
 
-A chunk is a file of fixed size (`record.chunk_mb`, default 256 MiB),
+A chunk is a file of fixed size (`record.chunk_mb`, default 256 MiB;
+4..1024, below 64 only for tests and very small media),
 created when the pool is set up, until the pool fills the target except
-for a reserve (`max(2 %, 1 GiB)`; less on small media). Each chunk holds
+for a reserve (`max(2 %, 1 GiB)`; less on small media: at most a tenth of
+it), or up to `record.pool_mb`. Each chunk holds
 one stream of one camera (CAM3 main, or CAM3 sub) for as long as it lasts:
 at 4 Mbit/s about 8.5 minutes, at 512 kbit/s about an hour.
 
@@ -331,7 +335,8 @@ and go):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `chunk_mb` | 256 | Chunk size, MiB (64..1024); set when the pool is made |
+| `chunk_mb` | 256 | Chunk size, MiB (4..1024); set when the pool is made |
+| `pool_mb` | 0 | The most the pool takes; 0: the target less the reserve. Grows, never shrinks |
 | `fragment_s` | 4 | Longest fragment, seconds |
 | `flush_s` | auto | 2 on disks and shares, 5 on flash |
 | `pre_s`, `post_s` | 5, 10 | Event recording before and after |
@@ -365,3 +370,92 @@ from the file names and the frame count, but not planned.)
    the timeline, event recording with pre/post, search by type.
 4. **More**: sub-stream recording, RTSP playback and ONVIF Profile G,
    audio, several targets (disk + share), flash wear estimates.
+
+## Phase 1 as built
+
+Where the code settles what the design leaves open, or differs from it:
+
+- **Configuration**: `chunk_mb` (4..1024), `pool_mb` (new: a pool's
+  largest size; a pool grows to a larger value, never shrinks),
+  `fragment_s`, `flush_s`, `index_save_s`. `pre_s`, `post_s` and `sub` are
+  not there yet (phases 3 and 4). `segment` and `keep` stay, for the local
+  inputs only: a board's own encoder (`capture:N`, hi3520dv200) is still
+  recorded by `seg_writer`; every camera goes into the pool. The
+  environment variable `VIGIL_REC_POOL_MB_MAX` caps every pool's size
+  (the tests set it, so a `record.path` in a build tree never fills the
+  build machine's disk).
+- **Writing a fragment**: not a fragment at a time. A fragment's samples
+  are written as they arrive (no GOP is held in RAM: sixteen cameras'
+  would not fit in the SSR621Q's), into room kept before them for the
+  moof (enough for 1.5 times the most samples a fragment of the stream
+  has had, 32..1024); at the next keyframe (or `fragment_s`, or that room
+  full) the moof and the mdat header are written into it, and a `free`
+  box pads what the moof did not need. The pad begins `vgfr`, the chunk's
+  use and the fragment's key/gap flags, so a tail scan knows a fragment
+  of this use and whether it follows a gap. Writes are not aligned.
+- **vgch**: its 4 KiB hold the record twice, copy A (written when the
+  chunk opens) at 64 and copy B (written when it closes) at 2048, in
+  another sector: a torn rewrite of B leaves A. B counts only when it is
+  of A's use.
+- **Fragment entries** (16 B): start and duration in ms from the chunk's
+  start, the moof's offset, the size of moof and mdat with two flag bits
+  (starts with a keyframe, follows a gap). Exact times are in the moofs.
+- **Journal**: records are 32 B with the CRC seeded by the pool id and the
+  table's generation; the journal is rewritten from its start at each
+  save, never truncated, and a record of another generation never
+  checks. Before a chunk is reused, its "open" record is appended and
+  synced (write-ahead): a power cut never leaves the table saying a chunk
+  holds what was already overwritten. Fragment records follow an
+  `fdatasync` of the chunk, so the journal vouches only for data on the
+  disk.
+- **Recovery**: an open chunk is walked from the init segment; fragments
+  past what the journal vouched for are kept only when their samples
+  parse as length-prefixed NAL units (a moof can reach the disk before
+  its data). A chunk whose header for this use never got written is free
+  again; one that closed but whose close missed the journal is taken
+  from its vgch. Recovered chunks are closed (flag "recovered"). A power
+  cut at every one of the test scenario's 3 728 writes, torn, with and
+  without the writes not yet synced, loses nothing vouched for
+  (`tests/test_rec.c`, `REC_CUT_ALL=1`).
+- **Rebuild**: while it runs, only chunks already read back are used or
+  reused, and the table is not saved (a table saved half-way would hide
+  the rest). A lost event log is refilled from the chunks' vgix.
+- **Ring**: the oldest by start time; a stream that finds no chunk while
+  the pool is still being made or rebuilt waits, it is not "disk full".
+  A camera's size quota counts its chunks at their full size.
+- **Pre-allocation**: `posix_fallocate`; where it is not supported the
+  file is filled with zeros 1 MiB at a time, resting three times as long
+  as each write took (the core is POSIX: no I/O priorities).
+- **Flush default**: from the mount (`nfs`, `cifs`, `smb3`... a share: 2 s)
+  and the device's `/sys/class/block/*/queue/rotational` (`mmcblk*` and 0:
+  flash, 5 s; else 2 s).
+- **Queue**: 10 s of what came in over the last 10 s, at least 4 and at
+  most 24 MiB.
+- **Times**: sample times are the camera's, anchored to the wall clock
+  and anchored again when they are more than 2 s off it. Arrival-time
+  timestamps (NETIP) jitter with the network; without B-frames they are
+  smoothed (each frame an average interval after the one before,
+  corrected towards the camera's time by at most an eighth of an
+  interval), so players see even frame durations. A chunk starts on a
+  multiple of 100 us (9 ticks), so times convert exactly.
+- **Events**: from the camera event hub (`cam_events.h`) as they begin
+  and end: a record at the start, its duration at the stop; events going
+  on when a pool is mounted begin then. The log holds 256 events per
+  chunk (4 096 .. 4 M) and is searched by time with a binary search, not
+  a per-day table: records go in at their start, so the log is in time
+  order.
+- **Owner lock**: the recorder's id is the MAC address of its first
+  network interface by name (else its host name). Another recorder's
+  pool is mounted read-only; `POST /api/v1/record/takeover` makes it ours.
+- **API** (docs/api.md, "Recordings"): times are Unix seconds with
+  decimals. `fragments` re-bases to `base` (default: local midnight of
+  `from`) and says where to go on (`X-Vigil-Next`, then `cont=1`).
+  `export.mp4` knows its size ahead (`Content-Length`); `gaps=split`
+  answers a list of one URL per span; `gaps=remove` has no subtitle track
+  with the real times yet; a change of format ends the file there
+  (`X-Vigil-Format-Change`); `layout=faststart` is phase 2 (501).
+  `DELETE recordings` is there already.
+- **Status**: a channel is "recording" while data goes into an open chunk
+  (written within the last 3 s), not merely while one is open.
+- **Old recordings**: the `CAMn_*` files are left alone; showing them in
+  Storage and deleting them there is for phase 2.

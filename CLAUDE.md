@@ -56,7 +56,8 @@ comments; options override the file.
 ## Layout
 
 - `src/core/` — channel threads, the access-unit normalizer (`au_norm`), SPS
-  parsing, the segment writer, events, small net/md5 helpers, the
+  parsing, the recording store (`rec_store`, `rec_pool`, `rec_read`, `mp4`:
+  `docs/recording.md`), the segment writer (local inputs), events, small net/md5 helpers, the
   passwords' cipher (`secret.c`, AES-GCM through libmbedcrypto), and the
   configuration: `schema.c` (generic engine), `config_schema.c` (every
   setting as a table row), `schema_yaml.c` (the file's YAML, via libyaml,
