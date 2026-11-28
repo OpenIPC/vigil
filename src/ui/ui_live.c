@@ -29,7 +29,8 @@
  * Keyboard: the grid is an lv_gridnav container, so the arrows select a
  * tile (a ring inside its edge, ui_st_focus_in) and Enter shows it full
  * screen; Tab reaches the navigation bar, which comes up while it has the
- * focus. The shortcuts (1, 4, pages, menu) are in ui_live_key.
+ * focus. The shortcuts (1, 4, pages, menu, S or F12 a snapshot of the
+ * selected tile) are in ui_live_key; a snapshot's result is a toast.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -782,7 +783,72 @@ static void osd_cb(lv_observer_t *o, lv_subject_t *s)
 /* ---- navigation bar ------------------------------------------------------------------------ */
 
 enum { ACT_MENU = 1, ACT_PREV, ACT_NEXT, ACT_PIN, ACT_FULL, ACT_CONTEXT, ACT_ESC, ACT_CHANNELS, ACT_RECORD,
-       ACT_DISPLAY, ACT_EXIT, ACT_LAYOUT = 100 };
+       ACT_DISPLAY, ACT_EXIT, ACT_SNAPSHOT, ACT_LAYOUT = 100 };
+
+/* ---- snapshots ----------------------------------------------------------------------------- */
+
+/* The requests under way: their result becomes a toast. */
+#define SNAP_PENDING 4
+#define SNAP_POLL    200            /* ms */
+#define SNAP_GIVE_UP 30000          /* ms: the worker answers long before */
+static struct {
+    int      id, ch;
+    uint32_t since;
+} g_snap[SNAP_PENDING];
+static lv_timer_t *g_snap_timer;
+
+static void snap_poll_cb(lv_timer_t *t)
+{
+    int left = 0;
+    for (int i = 0; i < SNAP_PENDING; ++i) {
+        if (!g_snap[i].id) continue;
+        char msg[200], who[40];
+        int rc = ui_model()->snapshot_result(g_snap[i].id, msg, sizeof msg);
+        if (rc == 0 && lv_tick_elaps(g_snap[i].since) < SNAP_GIVE_UP) {
+            ++left;
+            continue;
+        }
+        ui_chan_title(g_snap[i].ch, who, sizeof who);
+        if (rc > 0) ui_toast(UI_TOAST_OK, "%s: snapshot saved (%s)", who, msg);
+        else ui_toast(UI_TOAST_BAD, "%s: no snapshot: %s", who, rc == 0 ? "no answer" : msg);
+        g_snap[i].id = 0;
+    }
+    if (!left) {
+        lv_timer_delete(t);
+        g_snap_timer = NULL;
+    }
+}
+
+static void snapshot_now(void *arg)
+{
+    int ch = (int)(intptr_t)arg;
+    char who[40];
+    ui_chan_title(ch, who, sizeof who);
+    if (ch < 0 || ch >= n_channels() || !ui_channel(ch)->configured) {
+        ui_toast(UI_TOAST_WARN, "No camera to take a snapshot of");
+        return;
+    }
+    int slot = -1;
+    for (int i = 0; i < SNAP_PENDING && slot < 0; ++i)
+        if (!g_snap[i].id) slot = i;
+    int id = slot >= 0 ? ui_model()->snapshot(ch) : -1;
+    if (id < 0) {
+        ui_toast(UI_TOAST_WARN, "%s: snapshots are busy; try again", who);
+        return;
+    }
+    g_snap[slot].id = id;
+    g_snap[slot].ch = ch;
+    g_snap[slot].since = lv_tick_get();
+    if (!g_snap_timer) g_snap_timer = lv_timer_create(snap_poll_cb, SNAP_POLL, NULL);
+}
+
+/* The channel a snapshot is of: the one full screen, else the selected tile. */
+static int snapshot_channel(int ch)
+{
+    if (ch >= 0) return ch;
+    if (L.n_cells == 1) return L.cells[0].ch;
+    return L.sel_ch;
+}
 
 
 static void nav_show(int show)
@@ -817,6 +883,9 @@ static void do_action(int act, int ch)
         break;
     case ACT_EXIT:
         ui_exit_open();
+        break;
+    case ACT_SNAPSHOT:
+        if (ui_model()->snapshot) ui_with_perm(UI_PERM_LIVE, snapshot_now, (void *)(intptr_t)snapshot_channel(ch));
         break;
     case ACT_PREV:
     case ACT_NEXT:
@@ -1069,13 +1138,22 @@ static void split_open(lv_obj_t *item)
     ui_popup_sub_place(cur);
 }
 
-/* Main menu, Channels, Playback, Record, PTZ, Display, Split, Exit:
- * nothing else (full screen is a double click or Enter, pages the edge arrows or
+/* Main menu, Snapshot (of the tile it opened on), Channels, Playback,
+ * Record, PTZ, Display, Split, Exit: nothing else (full screen is a double click or Enter, pages the edge arrows or
  * PgUp/PgDn, pinning the bar its own button). */
 void ui_live_context_menu(const lv_point_t *at)
 {
+    /* The tile it was opened on (the keyboard's: its middle). */
+    int at_ch = -1;
+    for (int i = 0; i < L.n_cells; ++i) {
+        lv_area_t a;
+        lv_obj_get_coords(L.cells[i].obj, &a);
+        if (at->x >= a.x1 && at->x <= a.x2 && at->y >= a.y1 && at->y <= a.y2) at_ch = L.cells[i].ch;
+    }
     lv_obj_t *panel = ui_popup_open(at, 260);
     menu_item(panel, LV_SYMBOL_LIST, "Main menu", ACT_MENU, -1);
+    if (ui_model()->snapshot && at_ch >= 0 && at_ch < n_channels() && ui_channel(at_ch)->configured)
+        menu_item(panel, LV_SYMBOL_IMAGE, "Snapshot", ACT_SNAPSHOT, at_ch);
     if (section_of("cameras") >= 0) menu_item(panel, LV_SYMBOL_VIDEO, "Channels", ACT_CHANNELS, -1);
     menu_item_later(panel, LV_SYMBOL_PLAY, "Playback");
     if (section_of("record") >= 0) menu_item(panel, LV_SYMBOL_SAVE, "Record", ACT_RECORD, -1);
@@ -1134,6 +1212,7 @@ int ui_live_key(uint32_t key, unsigned mods)
     case UI_KEY_PGUP: case '[': act = ACT_PREV; break;
     case UI_KEY_PGDN: case ']': act = ACT_NEXT; break;
     case 'm': case 'M': case UI_KEY_F(2): act = ACT_MENU; break;
+    case 's': case 'S': case UI_KEY_F(12): act = ACT_SNAPSHOT; break;
     case UI_KEY_MENU: act = ACT_CONTEXT; break;
     case LV_KEY_ESC: act = ACT_ESC; break;
     default: return 0;
