@@ -40,6 +40,7 @@
 
 #include "aspect.h"
 #include "au_norm.h"
+#include "cam_events.h"
 #include "channel.h"
 #include "events.h"
 #include "gop_cache.h"
@@ -47,6 +48,7 @@
 #include "hal_decoder.h"
 #include "hal_display.h"
 #include "log.h"
+#include "onvif_events.h"
 #include "rec_place.h"
 #include "rec_sched.h"
 #include "rec_store.h"
@@ -120,6 +122,11 @@ struct channel {
      * inputs, which keep their segment files (seg_writer.h) for now. */
     int             store;
     char            title[32];      /* the camera's name for the channel (under lock) */
+    /* Where its events come from (channels_config_t.events, onvif_urls):
+     * the main session's NETIP connection (its source's `events`). */
+    ch_events_mode_t ev_mode;
+    char            onvif_url[160];
+    onvif_ev_t     *onvif;          /* the ONVIF events' watcher; NULL none */
 
     sess_t          s[S_N];
     seg_writer_t    seg;            /* the main session's */
@@ -169,11 +176,10 @@ static channel_t       g_ch[CHANNEL_MAX];
 static pthread_mutex_t g_locks[CHANNEL_MAX], g_dec_locks[CHANNEL_MAX];
 static pthread_once_t  g_once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t g_n_lock = PTHREAD_MUTEX_INITIALIZER;
-/* Per slot, under g_locks: switched off (with its name), and when each
- * event type was last reported. Kept whether a channel runs or not. */
+/* Per slot, under g_locks: switched off (with its name). Kept whether a
+ * channel runs or not, as its events are (cam_events.c). */
 static char            g_disabled[CHANNEL_MAX];
 static char            g_off_name[CHANNEL_MAX][32];
-static time_t          g_ev_last[CHANNEL_MAX][CH_EV_TYPES];
 static int             g_n;         /* tiles in use */
 static int             g_can_decode;
 static int             g_running;   /* past the first apply: changes are news */
@@ -199,34 +205,6 @@ const char *ch_state_name(ch_state_t s)
     static const char *const names[] = { "empty", "disabled", "connecting", "live", "no_video",
                                          "offline", "auth", "codec", "error" };
     return (unsigned)s < sizeof names / sizeof names[0] ? names[s] : "error";
-}
-
-const char *ch_event_name(int bit)
-{
-    static const char *const names[CH_EV_TYPES] = { "motion", "human", "face", "vehicle" };
-    return bit >= 0 && bit < CH_EV_TYPES ? names[bit] : NULL;
-}
-
-unsigned channel_events_held(const time_t last[CH_EV_TYPES], time_t now)
-{
-    unsigned bits = 0;
-    for (int b = 0; b < CH_EV_TYPES; ++b)
-        if (last[b] && now >= last[b] && now - last[b] < CHANNEL_EVENT_HOLD) bits |= 1u << b;
-    return bits;
-}
-
-void channels_report_events(int idx, unsigned bits)
-{
-    if (idx < 0 || idx >= CHANNEL_MAX) return;
-    pthread_once(&g_once, locks_init);
-    time_t now = time(NULL);
-    pthread_mutex_lock(&g_locks[idx]);
-    for (int b = 0; b < CH_EV_TYPES; ++b)
-        if (bits & (1u << b)) g_ev_last[idx][b] = now;
-    pthread_mutex_unlock(&g_locks[idx]);
-    /* Into the pool's event log: CH_EV_* bit b is REC_EV_* type b + 1. */
-    for (int b = 0; b < CH_EV_TYPES; ++b)
-        if (bits & (1u << b)) rec_store_event(idx, b + 1);
 }
 
 /* What a failed source means for the tile. */
@@ -294,7 +272,7 @@ void channels_status(int idx, channel_status_t *st)
         snprintf(st->sub_state, sizeof st->sub_state, "%s", sub_up ? sub->state : "");
         snprintf(st->title, sizeof st->title, "%s", c->title);
         if (!st->name[0]) snprintf(st->name, sizeof st->name, "%s", c->title);
-        st->events = channel_events_held(g_ev_last[idx], time(NULL));
+        st->events = cam_events_held(idx, time(NULL));
         st->decoding = holder != VIEW_NONE;
         st->no_decoder = !st->decoding && view != VIEW_NONE && atomic_load(&c->dec_told);
         st->codec = v->codec ? v->codec : c->s[S_MAIN].codec;
@@ -693,10 +671,7 @@ static const char *rec_blocked(channel_t *c, time_t now)
     char mode = rec_sched_mode(c->idx, now);
     if (mode == REC_SCHED_OFF) return "schedule off";
     if (mode == REC_SCHED_MOTION) {
-        pthread_mutex_lock(c->lock);
-        unsigned ev = channel_events_held(g_ev_last[c->idx], now);
-        pthread_mutex_unlock(c->lock);
-        if (!(ev & CH_EV_MOTION)) return "waiting for motion";
+        if (!(cam_events_held(c->idx, now) & CH_EV_DETECTIONS)) return "waiting for motion";
     }
     return "";
 }
@@ -1126,12 +1101,18 @@ static int slot_matches(const channel_t *c, const channels_config_t *cfg, int i)
 static void slot_stop(channel_t *c)
 {
     for (int i = 0; i < S_N; ++i) c->s[i].stop = 1;
+    onvif_ev_signal(c->onvif);
 }
 
 /* Tear down a channel whose sessions have been told to stop. */
 static void slot_teardown(channel_t *c)
 {
     for (int i = 0; i < S_N; ++i) sess_reap(c, i);
+    onvif_ev_join(c->onvif);
+    c->onvif = NULL;
+    /* The camera is gone: nothing it said goes on. */
+    cam_events_clear(c->idx, CAM_EV_SRC_NETIP);
+    cam_events_clear(c->idx, CAM_EV_SRC_ONVIF);
     pthread_mutex_lock(c->lock);
     c->active = 0;
     pthread_mutex_unlock(c->lock);
@@ -1143,6 +1124,36 @@ static void slot_teardown(channel_t *c)
     rec_close(c);
     pthread_mutex_unlock(c->lock);
     if (c->store) rec_store_break(c->idx, 0);
+}
+
+/* ---- events ------------------------------------------------------------------ */
+
+static int is_netip(const char *url) { return !strncmp(url, "netip://", 8); }
+
+/* Where channel c's camera events come from, from the thread that calls
+ * channels_apply: its NETIP connection's alarms (auto or netip, a NETIP
+ * camera), or ONVIF events (onvif; auto, a camera that is not NETIP's),
+ * or none. A change applies at once, the streams untouched. */
+static void events_apply(channel_t *c, ch_events_mode_t mode, const char *onvif_url)
+{
+    if (!onvif_url) onvif_url = "";
+    int changed = c->ev_mode != mode || strcmp(c->onvif_url, onvif_url) != 0;
+    c->ev_mode = mode;
+    snprintf(c->onvif_url, sizeof c->onvif_url, "%s", onvif_url);
+    int netip = is_netip(c->url) && (mode == CH_EVENTS_AUTO || mode == CH_EVENTS_NETIP);
+    int onvif = !c->self_displayed && strstr(c->url, "://") &&
+                (mode == CH_EVENTS_ONVIF || (mode == CH_EVENTS_AUTO && !is_netip(c->url)));
+    if (c->s[S_MAIN].src) c->s[S_MAIN].src->events = netip;
+    if (c->onvif && (changed || !onvif)) {
+        onvif_ev_join(c->onvif);
+        c->onvif = NULL;
+    }
+    if (onvif && !c->onvif) {
+        c->onvif = onvif_ev_start(c->idx, c->url, onvif_url, mode == CH_EVENTS_AUTO);
+        if (!c->onvif) vg_log("CAM%d: cannot watch its ONVIF events", c->idx + 1);
+    }
+    if (changed && mode == CH_EVENTS_NETIP && !is_netip(c->url))
+        vg_log("CAM%d: events netip: not a netip:// camera, no events", c->idx + 1);
 }
 
 static int slot_start(int i, const channels_config_t *cfg)
@@ -1198,6 +1209,7 @@ static int slot_start(int i, const channels_config_t *cfg)
         slot_teardown(c);
         return -1;
     }
+    events_apply(c, cfg->events[i], cfg->onvif_urls[i]);
     /* Both streams for as long as the channel runs: the sub-stream's
      * picture is there the moment a tile wants it. */
     if (c->sub_url[0] && sess_start(c, S_SUB, c->sub_url) < 0)
@@ -1238,6 +1250,7 @@ int channels_apply(const channels_config_t *cfg)
                 pthread_mutex_lock(c->lock);
                 snprintf(c->st.name, sizeof c->st.name, "%s", name);
                 pthread_mutex_unlock(c->lock);
+                events_apply(c, cfg->events[i], cfg->onvif_urls[i]);
                 /* A new sub-stream: only that session starts again. */
                 char sub[sizeof c->sub_url];
                 if (!c->self_displayed) sub_url_of(cfg, i, sub, sizeof sub);

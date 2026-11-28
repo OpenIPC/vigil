@@ -31,6 +31,7 @@
 #include "api.h"
 #include "cJSON.h"
 #include "netip_srv.h"
+#include "cam_events.h"
 #include "channel.h"
 #include "config.h"
 #include "events.h"
@@ -45,6 +46,7 @@
 #include "source.h"
 #include "onvif.h"
 #include "rec_store.h"
+#include "onvif_events.h"
 #include "rtsp_server.h"
 #include "secret.h"
 #include "web.h"
@@ -402,6 +404,7 @@ static void apply_config(void)
     rec_sched_set(weeks, config_to_schedule(&c, weeks));
     apply_qos(&c);
     apply_store(&c);
+    onvif_ev_set_self_port(c.onvif_server.enabled ? c.onvif_server.port : 0);
     int failed = channels_apply(&cc);
     apply_output(c.display.output);
     apply_output_adj(&c.display, 0);
@@ -508,6 +511,7 @@ int main(int argc, char **argv)
             config_camera_t *cam = &cfg.cameras[i];
             memset(cam, 0, sizeof *cam);
             snprintf(cam->url, sizeof cam->url, "%s", urls[i]);
+            snprintf(cam->events, sizeof cam->events, "auto");
             cam->enabled = 1;
         }
     }
@@ -572,6 +576,8 @@ int main(int argc, char **argv)
     rec_sched_set(weeks, config_to_schedule(&running, weeks));
     apply_qos(&running);
     apply_store(&running);
+    onvif_ev_set_self_port(running.onvif_server.enabled ? running.onvif_server.port : 0);
+    if (cam_events_start() < 0) vg_log("camera events: cannot start the ticker; a pulse's stop comes late");
     if (channels_start(&cc, caps->display ? tiles : NULL) == 0) {
         config_mark_applied(g_applied_gen);
         if (mgmt_start() < 0) vg_log("mgmt: cannot start its threads; the management pages will not act");
@@ -592,6 +598,7 @@ int main(int argc, char **argv)
         channels_stop();
     }
     rec_store_shutdown();               /* the open chunks closed, the index saved */
+    cam_events_stop();
     hal_shutdown();
     vg_log("stopped");
     /* Reboot or shutdown asked for (UI, API): after the clean stop. */

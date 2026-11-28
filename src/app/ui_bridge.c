@@ -53,7 +53,13 @@ _Static_assert((int)UI_CH_EMPTY == (int)CH_EMPTY && (int)UI_CH_DISABLED == (int)
                    (int)UI_CH_ERROR == (int)CH_ERROR,
                "ui_ch_status_t follows ch_state_t");
 _Static_assert((unsigned)UI_EV_MOTION == (unsigned)CH_EV_MOTION && (unsigned)UI_EV_HUMAN == (unsigned)CH_EV_HUMAN &&
-                   (unsigned)UI_EV_FACE == (unsigned)CH_EV_FACE && (unsigned)UI_EV_VEHICLE == (unsigned)CH_EV_VEHICLE,
+                   (unsigned)UI_EV_FACE == (unsigned)CH_EV_FACE && (unsigned)UI_EV_VEHICLE == (unsigned)CH_EV_VEHICLE &&
+                   (unsigned)UI_EV_LINE == (unsigned)CH_EV_LINE &&
+                   (unsigned)UI_EV_INTRUSION == (unsigned)CH_EV_INTRUSION &&
+                   (unsigned)UI_EV_VIDEO_LOSS == (unsigned)CH_EV_VIDEO_LOSS &&
+                   (unsigned)UI_EV_TAMPER == (unsigned)CH_EV_TAMPER &&
+                   (unsigned)UI_EV_ALARM_IN == (unsigned)CH_EV_ALARM_IN &&
+                   (unsigned)UI_EV_OTHER == (unsigned)CH_EV_OTHER && (int)UI_EV_N == (int)CH_EV_TYPES,
                "UI_EV_* are CH_EV_*");
 
 static void chan_status(int idx, ui_chan_t *st)
@@ -87,7 +93,11 @@ static void chan_status(int idx, ui_chan_t *st)
 static int next_event(ui_event_t *ev)
 {
     event_t e;
-    if (!events_next(&g_ev_cursor, &e)) return 0;
+    /* A camera's events are on its tile (icons, the alarm frame), not
+     * news for the live view's toasts and flashes. */
+    do {
+        if (!events_next(&g_ev_cursor, &e)) return 0;
+    } while (e.cam_type);
     ev->ch = e.ch;
     ev->time = e.time;
     snprintf(ev->text, sizeof ev->text, "%s", e.text);

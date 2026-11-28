@@ -39,8 +39,14 @@ typedef enum {
     UI_CH_ERROR,                /* `state` has the text */
 } ui_ch_status_t;
 
-/* Events a camera reports now (each held a few seconds), as bits. */
-enum { UI_EV_MOTION = 1u << 0, UI_EV_HUMAN = 1u << 1, UI_EV_FACE = 1u << 2, UI_EV_VEHICLE = 1u << 3 };
+/* Events a camera reports now (while they last, or a few seconds after a
+ * moment's report), as bits; UI_EV_N of them. */
+enum {
+    UI_EV_MOTION = 1u << 0, UI_EV_HUMAN = 1u << 1, UI_EV_FACE = 1u << 2, UI_EV_VEHICLE = 1u << 3,
+    UI_EV_LINE = 1u << 4, UI_EV_INTRUSION = 1u << 5, UI_EV_VIDEO_LOSS = 1u << 6, UI_EV_TAMPER = 1u << 7,
+    UI_EV_ALARM_IN = 1u << 8, UI_EV_OTHER = 1u << 9,
+    UI_EV_N = 10,
+};
 
 typedef struct {
     int      configured;        /* a camera is set for this channel */

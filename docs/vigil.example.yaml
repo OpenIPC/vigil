@@ -17,19 +17,33 @@ version: 1
 #   sub_url: Sub-stream URL. Used in multi-window views; the main URL is used
 #     full screen and for recording. Empty: derived for NETIP, otherwise the
 #     main stream everywhere.
+#   events: Camera events. Where its alarms (motion, people, vehicles, line
+#     crossing, video loss, tamper, alarm input) come from. auto: NETIP alarms
+#     for a netip:// camera, else ONVIF events when it has them; netip; onvif
+#     (a NETIP camera's too); off. One of: auto, netip, onvif, off. Default
+#     auto.
+#   onvif_url: ONVIF address. Its ONVIF device service for the events,
+#     http://host[:port]/onvif/device_service; the URL's user and password log
+#     in. Empty: found from its address.
 cameras:
   - url: "rtsp://admin@192.168.1.10/stream=0"
     name: Gate
     enabled: true
     sub_url: ""
+    events: auto
+    onvif_url: ""
   - url: "netip://admin:@192.168.1.11:34567/?ch=0&stream=main"
     name: Yard
     enabled: true
     sub_url: ""
+    events: auto
+    onvif_url: ""
   - url: "rtsp://192.168.1.12:554/live"
     name: Garage
     enabled: false
     sub_url: ""
+    events: auto
+    onvif_url: ""
 
 # Recording
 record:
@@ -283,8 +297,9 @@ display:
   # REC icon: REC in the status icons' corner of each tile while its channel
   # records. Default true.
   rec_icon: true
-  # Alarm icons: The events the camera reports (motion, human, face, vehicle)
-  # as icons in the status icons' corner, while they last. Default true.
+  # Alarm icons: The events the camera reports (motion, people, vehicles, line
+  # crossing, video loss, tamper, alarm input, ...) as icons in the status
+  # icons' corner, while they last. Default true.
   alarm_icons: true
   # Lines between tiles: A thin line around each tile of the live view. Off:
   # the pictures touch. Default true.

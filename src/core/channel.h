@@ -28,6 +28,13 @@
 
 #define CHANNEL_MAX  16
 
+/* Where a camera's events come from (cameras[].events): its NETIP
+ * connection's alarms for a netip:// camera, else ONVIF events
+ * (CH_EVENTS_AUTO); one of them; none. */
+typedef enum { CH_EVENTS_AUTO = 0, CH_EVENTS_NETIP, CH_EVENTS_ONVIF, CH_EVENTS_OFF } ch_events_mode_t;
+/* "auto", "netip", "onvif", "off" -> mode; -1 if unknown. */
+int ch_events_mode(const char *s);
+
 typedef struct {
     const char *urls[CHANNEL_MAX];  /* source URLs, in tile order; NULL: an empty tile */
     const char *names[CHANNEL_MAX]; /* optional display names (NULL or "") */
@@ -45,6 +52,11 @@ typedef struct {
     int         stop_when_full;     /* record.on_full "stop": nothing deleted for space */
     uint64_t    quota_bytes[CHANNEL_MAX];   /* per camera, 0: none (seg_set_quota) */
     time_t      quota_age[CHANNEL_MAX];     /* seconds, 0: none */
+    /* Where each camera's events come from, and its ONVIF device service
+     * (NULL or "": found from the camera's address). Changed without a
+     * restart of the camera's streams. */
+    ch_events_mode_t events[CHANNEL_MAX];
+    const char *onvif_urls[CHANNEL_MAX];
 } channels_config_t;
 
 /* What a channel is doing, for the tile and the API (ch_state_name). */
@@ -64,25 +76,40 @@ typedef enum {
  * "auth", "codec", "error" */
 const char *ch_state_name(ch_state_t s);
 
-/* Events a camera reports, as bits of channel_status_t.events. Each stays
- * set for CHANNEL_EVENT_HOLD seconds after the camera last reported it.
- * Room for more (line crossing, intrusion) after these. */
+/* Events a camera reports, as bits of channel_status_t.events. A type
+ * is held while the camera says it goes on (a start without its stop
+ * yet) and for CHANNEL_EVENT_HOLD seconds after a momentary report (a
+ * line crossed, POST /api/v1/channels/<n>/events): cam_events.h. */
 enum {
-    CH_EV_MOTION  = 1u << 0,
-    CH_EV_HUMAN   = 1u << 1,
-    CH_EV_FACE    = 1u << 2,
-    CH_EV_VEHICLE = 1u << 3,
-    CH_EV_TYPES   = 4,
+    CH_EV_MOTION     = 1u << 0,
+    CH_EV_HUMAN      = 1u << 1,
+    CH_EV_FACE       = 1u << 2,
+    CH_EV_VEHICLE    = 1u << 3,
+    CH_EV_LINE       = 1u << 4,     /* a line (tripwire) crossed */
+    CH_EV_INTRUSION  = 1u << 5,     /* something inside a watched field */
+    CH_EV_VIDEO_LOSS = 1u << 6,     /* the camera (a DVR's input) lost its picture */
+    CH_EV_TAMPER     = 1u << 7,     /* covered, turned away, out of focus */
+    CH_EV_ALARM_IN   = 1u << 8,     /* the camera's alarm input (a dry contact) */
+    CH_EV_OTHER      = 1u << 9,     /* any other alarm the camera raises */
+    CH_EV_TYPES      = 10,
 };
+/* What a detection is: motion, or something the camera recognised in the
+ * picture (rec_sched's motion slots record on any of them). */
+#define CH_EV_DETECTIONS (CH_EV_MOTION | CH_EV_HUMAN | CH_EV_FACE | CH_EV_VEHICLE | CH_EV_LINE | CH_EV_INTRUSION)
 #define CHANNEL_EVENT_HOLD 5
-/* "motion", "human", "face", "vehicle"; NULL past the last. */
+/* "motion", "human", "face", "vehicle", "line_crossing", "intrusion",
+ * "video_loss", "tamper", "alarm_input", "other" (the API's names); NULL
+ * past the last. */
 const char *ch_event_name(int bit);
+/* The bit of a name; -1 if there is none. */
+int ch_event_bit(const char *name);
 
-/* A camera of channel `idx` reports events `bits` now (no source does
- * yet: NETIP alarms and ONVIF events are to come). Any thread. */
+/* A camera of channel `idx` reports events `bits` now, each held
+ * CHANNEL_EVENT_HOLD s (cam_event_report with CAM_EV_PULSE from the
+ * API). Any thread. */
 void channels_report_events(int idx, unsigned bits);
 /* The bits still held at `now`, given when each type was last reported
- * (0: never). */
+ * (0: never), CHANNEL_EVENT_HOLD s each. */
 unsigned channel_events_held(const time_t last[CH_EV_TYPES], time_t now);
 
 typedef struct {

@@ -11,7 +11,7 @@ target_link_libraries(test_discovery PRIVATE vigil_core)
 add_test(NAME discovery COMMAND test_discovery ${CMAKE_CURRENT_SOURCE_DIR}/data)
 add_executable(test_onvif test_onvif.c)
 target_link_libraries(test_onvif PRIVATE vigil_core)
-add_test(NAME onvif COMMAND test_onvif)
+add_test(NAME onvif COMMAND test_onvif ${CMAKE_CURRENT_SOURCE_DIR}/data)
 
 # src/sys on a fake root: fake /etc, /sys, /proc and /dev files, and a
 # recorder in place of ifup, mkfs, mount, date, ntpd, hostname, curl.
@@ -89,7 +89,7 @@ if(Python3_FOUND)
   add_test(NAME netip_wide
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_netip.sh $<TARGET_FILE:vigild>
                    ${CMAKE_CURRENT_SOURCE_DIR}/data/majestic_1080p.h265 wide)
-  foreach(case title notitle)
+  foreach(case title notitle alarms noalarms)
     add_test(NAME netip_${case}
              COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_netip.sh $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264 ${case})
@@ -141,7 +141,12 @@ if(Python3_FOUND)
     add_test(NAME rec_e2e
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/rec_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data)
-    set_tests_properties(rec_e2e PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 400)
+    set_tests_properties(rec_e2e PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 400 RUN_SERIAL TRUE)
+    # The cameras' events: NETIP alarms and ONVIF events from fake cameras,
+    # held, ended, through the status and the WebSocket.
+    add_test(NAME events_e2e
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/events_test.py $<TARGET_FILE:vigild>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
     add_test(NAME api_e2e
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/api_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)

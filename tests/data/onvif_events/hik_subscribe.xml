@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<env:Envelope xmlns:env="http://www.w3.org/2003/05/soap-envelope" xmlns:wsa="http://www.w3.org/2005/08/addressing" xmlns:tev="http://www.onvif.org/ver10/events/wsdl" xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2">
+<env:Body><tev:CreatePullPointSubscriptionResponse><tev:SubscriptionReference><wsa:Address>http://192.168.1.64/onvif/Events/PullSubManager_2026-11-28T10:00:00Z_0</wsa:Address></tev:SubscriptionReference><wsnt:CurrentTime>2026-11-28T10:00:00Z</wsnt:CurrentTime><wsnt:TerminationTime>2026-11-28T10:02:00Z</wsnt:TerminationTime></tev:CreatePullPointSubscriptionResponse></env:Body></env:Envelope>

@@ -7,7 +7,8 @@ of Profile S a client needs for that: the device service, media (ver10)
 and media2 (ver20) with a profile per camera and stream, and
 WS-Discovery. Events, PTZ, imaging, recordings (Profile G) and changing
 settings over ONVIF are not there; settings are changed through
-[the API](api.md) and the on-screen UI.
+[the API](api.md) and the on-screen UI. (As a *client*, vigild does take
+its cameras' ONVIF events: [Camera events](api.md#camera-events).)
 
 ```yaml
 onvif_server:

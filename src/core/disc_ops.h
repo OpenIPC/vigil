@@ -61,6 +61,30 @@ typedef struct {
 int disc_http_post(const char *host, int port, const char *path, const char *ctype, const char *auth,
                    const char *body, int timeout_ms, disc_http_t *r, char *err, size_t errcap);
 
+/* ---- an ONVIF client (also for onvif_events.c) ----------------------------- */
+
+typedef struct {
+    char host[64];
+    int  port;
+    char path[128];                 /* the service's path */
+    const char *user, *pass;        /* not copied: they must outlive the calls */
+    long clock_offset;              /* device UTC - ours, s (disc_onvif_clock) */
+    const volatile int *stop;       /* set: connects and waits give up; may be NULL */
+} disc_onvif_t;
+
+/* For the service at `xaddr` (http://host[:port]/path), reached at `ip`
+ * when that is given and the address names another host. 0, or -1. */
+int disc_onvif_init(disc_onvif_t *o, const char *xaddr, const char *ip, const char *user, const char *pass);
+/* GetSystemDateAndTime: the offset WS-Security's Created needs. */
+void disc_onvif_clock(disc_onvif_t *o);
+/* One SOAP 1.2 call with WS-Security (and HTTP Digest when asked for):
+ * `hdr_xml` (may be NULL) goes into the Header before the Security
+ * element, `body_xml` into the Body; the envelope declares the prefixes
+ * s, tds, trt, tev, wsnt, wsa (2005/08) and tt. `path` NULL: o->path.
+ * DISC_OK with r->body (free it), else the failure with `err`. */
+disc_rc_t disc_onvif_call(disc_onvif_t *o, const char *path, const char *hdr_xml, const char *body_xml,
+                          int timeout_ms, disc_http_t *r, const char *what, char *err, size_t errcap);
+
 /* ONVIF: the main and sub-stream RTSP URLs of video channel `channel`
  * (0-based: media profiles 2 * channel and the one after), with user:pass
  * put into them. `sub` may come back "". */

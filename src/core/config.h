@@ -51,6 +51,8 @@ typedef struct {
     char sub_url[512];              /* "": derived, or none (channels_config_t) */
     char name[32];
     int  enabled;
+    char events[8];                 /* "auto" | "netip" | "onvif" | "off" (ch_events_mode) */
+    char onvif_url[160];            /* "": found from the camera's address */
 } config_camera_t;
 
 typedef struct {
@@ -158,7 +160,7 @@ typedef struct {
     int  hdmi_mute;
     /* What the tiles show besides the video (booleans). */
     int  rec_icon;                  /* REC while the channel records */
-    int  alarm_icons;               /* the camera's events (motion, human, face, vehicle) */
+    int  alarm_icons;               /* the camera's events (CH_EV_*: motion, human, ...) */
     int  tile_dividers;             /* a line between the tiles */
     int  alert_frame;               /* a frame around a tile while its camera reports an event */
 } config_display_t;
