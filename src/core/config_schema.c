@@ -234,6 +234,23 @@ static int check_url_path(const char *v, char *msg, size_t cap)
     return check_word(v, msg, cap);
 }
 
+/* ONVIF events need a device service the client can reach without TLS;
+ * the camera's user and password come from its URL, not this one. */
+static int check_onvif_url(const char *v, char *msg, size_t cap)
+{
+    if (!*v) return 0;
+    if (strncmp(v, "http://", 7)) {
+        snprintf(msg, cap, "must start with http://");
+        return -1;
+    }
+    if (strchr(v + 7, '@')) {
+        snprintf(msg, cap, "no user or password here: the camera URL's are used");
+        return -1;
+    }
+    return check_word(v, msg, cap);
+}
+
+static const char *const events_modes[] = { "auto", "netip", "onvif", "off", NULL };
 static const char *const on_full_values[] = { "overwrite", "stop", NULL };
 static const char *const nas_types[] = { "none", "cifs", "nfs", NULL };
 static const char *const ddns_providers[] = { "dyndns", "noip", "custom", NULL };
@@ -297,6 +314,15 @@ static const schema_field_t camera_fields[] = {
       .live = 1, .check = check_sub_url, .label = "Sub-stream URL",
       .help = "Used in multi-window views; the main URL is used full screen and for recording. "
               "Empty: derived for NETIP, otherwise the main stream everywhere." },
+    { .key = "events", ENUM(config_camera_t, events, events_modes), .def_str = "auto", .live = 1,
+      .label = "Camera events",
+      .help = "Where its alarms (motion, people, vehicles, line crossing, video loss, tamper, "
+              "alarm input) come from. auto: NETIP alarms for a netip:// camera, else ONVIF events "
+              "when it has them; netip; onvif (a NETIP camera's too); off." },
+    { .key = "onvif_url", STR(config_camera_t, onvif_url), .def_str = "", .live = 1, .check = check_onvif_url,
+      .label = "ONVIF address",
+      .help = "Its ONVIF device service for the events, http://host[:port]/onvif/device_service; "
+              "the URL's user and password log in. Empty: found from its address." },
 };
 
 static const schema_field_t record_fields[] = {

@@ -40,6 +40,7 @@
 
 #include "aspect.h"
 #include "au_norm.h"
+#include "cam_events.h"
 #include "channel.h"
 #include "events.h"
 #include "gop_cache.h"
@@ -165,11 +166,10 @@ static channel_t       g_ch[CHANNEL_MAX];
 static pthread_mutex_t g_locks[CHANNEL_MAX], g_dec_locks[CHANNEL_MAX];
 static pthread_once_t  g_once = PTHREAD_ONCE_INIT;
 static pthread_mutex_t g_n_lock = PTHREAD_MUTEX_INITIALIZER;
-/* Per slot, under g_locks: switched off (with its name), and when each
- * event type was last reported. Kept whether a channel runs or not. */
+/* Per slot, under g_locks: switched off (with its name). Kept whether a
+ * channel runs or not, as its events are (cam_events.c). */
 static char            g_disabled[CHANNEL_MAX];
 static char            g_off_name[CHANNEL_MAX][32];
-static time_t          g_ev_last[CHANNEL_MAX][CH_EV_TYPES];
 static int             g_n;         /* tiles in use */
 static int             g_can_decode;
 static int             g_running;   /* past the first apply: changes are news */
@@ -195,31 +195,6 @@ const char *ch_state_name(ch_state_t s)
     static const char *const names[] = { "empty", "disabled", "connecting", "live", "no_video",
                                          "offline", "auth", "codec", "error" };
     return (unsigned)s < sizeof names / sizeof names[0] ? names[s] : "error";
-}
-
-const char *ch_event_name(int bit)
-{
-    static const char *const names[CH_EV_TYPES] = { "motion", "human", "face", "vehicle" };
-    return bit >= 0 && bit < CH_EV_TYPES ? names[bit] : NULL;
-}
-
-unsigned channel_events_held(const time_t last[CH_EV_TYPES], time_t now)
-{
-    unsigned bits = 0;
-    for (int b = 0; b < CH_EV_TYPES; ++b)
-        if (last[b] && now >= last[b] && now - last[b] < CHANNEL_EVENT_HOLD) bits |= 1u << b;
-    return bits;
-}
-
-void channels_report_events(int idx, unsigned bits)
-{
-    if (idx < 0 || idx >= CHANNEL_MAX) return;
-    pthread_once(&g_once, locks_init);
-    time_t now = time(NULL);
-    pthread_mutex_lock(&g_locks[idx]);
-    for (int b = 0; b < CH_EV_TYPES; ++b)
-        if (bits & (1u << b)) g_ev_last[idx][b] = now;
-    pthread_mutex_unlock(&g_locks[idx]);
 }
 
 /* What a failed source means for the tile. */
@@ -287,7 +262,7 @@ void channels_status(int idx, channel_status_t *st)
         snprintf(st->sub_state, sizeof st->sub_state, "%s", sub_up ? sub->state : "");
         snprintf(st->title, sizeof st->title, "%s", c->title);
         if (!st->name[0]) snprintf(st->name, sizeof st->name, "%s", c->title);
-        st->events = channel_events_held(g_ev_last[idx], time(NULL));
+        st->events = cam_events_held(idx, time(NULL));
         st->decoding = holder != VIEW_NONE;
         st->no_decoder = !st->decoding && view != VIEW_NONE && atomic_load(&c->dec_told);
         st->codec = v->codec ? v->codec : c->s[S_MAIN].codec;
@@ -669,10 +644,7 @@ static const char *rec_blocked(channel_t *c, time_t now)
     char mode = rec_sched_mode(c->idx, now);
     if (mode == REC_SCHED_OFF) return "schedule off";
     if (mode == REC_SCHED_MOTION) {
-        pthread_mutex_lock(c->lock);
-        unsigned ev = channel_events_held(g_ev_last[c->idx], now);
-        pthread_mutex_unlock(c->lock);
-        if (!(ev & CH_EV_MOTION)) return "waiting for motion";
+        if (!(cam_events_held(c->idx, now) & CH_EV_DETECTIONS)) return "waiting for motion";
     }
     return "";
 }

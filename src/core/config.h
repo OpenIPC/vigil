@@ -51,6 +51,8 @@ typedef struct {
     char sub_url[512];              /* "": derived, or none (channels_config_t) */
     char name[32];
     int  enabled;
+    char events[8];                 /* "auto" | "netip" | "onvif" | "off" (ch_events_mode) */
+    char onvif_url[160];            /* "": found from the camera's address */
 } config_camera_t;
 
 typedef struct {

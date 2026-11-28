@@ -73,6 +73,9 @@ defaults, commented.
 | `cameras[].url` | string, required | | `rtsp://…`, `netip://…` or `capture:N` (formats in [architecture.md](architecture.md#sources-camera-protocols)). Checked with the source drivers' own URL parsers. |
 | `cameras[].name` | string, ≤ 31 | `""` | Shown in the status and on the tile instead of the host. |
 | `cameras[].enabled` | boolean | `true` | A disabled camera keeps its tile (and its CAMn number), empty. |
+| `cameras[].sub_url` | string | `""` | The sub-stream for small tiles; empty: derived for NETIP, else the main stream. |
+| `cameras[].events` | `auto`, `netip`, `onvif`, `off` | `auto` | Where the camera's events come from ([Camera events](#camera-events)): `auto` NETIP alarms for a `netip://` camera, else ONVIF events if it has them. Changes without reconnecting the streams. |
+| `cameras[].onvif_url` | `http://…`, no user or password | `""` | Its ONVIF device service, for the events (the URL's user and password log in). Empty: found from its address. Set when a camera is added over ONVIF. |
 | `record.path` | absolute path, no `.` or `..` | `""` | Where streams are recorded. Empty: no recording. Used only on a disk: see [Where recordings may go](#where-recordings-may-go). |
 | `record.segment` | integer 10..3600 | 60 | Segment length in seconds. |
 | `record.keep` | integer 0..64 | 3 | Segments kept per camera; 0 keeps all (the free-space reserve still applies). 64 is what the segment writer can track. |
@@ -677,9 +680,12 @@ sub-stream; both are absent when the channel does not run): a main stream that f
 in `main` (and `rec_state` says nothing is recorded). `title` is what a
 NETIP camera calls the channel (its ChannelTitle, asked at each login),
 `""` when the camera does not say; with no `name` configured the UI shows
-it. `events` are the events the camera reports now, each held 5 s
-after the last report: `motion`, `human`, `face`, `vehicle` (no source
-reports them yet: camera alarms over NETIP and ONVIF events are to come);
+it. `events` are the events the camera reports now: `motion`, `human`,
+`face`, `vehicle`, `line_crossing`, `intrusion`, `video_loss`, `tamper`,
+`alarm_input`, `other` — from its NETIP alarms or ONVIF events
+(`cameras[].events`, [Camera events](#camera-events)) or the `POST` below;
+each is held while the camera says it goes on, and 5 s after a momentary
+report;
 `recording`: a segment is open; `rec_state` is `off` (no `record.path`);
 when recording is set up, `recording`, `ready` (no segment open yet: waiting
 for a keyframe or for the camera) or `failed` (the last write failed); when it
@@ -730,7 +736,7 @@ answering.
 | `type` | When | `data` |
 |---|---|---|
 | `status` | On connect, every second, and at once when a camera goes live, offline or changes state | as `GET /api/v1/status` |
-| `event` | As they happen | `{"seq": 42, "time": 1795700819, "camera": 2, "text": "online"}` — `camera` 0 is the system; `missed` counts events lost by a slow reader |
+| `event` | As they happen | `{"seq": 42, "time": 1795700819, "camera": 2, "text": "online"}` — `camera` 0 is the system; `missed` counts events lost by a slow reader. A camera's event also has `event` (its name, as in the status), `state` (`start` or `stop`) and, when the camera names it, `detail`: `{"seq": 43, "time": 1795700820, "camera": 1, "text": "motion start", "event": "motion", "state": "start", "detail": "VideoMotion"}` |
 | `config` | On connect, and when a configuration is saved or applied | `{"generation": 8, "applied": 7}` |
 
 Events are the same ones the TV's event strip shows: `online`, `offline`,
@@ -947,14 +953,17 @@ channels share an address).
 ### `POST /api/v1/channels/<n>/events`
 
 `{"events": ["motion", "human"]}` reports events of channel n's camera as
-if the camera had (any of `motion`, `human`, `face`, `vehicle`): for an
-alarm input vigild does not read itself (a script relaying a camera's or a
+if the camera had (any of the status's `events` names): for an alarm
+input vigild does not read itself (a script relaying a camera's or a
 sensor's alarm), and for trying the tiles' alarm icons and frame
-(`display.alarm_icons`, `display.alert_frame`). Each is held 5 s after
-its last report, like a camera's, so a source repeats it while it lasts;
-the status's `events` and the live view show it meanwhile. The answer is
-the events held now, `{"channel": 1, "events": ["motion", "human"]}`.
-`400` for an unknown event, `404` past the channels. Needs `cameras`.
+(`display.alarm_icons`, `display.alert_frame`). Without a `state` each is
+held 5 s after its last report, so a source repeats it while it lasts;
+`"state": "start"` holds it until the same events come with
+`"state": "stop"` (a camera's own NETIP or ONVIF report does not end the
+API's, nor the other way round). The status's `events`, the WebSocket's
+`event` messages and the live view show it meanwhile. The answer is the
+events held now, `{"channel": 1, "events": ["motion", "human"]}`. `400`
+for an unknown event or state, `404` past the channels. Needs `cameras`.
 
 ```sh
 while sleep 2; do

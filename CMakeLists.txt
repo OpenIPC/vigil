@@ -81,6 +81,7 @@ endif()
 # ---- core: hardware-agnostic, builds and tests on any host ------------------
 add_library(vigil_core STATIC
   src/core/aspect.c
+  src/core/cam_events.c
   src/core/au_norm.c
   src/core/channel.c
   src/core/config.c
