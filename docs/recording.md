@@ -461,3 +461,13 @@ Where the code settles what the design leaves open, or differs from it:
   (written within the last 3 s), not merely while one is open.
 - **Old recordings**: the `CAMn_*` files are left alone; showing them in
   Storage and deleting them there is for phase 2.
+- **Measured** (QEMU's `ssr621q` machine, not a board; a rough proxy):
+  four NETIP cameras at 720p 15 fps (~2.6 Mbit/s each) into an ext4 disk,
+  32 MiB chunks, a 384 MiB pool that went round in ten minutes: vigild at
+  12 % of one core (decoding included) and 8.5-9 MiB resident, nothing
+  dropped. The guest killed (a power cut) and booted again: the open
+  chunks were recovered, 0.1 to 2.1 s lost before the cut (flush 2 s), a
+  155 s export across chunks read 2 340 frames without an error. The
+  writer alone (`test_rec --bench`) wrote 16 streams of 4 Mbit/s there at
+  11 times real time, 9 % of a core at real time. On the build host the
+  calendar and a day's timeline on a 32 000-chunk table take 0.1-0.3 ms.
