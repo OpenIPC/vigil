@@ -335,6 +335,7 @@ saved over it until it is fixed or removed.
 | `/config/live` | `live` |
 | `/config/api`, `web`, `rtsp_server` | `users` |
 | `/network/…` | `network` |
+| `/system/config/…`, `/system/reset` | `system` and `users` |
 | `/system/…` | `system` |
 | `/disks…`, `/storage/…` | `storage` |
 | `/discovery…`, `/channels/…` | `cameras` |
@@ -857,6 +858,10 @@ and `GET /api/v1/jobs/7` says how it goes:
 | `GET /api/v1/system/zones` | `[{"name": "Europe/Berlin", "tz": "CET-1CEST,M3.5.0,M10.5.0/3"}, …]` |
 | `GET`/`PUT /api/v1/system/hostname` | `{"hostname"}`; also in `GET /api/v1/status`. |
 | `POST /api/v1/system/reboot`, `/system/shutdown` | `{"ok": true}`, then vigild stops as on SIGTERM (the channels close their recordings), syncs the disks and runs busybox's `reboot` or `poweroff`. Needs the `system` permission; `409` where vigild does not manage the system. The UI's Exit does the same. |
+| `POST /api/v1/system/config/export` | The configuration as one file: [below](#configuration-export-and-import). |
+| `POST /api/v1/system/config/import` | An export checked (`"dry_run": true`) or applied. |
+| `GET /api/v1/system/config/files` | Where an export can be written, and the exports found there. |
+| `POST /api/v1/system/reset` | `{"level": "vigil" \| "factory", "network": false}`: below. |
 | `GET /api/v1/disks` | `{"managed", "disks": [{"name", "parent", "partition", "size", "model", "removable", "read_only", "fs", "mount", "total", "free", "system", "state"}], "formats": ["exfat", "vfat"]}` |
 | `POST /api/v1/disks/<name>/format` | `{"fs": "exfat", "confirm": "<name>"}` → `202`. A system device, or a wrong `confirm`, is `400`. |
 | `POST /api/v1/disks/<name>/mount`, `/unmount` | `202`. |
@@ -868,6 +873,95 @@ and `GET /api/v1/jobs/7` says how it goes:
 | `GET /api/v1/storage/nas` | `{"support": {"cifs": {"ok", "why"}, "nfs": {…}}, "mount": "/mnt/nas", "mounted", "status"}` |
 | `POST /api/v1/storage/nas/test` | `202`: mount the share in force at a test directory, write and read a file, unmount. |
 | `GET /api/v1/jobs/<id>` | A job, as above. |
+
+### Configuration export and import
+
+What the file holds, what it does not and how an import checks it are in
+[management.md](management.md#configuration-export-import-factory-reset);
+its encryption in [security.md](security.md#configuration-export). Each
+needs the `system` and `users` permissions; one export, import or reset at
+a time (`409`, `"code": "busy"`).
+
+`POST /api/v1/system/config/export` — the body (a POST, so the password is
+not in a URL or a log):
+
+| Key | |
+|---|---|
+| `secrets` | `"password"` (default): every password sealed with `password`; `"none"`: left out |
+| `password` | at least 4 characters, with `"password"` |
+| `destination` | optional: a mounted disk (`GET .../files`' `destinations`) to write it onto instead |
+
+The answer is the file, `application/x-tar`, with `Content-Disposition:
+attachment; filename="vigil-config-<host>-<date>.tar"`; with `destination`,
+`{"path": "/mnt/sdb1/vigil-config-....tar"}`. The key derivation takes
+about a second.
+
+```sh
+curl -u root:PASS -H 'Content-Type: application/json' -o nvr.tar \
+     -d '{"secrets": "password", "password": "export pw"}' \
+     http://nvr:8080/api/v1/system/config/export
+```
+
+`POST /api/v1/system/config/import` — either JSON:
+
+| Key | |
+|---|---|
+| `file` | the export, base64 (up to 1 MiB of file) |
+| `path` | or an export on a mounted disk (`GET .../files`' `files`) |
+| `password` | the export's, if it has one |
+| `dry_run` | `true`: only check and summarise |
+| `hostname` | `false`: keep this recorder's host name (default `true`) |
+
+or the file itself as `Content-Type: application/x-tar`, with
+`?dry_run=1&hostname=0` in the query and the password in an
+`X-Config-Password` header:
+
+```sh
+curl -u root:PASS -H 'Content-Type: application/x-tar' -H 'X-Config-Password: export pw' \
+     --data-binary @nvr.tar 'http://nvr:8080/api/v1/system/config/import?dry_run=1'
+```
+
+`200` with the summary:
+
+```json
+{
+  "from": {"hostname": "nvr-hall", "mac": "aa:bb:cc:00:00:01", "vigil_version": "0.1.0",
+           "board": "ssr621q_lite", "created": "2026-11-28T14:45:06Z"},
+  "secrets": "password",
+  "cameras": {"now": 3, "import": 4},
+  "users": {"now": 1, "import": 2, "without_password": 0, "groups": 3},
+  "root_password": true,
+  "system": {"applies": true, "hostname": true, "hostname_now": "nvr-gate", "hostname_import": "nvr-hall",
+             "timezone": false, "ntp": false, "ethernet": true, "wifi": false},
+  "address_may_change": true,
+  "reboot_required": true,
+  "applied": false,
+  "lines": [{"kind": "info", "text": "Cameras: 4 (now 3)"},
+            {"kind": "warning", "text": "After the reboot the recorder is at 192.168.1.50, not 192.168.1.10: it can only be reached there."}]
+}
+```
+
+Refused, nothing changed: `{"error", "code", "summary"}` with `400`
+(`invalid`: not an export, a value it holds, settings that cannot apply
+here such as a port in use), `403` (`password`: needed or wrong), `422`
+(`changed`: a file changed or damaged since the export), `409`
+(`version`: made by a newer vigil; `busy`). After an applied import with
+`reboot_required`, `POST /api/v1/system/reboot` brings the network
+settings in.
+
+`GET /api/v1/system/config/files` — `{"destinations": [{"path": "/mnt/sdb1",
+"label": "sdb1  exfat  14.2 GB free  SanDisk Ultra"}], "files": [{"path",
+"name", "size", "mtime"}]}`: the mounted, writable disks (and the network
+storage when mounted), and the `vigil-config*.tar` at the top of each,
+the newest first.
+
+`POST /api/v1/system/reset` — `{"level": "vigil"}` resets vigil's
+settings (the image's `vigil.yaml`, no users, a new key; in force at
+once); `"network": true` also the interfaces and the Wi-Fi network, then a
+reboot. `{"level": "factory"}`: OpenIPC's `firstboot` after vigild stops,
+the whole overlay erased, then a reboot. Answer `{"level", "rebooting"}`;
+`409` (`unmanaged`) where vigild does not manage the system (the factory
+reset, the network). Recordings stay.
 
 ## Discovery
 

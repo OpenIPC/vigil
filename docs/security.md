@@ -38,11 +38,12 @@ images); `src/core/secret.c`.
 ## What it protects, and what it does not
 
 **Protected:** a copy of the configuration or the users file on its own.
-Backups, configuration exports, files attached to a support request or
+Backups, files attached to a support request or
 pasted into a forum, a file left on a USB stick, the `.bad` copy of an
 invalid file: without `vigil.key` none of them gives a password away.
 **Keep the key out of backups** — copy `vigil.yaml` and
 `vigil.users.yaml`, not `vigil.key` — or the backup carries everything.
+vigil's own export never contains the key (below).
 The HTTP API never returns a password, a hash or a sealed value
 (`"***"` for a set password, `"password_set": true` for users); passwords
 never appear in vigild's log.
@@ -123,5 +124,46 @@ through any number of saves of other settings, so putting the old key back
 its old value. Set the cameras' and services' passwords again; users and `root`
 need only log in once to the API, the web page or the screen (their
 `crypt(3)` hashes are not sealed), or have their passwords set again.
-Moving a recorder's whole configuration to a new board means moving
-`vigil.key` with it.
+Moving a recorder's whole configuration to a new board is what the
+configuration export is for (below); copying the files by hand means
+moving `vigil.key` with them.
+
+## Configuration export
+
+Operation → Configuration and `POST /api/v1/system/config/export`
+([management.md](management.md#configuration-export-import-factory-reset))
+make one file of the configuration. It never holds `vigil.key`, a
+password in the clear or a `crypt(3)` hash:
+
+- **With a password** (the default): the user types one (at least 4
+  characters). vigild derives a key from it with **PBKDF2-HMAC-SHA256**
+  (mbedTLS; Argon2 is not in mbedTLS), a random 16-byte salt and as many
+  iterations as take about one second on the recorder (measured at
+  export, at least 100 000; the manifest records them, and an import
+  accepts 1 000 to 10 000 000). Every password is opened with `vigil.key`
+  and sealed with that key: `enc:p1:` and the base64 of a 12-byte nonce,
+  the ciphertext and the 16-byte tag, AES-256-GCM, the field's path as
+  additional data (the same paths as above, `system:wifi.password` for the
+  Wi-Fi passphrase). The manifest has `check`, the text `vigil-config`
+  sealed for `export:check`, which tells a wrong password at once, and
+  `files_sealed`, the files' SHA-256 sealed for `export:files`, so a file
+  changed since (and its checksum with it) is refused as changed, not
+  read. `enc:p1:` values are never opened with `vigil.key`: an export's
+  `vigil.yaml` copied to `/etc` by hand does not pass for the board's own.
+- **Without a password**: the passwords are left out; the import says
+  which must be entered again. The files' SHA-256 still catch a damaged
+  file, but nothing stops an edited one: keep it as you would the
+  settings themselves.
+
+On import every password is opened with the export's key and sealed with
+**this board's** `vigil.key`; users get new `crypt(3)` hashes from their
+passwords, root's goes to `/etc/shadow` through the same path as setting
+it on the Account page. A recorder with another key takes an export as
+well as the one that made it.
+
+The export's protection is the password's: PBKDF2 slows guessing to about
+a guess a second on the recorder, much faster on a PC's or a GPU's. Use
+one that is not guessable, and keep it apart from the file.
+
+A reset of vigil's settings makes a new `vigil.key`: whatever was sealed
+with the old one is gone with the settings.

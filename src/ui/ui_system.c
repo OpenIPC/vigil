@@ -6,6 +6,7 @@
 
 #include "ui_app.h"
 #include "ui_layout.h"
+#include "ui_settings.h"
 #include "ui_theme.h"
 
 #define INFO_MAX 16
@@ -215,6 +216,12 @@ static void channel_info_cb(lv_event_t *e)
     ui_channel_info_open();
 }
 
+static void configuration_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_backup_open(UI_BACKUP_EXPORT);
+}
+
 void ui_system_open(void)
 {
     sys_t *s = lv_malloc_zeroed(sizeof *s);
@@ -235,5 +242,7 @@ void ui_system_open(void)
     lv_obj_set_user_data(p->body, lv_timer_create(sys_tick_cb, 1000, s));
     lv_obj_t *ci_btn = ui_btn(p->actions, LV_SYMBOL_LIST, "Channel info");
     lv_obj_add_event_cb(ci_btn, channel_info_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *cfg_btn = ui_btn(p->actions, LV_SYMBOL_SAVE, "Configuration");
+    lv_obj_add_event_cb(cfg_btn, configuration_cb, LV_EVENT_CLICKED, NULL);
     ui_page_ready(p);
 }

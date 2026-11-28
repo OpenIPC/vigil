@@ -13,6 +13,8 @@
 
 #include <mbedtls/base64.h>
 #include <mbedtls/gcm.h>
+#include <mbedtls/md.h>
+#include <mbedtls/pkcs5.h>
 
 #include "config.h"
 #include "log.h"
@@ -179,23 +181,15 @@ int secret_is_sealed(const char *v)
     return v && !strncmp(v, SECRET_PREFIX, sizeof SECRET_PREFIX - 1);
 }
 
-secret_rc_t secret_seal(const char *aad, const char *plain, char *out, size_t cap)
+/* AES-256-GCM under `key`: `prefix` and base64(nonce | ciphertext | tag). */
+static secret_rc_t seal_key(const unsigned char *key, const char *prefix, const char *aad, const char *plain,
+                            char *out, size_t cap)
 {
     if (cap) out[0] = 0;
-    size_t len = strlen(plain);
-    if (len > PLAIN_MAX || cap < SECRET_SEALED_SIZE(len)) return SECRET_EFORMAT;
-    unsigned char key[SECRET_KEY_LEN];
-    pthread_mutex_lock(&g_lock);
-    secret_rc_t rc = key_locked(1);
-    if (rc == SECRET_OK) memcpy(key, g_key, sizeof key);
-    pthread_mutex_unlock(&g_lock);
-    if (rc != SECRET_OK) return rc;
-
+    size_t len = strlen(plain), pre = strlen(prefix);
+    if (len > PLAIN_MAX || cap < SECRET_SEALED_SIZE(len) - sizeof SECRET_PREFIX + 1 + pre) return SECRET_EFORMAT;
     unsigned char buf[NONCE_LEN + PLAIN_MAX + TAG_LEN];
-    if (random_bytes(buf, NONCE_LEN) < 0) {
-        secret_wipe(key, sizeof key);
-        return SECRET_ENOKEY;
-    }
+    if (random_bytes(buf, NONCE_LEN) < 0) return SECRET_ENOKEY;
     mbedtls_gcm_context gcm;
     mbedtls_gcm_init(&gcm);
     int bad = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 8 * SECRET_KEY_LEN) ||
@@ -203,10 +197,9 @@ secret_rc_t secret_seal(const char *aad, const char *plain, char *out, size_t ca
                                         strlen(aad), (const unsigned char *)plain, buf + NONCE_LEN, TAG_LEN,
                                         buf + NONCE_LEN + len);
     mbedtls_gcm_free(&gcm);
-    secret_wipe(key, sizeof key);
-    size_t olen = 0, pre = sizeof SECRET_PREFIX - 1;
+    size_t olen = 0;
     if (!bad) {
-        memcpy(out, SECRET_PREFIX, pre);
+        memcpy(out, prefix, pre);
         bad = mbedtls_base64_encode((unsigned char *)out + pre, cap - pre, &olen, buf, NONCE_LEN + len + TAG_LEN);
     }
     secret_wipe(buf, sizeof buf);
@@ -218,25 +211,22 @@ secret_rc_t secret_seal(const char *aad, const char *plain, char *out, size_t ca
     return SECRET_OK;
 }
 
-secret_rc_t secret_open(const char *aad, const char *in, char *out, size_t cap)
+/* The base64 part of `in` (after `prefix`) into buf: its length, or 0. */
+static size_t unwrap(const char *prefix, const char *in, unsigned char *buf, size_t cap)
 {
-    if (cap) out[0] = 0;
-    if (!secret_is_sealed(in) || !cap) return SECRET_EFORMAT;
-    const char *b64 = in + sizeof SECRET_PREFIX - 1;
-    unsigned char buf[NONCE_LEN + PLAIN_MAX + TAG_LEN];
-    size_t n = 0;
-    if (mbedtls_base64_decode(buf, sizeof buf, &n, (const unsigned char *)b64, strlen(b64)) ||
-        n < NONCE_LEN + TAG_LEN)
-        return SECRET_EFORMAT;
+    size_t pre = strlen(prefix), n = 0;
+    if (strncmp(in, prefix, pre) != 0) return 0;
+    const char *b64 = in + pre;
+    if (mbedtls_base64_decode(buf, cap, &n, (const unsigned char *)b64, strlen(b64)) || n < NONCE_LEN + TAG_LEN)
+        return 0;
+    return n;
+}
+
+static secret_rc_t open_key(const unsigned char *key, unsigned char *buf, size_t n, const char *aad, char *out,
+                            size_t cap)
+{
     size_t len = n - NONCE_LEN - TAG_LEN;
     if (len >= cap) return SECRET_EFORMAT;
-    unsigned char key[SECRET_KEY_LEN];
-    pthread_mutex_lock(&g_lock);
-    secret_rc_t rc = key_locked(0);
-    if (rc == SECRET_OK) memcpy(key, g_key, sizeof key);
-    pthread_mutex_unlock(&g_lock);
-    if (rc != SECRET_OK) return rc;
-
     mbedtls_gcm_context gcm;
     mbedtls_gcm_init(&gcm);
     int bad = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 8 * SECRET_KEY_LEN);
@@ -244,8 +234,6 @@ secret_rc_t secret_open(const char *aad, const char *in, char *out, size_t cap)
         bad = mbedtls_gcm_auth_decrypt(&gcm, len, buf, NONCE_LEN, (const unsigned char *)aad, strlen(aad),
                                        buf + NONCE_LEN + len, TAG_LEN, buf + NONCE_LEN, (unsigned char *)out);
     mbedtls_gcm_free(&gcm);
-    secret_wipe(key, sizeof key);
-    secret_wipe(buf, sizeof buf);
     if (bad || memchr(out, 0, len)) {
         secret_wipe(out, len < cap ? len : cap);
         out[0] = 0;
@@ -253,6 +241,99 @@ secret_rc_t secret_open(const char *aad, const char *in, char *out, size_t cap)
     }
     out[len] = 0;
     return SECRET_OK;
+}
+
+secret_rc_t secret_seal(const char *aad, const char *plain, char *out, size_t cap)
+{
+    if (cap) out[0] = 0;
+    size_t len = strlen(plain);
+    if (len > PLAIN_MAX || cap < SECRET_SEALED_SIZE(len)) return SECRET_EFORMAT;
+    unsigned char key[SECRET_KEY_LEN];
+    pthread_mutex_lock(&g_lock);
+    secret_rc_t rc = key_locked(1);
+    if (rc == SECRET_OK) memcpy(key, g_key, sizeof key);
+    pthread_mutex_unlock(&g_lock);
+    if (rc != SECRET_OK) return rc;
+    rc = seal_key(key, SECRET_PREFIX, aad, plain, out, cap);
+    secret_wipe(key, sizeof key);
+    return rc;
+}
+
+secret_rc_t secret_open(const char *aad, const char *in, char *out, size_t cap)
+{
+    if (cap) out[0] = 0;
+    if (!secret_is_sealed(in) || !cap) return SECRET_EFORMAT;
+    unsigned char buf[NONCE_LEN + PLAIN_MAX + TAG_LEN];
+    size_t n = unwrap(SECRET_PREFIX, in, buf, sizeof buf);
+    if (!n) return SECRET_EFORMAT;
+    if (n - NONCE_LEN - TAG_LEN >= cap) return SECRET_EFORMAT;
+    unsigned char key[SECRET_KEY_LEN];
+    pthread_mutex_lock(&g_lock);
+    secret_rc_t rc = key_locked(0);
+    if (rc == SECRET_OK) memcpy(key, g_key, sizeof key);
+    pthread_mutex_unlock(&g_lock);
+    if (rc == SECRET_OK) rc = open_key(key, buf, n, aad, out, cap);
+    secret_wipe(key, sizeof key);
+    secret_wipe(buf, sizeof buf);
+    return rc;
+}
+
+/* ---- a key of one's own: configuration exports (docs/security.md) ---------------------- */
+
+secret_rc_t secret_seal_with(const unsigned char key[SECRET_KEY_LEN], const char *aad, const char *plain, char *out,
+                             size_t cap)
+{
+    return seal_key(key, SECRET_EXPORT_PREFIX, aad, plain, out, cap);
+}
+
+secret_rc_t secret_open_with(const unsigned char key[SECRET_KEY_LEN], const char *aad, const char *in, char *out,
+                             size_t cap)
+{
+    if (cap) out[0] = 0;
+    if (!cap) return SECRET_EFORMAT;
+    unsigned char buf[NONCE_LEN + PLAIN_MAX + TAG_LEN];
+    size_t n = unwrap(SECRET_EXPORT_PREFIX, in, buf, sizeof buf);
+    secret_rc_t rc = n ? open_key(key, buf, n, aad, out, cap) : SECRET_EFORMAT;
+    secret_wipe(buf, sizeof buf);
+    return rc;
+}
+
+int secret_is_export_sealed(const char *v)
+{
+    return v && !strncmp(v, SECRET_EXPORT_PREFIX, sizeof SECRET_EXPORT_PREFIX - 1);
+}
+
+int secret_derive(const char *password, const unsigned char *salt, size_t salt_len, unsigned iterations,
+                  unsigned char key[SECRET_KEY_LEN])
+{
+    return mbedtls_pkcs5_pbkdf2_hmac_ext(MBEDTLS_MD_SHA256, (const unsigned char *)password, strlen(password), salt,
+                                         salt_len, iterations, SECRET_KEY_LEN, key) == 0
+               ? 0
+               : -1;
+}
+
+int secret_random(void *buf, size_t len) { return random_bytes(buf, len); }
+
+secret_rc_t secret_new_key(void)
+{
+    char path[300];
+    pthread_mutex_lock(&g_lock);
+    path_locked(path, sizeof path);
+    unsigned char old[SECRET_KEY_LEN];
+    int had = g_have;
+    memcpy(old, g_key, sizeof old);
+    g_have = 0;
+    /* make_key writes over the file: here, and only here, replacing a key
+     * is what is asked for (a reset: what it sealed is gone with it). */
+    secret_rc_t rc = make_key(path);
+    if (rc != SECRET_OK && had) {
+        memcpy(g_key, old, sizeof old);
+        g_have = 1;
+    }
+    g_why = SECRET_OK;
+    pthread_mutex_unlock(&g_lock);
+    secret_wipe(old, sizeof old);
+    return rc;
 }
 
 const char *secret_strerror(secret_rc_t rc)

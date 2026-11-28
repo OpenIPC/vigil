@@ -466,24 +466,24 @@ static void status_signature(char *out, size_t cap)
 /* ---- requests ---------------------------------------------------------------------- */
 
 /* The body, NUL-terminated; NULL with *status set on failure. */
-char *read_body(struct mg_connection *conn, size_t *len, int *status)
+char *read_body_max(struct mg_connection *conn, size_t max, size_t *len, int *status)
 {
     const struct mg_request_info *ri = mg_get_request_info(conn);
-    if (ri->content_length > (long long)BODY_MAX) {
+    if (ri->content_length > (long long)max) {
         *status = 413;
         return NULL;
     }
-    char *buf = malloc(BODY_MAX + 1);
+    char *buf = malloc(max + 1);
     if (!buf) {
         *status = 500;
         return NULL;
     }
     size_t n = 0;
     for (;;) {
-        int r = mg_read(conn, buf + n, BODY_MAX + 1 - n);
+        int r = mg_read(conn, buf + n, max + 1 - n);
         if (r <= 0) break;
         n += (size_t)r;
-        if (n > BODY_MAX) {
+        if (n > max) {
             free(buf);
             *status = 413;
             return NULL;
@@ -492,6 +492,11 @@ char *read_body(struct mg_connection *conn, size_t *len, int *status)
     buf[n] = 0;
     *len = n;
     return buf;
+}
+
+char *read_body(struct mg_connection *conn, size_t *len, int *status)
+{
+    return read_body_max(conn, BODY_MAX, len, status);
 }
 
 int method_not_allowed(struct mg_connection *conn, const char *allow)
@@ -574,7 +579,8 @@ static int request_handler(struct mg_connection *conn, void *cbdata)
     if (!strcmp(uri, "/api/v1/ws")) return send_error(conn, 400, "WebSocket upgrade required", NULL);
     if (!strcmp(uri, "/api/v1/me") || !strncmp(uri, "/api/v1/users", 13) || !strncmp(uri, "/api/v1/groups", 14))
         return api_users_request(conn, uri, m);
-    int rc = api_mgmt_request(conn, uri, m);
+    int rc = api_backup_request(conn, uri, m);
+    if (!rc) rc = api_mgmt_request(conn, uri, m);
     if (rc) return rc;
     if (!strncmp(uri, "/api/v1/discovery", 17) || !strncmp(uri, "/api/v1/channels/", 17) ||
         !strncmp(uri, "/api/v1/devices/", 16))

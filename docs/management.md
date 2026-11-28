@@ -29,6 +29,7 @@ The same actions are in the HTTP API ([api.md](api.md#management)).
 | | Disk Quota | works | Per camera: the most space (GB) and the most days its recordings may take. |
 | | Network Storage | works | SMB (CIFS, SMB2/3; SMB1 only where the kernel has nothing else) and NFS v3, mounted at `/mnt/nas`; Test mounts, writes and reads a file. |
 | System | General | works | Device name (host name), language (English for now), date and time, time zone with DST, NTP, date and time format. |
+| Operation | Configuration | works | Export the configuration to a disk (or the browser, through the API), import one, reset vigil's settings or the whole firmware ([below](#configuration-export-import-factory-reset)). |
 | Account | Users, Groups | works | vigild's own users in groups with permissions, enforced by the API ([api.md](api.md#accounts-and-permissions)). The on-screen UI does not ask for a login yet. |
 
 ## Where things are kept
@@ -222,6 +223,120 @@ set of permissions (live view, playback, PTZ, cameras, storage, network,
 system, users), the built-in groups `admin` and `user`, and the system
 account (root) that always logs in as an administrator, so nobody is
 locked out.
+
+## Configuration: export, import, factory reset
+
+Operation → **Configuration** on the screen, `/api/v1/system/config/…`
+and `/api/v1/system/reset` in the API ([api.md](api.md#configuration-export-and-import)),
+both with the `system` and `users` permissions.
+
+### The export
+
+One file, `vigil-config-<host name>-<YYYYMMDD-HHMM>.tar`, a plain ustar
+archive any `tar` lists:
+
+| File | What |
+|---|---|
+| `manifest.json` | `format` (`vigil-config`), `format_version` (1), `vigil_version`, `config_version` (vigil.yaml's `version`), `platform`, `board` (`BUILD_PLATFORM`), `firmware`, `build`, `hostname`, `mac`, `created` (UTC); `secrets` (`password` or `none`) and with a password `kdf` (`PBKDF2-HMAC-SHA256`, `iterations`, `salt`), `cipher`, `check` and `files_sealed`; `files` (name, size, SHA-256 of each); `included` (counts: cameras, camera and service passwords, users, user passwords, whether root's and the Wi-Fi passphrase are in it), `left_out` (without a password: what was left out), `not_included` |
+| `vigil.yaml` | vigil's settings, as the file is written (with each setting's help), every password sealed for the export or left out |
+| `vigil.users.yaml` | the groups, the users (name, group, enabled) and their passwords sealed for the export; no `crypt(3)` hash (an import makes new ones) |
+| `system.json` | on a system vigild manages: `hostname`, `timezone` (`zone`, `tz`), `ntp_servers`, `interfaces.eth0` (`dhcp`, `address`, `netmask`, `gateway`, `dns1`, `dns2`, `mtu`), `wifi` (`ssid`, `password` sealed, `wlandev`) |
+
+**In it:** the cameras (URLs, names, sub-streams), recording, schedule,
+quotas, network storage, DDNS, UPnP, mail, alarm center, QoS, the ports
+and servers (API, web, ONVIF, RTSP, NETIP), the screen's settings and
+layout, NTP on or off; vigil's users and groups; the host name, time zone,
+NTP servers, the Ethernet stanza vigil manages, and the Wi-Fi network and
+`wlandev` of the U-Boot environment. With a password also every password:
+the cameras', the mail, DDNS and network storage ones, each user's, root's
+(only while vigil knows it and it is still root's in `/etc/shadow`) and
+the Wi-Fi passphrase.
+
+**Not in it:** recordings, logs, `vigil.key` (never), SSH host keys and
+`authorized_keys`, `/etc/shadow` itself, `crypt(3)` hashes, the rest of
+the U-Boot environment (MAC, boot settings), which recorder owns the
+recording disks, other programs' settings (majestic, crontab).
+
+**Passwords.** With a password typed at export (at least 4 characters;
+the default), each password is opened with `vigil.key` and sealed again
+with a key derived from that password: `enc:p1:…`, AES-256-GCM, the
+field's path as additional data, as [security.md](security.md#configuration-export)
+describes. Without one they are left out: the cameras' URLs lose their
+password, the users theirs, root's stays out.
+
+### Import
+
+Checked first, nothing changed until everything has been read:
+
+- the archive and its manifest (`format`), every file against its
+  SHA-256; with a password, the password (a wrong one: "wrong password
+  for this export") and the sealed checksums (a file changed since:
+  "the export was changed since it was made"), and every value opens;
+- the versions: a newer `format_version` or `config_version` is refused
+  ("made by a newer vigil … update vigil first"); a newer `vigil_version`
+  with the same formats is read, with a warning: settings this vigil does
+  not know are left out. An older export is read the way vigild loads an
+  older file (defaults for what it lacks);
+- another kind of recorder (board, platform) is a warning: check the
+  display and recording settings afterwards. Another recorder of the same
+  kind (another MAC and host name) is fine; the host name is taken unless
+  "Take its host name" is off (`"hostname": false`). The recording disks'
+  ownership is not part of the configuration.
+
+The summary says what changes: cameras and users (now and after), users
+without a password, root's password, the host name, time zone, NTP
+servers, Ethernet and Wi-Fi, ports that move, and in a warning when the
+recorder's address may change at the next boot ("After the reboot the
+recorder is at 10.0.0.5, not 192.168.1.10: it can only be reached there",
+or DHCP instead of a static address).
+
+Applied: the users file is replaced, then `vigil.yaml` (each atomically,
+every password sealed with this board's own key); if the settings are
+refused (a port another program holds), the users file is put back and
+nothing has changed. `api.users` and `api.shadow` (where this board keeps
+its accounts) stay this board's. Then root's password, when the export
+has it, goes to `/etc/shadow` as the Account page's *System account
+password* does; the host name, zone and NTP servers apply at once; the
+Ethernet stanza (`net_write`: only the managed lines, without restarting
+the interface) and the Wi-Fi settings (`fw_setenv`) are written for the
+next boot, and the page offers the reboot. The cameras reconnect with the
+imported settings at once.
+
+### Factory reset
+
+Recordings on the disks are never touched by either level.
+
+- **vigil's settings** (`"level": "vigil"`, type `RESET` on the screen):
+  `vigil.yaml` becomes the image's (`/rom/etc/vigil.yaml`; vigil's
+  defaults where there is none), `vigil.users.yaml` has no users, and
+  `vigil.key` is made anew (nothing sealed with the old one could be
+  used anyway); in force at once. `/etc/shadow` is not touched: root logs
+  in as before. With **the network too** (`"network": true`) the
+  stanzas in `/etc/network/interfaces.d` become the image's (others are
+  removed), `wlanssid` and `wlanpass` are removed (`wlandev`, the
+  adapter's driver, stays) and the recorder reboots; the address may then
+  change (DHCP).
+- **The whole firmware** (`"level": "factory"`, type `FACTORY`): OpenIPC's
+  own reset, `firstboot`, which is `sysupgrade -n`: the overlay partition
+  (`rootfs_data`) is erased (`flash_eraseall -j`, or the UBI volume
+  truncated) and the board reboots into the image as flashed, every
+  setting gone (vigil's, the network, SSH keys, root's password: the
+  recorder is unclaimed again and `openipc-claim` asks for a password at
+  the console). The U-Boot environment (MAC, `wlanssid`, `wlandev`) is not
+  on the overlay and stays. vigild stops first as for a reboot (the
+  recordings closed), then starts `firstboot` in a session of its own,
+  its output in `/tmp/vigil-firstboot.log`; `sysupgrade` stops vigild on
+  its way (`S95vigil stop`). If `firstboot` refuses before it erases
+  anything, the board reboots with its settings.
+
+**The reset button.** OpenIPC/firmware has a `reset-button` package
+(`/usr/sbin/reset-button`, `S96reset-button`): with `button=N` in
+`/usr/share/openipc/gpio.conf`, holding the button 5 to 15 s reboots and
+15 to 30 s runs the same `firstboot`. The ssr621q image does not include
+it (it is not in `ssr621q_lite_defconfig`, and the image has no
+`gpio.conf`), so on this recorder the screen and the API are the way to a
+factory reset. Where a board has it, the button's reset is the full one
+above, without vigild stopping first: the segment being written is cut.
 
 ## On systems vigild does not manage
 

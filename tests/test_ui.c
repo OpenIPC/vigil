@@ -39,6 +39,7 @@
 #include "ui_theme.h"
 #include "theme_tokens.h"
 #include "icons.h"
+#include "ui_settings.h"
 
 #define W 1280
 #define H 720
@@ -1170,6 +1171,93 @@ static int fa_power(int reboot)
     return 0;
 }
 
+/* Operation -> Configuration: one stick, two exports on it; the
+ * protected one opens with "export-pw". */
+static char g_fc_dir[128], g_fc_pw[64], g_fc_path[256];
+static int  g_fc_applied, g_fc_reset = -1, g_fc_reset_net, g_fc_pending;
+static ui_cfg_result_t g_fc_r;
+static int fc_places(ui_cfg_place_t *out, int max)
+{
+    if (max < 1) return 0;
+    snprintf(out[0].path, sizeof out[0].path, "/mnt/sda1");
+    snprintf(out[0].label, sizeof out[0].label, "sda1  exfat  14.2 GB free  SanDisk Ultra");
+    return 1;
+}
+static int fc_files(ui_cfg_file_t *out, int max)
+{
+    static const char *const n[] = { "vigil-config-nvr-hall-20261126-1432.tar", "vigil-config-nvr-yard-20261101-0910.tar" };
+    int k = max < 2 ? max : 2;
+    for (int i = 0; i < k; ++i) {
+        snprintf(out[i].name, sizeof out[i].name, "%s", n[i]);
+        snprintf(out[i].path, sizeof out[i].path, "/mnt/sda1/%s", n[i]);
+        out[i].size = 26624;
+    }
+    return k;
+}
+static void fc_line(int kind, const char *t)
+{
+    if (g_fc_r.n_lines >= UI_CFG_LINES) return;
+    g_fc_r.kind[g_fc_r.n_lines] = kind;
+    snprintf(g_fc_r.line[g_fc_r.n_lines++], sizeof g_fc_r.line[0], "%s", t);
+}
+static int fc_export(const char *dir, const char *pw, char *err, size_t cap)
+{
+    (void)err, (void)cap;
+    snprintf(g_fc_dir, sizeof g_fc_dir, "%s", dir);
+    snprintf(g_fc_pw, sizeof g_fc_pw, "%s", pw ? pw : "");
+    memset(&g_fc_r, 0, sizeof g_fc_r);
+    snprintf(g_fc_r.path, sizeof g_fc_r.path, "%s/vigil-config-nvr-hall-20261126-1432.tar", dir);
+    snprintf(g_fc_r.msg, sizeof g_fc_r.msg, "Saved as %s", g_fc_r.path);
+    g_fc_pending = 1;
+    return 0;
+}
+static int fc_import(const char *path, const char *pw, int hostname, int apply, char *err, size_t cap)
+{
+    (void)err, (void)cap, (void)hostname;
+    memset(&g_fc_r, 0, sizeof g_fc_r);
+    snprintf(g_fc_path, sizeof g_fc_path, "%s", path);
+    g_fc_pending = 1;
+    if (strcmp(pw, "export-pw")) {
+        g_fc_r.rc = UI_CFG_EPASSWORD;
+        snprintf(g_fc_r.msg, sizeof g_fc_r.msg, "%s", pw[0] ? "wrong password for this export"
+                                                           : "this export is protected by a password: type it");
+        return 0;
+    }
+    g_fc_r.secrets = 1;
+    fc_line(0, "From nvr-hall aa:bb:cc:00:00:01, made 2026-11-26T14:32:05Z by vigil 0.1.0 on ssr621q_lite");
+    fc_line(0, "From another recorder (MAC aa:bb:cc:00:00:01; this one is aa:bb:cc:00:00:02).");
+    fc_line(0, "Cameras: 4 (now 3)");
+    fc_line(0, "Users: 2 (now 1): anna, bob; groups: 3");
+    fc_line(1, "root's password (the console's, SSH's and the system account's) is set from the export.");
+    fc_line(0, "Host name: nvr-hall (now nvr-gate)");
+    fc_line(0, "Ethernet: static 192.168.1.50/255.255.255.0 via 192.168.1.1 (now DHCP), from the next boot");
+    fc_line(1, "After the reboot the recorder is at 192.168.1.50, not 192.168.1.10: it can only be reached there.");
+    fc_line(1, "The network settings apply after a reboot.");
+    g_fc_r.applied = apply;
+    g_fc_r.reboot = g_fc_r.net_cuts = 1;
+    g_fc_applied += apply;
+    snprintf(g_fc_r.msg, sizeof g_fc_r.msg, "%s", apply ? "Imported" : "Checked");
+    return 0;
+}
+static int fc_reset(int level, int network, char *err, size_t cap)
+{
+    (void)err, (void)cap;
+    g_fc_reset = level;
+    g_fc_reset_net = network;
+    memset(&g_fc_r, 0, sizeof g_fc_r);
+    snprintf(g_fc_r.msg, sizeof g_fc_r.msg, "%s", level ? "Factory reset: vigild stops, the firmware resets and reboots"
+                                                        : "vigil's settings are the image's again");
+    g_fc_pending = 1;
+    return 0;
+}
+static int fc_poll(ui_cfg_result_t *r)
+{
+    if (!g_fc_pending) return UI_MGMT_EINVAL;
+    g_fc_pending = 0;
+    *r = g_fc_r;
+    return 0;
+}
+
 static void fake_mgmt(ui_model_t *m)
 {
     g_mg = *m->mgmt;                    /* real: time zone parsing */
@@ -1227,6 +1315,12 @@ static void fake_mgmt(ui_model_t *m)
     g_mg.system_password = fa_system_password;
     g_mg.system_user = fa_system_user;
     g_mg.power = fa_power;
+    g_mg.cfg_places = fc_places;
+    g_mg.cfg_files = fc_files;
+    g_mg.cfg_export = fc_export;
+    g_mg.cfg_import = fc_import;
+    g_mg.cfg_reset = fc_reset;
+    g_mg.cfg_poll = fc_poll;
     m->mgmt = &g_mg;
 }
 
@@ -2197,6 +2291,152 @@ static void test_system(void)
     shot("system");
     button(BTN_RIGHT);
     button(BTN_RIGHT);
+    CHECK(!ui_page_top(), "back on the live view");
+}
+
+static void click_obj(lv_obj_t *o);
+
+/* The button whose label is `text` (after its symbol). */
+static lv_obj_t *btn_in(lv_obj_t *o, const char *text)
+{
+    if (lv_obj_check_type(o, &lv_button_class) && visible(o) && lv_obj_get_child_count(o)) {
+        lv_obj_t *l = lv_obj_get_child(o, 0);
+        if (lv_obj_check_type(l, &lv_label_class)) {
+            const char *t = lv_label_get_text(l);
+            size_t a = strlen(t), b = strlen(text);
+            if (a >= b && !strcmp(t + a - b, text) && (a == b || t[a - b - 1] == ' ')) return o;
+        }
+    }
+    for (uint32_t i = 0; i < lv_obj_get_child_count(o); ++i) {
+        lv_obj_t *r = btn_in(lv_obj_get_child(o, (int32_t)i), text);
+        if (r) return r;
+    }
+    return NULL;
+}
+
+static lv_obj_t *btn(const char *text)
+{
+    lv_obj_t *b = btn_in(lv_layer_top(), text);
+    return b ? b : btn_in(lv_screen_active(), text);
+}
+
+static void click_btn(const char *text)
+{
+    lv_obj_t *b = btn(text);
+    CHECK(b, "no button '%s'", text);
+    if (b) click_obj(b);
+}
+
+/* Operation -> Configuration: export onto the stick with a password, an
+ * import checked (a wrong password first) and applied, the resets each
+ * behind its typed word. */
+static void test_backup_pages(void)
+{
+    run(VG_DURATION_TOAST);
+    move_to(W / 2, H - 1);
+    run(300);
+    click_text("Main menu");
+    click_text("OPERATION");
+    click_btn("Configuration");
+    lv_obj_t *dd = nth_of(&lv_dropdown_class, 0);
+    CHECK(find("Export the configuration", 0) && dd &&
+              !strcmp(lv_dropdown_get_options(dd), "/mnt/sda1  (sda1  exfat  14.2 GB free  SanDisk Ultra)"),
+          "Configuration: Export, the stick offered");
+    shot("config_export");
+    lv_textarea_set_text(textarea(0), "export-pw");
+    lv_textarea_set_text(textarea(1), "export-pX");
+    click_btn("Export now");
+    run(100);
+    CHECK(!g_fc_dir[0] && find("The two passwords differ", 1), "two passwords that differ: refused");
+    run(VG_DURATION_TOAST);
+    lv_textarea_set_text(textarea(1), "export-pw");
+    click_btn("Export now");
+    run(600);
+    CHECK(!strcmp(g_fc_dir, "/mnt/sda1") && !strcmp(g_fc_pw, "export-pw") &&
+              find("Saved as /mnt/sda1/vigil-config-nvr-hall-20261126-1432.tar", 1),
+          "exported with its password");
+    CHECK(!strcmp(lv_textarea_get_text(textarea(0)), ""), "the password fields emptied");
+    run(VG_DURATION_TOAST);
+
+    click_text("Import");
+    dd = nth_of(&lv_dropdown_class, 0);
+    CHECK(find("Import a configuration", 0) && dd &&
+              !strncmp(lv_dropdown_get_options(dd), "/mnt/sda1/vigil-config-nvr-hall-20261126-1432.tar\n", 50),
+          "Import: the newest export offered");
+    lv_textarea_set_text(textarea(0), "wrong");
+    click_btn("Check");
+    run(600);
+    CHECK(find("wrong password for this export", 1) && btn("Import now") &&
+              lv_obj_has_state(btn("Import now"), LV_STATE_DISABLED),
+          "a wrong password: said, Import stays off");
+    lv_textarea_set_text(textarea(0), "export-pw");
+    click_btn("Check");
+    run(600);
+    CHECK(find("What changes", 0) && find("Cameras: 4 (now 3)", 1) && find("it can only be reached there", 1),
+          "checked: the summary, the address warning");
+    run(VG_DURATION_TOAST);
+    shot("config_import");
+    click_btn("Import now");
+    CHECK(find("Replace this recorder's settings", 1), "asked first");
+    click_text("Import");                       /* the question's button, on the top layer */
+    run(600);
+    CHECK(g_fc_applied == 1 && find("Reboot now?", 1), "imported; a reboot offered for the network");
+    click_text("Cancel");
+    run(VG_DURATION_TOAST);
+
+    click_text("Factory reset");
+    CHECK(find("never touched", 1) && find("vigil's settings", 0) && find("The whole firmware", 0),
+          "Factory reset: two levels, the recordings stay");
+    lv_obj_t *go_v = btn("Reset vigil's settings");
+    CHECK(lv_obj_has_state(go_v, LV_STATE_DISABLED), "off until RESET is typed");
+    lv_obj_t *net = nth_of(&lv_switch_class, 0);
+    lv_obj_add_state(net, LV_STATE_CHECKED);
+    lv_obj_send_event(net, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_textarea_set_text(textarea(0), "RESET");
+    lv_obj_send_event(textarea(0), LV_EVENT_VALUE_CHANGED, NULL);
+    run(50);
+    CHECK(!lv_obj_has_state(go_v, LV_STATE_DISABLED) && find("may no longer be where it is now", 1),
+          "typed: on, the network's warning shown");
+    shot("config_reset");
+    click_btn("Reset vigil's settings");
+    run(600);
+    CHECK(g_fc_reset == 0 && g_fc_reset_net == 1 && find("the image's again", 1), "vigil's settings reset");
+    run(VG_DURATION_TOAST);
+    lv_textarea_set_text(textarea(1), "FACTORY");
+    lv_obj_send_event(textarea(1), LV_EVENT_VALUE_CHANGED, NULL);
+    run(50);
+    click_btn("Reset the firmware");
+    run(600);
+    CHECK(g_fc_reset == 1, "the firmware's reset asked for");
+    run(VG_DURATION_TOAST);
+    button(BTN_RIGHT);
+    button(BTN_RIGHT);
+    button(BTN_RIGHT);
+    run(300);
+    CHECK(!ui_page_top(), "back on the live view");
+
+    /* Listed on another screen (Operation, with the firmware upgrade), a
+     * sub-page checks the permissions itself. */
+    schema_errors_t se = { 0 };
+    static const char on[] = "{\"login\":true}", off[] = "{\"login\":false}";
+    CHECK(config_put_json("ui", on, strlen(on), &se) == CONFIG_OK, "login on");
+    ui_app_refresh();
+    run(300);
+    static const ui_set_item_t rows[] = {
+        { "Import", &ui_icon_nav_disks, ui_cfg_import_open, NULL, NULL, NULL, ui_cfg_import_close },
+    };
+    ui_settings_open("Operation", rows, 1, 0);
+    run(100);
+    CHECK(find("Needs the system and users permissions", 0) && !find("Import a configuration", 0),
+          "nobody logged in: the sub-page says what it needs");
+    click_btn("Log in");
+    CHECK(ui_popup_is_open() && find("Wrong user or password", 1) == NULL, "and offers the login");
+    button(BTN_RIGHT);
+    button(BTN_RIGHT);
+    run(300);
+    CHECK(config_put_json("ui", off, strlen(off), &se) == CONFIG_OK, "login off");
+    ui_app_refresh();
+    run(300);
     CHECK(!ui_page_top(), "back on the live view");
 }
 
@@ -4799,6 +5039,16 @@ static int shots_4(void)
     click_text("Channel info");
     shot("channel-info");
     button(BTN_RIGHT);
+    click_btn("Configuration");
+    shot("config-export");
+    click_text("Import");
+    lv_textarea_set_text(textarea(0), "export-pw");
+    click_btn("Check");
+    run(600);
+    shot("config-import");
+    click_text("Factory reset");
+    shot("config-reset");
+    button(BTN_RIGHT);
     button(BTN_RIGHT);
     button(BTN_RIGHT);
 
@@ -5148,6 +5398,7 @@ int main(int argc, char **argv)
     test_channels_scroll();
     test_channels_manual();
     test_system();
+    test_backup_pages();
     test_same_redacted_urls();
     test_stale_and_cancel();
     test_two_mice(ptr);

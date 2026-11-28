@@ -31,7 +31,9 @@ live view                  tiles over the whole screen, clock in a corner
       +-> ACCOUNT          settings screen: Users, Groups
       +-> OPERATION        platform, version, uptime, memory, storage (read-only)
       |               +-> Channel info: every channel's state, stream, codec,
-      |                   size, fps, main stream, recording, events
+      |               |   size, fps, main stream, recording, events
+      |               +-> Configuration: settings screen: Export, Import,
+      |                   Factory reset
       +-> DISPLAY          settings screen: Output, OSD (Clock, Camera names,
                            Status icons, Video, Tiles on one page)
 ```
@@ -228,6 +230,32 @@ actions (Save, Cancel, Add) and the clock. Back is the header button, the
 on-screen keyboard or a question first). The **mouse wheel** scrolls the
 list or page under the pointer (`ui_app_wheel`; LVGL's pointer has no
 wheel), two table rows a notch; lists that can scroll show a scroll bar.
+
+**Operation → Configuration** (`ui_set_backup.c`), from the System
+page's header, needs the `system` and `users` permissions (it holds the
+accounts). A settings screen of three sub-pages with nothing to save:
+
+- **Export**: where to (the mounted disks, by path, filesystem, free
+  space and model; none: plug a stick in), the passwords included and
+  protected by one typed twice, or left out; *Export now* writes
+  `vigil-config-<host>-<date>.tar` and says where. What is in the file and
+  what is not is on the page.
+- **Import**: the exports found at the top of the disks, the newest
+  first; the export's password; *Take its host name*. *Check* reads it
+  and lists what changes under *What changes* (warnings in amber: the
+  address after the reboot, root's password, passwords left out); a wrong
+  password, a changed file or a newer vigil is said in words and Import
+  stays off. *Import now* asks once more, applies it, and offers the
+  reboot the network settings need.
+- **Factory reset**: vigil's settings (with *Also the network* and its
+  warning) behind typing `RESET`, the whole firmware behind `FACTORY`;
+  "Recordings on the disks are never touched" above both.
+
+The work runs on a thread of the bridge's (the export's key takes a
+second to derive); the page shows "Exporting...", "Checking...", then the
+outcome.
+
+![Configuration, Import checked](../tests/ui/config_import.png)
 
 ### Settings screens
 
@@ -909,7 +937,8 @@ zone, the user editor),
 arrows (`live-page-arrow-next.png`, `-prev`), every tile state and the
 empty slots' "+" (`live-16.png`), `live-empty-plus-hover.png`,
 `camera-add-channel-4.png`, the Channel info page (`channel-info.png`,
-`channel-info-16.png`) and the on-screen keyboard (`osk-letters.png`,
+`channel-info-16.png`), Operation → Configuration (`config-export.png`,
+`config-import.png`, `config-reset.png`) and the on-screen keyboard (`osk-letters.png`,
 `osk-shifted.png`, `osk-symbols.png`, `osk-above.png`), the text over a
 picture (`live-16-text-over-video.png`), Exit (`context-menu-exit.png`,
 `exit-chooser.png`, `reboot-confirm.png`, `shutdown-confirm.png`) and the

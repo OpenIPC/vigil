@@ -28,6 +28,9 @@
 #include <unistd.h>
 
 #include "api.h"
+#ifdef VIGIL_HAVE_USERS
+#include "backup.h"
+#endif
 #include "cJSON.h"
 #include "netip_srv.h"
 #include "cam_events.h"
@@ -516,6 +519,9 @@ int main(int argc, char **argv)
         return 1;
     }
     const hal_caps_t *caps = hal_caps();
+#ifdef VIGIL_HAVE_USERS
+    backup_set_platform(caps->name);
+#endif
     apply_output_adj(&cfg.display, 1);
     vg_log("platform %s: display %s, decoder %s, capture inputs %d; %d camera(s)",
            caps->name, caps->display ? "yes" : "no", caps->decoder ? "yes" : "no",

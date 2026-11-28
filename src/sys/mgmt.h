@@ -118,7 +118,12 @@ int mgmt_hostname_set(const char *name, char *err, size_t cap);
 
 /* ---- reboot and shutdown ----------------------------------------------------------- */
 
-typedef enum { MGMT_POWER_NONE = 0, MGMT_POWER_REBOOT, MGMT_POWER_OFF } mgmt_power_t;
+/* MGMT_POWER_FACTORY: OpenIPC's factory reset (firstboot: the overlay
+ * erased, every setting of the system gone) and a reboot; recordings on
+ * the disks are not touched. */
+typedef enum { MGMT_POWER_NONE = 0, MGMT_POWER_REBOOT, MGMT_POWER_OFF, MGMT_POWER_FACTORY } mgmt_power_t;
+/* firstboot's output, for a reset that did not happen. */
+#define MGMT_FACTORY_LOG "/tmp/vigil-firstboot.log"
 
 /* Ask for a reboot or a shutdown (the UI's Exit, the API's
  * /system/reboot and /system/shutdown): vigild's main loop sees it

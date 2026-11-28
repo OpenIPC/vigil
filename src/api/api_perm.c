@@ -44,6 +44,9 @@ unsigned api_perm_needed(const char *method, const char *uri)
         return PERM_SYSTEM;
     }
     if (at(uri, "/api/v1/network")) return PERM_NETWORK;
+    /* The whole configuration, the accounts with it, in or out; a reset
+     * removes every user. */
+    if (at(uri, "/api/v1/system/config") || at(uri, "/api/v1/system/reset")) return PERM_SYSTEM | PERM_USERS;
     if (at(uri, "/api/v1/system")) return PERM_SYSTEM;
     if (!strncmp(uri, "/api/v1/disks", 13) || at(uri, "/api/v1/storage")) return PERM_STORAGE;
     if (!strncmp(uri, "/api/v1/discovery", 17) || at(uri, "/api/v1/channels")) return PERM_CAMERAS;
