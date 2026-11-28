@@ -8,6 +8,9 @@ add_test(NAME discovery COMMAND test_discovery ${CMAKE_CURRENT_SOURCE_DIR}/data)
 add_executable(test_onvif test_onvif.c)
 target_link_libraries(test_onvif PRIVATE vigil_core)
 add_test(NAME onvif COMMAND test_onvif ${CMAKE_CURRENT_SOURCE_DIR}/data)
+add_executable(test_ptz test_ptz.c)
+target_link_libraries(test_ptz PRIVATE vigil_core)
+add_test(NAME ptz COMMAND test_ptz ${CMAKE_CURRENT_BINARY_DIR})
 
 # src/sys on a fake root: fake /etc, /sys, /proc and /dev files, and a
 # recorder in place of ifup, mkfs, mount, date, ntpd, hostname, curl.
@@ -28,6 +31,12 @@ if(TARGET vigil_api)
   add_executable(test_api test_api.c)
   target_link_libraries(test_api PRIVATE vigil_api)
   add_test(NAME api_auth COMMAND test_api)
+  # Configuration export and import, the resets: two recorders on fake
+  # systems, each with a key of its own.
+  add_executable(test_backup test_backup.c sys_fake.c)
+  target_include_directories(test_backup PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(test_backup PRIVATE vigil_api)
+  add_test(NAME backup COMMAND test_backup)
 endif()
 
 if(TARGET vigil_ui)
@@ -151,6 +160,17 @@ if(Python3_FOUND)
     # mailed, and the directory's cap.
     add_test(NAME snapshot_e2e
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/snapshot_test.py $<TARGET_FILE:vigild>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
+    # Configuration export and import between two vigild with keys of
+    # their own, and the reset of vigil's settings, through the API.
+    add_test(NAME backup_e2e
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/backup_test.py $<TARGET_FILE:vigild>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
+    set_tests_properties(backup_e2e PROPERTIES RUN_SERIAL TRUE)
+    # PTZ through the API against the NETIP emulator's simulated head:
+    # moves that stop on their own, presets, refusals, permissions.
+    add_test(NAME ptz_e2e
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/ptz_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
     add_test(NAME api_e2e
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/api_test.py $<TARGET_FILE:vigild>

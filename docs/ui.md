@@ -17,6 +17,8 @@ live view                  tiles over the whole screen, clock in a corner
  |  page arrows            < > at the left and right edges, half way down
  |  context menu           right button: Main menu, Snapshot (of that tile), Channels,
  |                         Playback, Record, PTZ, Display, Split > (layouts)
+ |  PTZ panel              the camera full screen, a panel on the right: pad, zoom,
+ |                         focus, iris, speed, presets, tours; the picture moves it
  +-> Main menu             cards: PLAYBACK, AI, ALARM, OPERATION, BACKUP, DISPLAY
       |                    MANAGEMENT: CAMERA, NETWORK, STORAGE, SYSTEM, ACCOUNT
       +-> CAMERA           Channels: cameras found on the network (Search, Add,
@@ -31,7 +33,9 @@ live view                  tiles over the whole screen, clock in a corner
       +-> ACCOUNT          settings screen: Users, Groups
       +-> OPERATION        platform, version, uptime, memory, storage (read-only)
       |               +-> Channel info: every channel's state, stream, codec,
-      |                   size, fps, main stream, recording, events
+      |               |   size, fps, main stream, recording, events
+      |               +-> Configuration: settings screen: Export, Import,
+      |                   Factory reset
       +-> DISPLAY          settings screen: Output, OSD (Clock, Camera names,
                            Status icons, Video, Tiles on one page)
 ```
@@ -45,17 +49,24 @@ camera's name from the configuration (else the name a NETIP camera gives
 the channel, its ChannelTitle; else `CAM n`) as outlined text straight
 on the picture (see below); in another (bottom right), icons only, a red
 dot while the channel records and an amber icon for each event the camera
-reports now (motion, human, face, vehicle; each held 5 s after the camera's
-last report). Where they go, their size and what they stand on are
+reports now (motion, human, face, vehicle, line crossing, intrusion, video
+loss, tamper, alarm input, other; each while it goes on, or 5 s after a
+momentary report). Where they go, their size and what they stand on are
 `display.*` (Display, below), and so are whether REC and the event icons
 are shown at all, the 1-pixel line around each tile (2 px between two;
 without it the pictures touch), and an alarm frame: a red 3-pixel frame
 inside the edge of a tile while its camera reports any event, blinking
 (750 ms on, 250 ms off; on and off, never faded, as a translucent edge over
 a colour-keyed hole would show the key colour), off by default. The events
-come from `channels_report_events` (NETIP alarms and ONVIF events are to
-come) or from outside, `POST /api/v1/channels/<n>/events`
-([API](api.md)). The stream's codec, size
+are the camera's own (its NETIP alarms or ONVIF events, `cameras[].events`,
+[API](api.md#camera-events)) or reported from outside,
+`POST /api/v1/channels/<n>/events`; an icon is on while its event goes on
+and goes off at its stop (5 s after a momentary one, a line crossed). One
+icon per type, Tabler's: motion (activity), human (walk), face (face-id),
+vehicle (car), line crossing (arrow-bar-both), intrusion (fence), video
+loss (video-off), tamper (eye-off), alarm input (bell-bolt), other
+(alert-triangle). Camera events are not toasts and do not flash the tile:
+the icons and the frame say them. The stream's codec, size
 and frame rate are not on the tiles but on the Channel info page
 (System). The middle of a tile says something only when there is no
 picture, outlined like the name. It is about the stream on screen: a small
@@ -96,10 +107,10 @@ would meet the clock move inward (down from the top, up from the bottom)
 past it, in whichever tile and corner that happens; icons in the names'
 corner go just past the name.
 
-Camera events are wired through (`channels_report_events`, `events` in the
-channel status, the API and `ui_chan_t`) but nothing reports them yet:
-the icons appear once a source does (camera alarms over NETIP and ONVIF
-events are the next step).
+Camera events come through `cam_events.h` into `events` of the channel
+status, the API and `ui_chan_t` (the same bits, `UI_EV_*` = `CH_EV_*`);
+`test_ui` injects each type and checks its icon and the frame
+(`live_events.png`).
 
 **Events.** The live view has no event list; the HTTP API's WebSocket
 carries every event. A tile shows its channel's state all the time, so
@@ -149,15 +160,15 @@ every chip over the video. PgUp/PgDn and `[`/`]` do the same.
 
 The **context menu** (right button, or the Menu key) is, in this order:
 **Main menu**; **Snapshot**, of the tile it was opened on (there only on a
-tile with a camera; full screen, of that camera); **Channels** (the Channels page); **Playback**; **Record**
-(the recording settings); **PTZ**; **Display** (the Display settings
+tile with a camera; full screen, of that camera); **Channels** (the Channels
+page); **Playback**; **Record** (the recording settings); **PTZ** (the camera
+the menu was opened on, [below](#ptz)); **Display** (the Display settings
 screen, below); **Split**, a
 submenu of the layouts; and **Exit**: Logout, Reboot, Shutdown, Cancel
 (below). Nothing else (full screen is a double click or Enter, pages the
-arrows, pinning the bar its own button). Playback and
-PTZ are not in vigil yet: they
-are in the menu, muted, and say "not available yet" when chosen; they are
-placeholders for what comes next.
+arrows, pinning the bar its own button). Playback is not in vigil yet:
+it is in the menu, muted, and says "not available yet" when chosen, a
+placeholder for what comes next.
 
 ![Context menu with Split](../tests/ui/split_menu16.png)
 
@@ -217,7 +228,7 @@ on-screen UI does not log in yet, so there is no log-out either), six function c
 **MANAGEMENT** row of the settings. The cards: PLAYBACK, AI, ALARM,
 OPERATION (the System page), BACKUP and DISPLAY (the Display page).
 PLAYBACK, AI, ALARM and BACKUP are not in vigil yet: their cards are
-there and say "not available yet", the same as Playback and PTZ in the
+there and say "not available yet", the same as Playback in the
 context menu. Six cards fill one page at 1280x720, so there are no page
 dots. The management row: CAMERA (the Channels page), NETWORK, STORAGE,
 SYSTEM and ACCOUNT, each a settings screen (below). The arrows move over
@@ -234,6 +245,32 @@ actions (Save, Cancel, Add) and the clock. Back is the header button, the
 on-screen keyboard or a question first). The **mouse wheel** scrolls the
 list or page under the pointer (`ui_app_wheel`; LVGL's pointer has no
 wheel), two table rows a notch; lists that can scroll show a scroll bar.
+
+**Operation → Configuration** (`ui_set_backup.c`), from the System
+page's header, needs the `system` and `users` permissions (it holds the
+accounts). A settings screen of three sub-pages with nothing to save:
+
+- **Export**: where to (the mounted disks, by path, filesystem, free
+  space and model; none: plug a stick in), the passwords included and
+  protected by one typed twice, or left out; *Export now* writes
+  `vigil-config-<host>-<date>.tar` and says where. What is in the file and
+  what is not is on the page.
+- **Import**: the exports found at the top of the disks, the newest
+  first; the export's password; *Take its host name*. *Check* reads it
+  and lists what changes under *What changes* (warnings in amber: the
+  address after the reboot, root's password, passwords left out); a wrong
+  password, a changed file or a newer vigil is said in words and Import
+  stays off. *Import now* asks once more, applies it, and offers the
+  reboot the network settings need.
+- **Factory reset**: vigil's settings (with *Also the network* and its
+  warning) behind typing `RESET`, the whole firmware behind `FACTORY`;
+  "Recordings on the disks are never touched" above both.
+
+The work runs on a thread of the bridge's (the export's key takes a
+second to derive); the page shows "Exporting...", "Checking...", then the
+outcome.
+
+![Configuration, Import checked](../tests/ui/config_import.png)
 
 ### Settings screens
 
@@ -421,6 +458,59 @@ of earlier versions). A save applies to the live view at once.
 ![Display, OSD](../tests/ui/display_osd.png)
 ![Display, OSD, scrolled to the end](../tests/ui/display_osd_end.png)
 
+## PTZ
+
+The context menu's **PTZ** (or **P** on the selected camera) shows the
+camera the menu was opened on full screen, with the PTZ panel on the right
+edge of the screen, top to bottom; closing it (the X, Esc, the right
+button) brings back the grid it came from. Everything on it is opaque and
+square, like every chip over the video.
+
+- The top: PTZ, the camera's name, and what the panel knows: the
+  protocol (NETIP or ONVIF) and "moving", "Asking the camera what it can
+  do..." while the camera is being asked, or why there is no PTZ ("This
+  camera has no PTZ", "Cannot reach its PTZ: ...").
+- A **direction pad**: eight directions held down to move, and in the
+  middle the home position (a camera without one: stop). Beside it
+  **zoom**, **focus** and **iris**, each - and +, held. The **speed**
+  (1 to 8) for the pad, the keys and the wheel; **AF** for a camera with
+  its own automatic focus.
+- The **presets**: a click on one goes there; beside each, store the
+  position now as that preset (asks first), rename, delete (asks first);
+  **+** stores the position now as a new preset, with a name typed on
+  the keyboard or the on-screen keyboard. Below, the **tours** the camera
+  has: start or stop one.
+- **On the picture**: press and hold moves the camera towards the
+  pointer, faster further from the middle (nothing close to it), and the
+  chip at the top says where; letting go stops it, and so does the pointer
+  leaving the picture for the panel. The **wheel** zooms in or out a
+  moment per notch.
+
+Only what the camera can do is shown (the capabilities its protocol
+reports: a lens with zoom and focus has no pad and no presets).
+
+**Nothing is left moving.** A move lasts while something holds it, and the
+panel repeats it every 250 ms (`duration.ptz_repeat`) for a 1 s hold in
+the core (`duration.ptz_hold`), so the camera stops within a second of the
+panel no longer asking: on the release of the button, the key or the
+picture, when the pointer slides off what it pressed, on Esc, the right
+button or closing the panel, and after two minutes held without a change.
+A key is kept going by its own repeats (the kernel's, or the browser's),
+not by the panel, so a keyboard unplugged with an arrow down, which never
+says it was let go, stops the camera after the hold. The core stops it
+again if anything was lost on the way ([api.md](api.md#ptz)).
+
+**Keys**: the arrows move (two at once: a diagonal), + and - zoom, PgUp
+and PgDn focus far and near, all while held; 1 to 9 go to preset 1 to 9
+(0: 10; a camera whose presets are not numbered: the one at that place
+in the list), Home to the home position, Esc closes. Tab moves over the
+panel; with the speed slider or the tour list focused the arrows change
+it instead. The zero channel's browser does all of this too, as a USB
+mouse and keyboard.
+
+With the on-screen login on, PTZ asks for a user with the `ptz`
+permission.
+
 ## Login and Exit
 
 **Exit**, the context menu's last item, offers Logout, Reboot, Shutdown and
@@ -467,6 +557,7 @@ src/ui/ui_set_display.c Display: Output (the resolution with its keep-or-undo qu
 src/ui/ui_layout.c      tile geometry (plain C, shared with frontend_tiles)
 src/ui/ui_theme.c       LVGL styles from the design tokens
 src/ui/ui_cursor.c      the mouse pointer's arrow
+src/ui/ui_ptz.c         the PTZ panel over a camera full screen (model->ptz_*, src/core/ptz.c)
 ```
 
 The layering rule holds: `src/ui` includes LVGL and `hal_ui.h` only. All
@@ -771,7 +862,10 @@ button clicks; the **right button** calls `ui_app_back`.
 LVGL's own evdev driver (`LV_USE_EVDEV`) is not used: it opens one device
 and reports only `BTN_MOUSE`/`BTN_TOUCH`, so the right button and the keys
 would be lost. Button changes are queued, so a click shorter than LVGL's
-input poll (16 ms) still counts. The reader is in `src/app` rather than
+input poll (16 ms) still counts. A key's release is not LVGL's to see (each
+press reaches it as a press and a release), but it goes to a hook
+(`key_up`, `ui_app_key_up`), so the PTZ panel stops what a key held
+moving. The reader is in `src/app` rather than
 `src/core` (it needs Linux headers, which the core must not depend on) or
 `src/ui` (LVGL only); it is plain Linux, so every platform with a display
 uses it.
@@ -846,7 +940,13 @@ longer opens the on-screen keyboard: type into it.
 | | `S`, F12 | a snapshot of the selected camera (or the one full screen), kept; a toast says where |
 | | Menu key, Shift+F10 | context menu of the selected camera; Right (or Enter) on Split opens it, Left or Esc closes it |
 | | Tab | to the navigation bar (it comes up while it has the focus) |
+| | `P` | PTZ of the selected camera |
 | | Esc | close a menu or popup; from the navigation bar back to the tiles |
+| PTZ | arrows, `+` / `-` | move, zoom, while held (two arrows: a diagonal) |
+| | PgUp / PgDn | focus far / near, while held |
+| | `1` .. `9`, `0` | preset 1 to 9, 10 |
+| | Home | the home position |
+| | Esc | close (the camera stops) |
 | everywhere | Tab / Shift+Tab | next / previous item |
 | | arrows | move between items (in a text field Left/Right move the cursor) |
 | | Enter, Space | activate a button, turn a switch on or off |
@@ -885,7 +985,16 @@ the context menu, the help, the main menu by the arrows, typing into a
 field (with a held key's repeats, Shift and Caps Lock), Enter to the next
 field, a number stepped by the arrows, Ctrl+S saved and in force, Esc
 asking before it discards, the camera list's rows, a switch, a drop-down,
-and a keyboard unplugged with Shift held.
+and a keyboard unplugged with Shift held. The PTZ panel, over a fake that
+records each command: opened from the context menu on the camera
+clicked (full screen, the grid back on close), a move held on the
+picture (its direction and speed, repeated, stopped on release and when
+the pointer reaches the panel), the wheel, the pad and lens buttons held
+and slid off, arrows held, together and with the release never told, +,
+-, PgUp, digits and Home, presets stored, named, renamed, deleted and
+gone to, a tour, Esc and the right button stopping what moves, a camera
+without PTZ, one still being asked, a lens without pan and tilt, and the
+login it asks for.
 
 `tests/ui_compare.py` compares those with the references in `tests/ui/*.png`
 (a pixel differs when a channel is off by more than 24; at most 0.3 % may
@@ -916,11 +1025,14 @@ zone, the user editor),
 arrows (`live-page-arrow-next.png`, `-prev`), every tile state and the
 empty slots' "+" (`live-16.png`), `live-empty-plus-hover.png`,
 `camera-add-channel-4.png`, the Channel info page (`channel-info.png`,
-`channel-info-16.png`) and the on-screen keyboard (`osk-letters.png`,
+`channel-info-16.png`), Operation → Configuration (`config-export.png`,
+`config-import.png`, `config-reset.png`) and the on-screen keyboard (`osk-letters.png`,
 `osk-shifted.png`, `osk-symbols.png`, `osk-above.png`), the text over a
 picture (`live-16-text-over-video.png`), Exit (`context-menu-exit.png`,
 `exit-chooser.png`, `reboot-confirm.png`, `shutdown-confirm.png`) and the
-login (`login.png`, `login-keyboard.png`). They are for people reviewing
+login (`login.png`, `login-keyboard.png`), and the PTZ panel (`ptz-panel.png`, `ptz-moving.png`,
+`ptz-new-preset.png`, `ptz-delete-preset.png`, `ptz-lens-only.png`,
+`ptz-none.png`, over a fake camera that records what it is asked). They are for people reviewing
 a change to the UI, not committed: run it after changing a screen or a
 menu and look at the set. The `ui_screenshots` test only checks that the
 walk still gets through every screen; the references above guard the

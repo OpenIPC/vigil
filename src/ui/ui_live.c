@@ -31,6 +31,10 @@
  * screen; Tab reaches the navigation bar, which comes up while it has the
  * focus. The shortcuts (1, 4, pages, menu, S or F12 a snapshot of the
  * selected tile) are in ui_live_key; a snapshot's result is a toast.
+ *
+ * PTZ (the context menu's, or P) shows the camera full screen with the
+ * PTZ panel over it (ui_ptz.c), which has the keys, the wheel and the
+ * right button while it is open; closing it brings the grid back.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,9 +54,9 @@
 #define ARROW_IDLE 2000         /* ms without the pointer moving that put it away */
 #define SAVE_DELAY 3000         /* ms after the last layout or page change that it is saved */
 
-#define N_EVENT_ICONS 4
+#define N_EVENT_ICONS UI_EV_N
 #define NAME_W        200       /* px a name takes at most, for keeping it off the clock */
-#define ICONS_W       140       /* ... the icons, all of them shown */
+#define ICONS_W       140       /* ... the icons: REC and a few events at once */
 #define ICON_PX       20        /* the icons' size (icons.h) */
 
 typedef struct {
@@ -97,6 +101,8 @@ static struct {
     ui_osd_t   osd;                     /* display.*, as the screen shows it */
     lv_timer_t *alert_timer;            /* the alarm frames' blink */
     unsigned   alert_tick;
+    int        menu_ch;                 /* the channel the context menu was opened on */
+    int        ptz_ch, ptz_switched;    /* PTZ open on: full screen for it (back on close) */
 } L;
 
 static int n_channels(void)
@@ -489,8 +495,10 @@ static void cell_build(cell_t *c, const ui_cell_t *g)
 
     /* Icons only, small, in the design tokens' colours; past the name
      * when they share its corner. */
-    static const lv_image_dsc_t *const ev_img[N_EVENT_ICONS] = { &ui_icon_ev_motion, &ui_icon_ev_human,
-                                                                 &ui_icon_ev_face, &ui_icon_ev_vehicle };
+    static const lv_image_dsc_t *const ev_img[N_EVENT_ICONS] = {
+        &ui_icon_ev_motion, &ui_icon_ev_human,      &ui_icon_ev_face,   &ui_icon_ev_vehicle,  &ui_icon_ev_line,
+        &ui_icon_ev_intrusion, &ui_icon_ev_video_loss, &ui_icon_ev_tamper, &ui_icon_ev_alarm_in, &ui_icon_ev_other,
+    };
     c->icons = icon_row(o, osd->icons_bg);
     int icons_h = ICON_PX + (osd->icons_bg == UI_OSD_BOX ? 2 * VG_SPACE_XS : 2);
     int icons_dy = osd->icons == osd->name ? name_dy + name_h + VG_SPACE_XS
@@ -713,6 +721,7 @@ static void live_cfg_cb(lv_observer_t *o, lv_subject_t *s)
     int layout, page;
     live_stored(&layout, &page);
     if (!layout || (layout == L.cfg_layout && page == L.cfg_page)) return;
+    if (ui_ptz_is_open()) ui_ptz_close();       /* the picture it was over goes */
     L.cfg_layout = layout;
     L.cfg_page = page;
     if (L.save_timer) lv_timer_delete(L.save_timer);
@@ -783,7 +792,7 @@ static void osd_cb(lv_observer_t *o, lv_subject_t *s)
 /* ---- navigation bar ------------------------------------------------------------------------ */
 
 enum { ACT_MENU = 1, ACT_PREV, ACT_NEXT, ACT_PIN, ACT_FULL, ACT_CONTEXT, ACT_ESC, ACT_CHANNELS, ACT_RECORD,
-       ACT_DISPLAY, ACT_EXIT, ACT_SNAPSHOT, ACT_LAYOUT = 100 };
+       ACT_DISPLAY, ACT_EXIT, ACT_SNAPSHOT, ACT_PTZ, ACT_LAYOUT = 100 };
 
 /* ---- snapshots ----------------------------------------------------------------------------- */
 
@@ -887,6 +896,9 @@ static void do_action(int act, int ch)
     case ACT_SNAPSHOT:
         if (ui_model()->snapshot) ui_with_perm(UI_PERM_LIVE, snapshot_now, (void *)(intptr_t)snapshot_channel(ch));
         break;
+    case ACT_PTZ:
+        ui_live_ptz(ch);
+        break;
     case ACT_PREV:
     case ACT_NEXT:
         if (pages > 1) set_layout(L.layout, L.page + (act == ACT_NEXT ? 1 : -1));
@@ -938,7 +950,7 @@ static void arrows_poll(void)
         L.arrow_pt = p;
         L.arrow_moved_ms = lv_tick_get();
     }
-    if (has && lv_screen_active() == L.scr && !ui_popup_is_open() &&
+    if (has && lv_screen_active() == L.scr && !ui_popup_is_open() && !ui_ptz_is_open() &&
         ui_layout_pages(L.layout, n_channels()) > 1 && !ui_model()->fixed_tiles &&
         lv_tick_elaps(L.arrow_moved_ms) < ARROW_IDLE && p.y >= L.sh / 3 && p.y < L.sh * 2 / 3)
         side = p.x < ARROW_EDGE ? 0 : p.x >= L.sw - ARROW_EDGE ? 1 : -1;
@@ -951,7 +963,14 @@ static void nav_poll_cb(lv_timer_t *t)
     lv_point_t p;
     arrows_poll();
     if (lv_screen_active() != L.scr) return;
-    if (lv_subject_get_int(&ui_subj_nav_pinned)) return;
+    if (ui_ptz_is_open()) {                     /* the PTZ panel has the screen */
+        if (L.nav_shown) nav_show(0);
+        return;
+    }
+    if (lv_subject_get_int(&ui_subj_nav_pinned)) {
+        nav_show(1);
+        return;
+    }
     if (!ui_pointer(&p)) p.y = 0;                /* no mouse: up only while it has the focus */
     if (lv_obj_has_state(L.nav, LV_STATE_FOCUSED)) {
         nav_show(1);
@@ -1138,26 +1157,33 @@ static void split_open(lv_obj_t *item)
     ui_popup_sub_place(cur);
 }
 
-/* Main menu, Snapshot (of the tile it opened on), Channels, Playback,
- * Record, PTZ, Display, Split, Exit: nothing else (full screen is a double click or Enter, pages the edge arrows or
- * PgUp/PgDn, pinning the bar its own button). */
-void ui_live_context_menu(const lv_point_t *at)
+/* The channel whose tile is at `at` (the keyboard's when NULL or none). */
+static int channel_at(const lv_point_t *at)
 {
-    /* The tile it was opened on (the keyboard's: its middle). */
-    int at_ch = -1;
-    for (int i = 0; i < L.n_cells; ++i) {
+    for (int i = 0; at && i < L.n_cells; ++i) {
         lv_area_t a;
         lv_obj_get_coords(L.cells[i].obj, &a);
-        if (at->x >= a.x1 && at->x <= a.x2 && at->y >= a.y1 && at->y <= a.y2) at_ch = L.cells[i].ch;
+        if (at->x >= a.x1 && at->x <= a.x2 && at->y >= a.y1 && at->y <= a.y2) return L.cells[i].ch;
     }
+    return L.sel_ch;
+}
+
+/* Main menu, Snapshot, Channels, Playback, Record, PTZ, Display, Split, Exit:
+ * nothing else (full screen is a double click or Enter, pages the edge arrows or
+ * PgUp/PgDn, pinning the bar its own button). Snapshot and PTZ are for the
+ * camera whose tile the menu was opened on. */
+void ui_live_context_menu(const lv_point_t *at)
+{
+    L.menu_ch = channel_at(at);
     lv_obj_t *panel = ui_popup_open(at, 260);
     menu_item(panel, LV_SYMBOL_LIST, "Main menu", ACT_MENU, -1);
-    if (ui_model()->snapshot && at_ch >= 0 && at_ch < n_channels() && ui_channel(at_ch)->configured)
-        menu_item(panel, LV_SYMBOL_IMAGE, "Snapshot", ACT_SNAPSHOT, at_ch);
+    if (ui_model()->snapshot && L.menu_ch >= 0 && L.menu_ch < n_channels() && ui_channel(L.menu_ch)->configured)
+        menu_item(panel, LV_SYMBOL_IMAGE, "Snapshot", ACT_SNAPSHOT, L.menu_ch);
     if (section_of("cameras") >= 0) menu_item(panel, LV_SYMBOL_VIDEO, "Channels", ACT_CHANNELS, -1);
     menu_item_later(panel, LV_SYMBOL_PLAY, "Playback");
     if (section_of("record") >= 0) menu_item(panel, LV_SYMBOL_SAVE, "Record", ACT_RECORD, -1);
-    menu_item_later(panel, LV_SYMBOL_GPS, "PTZ");
+    if (ui_model()->ptz_info) menu_item(panel, LV_SYMBOL_GPS, "PTZ", ACT_PTZ, L.menu_ch);
+    else menu_item_later(panel, LV_SYMBOL_GPS, "PTZ");
     menu_item(panel, LV_SYMBOL_SETTINGS, "Display", ACT_DISPLAY, -1);
     if (!ui_model()->fixed_tiles) {
         lv_obj_t *split = menu_item(panel, LV_SYMBOL_BARS, "Split", 0, -1);
@@ -1169,6 +1195,38 @@ void ui_live_context_menu(const lv_point_t *at)
     /* Left and Right go to the item (Right opens Split). */
     ui_popup_focus(panel, NULL, LV_GRIDNAV_CTRL_ROLLOVER | LV_GRIDNAV_CTRL_VERTICAL_MOVE_ONLY);
     ui_popup_place(at);
+}
+
+/* ---- PTZ ------------------------------------------------------------------------------------ */
+
+/* The panel closed: the grid it came from back, if PTZ made it full screen. */
+static void ptz_closed(void)
+{
+    int ch = L.ptz_ch;
+    if (L.ptz_switched && L.fs && L.layout == 1 && L.page == ch) toggle_full_screen(ch);
+    L.ptz_switched = 0;
+}
+
+static void ptz_now(void *arg)
+{
+    int ch = (int)(intptr_t)arg;
+    if (ch < 0 || ch >= n_channels() || !ui_channel(ch)->configured) {
+        ui_toast(UI_TOAST_WARN, "PTZ: no camera on this channel");
+        return;
+    }
+    L.ptz_ch = ch;
+    L.ptz_switched = 0;
+    if (!ui_model()->fixed_tiles && !(L.layout == 1 && L.page == ch)) {
+        toggle_full_screen(ch);                 /* the grid is kept to come back to */
+        L.ptz_switched = 1;
+    }
+    ui_ptz_open(L.scr, ch, ptz_closed);
+}
+
+void ui_live_ptz(int ch)
+{
+    if (ch < 0) ch = L.sel_ch;
+    ui_with_perm(UI_PERM_PTZ, ptz_now, (void *)(intptr_t)ch);
 }
 
 /* ---- keyboard ----------------------------------------------------------------------------- */
@@ -1201,7 +1259,7 @@ static void key_async(void *arg)
 
 int ui_live_key(uint32_t key, unsigned mods)
 {
-    (void)mods;
+    if (ui_ptz_is_open()) return ui_ptz_key(key, mods);
     int act;
     switch (key) {
     case '1': act = ACT_LAYOUT + 1; break;
@@ -1214,6 +1272,7 @@ int ui_live_key(uint32_t key, unsigned mods)
     case 'm': case 'M': case UI_KEY_F(2): act = ACT_MENU; break;
     case 's': case 'S': case UI_KEY_F(12): act = ACT_SNAPSHOT; break;
     case UI_KEY_MENU: act = ACT_CONTEXT; break;
+    case 'p': case 'P': act = ACT_PTZ; break;
     case LV_KEY_ESC: act = ACT_ESC; break;
     default: return 0;
     }

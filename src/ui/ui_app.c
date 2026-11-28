@@ -72,7 +72,7 @@ static lv_group_t *focus_group(void)
 {
     if (g_popup) return g_popup_group;
     ui_page_t *p = ui_page_top();
-    return p ? p->group : ui_live_group();
+    return p ? p->group : ui_ptz_is_open() ? ui_ptz_group() : ui_live_group();
 }
 
 /* The keypad works on the topmost thing: a popup, the page, the live view. */
@@ -143,6 +143,7 @@ void ui_app_wheel(int steps)
 {
     lv_point_t p;
     if (!steps || !ui_pointer(&p)) return;
+    if (!g_popup && !ui_page_top() && ui_ptz_wheel(steps)) return;
     /* A popup on the top layer covers the screen: only it scrolls. */
     lv_obj_t *o = lv_indev_search_obj(lv_layer_top(), &p);
     if (!o || o == lv_layer_top()) o = lv_indev_search_obj(lv_screen_active(), &p);
@@ -696,6 +697,12 @@ static const char *const k_help[][2] = {
     { "M   F2", "Main menu" },
     { "S   F12", "Snapshot of the selected camera" },
     { "Menu   Shift+F10", "Context menu (Right: Split)" },
+    { "P", "PTZ of the selected camera" },
+    { NULL, "PTZ" },
+    { "Arrows   + -", "Move, zoom (while held)" },
+    { "PgUp PgDn", "Focus far, near" },
+    { "1 .. 9   0   Home", "Preset 1 to 9, 10; home position" },
+    { "Esc", "Close (the camera stops)" },
     { NULL, "Everywhere" },
     { "Tab   Shift+Tab", "Next, previous item" },
     { "Arrows", "Move; change a list or a number" },
@@ -885,6 +892,10 @@ void ui_app_back(void)
         ui_page_close(p);
         return;
     }
+    if (ui_ptz_is_open()) {
+        ui_ptz_close();
+        return;
+    }
     lv_point_t at;
     if (ui_pointer(&at))
         ui_live_context_menu(&at);
@@ -972,6 +983,10 @@ uint32_t ui_app_key(uint32_t key, unsigned mods)
     }
     return key;
 }
+
+void ui_app_key_up(uint32_t key) { ui_ptz_key_up(key); }
+
+void ui_app_focus_changed(void) { focus_sync(); }
 
 void ui_app_keyboards(int n)
 {

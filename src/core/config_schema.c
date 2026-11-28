@@ -256,6 +256,7 @@ static int check_snapshot_url(const char *v, char *msg, size_t cap) { return che
 static const char *const off_on[] = { "off", "on", NULL };
 static const char *const snapshot_sources[] = { "auto", "camera", "nvr", NULL };
 static const char *const events_modes[] = { "auto", "netip", "onvif", "off", NULL };
+static const char *const ptz_modes[] = { "auto", "netip", "onvif", "off", NULL };
 static const char *const on_full_values[] = { "overwrite", "stop", NULL };
 static const char *const nas_types[] = { "none", "cifs", "nfs", NULL };
 static const char *const ddns_providers[] = { "dyndns", "noip", "custom", NULL };
@@ -326,8 +327,12 @@ static const schema_field_t camera_fields[] = {
               "when it has them; netip; onvif (a NETIP camera's too); off." },
     { .key = "onvif_url", STR(config_camera_t, onvif_url), .def_str = "", .live = 1, .check = check_onvif_url,
       .label = "ONVIF address",
-      .help = "Its ONVIF device service for the events, http://host[:port]/onvif/device_service; "
+      .help = "Its ONVIF device service for the events and PTZ, http://host[:port]/onvif/device_service; "
               "the URL's user and password log in. Empty: found from its address." },
+    { .key = "ptz", ENUM(config_camera_t, ptz, ptz_modes), .def_str = "auto", .live = 1, .label = "PTZ",
+      .help = "How the camera is moved (pan, tilt, zoom, focus, presets). auto: NETIP's PTZ control for a "
+              "netip:// camera, ONVIF's PTZ service for the others when the camera has one; netip, onvif: "
+              "that one (an RTSP camera's NETIP on port 34567 of its host); off: no PTZ for this camera." },
     { .key = "snapshot_url", STR(config_camera_t, snapshot_url), .def_str = "", .live = 1,
       .check = check_snapshot_url, .label = "Snapshot URL",
       .help = "Where the camera gives a JPEG over HTTP (http://host/cgi-bin/snapshot.cgi), for a camera "
@@ -579,8 +584,8 @@ static const schema_field_t display_fields[] = {
     { .key = "rec_icon", BOOL(config_display_t, rec_icon), .def_int = 1, .live = 1, .label = "REC icon",
       .help = "REC in the status icons' corner of each tile while its channel records." },
     { .key = "alarm_icons", BOOL(config_display_t, alarm_icons), .def_int = 1, .live = 1, .label = "Alarm icons",
-      .help = "The events the camera reports (motion, human, face, vehicle) as icons in the status "
-              "icons' corner, while they last." },
+      .help = "The events the camera reports (motion, people, vehicles, line crossing, video loss, "
+              "tamper, alarm input, ...) as icons in the status icons' corner, while they last." },
     { .key = "tile_dividers", BOOL(config_display_t, tile_dividers), .def_int = 1, .live = 1,
       .label = "Lines between tiles",
       .help = "A thin line around each tile of the live view. Off: the pictures touch." },

@@ -349,6 +349,7 @@ saved over it until it is fixed or removed.
 | `/config/live` | `live` |
 | `/config/api`, `web`, `rtsp_server` | `users` |
 | `/network/…` | `network` |
+| `/system/config/…`, `/system/reset` | `system` and `users` |
 | `/system/…` | `system` |
 | `/disks…`, `/storage/…` | `storage` |
 | `/channels/<n>/snapshot.jpg`, `POST /channels/<n>/snapshot` | `live` |
@@ -554,6 +555,77 @@ Not verified with XM's own CMS / VMS or XMEye: they are tested only
 through what python-dvr and vigil's own NETIP source do (`ctest -R
 netip_server_e2e`).
 
+## Camera events
+
+Each camera's events come from one place, `cameras[].events`:
+
+| `events` | `netip://` camera | other camera (`rtsp://`) |
+|---|---|---|
+| `auto` (default) | its NETIP alarms | its ONVIF events, if it has them |
+| `netip` | its NETIP alarms | none |
+| `onvif` | its ONVIF events | its ONVIF events |
+| `off` | none | none |
+
+A change applies at once, without reconnecting the camera's streams. An
+event is held while the camera says it goes on and ends at its stop; one
+the camera reports only as a moment (a line crossed) is held 5 s. When the
+connection or the subscription is lost, what it said goes on ends.
+
+**NETIP alarms.** The main stream's connection, once logged in and
+streaming, sends AlarmSet (msgid 1500) and is then pushed AlarmInfo
+(msgid 1504), `{"AlarmInfo": {"Channel": 0, "Event": "VideoMotion",
+"StartTime": "...", "Status": "Start"}}` and later `"Stop"`; asked again on
+every connection. An NVR's or DVR's other channels' alarms are left out
+(`Channel` against the URL's `ch`).
+
+| NETIP `Event` | Event |
+|---|---|
+| `VideoMotion` | `motion` |
+| `HumanDetect`, `appEventHumanDetectAlarm` (OpenIPC majestic) | `human` |
+| `FaceDetect` | `face` |
+| `CarShapeDetect` | `vehicle` |
+| `VideoLoss` | `video_loss` |
+| `VideoBlind` | `tamper` |
+| `LocalAlarm` | `alarm_input` |
+| `VideoAnalyze`, `NetAlarm`, `Storage…`, `NetAbort`, `NetIPConflict`, unknown | `other` (an unknown name is logged once) |
+
+A camera that refuses AlarmSet is logged once and streams on. Some XM
+firmwares accept it and push nothing: they send alarms only to the alarm
+server of their own settings.
+
+**ONVIF events.** A thread per camera finds the device's Events service
+(`GetCapabilities`, else `GetServices`) at `cameras[].onvif_url`, else at
+the address discovery heard from it, else `http://host/onvif/device_service`
+on port 80, then 8899 (XM's), logged in with the user and password of the
+camera's URL (WS-UsernameToken in the camera's clock; HTTP Digest when it
+asks). It holds a pull-point subscription (`CreatePullPointSubscription`,
+`PullMessages` with a 5 s timeout, `Renew` before its 120 s run out,
+`Unsubscribe` at the end) and starts a new one after two failed calls or a
+refused `Renew`. With `auto`, a camera without events is logged once and
+tried again every 10 minutes; with `onvif`, sooner, each new failure
+logged. A camera added over ONVIF gets its device service as `onvif_url`.
+
+| ONVIF topic (any prefixes; vendors' variants by what the name contains) | Event |
+|---|---|
+| `VideoSource/MotionAlarm`, `RuleEngine/CellMotionDetector/Motion`, `…/MotionRegionDetector/Motion`, Axis VMD | `motion` |
+| `RuleEngine/MyRuleDetector/PeopleDetect`, `…/HumanDetect`, any `People`/`Human`/`Person` | `human` |
+| `…/FaceDetect` | `face` |
+| `…/VehicleDetect`, `Car` | `vehicle` |
+| `RuleEngine/LineDetector/Crossed`, `LineCrossing`, `Tripwire` | `line_crossing` |
+| `RuleEngine/FieldDetector/ObjectsInside`, `Intrusion` | `intrusion` |
+| `VideoSource/SignalLoss` | `video_loss` |
+| `VideoSource/GlobalSceneChange/…`, `RuleEngine/TamperDetector/Tamper`, `VideoSource/ImageToo…` | `tamper` |
+| `Device/Trigger/DigitalInput`, Axis `IO/Port` | `alarm_input` |
+| `…/DogCatDetect`, `Visitor`, `Device/HardwareFailure/…`, an object detector of another class | `other` |
+| `Monitoring/…`, `Device/Trigger/Relay`, configuration changes | not an event (logged once with `VIGIL_DEBUG` set) |
+
+The first boolean Data item (`IsMotion`, `State`, `IsInside`, `IsTamper`,
+`LogicalState`, …) says start or stop; without one (a line's `ObjectId`)
+it is a moment. Each rule (its Source items) is followed on its own: two
+field rules hold `intrusion` until both are over. All of a device's
+notifications go to its channel; an ONVIF NVR's channels are not told
+apart.
+
 ## Passwords in camera URLs
 
 Camera URLs carry their passwords (`rtsp://admin:12345@…`). The API never
@@ -653,7 +725,10 @@ pictures, `snapshot.event_interval` s apart, when an event starts (one
 burst for the types that start together: motion, then a person, is one),
 from `snapshot.source`, named after the event (`ch01_..._motion.jpg`).
 With `snapshot.mail` and `smtp.enabled` they are mailed together, as
-attachments, subject `vigil: CAM1 (Gate): motion`. Any event source counts:
+attachments, subject `vigil: CAM1 (Gate): motion`: one mail per
+event. The management mailer's own mails ([management.md](management.md))
+are about trouble (a camera down, recording failed), never a camera's
+event, so an event is not mailed twice. Any event source counts:
 NETIP alarms, ONVIF events, `POST /api/v1/channels/<n>/events`.
 
 ### Room
@@ -696,6 +771,8 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `POST /api/v1/channels/<n>/snapshot` | A picture of channel n, kept in the snapshot directory. |
 | `GET /api/v1/snapshots` | The kept pictures, newest first. |
 | `GET`, `DELETE /api/v1/snapshots/<file>` | One of them. |
+| `GET /api/v1/channels/<n>/ptz` | Channel n's PTZ: state, capabilities, presets ([PTZ](#ptz)). |
+| `POST /api/v1/channels/<n>/ptz` | Move channel n's camera, stop it, a preset, home, a tour ([PTZ](#ptz)). |
 | `POST /api/v1/discovery/autoadd` | Add every new device to the empty channels. |
 | `POST /api/v1/devices/test` | Connect to a camera described by hand: codec and size, or why not. |
 
@@ -894,6 +971,10 @@ and `GET /api/v1/jobs/7` says how it goes:
 | `GET /api/v1/system/zones` | `[{"name": "Europe/Berlin", "tz": "CET-1CEST,M3.5.0,M10.5.0/3"}, …]` |
 | `GET`/`PUT /api/v1/system/hostname` | `{"hostname"}`; also in `GET /api/v1/status`. |
 | `POST /api/v1/system/reboot`, `/system/shutdown` | `{"ok": true}`, then vigild stops as on SIGTERM (the channels close their recordings), syncs the disks and runs busybox's `reboot` or `poweroff`. Needs the `system` permission; `409` where vigild does not manage the system. The UI's Exit does the same. |
+| `POST /api/v1/system/config/export` | The configuration as one file: [below](#configuration-export-and-import). |
+| `POST /api/v1/system/config/import` | An export checked (`"dry_run": true`) or applied. |
+| `GET /api/v1/system/config/files` | Where an export can be written, and the exports found there. |
+| `POST /api/v1/system/reset` | `{"level": "vigil" \| "factory", "network": false}`: below. |
 | `GET /api/v1/disks` | `{"managed", "disks": [{"name", "parent", "partition", "size", "model", "removable", "read_only", "fs", "mount", "total", "free", "system", "state"}], "formats": ["exfat", "vfat"]}` |
 | `POST /api/v1/disks/<name>/format` | `{"fs": "exfat", "confirm": "<name>"}` → `202`. A system device, or a wrong `confirm`, is `400`. |
 | `POST /api/v1/disks/<name>/mount`, `/unmount` | `202`. |
@@ -905,6 +986,95 @@ and `GET /api/v1/jobs/7` says how it goes:
 | `GET /api/v1/storage/nas` | `{"support": {"cifs": {"ok", "why"}, "nfs": {…}}, "mount": "/mnt/nas", "mounted", "status"}` |
 | `POST /api/v1/storage/nas/test` | `202`: mount the share in force at a test directory, write and read a file, unmount. |
 | `GET /api/v1/jobs/<id>` | A job, as above. |
+
+### Configuration export and import
+
+What the file holds, what it does not and how an import checks it are in
+[management.md](management.md#configuration-export-import-factory-reset);
+its encryption in [security.md](security.md#configuration-export). Each
+needs the `system` and `users` permissions; one export, import or reset at
+a time (`409`, `"code": "busy"`).
+
+`POST /api/v1/system/config/export` — the body (a POST, so the password is
+not in a URL or a log):
+
+| Key | |
+|---|---|
+| `secrets` | `"password"` (default): every password sealed with `password`; `"none"`: left out |
+| `password` | at least 4 characters, with `"password"` |
+| `destination` | optional: a mounted disk (`GET .../files`' `destinations`) to write it onto instead |
+
+The answer is the file, `application/x-tar`, with `Content-Disposition:
+attachment; filename="vigil-config-<host>-<date>.tar"`; with `destination`,
+`{"path": "/mnt/sdb1/vigil-config-....tar"}`. The key derivation takes
+about a second.
+
+```sh
+curl -u root:PASS -H 'Content-Type: application/json' -o nvr.tar \
+     -d '{"secrets": "password", "password": "export pw"}' \
+     http://nvr:8080/api/v1/system/config/export
+```
+
+`POST /api/v1/system/config/import` — either JSON:
+
+| Key | |
+|---|---|
+| `file` | the export, base64 (up to 1 MiB of file) |
+| `path` | or an export on a mounted disk (`GET .../files`' `files`) |
+| `password` | the export's, if it has one |
+| `dry_run` | `true`: only check and summarise |
+| `hostname` | `false`: keep this recorder's host name (default `true`) |
+
+or the file itself as `Content-Type: application/x-tar`, with
+`?dry_run=1&hostname=0` in the query and the password in an
+`X-Config-Password` header:
+
+```sh
+curl -u root:PASS -H 'Content-Type: application/x-tar' -H 'X-Config-Password: export pw' \
+     --data-binary @nvr.tar 'http://nvr:8080/api/v1/system/config/import?dry_run=1'
+```
+
+`200` with the summary:
+
+```json
+{
+  "from": {"hostname": "nvr-hall", "mac": "aa:bb:cc:00:00:01", "vigil_version": "0.1.0",
+           "board": "ssr621q_lite", "created": "2026-11-28T14:45:06Z"},
+  "secrets": "password",
+  "cameras": {"now": 3, "import": 4},
+  "users": {"now": 1, "import": 2, "without_password": 0, "groups": 3},
+  "root_password": true,
+  "system": {"applies": true, "hostname": true, "hostname_now": "nvr-gate", "hostname_import": "nvr-hall",
+             "timezone": false, "ntp": false, "ethernet": true, "wifi": false},
+  "address_may_change": true,
+  "reboot_required": true,
+  "applied": false,
+  "lines": [{"kind": "info", "text": "Cameras: 4 (now 3)"},
+            {"kind": "warning", "text": "After the reboot the recorder is at 192.168.1.50, not 192.168.1.10: it can only be reached there."}]
+}
+```
+
+Refused, nothing changed: `{"error", "code", "summary"}` with `400`
+(`invalid`: not an export, a value it holds, settings that cannot apply
+here such as a port in use), `403` (`password`: needed or wrong), `422`
+(`changed`: a file changed or damaged since the export), `409`
+(`version`: made by a newer vigil; `busy`). After an applied import with
+`reboot_required`, `POST /api/v1/system/reboot` brings the network
+settings in.
+
+`GET /api/v1/system/config/files` — `{"destinations": [{"path": "/mnt/sdb1",
+"label": "sdb1  exfat  14.2 GB free  SanDisk Ultra"}], "files": [{"path",
+"name", "size", "mtime"}]}`: the mounted, writable disks (and the network
+storage when mounted), and the `vigil-config*.tar` at the top of each,
+the newest first.
+
+`POST /api/v1/system/reset` — `{"level": "vigil"}` resets vigil's
+settings (the image's `vigil.yaml`, no users, a new key; in force at
+once); `"network": true` also the interfaces and the Wi-Fi network, then a
+reboot. `{"level": "factory"}`: OpenIPC's `firstboot` after vigild stops,
+the whole overlay erased, then a reboot. Answer `{"level", "rebooting"}`;
+`409` (`unmanaged`) where vigild does not manage the system (the factory
+reset, the network). Recordings stay.
 
 ## Discovery
 
@@ -1078,6 +1248,110 @@ while sleep 2; do
   curl -s -u root:PASSWORD -d '{"events": ["motion"]}' $NVR/api/v1/channels/1/events
 done
 ```
+
+## PTZ
+
+A camera that moves (pan, tilt, zoom; its lens's focus and iris;
+presets, tours, a home position) is driven over its own protocol, per
+camera by `cameras[].ptz`: `auto` (the default) uses NETIP's
+`OPPTZControl` for a `netip://` camera and ONVIF's PTZ service (with
+Imaging for focus and iris) for the others when the camera has one;
+`netip` or `onvif` forces one (`netip` on an RTSP camera: NETIP on port
+34567 of its host); `off`, none. The camera is asked what it can do the
+first time anyone looks (the screen's PTZ panel, a `GET` here). Commands
+go out from a thread of the channel's own, so a request only queues them
+and is answered at once. Both need the `ptz` permission. The camera's
+password is the one in its URL; nothing here shows it.
+
+### `GET /api/v1/channels/<n>/ptz`
+
+```json
+{ "channel": 1, "state": "ready", "backend": "netip",
+  "capabilities": ["pan_tilt", "zoom", "focus", "iris", "presets", "tours"],
+  "presets": [ { "id": "1", "name": "Gate" }, { "id": "5", "name": "Road" } ],
+  "tours": 8, "moving": false, "error": "" }
+```
+
+`state`: `off` (no camera, disabled, `ptz: off`, or a `capture:` input),
+`probing` (being asked), `ready`, `none` (the camera has no PTZ: a NETIP
+camera answering `Ret 118` or `607`, an ONVIF one without a PTZ service),
+`error` (it could not be reached, or refused the login; `error` says why,
+and it is asked again a few seconds later). `capabilities`: what of
+`pan_tilt`, `zoom`, `focus`, `focus_auto`, `iris`, `presets`, `tours`,
+`home` it can do. `error` is also the last command's failure. `?wait=MS`
+(up to 10000) waits that long for a camera being asked.
+
+### `POST /api/v1/channels/<n>/ptz`
+
+One of:
+
+| Body | Does |
+|---|---|
+| `{"move": {"pan": -1..1, "tilt": -1..1, "zoom": -1..1}}` | A continuous move: pan + right, tilt + up, zoom + in; the size is the speed (NETIP: Step 1..8, one direction of eight, then zoom, at a time). |
+| `{"stop": true}` | Stop whatever moves. |
+| `{"focus": -1..1}`, `{"focus": "auto"}` | Focus + far, - near; or the camera's own focus. |
+| `{"iris": -1..1}` | Iris + open, - close. |
+| `{"preset": {"goto": ID}}` | Go to a preset. |
+| `{"preset": {"set": ID or null, "name": "Gate"}}` | Store the position now as preset ID (null: a new one; NETIP: the lowest free number 1..255). |
+| `{"preset": {"rename": ID, "name": "Lane"}}` | A new name (kept by vigild: the camera's position is not touched). |
+| `{"preset": {"remove": ID}}` | Delete a preset. |
+| `{"home": true}` | The home position. |
+| `{"tour": {"start": N}}`, `{"tour": {"stop": N}}` | A tour (patrol) the camera has, 1..`tours`. |
+
+**A move ends on its own**: it lasts `timeout` milliseconds (100..10000,
+in `move` or beside it; default 1000) and is stopped then, unless the same
+or another move or a stop comes first. A client holding a button repeats
+the move (every few hundred milliseconds) and sends a stop on release; a
+client that goes away leaves nothing moving. A stop the camera does not
+take is sent three times, then the control connection is dropped (majestic
+ends a move when its client hangs up); `vigild` stopping, or the camera's
+URL changing, stops a move first.
+
+The answer is `202` with the state as `GET` gives it (the command is queued;
+a failure shows in `error` afterwards, and on the screen). `400` a bad
+body (an unknown member, a value out of range, two of `move`, `stop`,
+`focus`, `iris` at once, two preset operations), `404` no such channel,
+`409` no PTZ on the channel or not something it can do (`home` and
+`focus: "auto"` on NETIP), `503` too many commands waiting.
+
+```sh
+# pan left at half speed for 2 s, then the preset named Gate
+curl -s -u root:PASSWORD -d '{"move": {"pan": -0.5}, "timeout": 2000}' $NVR/api/v1/channels/1/ptz
+curl -s -u root:PASSWORD -d '{"preset": {"goto": 1}}' $NVR/api/v1/channels/1/ptz
+```
+
+**Presets** are ids: a NETIP camera's are numbers (`"1"` .. `"255"`), an
+ONVIF camera's its own tokens (often `"1"`, `"Preset_1"`). XM cameras keep
+no names and list nothing, so vigild keeps the list of what was stored
+through it, with the names, in `vigil.ptz.json` beside the configuration
+file (`/etc/vigil.ptz.json`), per camera (address, port and channel of an
+NVR), with no password; a rename is kept there too for an ONVIF camera,
+over the name the camera gives.
+
+**NETIP** (XM cameras and NVRs, majestic with `netip`): message 1400 on a
+connection of its own, logged in with the URL's user and password,
+`{"Command": "DirectionLeft", "Parameter": {"Channel": 0, "Preset":
+65535, "Step": 5, "Tour": 0, ...}}` to start and the same with `"Preset":
+-1` to stop; `ZoomTile`/`ZoomWide`, `FocusNear`/`FocusFar`,
+`IrisLarge`/`IrisSmall`, `SetPreset`/`GotoPreset`/`ClearPreset`,
+`StartTour`/`StopTour`. There is no home position or automatic focus.
+
+**ONVIF**: the device service at `cameras[].onvif_url`, else the address
+discovery heard, else `http://<host>/onvif/device_service` on port 80 and
+8899 (as for the camera's events), logged in with the URL's user and
+password (WS-UsernameToken in the camera's clock, HTTP Digest when it asks).
+`GetCapabilities` (or `GetServices`) for the Media, PTZ and Imaging
+services; `GetProfiles`: the first profile with a PTZ configuration (the
+main stream's), its video source and node; `GetNode`: continuous pan/tilt
+and zoom, presets, home, preset tours. A move is `ContinuousMove` (`PanTilt
+x, y`, `Zoom x`) with `Timeout PT2S`, sent again every second while it
+lasts so the camera ends it by itself if vigild goes quiet (a camera that
+refuses the Timeout gets none), and `Stop`; focus is the Imaging service's
+`Move` (`Continuous Speed`) and `Stop`, automatic focus `SetImagingSettings`
+`AutoFocusMode AUTO`; presets `GetPresets`, `GotoPreset`, `SetPreset`,
+`RemovePreset`; `GotoHomePosition`; tours `GetPresetTours` and
+`OperatePresetTour` (tour N is the camera's Nth). ONVIF has no continuous
+iris move, so there is no iris.
 
 ### `POST /api/v1/devices/test`
 

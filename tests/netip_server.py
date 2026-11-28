@@ -15,6 +15,7 @@ bits 8-9 in the codec byte's high nibble (0x13: H.265, 2048 or more wide).
                     [--width 640 --height 360] [--title NAME] [--title-objects]
                     [--chatty] [--stall] [--video-frames N] [--no-title]
                     [--alarm-script S] [--alarm-ctl PORT] [--alarm-refuse] [--drop-after SECS]
+                    [--ptz-log FILE] [--no-ptz] [--snapshot FILE] [--snap-mode M]
 
 Alarms: a client that sends AlarmSet (1500) is answered 1501 and pushed
 AlarmInfo (1504) messages, {"AlarmInfo": {"Channel", "Event", "StartTime",
@@ -35,6 +36,14 @@ a JPEG as the body (python-dvr's snapshot(), XM's NET_SNAP_RSP):
                     header's total/current packet bytes counting them), framed
                     (a 0x1FE media frame header with the length, then the payload
                     over messages), refuse (1561 {"Ret": 103}), silent (no answer)
+
+PTZ (OPPTZControl, 1400 -> 1401 Ret 100): a simulated head. A Direction*
+or Zoom* command with Preset 65535 (or 0) starts moving at its Step (pan
+and tilt 4 degrees a second per Step, zoom 0.5x a second), the same
+command with Preset -1 stops it; Set/Goto/ClearPreset keep a table of
+positions; Start/StopTour are recorded. --ptz-log appends one JSON line
+per command: time, peer, Command, Channel, Preset, Step, Tour and the
+position after it. --no-ptz answers Ret 607 (majestic without PTZ).
 
 Fault modes for tests:
   --chatty          never answer the login; send unrelated messages instead
@@ -96,6 +105,58 @@ def access_units(data, h265):
     return aus
 
 
+class Head:
+    """A PTZ head: where it points, what moves it, its presets."""
+    DIRS = {"DirectionUp": (0, 1), "DirectionDown": (0, -1), "DirectionLeft": (-1, 0),
+            "DirectionRight": (1, 0), "DirectionLeftUp": (-1, 1), "DirectionLeftDown": (-1, -1),
+            "DirectionRightUp": (1, 1), "DirectionRightDown": (1, -1)}
+
+    def __init__(self, log):
+        self.lock = threading.Lock()
+        self.pan, self.tilt, self.zoom = 0.0, 0.0, 1.0
+        self.moving, self.step, self.since = None, 0, 0.0
+        self.presets = {}
+        self.log = log
+
+    def _settle(self, now):
+        if self.moving:
+            dt = now - self.since
+            if self.moving in self.DIRS:
+                dx, dy = self.DIRS[self.moving]
+                self.pan = max(-180.0, min(180.0, self.pan + dx * 4.0 * self.step * dt))
+                self.tilt = max(-90.0, min(90.0, self.tilt + dy * 4.0 * self.step * dt))
+            elif self.moving in ("ZoomTile", "ZoomWide"):
+                self.zoom = max(1.0, min(30.0, self.zoom + (0.5 if self.moving == "ZoomTile" else -0.5) * dt))
+        self.since = now
+
+    def command(self, peer, req):
+        op = req.get("OPPTZControl", {})
+        cmd, par = op.get("Command"), op.get("Parameter", {})
+        preset, step, tour = par.get("Preset"), par.get("Step"), par.get("Tour")
+        now = time.time()
+        with self.lock:
+            self._settle(now)
+            if cmd in self.DIRS or cmd in ("ZoomTile", "ZoomWide", "FocusNear", "FocusFar", "IrisLarge",
+                                           "IrisSmall"):
+                if preset == -1:
+                    if self.moving == cmd:
+                        self.moving = None
+                else:
+                    self.moving, self.step = cmd, step if isinstance(step, int) and 1 <= step <= 8 else 1
+            elif cmd == "SetPreset":
+                self.presets[preset] = (self.pan, self.tilt, self.zoom)
+            elif cmd == "GotoPreset" and preset in self.presets:
+                self.moving = None
+                self.pan, self.tilt, self.zoom = self.presets[preset]
+            elif cmd == "ClearPreset":
+                self.presets.pop(preset, None)
+            line = {"t": round(now, 3), "peer": peer, "cmd": cmd, "channel": par.get("Channel"), "preset": preset,
+                    "step": step, "tour": tour, "pan": round(self.pan, 1), "tilt": round(self.tilt, 1),
+                    "zoom": round(self.zoom, 2), "moving": self.moving}
+        if self.log:
+            with open(self.log, "a") as f:
+                f.write(json.dumps(line) + "\n")
+        print("netip_server: ptz %s" % json.dumps(line), flush=True)
 CLIENTS = set()
 CLIENTS_LOCK = threading.Lock()
 DROPPED = [False]
@@ -110,9 +171,9 @@ def alarm_body(session, event, status, channel):
 
 
 class Client(threading.Thread):
-    def __init__(self, sock, args, aus, h265):
+    def __init__(self, sock, args, aus, h265, head=None):
         super().__init__(daemon=True)
-        self.s, self.args, self.aus, self.h265 = sock, args, aus, h265
+        self.s, self.args, self.aus, self.h265, self.head = sock, args, aus, h265, head
         self.session, self.streaming = 0x1234ABCD, False
         self.alarms = False
         self.lock = threading.Lock()
@@ -242,6 +303,12 @@ class Client(threading.Thread):
                                      "SessionID": "0x%08X" % self.session})
                 elif msgid == 1413:
                     self.send(1414, {"Ret": 100, "SessionID": "0x%08X" % self.session})
+                elif msgid == 1400:
+                    if self.args.no_ptz:
+                        self.send(1401, {"Ret": 607, "SessionID": "0x%08X" % self.session})
+                    else:
+                        self.head.command("%s:%d" % self.s.getpeername(), req)
+                        self.send(1401, {"Ret": 100, "SessionID": "0x%08X" % self.session})
                 elif msgid == 1410 and not self.streaming:
                     self.streaming = True
                     threading.Thread(target=self.stream, daemon=True).start()
@@ -301,6 +368,8 @@ def main():
     ap.add_argument("--title", default="")
     ap.add_argument("--title-objects", action="store_true")
     ap.add_argument("--no-title", action="store_true")
+    ap.add_argument("--ptz-log", help="append each PTZ command (JSON lines)")
+    ap.add_argument("--no-ptz", action="store_true", help="answer PTZ with Ret 607")
     ap.add_argument("--alarm-script", default="")
     ap.add_argument("--alarm-ctl", type=int, default=0)
     ap.add_argument("--alarm-refuse", action="store_true")
@@ -321,9 +390,10 @@ def main():
     if args.alarm_ctl:
         threading.Thread(target=alarm_ctl, args=(args.alarm_ctl,), daemon=True).start()
     print("netip_server: %d frames on :%d" % (len(aus), args.port), flush=True)
+    head = Head(args.ptz_log)
     while True:
         c, _ = srv.accept()
-        Client(c, args, aus, h265).start()
+        Client(c, args, aus, h265, head).start()
 
 
 if __name__ == "__main__":

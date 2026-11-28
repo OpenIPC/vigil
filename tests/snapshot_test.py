@@ -390,6 +390,14 @@ def main():
                   sorted(p.get_filename() for p in atts) == new,
                   "mailed: the subject, both pictures attached (%s, %d)" %
                   (msg.get("Subject") if msg else None, len(atts)))
+            # One mail for the event: the management mailer's trouble mails
+            # (here CAM5 and CAM6, which point at nothing, going down) never
+            # carry a camera's event.
+            time.sleep(3)
+            about = [email.message_from_bytes(m) for m in smtp.messages]
+            about = [p for p in about if "motion" in p.get("Subject", "") or
+                     (not p.is_multipart() and b"motion" in (p.get_payload(decode=True) or b""))]
+            check(len(about) == 1, "one mail for the event (%d)" % len(about))
         else:
             print("skip mail: no curl here")
 

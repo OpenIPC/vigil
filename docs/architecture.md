@@ -65,7 +65,8 @@ Rules that keep the layers apart:
   through `ui_model.h`, which `src/app/ui_bridge.c` fills from the core.
 - `src/api` knows CivetWeb, `crypt(3)` and the core's public headers. It
   reads snapshots and writes the configuration store; it never drives the
-  channels or the UI itself. The zero channel's web server (`web.c`) gets
+  channels or the UI itself. What it asks of a camera (discovery's jobs,
+  a PTZ command) is queued for a thread of the core's that does it. The zero channel's web server (`web.c`) gets
   the screen's pictures and hands the browser's input on through `kvm.h`,
   which the app implements (`src/app/kvm.c`): the pictures are composed
   from LVGL's flushes and the platform's `hal_display_grab`, the input
@@ -241,6 +242,45 @@ flashes, toasts) and the API's WebSocket feed both see every event, and a reader
 falls behind skips ahead and is told how many it missed. Without a display,
 `frontend_headless.c` prints the status to the log.
 
+### Camera events
+
+What the cameras report (motion, people, vehicles, faces, a line crossed,
+something inside a field, video loss, tamper, an alarm input, anything
+else: `CH_EV_*` in `channel.h`) goes through `cam_events.c`, whatever its
+origin: the main session's NETIP connection (`source_netip.c` asks for
+AlarmInfo with AlarmSet and reports each Start and Stop), the channel's
+ONVIF watcher (`onvif_events.c`: a pull-point subscription on a thread of
+its own) or the API (`POST /api/v1/channels/<n>/events`). Each channel's
+type is held while any origin has a start without its stop, or 5 s after
+a momentary report; an origin that loses its camera (a connection
+dropped, a subscription lost, the camera removed) clears what it held.
+`cameras[].events` picks the origin per camera and changes without
+touching the streams. The held state's edges go to the log, to the events
+ring as camera events (`event_t.cam_type`: the WebSocket's `event`
+messages carry `event`, `state`, `detail`; the live view leaves them to
+the tiles' icons and alarm frame), and to subscribers:
+
+```c
+#include "cam_events.h"
+
+static void on_event(void *user, const cam_event_t *ev)
+{
+    /* ev->channel (0-based), ev->type (one CH_EV_* bit), ev->active
+     * (1 began, 0 ended), ev->time, ev->source (CAM_EV_SRC_NETIP, ...),
+     * ev->detail ("VideoMotion", "RuleEngine/LineDetector/Crossed") */
+}
+
+int id = cam_events_subscribe(on_event, ctx);   /* -1: CAM_EV_SUBS taken */
+...
+cam_events_unsubscribe(id);                     /* after it, on_event is not running */
+```
+
+A subscriber is called on the reporting thread, one edge at a time and in
+order; it must be quick (queue the work) and must not report events
+itself. `cam_events_held(ch, now)` is the current state, for one that
+starts late. The recorder's event log and motion recording, and the Alarm
+page, are meant to be such subscribers.
+
 ## Management
 
 The management pages (network, time, host name, disks, network storage,
@@ -312,6 +352,9 @@ page having put them in force already as the user moved them.
 | zero channel viewers (2) | one per viewer, at nice 10: composes, encodes and sends its pictures (`kvm_next`) |
 | NETIP server: listener | accepts NETIP connections, answers XM's LAN search (`src/api/netip_srv.c`) |
 | NETIP server: one per connection (24 at most) | its requests, and its stream's queue onto the socket; the camera's session thread only copies into that queue |
+| ONVIF events: one per camera that has them | its pull-point subscription: PullMessages, Renew, subscribing again (`onvif_events.c`) |
+| camera events ticker | ends momentary events when their 5 s are over (`cam_events.c`) |
+| PTZ: one per channel, once its PTZ is used | probes the camera, sends the moves, presets and their stops (`ptz.c`); its connection closes after a minute idle |
 | snapshot worker | the screen's snapshot requests and the pictures on camera events, mailing them (`src/app/snapshot.c`); the API's snapshots run on its own workers |
 | log reader (`-s`) | turns stdout/stderr lines into syslog messages |
 
@@ -337,6 +380,17 @@ settings pages do. Its network work runs as jobs on a thread of its own;
 the API (`api_disc.c`) and the UI (through `ui_model.h`) start them and
 read their state. Formats, sources and the protocol matrix are in
 `disc_proto.h`, `disc_ops.h` and [api.md](api.md#discovery).
+
+**PTZ** is not a source either: `ptz.c` gives each channel a backend
+(`ptz_netip.c`: NETIP's `OPPTZControl` on a control connection of its
+own; `ptz_onvif.c`: ONVIF's PTZ and Imaging services), chosen by
+`cameras[].ptz` and the URL's scheme, and a worker thread of the
+channel's own, started the first time the channel's PTZ is used, which
+does every network call; the UI (through `ui_model.h`) and the API
+(`api_ptz.c`) only queue commands and read its state. A continuous move
+lasts a hold (1 s) unless asked again, and a stop is retried, then the
+connection dropped; so a lost stop, or a client gone, never leaves a
+camera moving ([api.md](api.md#ptz), [ui.md](ui.md#ptz)).
 
 The other way round, the **ONVIF server** (`src/api/onvif.c`,
 [onvif.md](onvif.md)) makes the recorder an ONVIF device for VMS: like
@@ -432,6 +486,14 @@ adding a platform is covered in [porting.md](porting.md).
   vectors), WS-Discovery probes and their matching, our ProbeMatches as
   the camera search reads them; each request cut at every length.
   `onvif_e2e`: `vigild`'s ONVIF server as a client sees it.
+- `ptz`: NETIP's PTZ commands and bodies, the backend chosen per camera,
+  the safety stops (a hold that runs out, a stop retried then hung up, a
+  camera replaced or vigild stopping while it moves), presets and their
+  names across a restart, and the NETIP backend against a camera in a
+  thread over a socket. `ptz_e2e`: the API against the NETIP emulator's
+  simulated head (`netip_server.py --ptz-log`): moves stopped by their
+  timeout and by the client, presets, refusals, the `ptz` permission, a
+  move stopped when vigild stops.
 - `theme_tokens`: the generated `theme_tokens.h` and `web/theme.css` match
   `src/ui/theme.json`.
 - `ui_screens`: the UI on an in-memory display, driven through the evdev
@@ -448,7 +510,14 @@ adding a platform is covered in [porting.md](porting.md).
   restart (the camera's sealed password too); none in the clear in a file,
   the log or the API (`tests/secrets_test.py`).
 - `netip_*`: `vigild` against `tests/netip_server.py`, a NETIP camera
-  emulator, with H.264 and H.265 clips and a wrong password.
+  emulator, with H.264 and H.265 clips and a wrong password; its alarms
+  pushed and refused, and asked for again after a dropped connection
+  (`netip_alarms`, `netip_noalarms`).
+- `events_e2e`: the cameras' events through the API's status and
+  WebSocket, from the NETIP emulator's alarms and from
+  `tests/fake_onvif_events.py`, an ONVIF event service (pull point,
+  reference parameters, renewal, a camera that forgets its subscriptions),
+  and switched off without a reconnect (`tests/events_test.py`).
 - `fault_*`: misbehaving servers. A NETIP login that is never answered
   while other messages keep coming, a message body that stops halfway
   (vigild must not spin the CPU), a camera sending only audio (the channel

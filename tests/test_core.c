@@ -40,6 +40,7 @@
 #include "rec_place.h"
 #include "rec_sched.h"
 #include "secret.h"
+#include "tar.h"
 #include "rtp_depay.h"
 #include "source.h"
 #include "rtsp_client.h"
@@ -1262,6 +1263,8 @@ static void test_config_file(void)
     snprintf(c.cameras[0].snapshot_on_event, sizeof c.cameras[0].snapshot_on_event, "off");
     snprintf(c.cameras[1].snapshot_on_event, sizeof c.cameras[1].snapshot_on_event, "on");
     snprintf(c.cameras[1].onvif_url, sizeof c.cameras[1].onvif_url, "http://10.0.0.3:8899/onvif/device_service");
+    snprintf(c.cameras[0].ptz, sizeof c.cameras[0].ptz, "auto");
+    snprintf(c.cameras[1].ptz, sizeof c.cameras[1].ptz, "netip");
     snprintf(c.record.path, sizeof c.record.path, "/mnt/sda1/rec");
     c.record.segment = 300;
     /* A world-readable file and a symlink where an older vigild put its
@@ -4061,6 +4064,59 @@ static void test_snap_store(void)
     if (system("rm -rf snapt")) {}
 }
 
+/* A configuration export's pieces: a key of one's own (PBKDF2, RFC 6070's
+ * style vector for SHA-256), values sealed with it that the board's key
+ * does not open, and the ustar archive they travel in. */
+static void test_export_pieces(void)
+{
+    unsigned char key[SECRET_KEY_LEN], other[SECRET_KEY_LEN];
+    /* PBKDF2-HMAC-SHA256("password", "salt", 1, 32) */
+    static const unsigned char want[8] = { 0x12, 0x0f, 0xb6, 0xcf, 0xfc, 0xf8, 0xb3, 0x2c };
+    CHECK(secret_derive("password", (const unsigned char *)"salt", 4, 1, key) == 0 && !memcmp(key, want, 8),
+          "PBKDF2-HMAC-SHA256 as RFC 7914 has it");
+    secret_derive("password", (const unsigned char *)"salt", 4, 2, other);
+    char sealed[256], out[128];
+    CHECK(secret_seal_with(key, "config:smtp.password", "m@il pw", sealed, sizeof sealed) == SECRET_OK &&
+              !strncmp(sealed, SECRET_EXPORT_PREFIX, 7) && secret_is_export_sealed(sealed) && !secret_is_sealed(sealed),
+          "sealed for an export: enc:p1:");
+    CHECK(secret_open_with(key, "config:smtp.password", sealed, out, sizeof out) == SECRET_OK &&
+              !strcmp(out, "m@il pw"), "opens with its key");
+    CHECK(secret_open_with(other, "config:smtp.password", sealed, out, sizeof out) == SECRET_EAUTH && !out[0],
+          "not with another");
+    CHECK(secret_open_with(key, "config:ddns.password", sealed, out, sizeof out) == SECRET_EAUTH,
+          "nor for another field");
+    CHECK(secret_open("config:smtp.password", sealed, out, sizeof out) == SECRET_EFORMAT,
+          "the board's own cipher does not take it");
+    sealed[12] ^= 1;
+    CHECK(secret_open_with(key, "config:smtp.password", sealed, out, sizeof out) != SECRET_OK, "changed: refused");
+
+    tar_out_t t = { 0 };
+    CHECK(tar_add(&t, "manifest.json", "{}", 2, 1700000000) == 0 && tar_add(&t, "a.yaml", "x: 1\n", 5, 0) == 0 &&
+              tar_add(&t, "empty", "", 0, 0) == 0 && tar_add(&t, "../evil", "", 0, 0) < 0 &&
+              tar_add(&t, "dir/file", "", 0, 0) < 0 && tar_finish(&t) == 0 && t.len == 512 * 7,
+          "a tar of three files (%zu bytes)", t.len);
+    tar_file_t f[TAR_FILES_MAX];
+    char err[160];
+    int n = tar_read(t.data, t.len, f, TAR_FILES_MAX, err, sizeof err);
+    const tar_file_t *a = tar_find(f, n, "a.yaml");
+    CHECK(n == 3 && a && a->len == 5 && !memcmp(a->data, "x: 1\n", 5) && tar_find(f, n, "empty")->len == 0,
+          "read back: %d (%s)", n, n < 0 ? err : "");
+    CHECK(tar_read(t.data, 1000, f, TAR_FILES_MAX, err, sizeof err) < 0, "cut short: %s", err);
+    t.data[1024 + 5] ^= 1;              /* a.yaml's name: its header's checksum fails */
+    CHECK(tar_read(t.data, t.len, f, TAR_FILES_MAX, err, sizeof err) < 0 && strstr(err, "checksum"),
+          "a bad header: %s", err);
+    t.data[1024 + 5] ^= 1;
+    t.data[512 * 2 + 156] = '2';        /* a.yaml as a symlink, checksum made right */
+    memset(t.data + 512 * 2 + 148, ' ', 8);
+    unsigned sum = 0;
+    for (int i = 0; i < 512; ++i) sum += (unsigned char)t.data[512 * 2 + i];
+    snprintf(t.data + 512 * 2 + 148, 8, "%06o", sum);
+    CHECK(tar_read(t.data, t.len, f, TAR_FILES_MAX, err, sizeof err) < 0 && strstr(err, "plain files"),
+          "only plain files: %s", err);
+    CHECK(tar_read("hello", 5, f, TAR_FILES_MAX, err, sizeof err) < 0, "not a tar");
+    tar_out_free(&t);
+}
+
 int main(int argc, char **argv)
 {
     g_data = argc > 1 ? argv[1] : "tests/data";
@@ -4070,6 +4126,7 @@ int main(int argc, char **argv)
     snprintf(key, sizeof key, "%s/vigil.key", keydir);
     secret_set_key_path(key);
     test_secret_cipher(keydir);
+    test_export_pieces();
     test_sps();
     test_au_norm();
     test_gop_cache();

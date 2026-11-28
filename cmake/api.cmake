@@ -36,9 +36,11 @@ add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/web_assets.c
                    DEPENDS ${_web_assets} ${CMAKE_SOURCE_DIR}/cmake/embed.cmake VERBATIM)
 
 add_library(vigil_api STATIC ${CMAKE_SOURCE_DIR}/src/api/api.c ${CMAKE_SOURCE_DIR}/src/api/api_disc.c
+            ${CMAKE_SOURCE_DIR}/src/api/api_ptz.c
             ${CMAKE_SOURCE_DIR}/src/api/web.c ${CMAKE_BINARY_DIR}/web_assets.c
             ${CMAKE_SOURCE_DIR}/src/api/api_mgmt.c ${CMAKE_SOURCE_DIR}/src/api/api_perm.c ${CMAKE_SOURCE_DIR}/src/api/api_snap.c
             ${CMAKE_SOURCE_DIR}/src/api/api_users.c ${CMAKE_SOURCE_DIR}/src/api/auth.c
+            ${CMAKE_SOURCE_DIR}/src/api/api_backup.c ${CMAKE_SOURCE_DIR}/src/api/backup.c
             ${CMAKE_SOURCE_DIR}/src/api/netip_srv.c ${CMAKE_SOURCE_DIR}/src/api/rtsp_server.c
             ${CMAKE_SOURCE_DIR}/src/api/users.c ${CMAKE_SOURCE_DIR}/src/api/onvif.c)
 target_include_directories(vigil_api PUBLIC ${CMAKE_SOURCE_DIR}/src/api)

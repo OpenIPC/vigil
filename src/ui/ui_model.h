@@ -81,6 +81,39 @@ typedef struct {
     int x, y, w, h;
 } ui_rect_t;
 
+/* ---- PTZ ------------------------------------------------------------------------ */
+
+/* A channel's PTZ (the core's ptz_info_t): its state, what it can do
+ * (UI_PTZ_CAP_*), its presets. */
+typedef enum { UI_PTZ_OFF, UI_PTZ_PROBING, UI_PTZ_READY, UI_PTZ_NONE, UI_PTZ_ERROR } ui_ptz_state_t;
+enum {
+    UI_PTZ_CAP_PAN_TILT = 1u << 0, UI_PTZ_CAP_ZOOM = 1u << 1, UI_PTZ_CAP_FOCUS = 1u << 2,
+    UI_PTZ_CAP_FOCUS_AUTO = 1u << 3, UI_PTZ_CAP_IRIS = 1u << 4, UI_PTZ_CAP_PRESETS = 1u << 5,
+    UI_PTZ_CAP_TOURS = 1u << 6, UI_PTZ_CAP_HOME = 1u << 7,
+};
+#define UI_PTZ_PRESETS 32
+
+typedef struct {
+    char token[32];                 /* NETIP: "1".."255"; ONVIF: the camera's */
+    char name[32];                  /* "": none */
+} ui_ptz_preset_t;
+
+typedef struct {
+    ui_ptz_state_t  state;
+    char            backend[8];     /* "netip", "onvif", "" */
+    unsigned        caps;
+    char            error[96];      /* why not, or the last command's failure */
+    unsigned        error_seq;      /* moves with every new failure */
+    int             n_presets;
+    ui_ptz_preset_t presets[UI_PTZ_PRESETS];
+    int             tours;          /* 1..tours can be started; 0 none */
+    int             moving;
+    unsigned        gen;            /* moves when anything above does */
+} ui_ptz_t;
+
+enum { UI_PTZ_PRESET_GOTO, UI_PTZ_PRESET_SET, UI_PTZ_PRESET_REMOVE, UI_PTZ_PRESET_RENAME };
+enum { UI_PTZ_FOCUS, UI_PTZ_IRIS };
+
 /* ---- settings -------------------------------------------------------------------- */
 
 typedef enum { UI_FIELD_STRING, UI_FIELD_INT, UI_FIELD_BOOL, UI_FIELD_ENUM } ui_field_kind_t;
@@ -252,6 +285,35 @@ typedef struct {
     char msg[256];
 } ui_mjob_t;
 
+/* Operation -> Configuration (src/api/backup.h): where an export goes and
+ * the exports found on the disks. */
+typedef struct {
+    char path[128];
+    char label[128];
+} ui_cfg_place_t;
+
+typedef struct {
+    char      path[256];
+    char      name[100];
+    long long size, mtime;
+} ui_cfg_file_t;
+
+/* The outcome of an export, an import (checked or applied) or a reset. */
+enum { UI_CFG_OK = 0, UI_CFG_EINVAL = -1, UI_CFG_EPASSWORD = -2, UI_CFG_ECHANGED = -3, UI_CFG_EVERSION = -4,
+       UI_CFG_EIO = -5, UI_CFG_EUNMANAGED = -6, UI_CFG_EBUSY = -7 };
+#define UI_CFG_LINES 24
+typedef struct {
+    int  rc;                        /* UI_CFG_* */
+    char msg[300];                  /* why not; or what was done */
+    char path[256];                 /* an export: the file written */
+    int  secrets;                   /* an import: the export has its passwords, sealed */
+    int  applied, reboot;           /* applied; the network settings wait for a reboot */
+    int  net_cuts;                  /* the recorder's address may change at that reboot */
+    int  n_lines;
+    int  kind[UI_CFG_LINES];        /* 0 information, 1 warning */
+    char line[UI_CFG_LINES][200];
+} ui_cfg_result_t;
+
 typedef struct {
     long long last;                 /* 0: never */
     int       ok;
@@ -411,6 +473,20 @@ typedef struct {
 
     int  (*job)(int id, ui_mjob_t *j);              /* 0, or -1 when forgotten */
 
+    /* configuration export and import, the resets (NULL: not in this
+     * build). Each of cfg_export, cfg_import and cfg_reset starts the
+     * work on a thread of its own (the key derivation alone takes a
+     * second): 0, or < 0 with err; cfg_poll says UI_MGMT_EBUSY while it
+     * runs, then gives the outcome once (0). cfg_import with apply 0 only
+     * checks and summarises. cfg_reset: level 0 vigil's settings (network
+     * 1: the interfaces too, and a reboot), 1 the whole firmware. */
+    int (*cfg_places)(ui_cfg_place_t *out, int max);
+    int (*cfg_files)(ui_cfg_file_t *out, int max);
+    int (*cfg_export)(const char *dir, const char *password, char *err, size_t cap);
+    int (*cfg_import)(const char *path, const char *password, int hostname, int apply, char *err, size_t cap);
+    int (*cfg_reset)(int level, int network, char *err, size_t cap);
+    int (*cfg_poll)(ui_cfg_result_t *r);
+
     /* disks */
     int  (*disks)(ui_disk_t *out, int max);
     int  (*disk_formats)(char out[][8], int max);
@@ -548,6 +624,22 @@ typedef struct ui_model {
     int  (*disc_test)(const ui_manual_t *m, char *err, size_t cap);
     int  (*disc_assign_manual)(const ui_manual_t *m, int channel, const char *name, int replace, char *err,
                                size_t cap);
+
+    /* PTZ (NULL: none in this build). Every call returns at once (the
+     * core's worker talks to the camera); what came of it shows in
+     * ptz_info, which also starts finding out what the camera can do.
+     * A move (-1..1 each: pan + right, tilt + up, zoom + in; lens: focus
+     * + far, iris + open) lasts hold_ms unless repeated; all zero stops.
+     * 0, or < 0 (refused: no PTZ, not supported, bad value). Presets:
+     * UI_PTZ_PRESET_*; SET with token "" or NULL makes a new one. */
+    int  (*ptz_info)(int ch, ui_ptz_t *out);
+    int  (*ptz_move)(int ch, double pan, double tilt, double zoom, int hold_ms);
+    int  (*ptz_lens)(int ch, int what, double dir, int hold_ms);
+    int  (*ptz_stop)(int ch);
+    int  (*ptz_preset)(int ch, int op, const char *token, const char *name);
+    int  (*ptz_home)(int ch);
+    int  (*ptz_focus_auto)(int ch);
+    int  (*ptz_tour)(int ch, int n, int start);
 
     /* The management pages (NULL: none in this build). */
     const ui_mgmt_t *mgmt;

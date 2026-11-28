@@ -346,9 +346,52 @@ static int real_klog(char *buf, size_t cap)
     return (int)keep;
 }
 
+static pid_t real_spawn(const char *const *argv, const char *log)
+{
+    char prog[512], lp[512];
+    if (which(argv[0], prog, sizeof prog) < 0) {
+        errno = ENOENT;
+        return -1;
+    }
+    int fd = open(sys_path(lp, sizeof lp, log), O_WRONLY | O_CREAT | O_TRUNC | O_APPEND | O_CLOEXEC, 0600);
+    if (fd < 0) return -1;
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_adddup2(&fa, fd, 1);
+    posix_spawn_file_actions_adddup2(&fa, fd, 2);
+    posix_spawnattr_t at;
+    posix_spawnattr_init(&at);
+    sigset_t none, all;
+    sigemptyset(&none);
+    sigfillset(&all);
+    posix_spawnattr_setsigmask(&at, &none);
+    posix_spawnattr_setsigdefault(&at, &all);
+    /* Its own session: nothing aimed at vigild's process group (a
+     * terminal's hang-up, a supervisor) reaches it. A C library without
+     * POSIX_SPAWN_SETSID still gives it a process group of its own. */
+#ifdef POSIX_SPAWN_SETSID
+    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSID);
+#else
+    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETPGROUP);
+    posix_spawnattr_setpgroup(&at, 0);
+#endif
+    pid_t pid;
+    int rc = posix_spawn(&pid, prog, &fa, &at, (char *const *)argv, environ);
+    posix_spawn_file_actions_destroy(&fa);
+    posix_spawnattr_destroy(&at);
+    close(fd);
+    if (rc != 0) {
+        errno = rc;
+        return -1;
+    }
+    return pid;
+}
+
 static const sys_ops_t REAL = {
     .run = real_run, .have = real_have, .sethostname = real_sethostname, .settime = real_settime,
     .mount = real_mount, .umount = real_umount, .reread_parts = real_reread_parts, .ifaddr = real_ifaddr, .klog = real_klog,
+    .spawn = real_spawn,
 };
 
 static sys_ops_t g_ops = REAL;
@@ -359,7 +402,7 @@ void sys_set_ops(const sys_ops_t *ops)
     if (!ops) return;
 #define TAKE(m) if (ops->m) g_ops.m = ops->m
     TAKE(run); TAKE(have); TAKE(sethostname); TAKE(settime); TAKE(mount); TAKE(umount);
-    TAKE(reread_parts); TAKE(ifaddr); TAKE(klog);
+    TAKE(reread_parts); TAKE(ifaddr); TAKE(klog); TAKE(spawn);
 #undef TAKE
 }
 

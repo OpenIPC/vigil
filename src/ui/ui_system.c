@@ -6,6 +6,7 @@
 
 #include "ui_app.h"
 #include "ui_layout.h"
+#include "ui_settings.h"
 #include "ui_theme.h"
 
 #define INFO_MAX 16
@@ -109,7 +110,8 @@ static lv_color_t status_color(ui_ch_status_t s)
 
 static void ci_fill(ci_t *ci)
 {
-    static const char *const ev[] = { "motion", "human", "face", "vehicle" };
+    static const char *const ev[UI_EV_N] = { "motion", "human", "face", "vehicle", "line", "intrusion",
+                                             "video loss", "tamper", "alarm in", "other" };
     for (int ch = 0; ch < ci->n; ++ch) {
         const ui_chan_t *st = ui_channel(ch);
         char v[CI_COLS][64];
@@ -130,7 +132,7 @@ static void ci_fill(ci_t *ci)
         snprintf(v[7], sizeof v[7], "%s", has_main ? status_word(st->main_status, 0, st->main_state) : "-");
         snprintf(v[8], sizeof v[8], "%s", st->rec_state[0] ? st->rec_state : "off");
         v[9][0] = 0;
-        for (int b = 0; b < 4; ++b)
+        for (int b = 0; b < UI_EV_N; ++b)
             if (st->events & (1u << b)) {
                 size_t n = strlen(v[9]);
                 snprintf(v[9] + n, sizeof v[9] - n, "%s%s", n ? ", " : "", ev[b]);
@@ -199,7 +201,8 @@ void ui_channel_info_open(void)
     }
     lv_obj_t *note = ui_label(p->body, "Stream: the camera's stream on the screen (main, or sub in a small tile); "
                                        "state, codec, resolution and FPS are that stream's. Main stream: the one "
-                                       "recorded. Events are held a few seconds.",
+                                       "recorded. Events: what the camera reports now, until it says they "
+                                       "are over (a moment's, a few seconds).",
                               VG_FONT_SM_LV, UI_C(TEXT2));
     lv_obj_set_width(note, LV_PCT(100));
     ci_fill(ci);
@@ -211,6 +214,12 @@ static void channel_info_cb(lv_event_t *e)
 {
     (void)e;
     ui_channel_info_open();
+}
+
+static void configuration_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_backup_open(UI_BACKUP_EXPORT);
 }
 
 void ui_system_open(void)
@@ -233,5 +242,7 @@ void ui_system_open(void)
     lv_obj_set_user_data(p->body, lv_timer_create(sys_tick_cb, 1000, s));
     lv_obj_t *ci_btn = ui_btn(p->actions, LV_SYMBOL_LIST, "Channel info");
     lv_obj_add_event_cb(ci_btn, channel_info_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *cfg_btn = ui_btn(p->actions, LV_SYMBOL_SAVE, "Configuration");
+    lv_obj_add_event_cb(cfg_btn, configuration_cb, LV_EVENT_CLICKED, NULL);
     ui_page_ready(p);
 }

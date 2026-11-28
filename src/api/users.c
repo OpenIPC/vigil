@@ -1043,3 +1043,211 @@ int users_login_with(const char *name, int (*check)(const char *pass, void *ctx)
     who_wipe(&w);
     return rc;
 }
+
+/* ---- configuration exports (src/api/backup.c) ------------------------------------------ */
+
+char *users_export_text(users_secret_fn fn, void *ctx, int *n_users, int *n_pass, int *root, char *err, size_t cap)
+{
+    *n_users = *n_pass = *root = 0;
+    config_api_t api;
+    api_settings(&api);
+    users_db_t *db = malloc(sizeof *db);
+    if (!db) {
+        snprintf(err, cap, "out of memory");
+        return NULL;
+    }
+    pthread_mutex_lock(&g_lock);
+    int bad = load_locked(api.users) < 0;
+    *db = g_db;
+    pthread_mutex_unlock(&g_lock);
+    if (bad) {
+        wipe(db, sizeof *db);
+        free(db);
+        snprintf(err, cap, "%.100s is invalid: fix it before exporting the accounts", api.users);
+        return NULL;
+    }
+    char pass[PASS_MAX + 1], aad[96];
+    int fail_fn = 0;
+    *n_users = db->n_users;
+    for (int i = 0; i < db->n_users; ++i) {
+        user_rec_t *u = &db->users[i];
+        user_aad(u->name, aad, sizeof aad);
+        int have = fn && open_pass(aad, u->password_enc, pass, sizeof pass);
+        /* No hash goes out: an import makes a new one from the password,
+         * and a file without passwords has neither. */
+        wipe(u->password, sizeof u->password);
+        wipe(u->password_enc, sizeof u->password_enc);
+        drop_old_user(u);
+        if (have) {
+            if (fn(ctx, aad, pass, u->password_enc, sizeof u->password_enc) < 0) fail_fn = 1;
+            else ++*n_pass;
+        }
+        wipe(pass, sizeof pass);
+    }
+    /* The system account's, only while it is root's password now. */
+    system_rec_t *s = &db->system;
+    char id[33], why[200];
+    system_aad(api.user, aad, sizeof aad);
+    int have = fn && s->password_enc[0] && auth_shadow_id(api.shadow, api.user, id, why, sizeof why) == 0 &&
+               !strcmp(id, s->shadow) && open_pass(aad, s->password_enc, pass, sizeof pass);
+    memset(s, 0, sizeof *s);
+    if (have) {
+        if (fn(ctx, aad, pass, s->password_enc, sizeof s->password_enc) < 0) fail_fn = 1;
+        else *root = 1;
+    }
+    wipe(pass, sizeof pass);
+    char *text = NULL;
+    if (fail_fn) {
+        snprintf(err, cap, "cannot seal the accounts' passwords for the export");
+    } else {
+        builtins(db);
+        cJSON *doc = schema_to_json(&users_schema_now, db, 0);
+        text = doc ? schema_yaml_emit(&users_schema_now, doc, file_header) : NULL;
+        cJSON_Delete(doc);
+        if (!text) snprintf(err, cap, "out of memory");
+    }
+    wipe(db, sizeof *db);
+    free(db);
+    return text;
+}
+
+struct users_import {
+    users_db_t db;
+    char       root[PASS_MAX + 1];      /* the system account's password, "" none */
+    int        n_pass;
+};
+
+users_import_t *users_import_prepare(const char *text, size_t len, users_secret_fn fn, void *ctx, const char *acct,
+                                     char *err, size_t cap)
+{
+    users_import_t *im = calloc(1, sizeof *im);
+    if (!im) {
+        snprintf(err, cap, "out of memory");
+        return NULL;
+    }
+    schema_errors_t errs = { 0 };
+    cJSON *doc = len > FILE_MAX ? NULL : schema_yaml_parse(&users_schema, text, len, &errs);
+    if (!doc || schema_from_json(&users_schema, doc, &im->db, 0, &errs) < 0 ||
+        schema_validate(&users_schema, &im->db, &errs) < 0) {
+        if (len > FILE_MAX) snprintf(err, cap, "the accounts are too large");
+        else snprintf(err, cap, "accounts: %.60s%s%.120s", errs.n ? errs.e[0].path : "",
+                      errs.n && errs.e[0].path[0] ? ": " : "", errs.n ? errs.e[0].msg : "not valid");
+        cJSON_Delete(doc);
+        users_import_free(im);
+        return NULL;
+    }
+    cJSON_Delete(doc);
+    users_db_t *db = &im->db;
+    char pass[PASS_MAX + 1], aad[96];
+    for (int i = 0; i < db->n_users; ++i) {
+        user_rec_t *u = &db->users[i];
+        if (!find_group(db, u->group) && strcmp(u->group, "admin") && strcmp(u->group, "user")) {
+            snprintf(err, cap, "accounts: user '%.31s' is in group '%.31s', which the export does not have", u->name,
+                     u->group);
+            users_import_free(im);
+            return NULL;
+        }
+        drop_old_user(u);
+        if (!u->password_enc[0]) continue;      /* a hash of its own (if any) stays; else no login */
+        user_aad(u->name, aad, sizeof aad);
+        users_err_t e = { 0 };
+        int rc = fn(ctx, aad, u->password_enc, pass, sizeof pass);
+        if (rc == 0 && pass[0]) rc = new_password(aad, pass, u->password, u->password_enc, &e) ? -1 : 0;
+        else wipe(u->password_enc, sizeof u->password_enc);
+        wipe(pass, sizeof pass);
+        if (rc < 0) {
+            snprintf(err, cap, "accounts: the password of '%.31s' %.120s", u->name,
+                     e.msg[0] ? e.msg : "does not open: the file was changed");
+            users_import_free(im);
+            return NULL;
+        }
+        if (u->password[0]) ++im->n_pass;
+    }
+    system_rec_t *s = &db->system;
+    if (s->password_enc[0]) {
+        system_aad(acct, aad, sizeof aad);
+        int rc = fn(ctx, aad, s->password_enc, im->root, sizeof im->root);
+        if (rc < 0) {
+            snprintf(err, cap, "accounts: the system account's password does not open: the file was changed");
+            users_import_free(im);
+            return NULL;
+        }
+    }
+    memset(s, 0, sizeof *s);                    /* users_set_system_password seals it anew */
+    builtins(db);
+    return im;
+}
+
+void users_import_info(const users_import_t *im, int *n_users, int *n_pass, int *n_groups, int *root)
+{
+    *n_users = im->db.n_users;
+    *n_pass = im->n_pass;
+    *n_groups = im->db.n_groups;
+    *root = im->root[0] != 0;
+}
+
+const char *users_import_user(const users_import_t *im, int i, int *has_pass)
+{
+    if (i < 0 || i >= im->db.n_users) return NULL;
+    *has_pass = im->db.users[i].password[0] != 0;
+    return im->db.users[i].name;
+}
+
+const char *users_import_root(const users_import_t *im) { return im->root; }
+
+/* Under g_lock: an invalid file is not written over without a copy. */
+static void keep_bad_locked(void)
+{
+    if (!g_bad) return;
+    char bad[220];
+    snprintf(bad, sizeof bad, "%s.bad", g_path);
+    if (rename(g_path, bad) == 0) vg_log("users: the invalid %s is kept as %s", g_path, bad);
+    g_bad = 0;
+}
+
+users_rc_t users_import_commit(users_import_t *im, users_err_t *e)
+{
+    memset(e, 0, sizeof *e);
+    pthread_mutex_lock(&g_lock);
+    load();
+    keep_bad_locked();
+    users_db_t *db = malloc(sizeof *db);
+    users_rc_t rc = USERS_EIO;
+    if (!db) {
+        snprintf(e->msg, sizeof e->msg, "out of memory");
+    } else {
+        *db = im->db;
+        /* root's password is the shadow file's, which an import changes
+         * only through users_set_system_password: until then its sealed
+         * copy here still belongs to it. */
+        db->system = g_db.system;
+        rc = save_locked(db, e);
+        wipe(db, sizeof *db);
+        free(db);
+    }
+    pthread_mutex_unlock(&g_lock);
+    if (rc == USERS_OK) vg_log("users: %d user(s) and %d group(s) imported", im->db.n_users, im->db.n_groups);
+    return rc;
+}
+
+void users_import_free(users_import_t *im)
+{
+    if (!im) return;
+    wipe(im, sizeof *im);
+    free(im);
+}
+
+users_rc_t users_reset(users_err_t *e)
+{
+    memset(e, 0, sizeof *e);
+    users_db_t *db = calloc(1, sizeof *db);
+    if (!db) return fail(e, USERS_EIO, "", "%sout of memory", "");
+    pthread_mutex_lock(&g_lock);
+    load();
+    keep_bad_locked();
+    users_rc_t rc = save_locked(db, e);
+    pthread_mutex_unlock(&g_lock);
+    free(db);
+    if (rc == USERS_OK) vg_log("users: reset (no users; the built-in groups)");
+    return rc;
+}

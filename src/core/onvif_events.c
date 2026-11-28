@@ -530,7 +530,7 @@ static void subscription(onvif_ev_t *w, const disc_onvif_t *dev, const char *evx
     w->last_err[0] = 0;
     vg_log("CAM%d: ONVIF events from %s", w->ch + 1, evx);
 
-    int fails = 0;
+    int fails = 0, answered = 1;           /* the camera answered the last call */
     while (!w->stop) {
         time_t now = time(NULL);
         if (ends - now <= RENEW_BEFORE) {
@@ -538,9 +538,11 @@ static void subscription(onvif_ev_t *w, const disc_onvif_t *dev, const char *evx
                      LIFE_SECS);
             wsa_header(hdr, sizeof hdr, "http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/RenewRequest", addr,
                        refs);
-            if (disc_onvif_call(&sub, NULL, hdr, body, CALL_MS, &r, "Renew", err, sizeof err) != DISC_OK) {
+            disc_rc_t rc = disc_onvif_call(&sub, NULL, hdr, body, CALL_MS, &r, "Renew", err, sizeof err);
+            if (rc != DISC_OK) {
                 /* Some cameras renew only by PullMessages, or not at all:
                  * a new subscription then. */
+                answered = rc != DISC_ETIMEOUT && rc != DISC_EUNREACHABLE;
                 if (!w->stop) say(w, err);
                 break;
             }
@@ -562,6 +564,7 @@ static void subscription(onvif_ev_t *w, const disc_onvif_t *dev, const char *evx
             break;
         }
         if (rc != DISC_OK) {
+            answered = rc != DISC_ETIMEOUT && rc != DISC_EUNREACHABLE;
             if (++fails >= 2) {
                 say(w, err);
                 break;
@@ -570,6 +573,7 @@ static void subscription(onvif_ev_t *w, const disc_onvif_t *dev, const char *evx
             continue;
         }
         fails = 0;
+        answered = 1;
         int n = onvif_ev_parse(r.body, r.len, note_cb, w);
         long l = onvif_ev_life(r.body, r.len);
         free(r.body);
@@ -579,12 +583,16 @@ static void subscription(onvif_ev_t *w, const disc_onvif_t *dev, const char *evx
         if (n <= 0 && t1.tv_sec - t0.tv_sec < 1) sleep_stop(w, 1);
     }
     /* Done with it, politely and quickly (it ends by itself anyway): not
-     * given up at the stop, but within 1.5 s. */
-    sub.stop = NULL;
-    wsa_header(hdr, sizeof hdr, "http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/UnsubscribeRequest", addr,
-               refs);
-    if (disc_onvif_call(&sub, NULL, hdr, "<wsnt:Unsubscribe/>", 1500, &r, "Unsubscribe", err, sizeof err) == DISC_OK)
-        free(r.body);
+     * given up at the stop, but within 1.5 s, and not tried on a camera
+     * that stopped answering (the channel's stop would wait it out). */
+    if (answered) {
+        sub.stop = NULL;
+        wsa_header(hdr, sizeof hdr, "http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/UnsubscribeRequest",
+                   addr, refs);
+        if (disc_onvif_call(&sub, NULL, hdr, "<wsnt:Unsubscribe/>", 1500, &r, "Unsubscribe", err, sizeof err) ==
+            DISC_OK)
+            free(r.body);
+    }
     active_clear(w);
 }
 
@@ -639,8 +647,6 @@ onvif_ev_t *onvif_ev_start(int ch, const char *cam_url, const char *onvif_url, i
         free(w);
         return NULL;
     }
-    if (quiet && !w->onvif_url[0])
-        vg_log("CAM%d: looking for ONVIF events at %s", ch + 1, w->host);
     return w;
 }
 

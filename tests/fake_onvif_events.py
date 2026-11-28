@@ -5,6 +5,7 @@
     fake_onvif_events.py [--host 127.0.0.1] [--port 8899] [--user admin]
                          [--password ''] [--life 120] [--ctl UDPPORT]
                          [--script "SECS:NAME:STATE,..."] [--refs] [--no-renew]
+                         [--public HOST:PORT]
 
 Answers, over HTTP, SOAP 1.2 with a checked WS-UsernameToken (as
 fake_discovery.py's ONVIF device does):
@@ -171,7 +172,7 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode(errors="replace")
         m = re.search(r"<s:Body>\s*<(?:\w+:)?(\w+)", body)
         op = m.group(1) if m else "?"
-        base = "http://%s:%d" % (a.host, a.port)
+        base = "http://%s" % a.public if a.public else "http://%s:%d" % (a.host, a.port)
         if op == "GetSystemDateAndTime":
             t = time.gmtime()
             return self.reply(200, "<tds:GetSystemDateAndTimeResponse><tds:SystemDateAndTime><tt:UTCDateTime>"
@@ -314,6 +315,7 @@ def main():
     ap.add_argument("--script", default="")
     ap.add_argument("--refs", action="store_true")
     ap.add_argument("--no-renew", action="store_true")
+    ap.add_argument("--public", default="", help="HOST:PORT the addresses in the answers name (behind a NAT)")
     args = ap.parse_args()
     srv = Server((args.host, args.port), Handler)
     srv.args = args

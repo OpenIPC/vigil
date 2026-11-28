@@ -53,6 +53,13 @@ typedef struct {
      * it; length or -1. Some refusals (a mount's EINVAL) say why only
      * there. */
     int (*klog)(char *buf, size_t cap);
+    /* Start argv[0] (looked up as for run) in a session of its own, with
+     * stdin from /dev/null and stdout and stderr appended to `log` (made
+     * 0600, emptied first; under the root), and return at once: its pid,
+     * or -1 (errno). For what must outlive vigild (sysupgrade stops it)
+     * or be watched while it runs (a download); the caller reaps it
+     * (waitpid) or leaves that to init. */
+    pid_t (*spawn)(const char *const *argv, const char *log);
 } sys_ops_t;
 
 /* Replace the actions; NULL members (or a NULL ops) are the real ones. */
