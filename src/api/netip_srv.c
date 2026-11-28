@@ -665,21 +665,23 @@ static cJSON *work_state(void)
         cJSON_Delete(chs);
         return NULL;
     }
-    unsigned loss = 0, motion = 0;
+    unsigned loss = 0, motion = 0, blind = 0, alarm_in = 0;
     for (int i = 0; i < channels_count() && i < 32; ++i) {
         channel_status_t st;
         channels_status(i, &st);
-        if (st.configured && !st.live) loss |= 1u << i;
-        if (st.events & CH_EV_MOTION) motion |= 1u << i;
+        if ((st.configured && !st.live) || (st.events & CH_EV_VIDEO_LOSS)) loss |= 1u << i;
+        if (st.events & CH_EV_DETECTIONS) motion |= 1u << i;
+        if (st.events & CH_EV_TAMPER) blind |= 1u << i;
+        if (st.events & CH_EV_ALARM_IN) alarm_in |= 1u << i;
         cJSON *c = cJSON_CreateObject();
         if (!c) continue;
         cJSON_AddNumberToObject(c, "Bitrate", 0);
         cJSON_AddBoolToObject(c, "Record", st.recording);
         cJSON_AddItemToArray(chs, c);
     }
-    cJSON_AddNumberToObject(al, "AlarmIn", 0);
+    cJSON_AddNumberToObject(al, "AlarmIn", alarm_in);
     cJSON_AddNumberToObject(al, "AlarmOut", 0);
-    cJSON_AddNumberToObject(al, "VideoBlind", 0);
+    cJSON_AddNumberToObject(al, "VideoBlind", blind);
     cJSON_AddNumberToObject(al, "VideoLoss", loss);
     cJSON_AddNumberToObject(al, "VideoMotion", motion);
     cJSON_AddItemToObject(o, "AlarmState", al);

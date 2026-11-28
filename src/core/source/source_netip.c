@@ -18,6 +18,11 @@
  *               some firmwares list objects with a "Name" instead
  *   live      : msgid 1413 OPMonitor Claim, then 1410 OPMonitor Start;
  *               media then arrives as msgid 1412 messages
+ *   alarms    : msgid 1500 AlarmSet on the same connection (when the
+ *               channel wants its events: source_t.events), answered 1501;
+ *               then AlarmInfo (1504) pushed among the media, Start and
+ *               Stop of each event (netip_proto.h). Asked again on every
+ *               connection; a camera that refuses is said once.
  *   media     : a frame starts with a big-endian tag and a header, and its
  *               payload may continue over the following messages:
  *                 0x000001FC  I-frame: u8 codec (2 = H.264, 3 = H.265,
@@ -40,9 +45,12 @@
 #include <sys/socket.h>
 
 #include "cJSON.h"
+#include "cam_events.h"
+#include "channel.h"
 #include "log.h"
 #include "md5.h"
 #include "net.h"
+#include "netip_proto.h"
 #include "source.h"
 
 #define NETIP_PORT       34567
@@ -52,6 +60,8 @@
 #define MSG_MONITOR      1410
 #define MSG_MONITOR_DATA 1412
 #define MSG_MONITOR_CLAIM 1413
+#define MSG_ALARM_SET    1500       /* python-dvr: AlarmSet (alarmStart) */
+#define MSG_ALARM_INFO   1504       /* pushed by the device: AlarmInfo */
 #define FRAME_MAX        (4u << 20)
 
 typedef struct {
@@ -75,6 +85,11 @@ typedef struct {
     vg_codec_t codec;
     int      keyed;                 /* an I-frame header has said the codec */
     int      key_told;              /* this connection's first I-frame was logged */
+    /* alarms (source_t.events) */
+    int      alarm_asked;           /* AlarmSet sent on this connection */
+    int      alarm_reported;        /* something went to cam_events since (to clear) */
+    int      alarm_refused_told;    /* once per source: the camera said no */
+    char     alarm_unknown[4][32];  /* event names said once as unknown */
 } netip_t;
 
 static void put32(uint8_t *p, uint32_t v) { p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24; }
@@ -203,11 +218,22 @@ static int netip_create(source_t *s)
     return 0;
 }
 
+/* What this connection reported ends with it: a Stop that never comes
+ * must not leave the camera's event on. */
+static void alarms_clear(source_t *s)
+{
+    netip_t *n = s->priv;
+    if (n->alarm_reported) cam_events_clear(s->index, CAM_EV_SRC_NETIP);
+    n->alarm_reported = 0;
+}
+
 static void netip_close(source_t *s)
 {
     netip_t *n = s->priv;
     if (n && n->fd >= 0) close(n->fd);
     if (n) {
+        alarms_clear(s);
+        n->alarm_asked = 0;
         n->fd = -1;
         n->hdr_got = n->body_got = n->body_len = 0;
         n->frame_len = n->frame_want = 0;
@@ -336,6 +362,55 @@ static int netip_title(source_t *s)
     return rc;
 }
 
+/* AlarmSet: from now on the camera pushes its alarms on this connection.
+ * The answer comes among the media (alarm_answer). */
+static int alarms_ask(source_t *s)
+{
+    netip_t *n = s->priv;
+    char req[96];
+    snprintf(req, sizeof req, "{\"Name\":\"\",\"SessionID\":\"0x%08X\"}", n->session);
+    n->alarm_asked = 1;
+    return send_msg(n, MSG_ALARM_SET, req);
+}
+
+static void alarm_answer(source_t *s, const uint8_t *body, size_t len)
+{
+    netip_t *n = s->priv;
+    char j[256];
+    size_t k = len < sizeof j - 1 ? len : sizeof j - 1;
+    memcpy(j, body, k);
+    j[k] = 0;
+    int ret = json_int(j, "Ret", -1);
+    if (ret == 100 || n->alarm_refused_told) return;
+    /* Not every firmware pushes alarms to its clients (some only to an
+     * alarm server of their own settings): said once, the video goes on. */
+    n->alarm_refused_told = 1;
+    vg_log("CAM%d %s: the camera refuses to send its alarms over NETIP (AlarmSet: Ret %d)", s->index + 1, n->host,
+           ret);
+}
+
+static void alarm_info(source_t *s, const uint8_t *body, size_t len)
+{
+    netip_t *n = s->priv;
+    netip_alarm_t a;
+    if (!s->events || netip_alarm_parse((const char *)body, len, &a) < 0) return;
+    /* A DVR or NVR says every channel's alarms on each connection. */
+    if (a.channel >= 0 && a.channel != n->channel) return;
+    if (!a.known) {
+        int told = 0, free_slot = -1;
+        for (int i = 0; i < 4; ++i) {
+            if (!strcmp(n->alarm_unknown[i], a.event)) told = 1;
+            if (!n->alarm_unknown[i][0] && free_slot < 0) free_slot = i;
+        }
+        if (!told) {
+            vg_log("CAM%d %s: NETIP alarm \"%s\": reported as \"other\"", s->index + 1, n->host, a.event);
+            if (free_slot >= 0) snprintf(n->alarm_unknown[free_slot], sizeof n->alarm_unknown[0], "%s", a.event);
+        }
+    }
+    n->alarm_reported = 1;
+    cam_event_report(s->index, a.type, a.what, CAM_EV_SRC_NETIP, a.event);
+}
+
 static int netip_open(source_t *s)
 {
     netip_t *n = s->priv;
@@ -369,6 +444,11 @@ static int netip_open(source_t *s)
              "{\"Name\":\"OPMonitor\",\"SessionID\":\"0x%08X\",\"OPMonitor\":{\"Action\":\"Start\",\"Parameter\":%s}}",
              n->session, params);
     if (send_msg(n, MSG_MONITOR, req) < 0) {
+        snprintf(s->err, sizeof s->err, "send failed");
+        goto fail;
+    }
+    n->alarm_asked = 0;
+    if (s->events && alarms_ask(s) < 0) {
         snprintf(s->err, sizeof s->err, "send failed");
         goto fail;
     }
@@ -516,6 +596,12 @@ static int netip_poll(source_t *s, au_emit_fn emit, void *user)
         send_msg(n, MSG_KEEPALIVE, req);
         n->last_ka = now;
     }
+    /* The channel's events switched on or off since the connection began. */
+    if (s->events && !n->alarm_asked && alarms_ask(s) < 0) {
+        snprintf(s->err, sizeof s->err, "send failed");
+        return -1;
+    }
+    if (!s->events && n->alarm_reported) alarms_clear(s);
     /* The first read of each call waits (1 s socket timeout), whether it is
      * for a header or for the rest of a body; later ones only drain what is
      * already there. Never a busy loop. */
@@ -559,8 +645,12 @@ static int netip_poll(source_t *s, au_emit_fn emit, void *user)
             got = 1;
         } else if (msgid == MSG_TITLE + 1) {
             take_title(s, n->body, n->body_len);
+        } else if (msgid == MSG_ALARM_INFO) {
+            alarm_info(s, n->body, n->body_len);
+        } else if (msgid == MSG_ALARM_SET + 1) {
+            alarm_answer(s, n->body, n->body_len);
         }
-        /* Other messages (keepalive replies, alarms) are ignored. */
+        /* Other messages (keepalive replies) are ignored. */
         n->hdr_got = 0;
         n->body_len = n->body_got = 0;
     }

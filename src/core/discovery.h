@@ -105,6 +105,10 @@ int disc_devices(disc_device_t *out, int max);
 /* The 1-based channel whose camera URL points at `d`'s address; 0 none. */
 int disc_device_channel(const disc_device_t *d);
 
+/* The ONVIF device service a device at `ip` gave in its discovery answer
+ * (while the table keeps it, DISC_TTL). 0 with `out` set, or -1. */
+int disc_xaddr_of(const char *ip, char *out, size_t cap);
+
 /* Forget every device. */
 void disc_clear(void);
 
@@ -216,6 +220,7 @@ int disc_plan(const char *start, const char *mask, int n, int (*used)(const char
  * (1-based), empty slots padding up to it: JSON text (malloc'd) for
  * config_put_json("cameras", ...). `cameras` is the current section as
  * JSON text (unredacted). */
-char *disc_cameras_with(const char *cameras, int ch, const char *url, const char *sub_url, const char *name);
+char *disc_cameras_with(const char *cameras, int ch, const char *url, const char *sub_url, const char *name,
+                        const char *onvif_url);
 
 #endif /* DISCOVERY_H */

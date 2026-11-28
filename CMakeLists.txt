@@ -82,6 +82,7 @@ endif()
 add_library(vigil_core STATIC
   src/core/alarm_feed.c
   src/core/aspect.c
+  src/core/cam_events.c
   src/core/au_norm.c
   src/core/channel.c
   src/core/config.c
@@ -98,6 +99,7 @@ add_library(vigil_core STATIC
   src/core/netip_proto.c
   src/core/overscan.c
   src/core/picture.c
+  src/core/onvif_events.c
   src/core/onvif_proto.c
   src/core/qos.c
   src/core/schema.c
