@@ -15,6 +15,7 @@
 #include "input_evdev.h"
 #include "kvm_app.h"
 #include "log.h"
+#include "snapshot.h"
 #include "ui_app.h"
 #include "ui_bridge.h"
 
@@ -36,6 +37,8 @@ int frontend_run(int run_secs, volatile sig_atomic_t *stop, void (*tick)(void))
         lv_deinit();
         return -1;
     }
+    model.snapshot = snapshot_request;
+    model.snapshot_result = snapshot_result;
     ui_app_create(&model);
     static const input_hooks_t hooks = { ui_app_back, ui_app_key, ui_app_keyboards, ui_app_wheel, ui_app_key_up };
     ui_app_set_pointer(input_evdev_create(disp, &hooks, 1));

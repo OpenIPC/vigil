@@ -17,7 +17,7 @@ static int at(const char *uri, const char *p)
 
 static const struct { const char *key; unsigned perm; } SECTIONS[] = {
     { "cameras", PERM_CAMERAS }, { "discovery", PERM_CAMERAS },
-    { "record", PERM_STORAGE }, { "schedule", PERM_STORAGE }, { "quota", PERM_STORAGE },
+    { "record", PERM_STORAGE }, { "snapshot", PERM_STORAGE }, { "schedule", PERM_STORAGE }, { "quota", PERM_STORAGE },
     { "nas", PERM_STORAGE },
     { "ddns", PERM_NETWORK }, { "upnp", PERM_NETWORK }, { "smtp", PERM_NETWORK },
     { "alarm", PERM_NETWORK }, { "qos", PERM_NETWORK }, { "onvif_server", PERM_NETWORK },
@@ -50,8 +50,15 @@ unsigned api_perm_needed(const char *method, const char *uri)
     if (at(uri, "/api/v1/system/config") || at(uri, "/api/v1/system/reset")) return PERM_SYSTEM | PERM_USERS;
     if (at(uri, "/api/v1/system")) return PERM_SYSTEM;
     if (!strncmp(uri, "/api/v1/disks", 13) || at(uri, "/api/v1/storage")) return PERM_STORAGE;
-    /* Moving a camera is its own permission, reading its PTZ too. */
+    /* A picture of a camera is what its live view shows; the kept ones are
+     * like recordings (and removing one is the storage's). */
     int ch, used = 0;
+    if (sscanf(uri, "/api/v1/channels/%d/snapshot%n", &ch, &used) == 1 && used &&
+        (!uri[used] || !strcmp(uri + used, ".jpg")))
+        return PERM_LIVE;
+    if (at(uri, "/api/v1/snapshots")) return get ? PERM_PLAYBACK : PERM_STORAGE;
+    /* Moving a camera is its own permission, reading its PTZ too. */
+    used = 0;
     if (sscanf(uri, "/api/v1/channels/%d/ptz%n", &ch, &used) == 1 && used && !uri[used]) return PERM_PTZ;
     if (!strncmp(uri, "/api/v1/discovery", 17) || at(uri, "/api/v1/channels")) return PERM_CAMERAS;
     if (!strncmp(uri, "/api/v1/users", 13) || !strncmp(uri, "/api/v1/groups", 14)) return PERM_USERS;

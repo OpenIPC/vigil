@@ -557,21 +557,25 @@ static void put_dev_caps(buf_t *b)
             "</tds:Capabilities>");
 }
 
-static void put_media_caps(buf_t *b)
+/* Snapshots are the API's (api_snap.c): there while the API listens. */
+static int api_port(const req_t *q) { return config_listen_port(q->cfg->api.listen); }
+static const char *snap_cap(const req_t *q) { return api_port(q) > 0 ? "true" : "false"; }
+
+static void put_media_caps(buf_t *b, const req_t *q)
 {
-    bput(b, "<trt:Capabilities SnapshotUri=\"false\" Rotation=\"false\" VideoSourceMode=\"false\" OSD=\"false\">"
+    bput(b, "<trt:Capabilities SnapshotUri=\"%s\" Rotation=\"false\" VideoSourceMode=\"false\" OSD=\"false\">"
             "<trt:ProfileCapabilities MaximumNumberOfProfiles=\"%d\"/>"
             "<trt:StreamingCapabilities RTPMulticast=\"false\" RTP_TCP=\"true\" RTP_RTSP_TCP=\"true\" "
-            "NonAggregateControl=\"false\" NoRTSPStreaming=\"false\"/></trt:Capabilities>", 2 * CHANNEL_MAX);
+            "NonAggregateControl=\"false\" NoRTSPStreaming=\"false\"/></trt:Capabilities>", snap_cap(q), 2 * CHANNEL_MAX);
 }
 
-static void put_media2_caps(buf_t *b)
+static void put_media2_caps(buf_t *b, const req_t *q)
 {
-    bput(b, "<tr2:Capabilities SnapshotUri=\"false\" Rotation=\"false\" VideoSourceMode=\"false\" OSD=\"false\" "
+    bput(b, "<tr2:Capabilities SnapshotUri=\"%s\" Rotation=\"false\" VideoSourceMode=\"false\" OSD=\"false\" "
             "Mask=\"false\" SourceMask=\"false\"><tr2:ProfileCapabilities MaximumNumberOfProfiles=\"%d\" "
             "ConfigurationsSupported=\"VideoSource VideoEncoder\"/><tr2:StreamingCapabilities RTSPStreaming=\"true\" "
             "RTPMulticast=\"false\" RTP_RTSP_TCP=\"true\" NonAggregateControl=\"false\" AutoStartMulticast=\"false\"/>"
-            "</tr2:Capabilities>", 2 * CHANNEL_MAX);
+            "</tr2:Capabilities>", snap_cap(q), 2 * CHANNEL_MAX);
 }
 
 static int dev_caps(req_t *q, buf_t *b)
@@ -627,8 +631,8 @@ static int dev_services(req_t *q, buf_t *b)
         if (caps) {
             bput(b, "<tds:Capabilities>");
             if (i == 0) put_dev_caps(b);
-            else if (i == 1) put_media_caps(b);
-            else put_media2_caps(b);
+            else if (i == 1) put_media_caps(b, q);
+            else put_media2_caps(b, q);
             bput(b, "</tds:Capabilities>");
         }
         bput(b, "<tds:Version><tt:Major>%d</tt:Major><tt:Minor>%d</tt:Minor></tds:Version></tds:Service>",
@@ -811,9 +815,8 @@ static chans_t *load_chans(req_t *q)
 
 static int m1_caps(req_t *q, buf_t *b)
 {
-    (void)q;
     bput(b, "<trt:GetServiceCapabilitiesResponse>");
-    put_media_caps(b);
+    put_media_caps(b, q);
     bput(b, "</trt:GetServiceCapabilitiesResponse>");
     return 0;
 }
@@ -865,6 +868,61 @@ static int m1_uri(req_t *q, buf_t *b)
         bput(b, "</tt:Uri><tt:InvalidAfterConnect>false</tt:InvalidAfterConnect>"
                 "<tt:InvalidAfterReboot>false</tt:InvalidAfterReboot><tt:Timeout>PT0S</tt:Timeout></trt:MediaUri>"
                 "</trt:GetStreamUriResponse>");
+    }
+    free(cs);
+    return c ? 0 : bad_arg(q, "ter:NoProfile", "No such profile");
+}
+
+/* GetSnapshotUri: the API's picture of the channel (the camera's own JPEG
+ * when it has one, else the recorder's), with the API's logins (HTTP
+ * Digest or Basic, as ONVIF clients send them). A profile of either
+ * stream is the channel's picture. */
+static void put_snap_uri(buf_t *b, const req_t *q, int ch)
+{
+    bput(b, "http://");
+    besc(b, q->hostname);
+    bput(b, ":%d/api/v1/channels/%d/snapshot.jpg", api_port(q), ch);
+}
+
+static int snap_off(req_t *q)
+{
+    return fault(q, 500, "s:Receiver", "ter:ActionNotSupported", NULL,
+                 "Snapshots are served by the HTTP API, which is off (api.listen)");
+}
+
+static int m1_snap_uri(req_t *q, buf_t *b)
+{
+    char tok[64] = "";
+    arg(q, "ProfileToken", tok, sizeof tok);
+    if (api_port(q) <= 0) return snap_off(q);
+    chans_t *cs = load_chans(q);
+    if (!cs) return -1;
+    int sub;
+    const chan_t *c = by_token(cs->c, cs->n, tok, "ch", &sub);
+    if (c) {
+        bput(b, "<trt:GetSnapshotUriResponse><trt:MediaUri><tt:Uri>");
+        put_snap_uri(b, q, c->ch);
+        bput(b, "</tt:Uri><tt:InvalidAfterConnect>false</tt:InvalidAfterConnect>"
+                "<tt:InvalidAfterReboot>false</tt:InvalidAfterReboot><tt:Timeout>PT0S</tt:Timeout></trt:MediaUri>"
+                "</trt:GetSnapshotUriResponse>");
+    }
+    free(cs);
+    return c ? 0 : bad_arg(q, "ter:NoProfile", "No such profile");
+}
+
+static int m2_snap_uri(req_t *q, buf_t *b)
+{
+    char tok[64] = "";
+    arg(q, "ProfileToken", tok, sizeof tok);
+    if (api_port(q) <= 0) return snap_off(q);
+    chans_t *cs = load_chans(q);
+    if (!cs) return -1;
+    int sub;
+    const chan_t *c = by_token(cs->c, cs->n, tok, "ch", &sub);
+    if (c) {
+        bput(b, "<tr2:GetSnapshotUriResponse><tr2:Uri>");
+        put_snap_uri(b, q, c->ch);
+        bput(b, "</tr2:Uri></tr2:GetSnapshotUriResponse>");
     }
     free(cs);
     return c ? 0 : bad_arg(q, "ter:NoProfile", "No such profile");
@@ -944,9 +1002,8 @@ static int m1_vec(req_t *q, buf_t *b)
 
 static int m2_caps(req_t *q, buf_t *b)
 {
-    (void)q;
     bput(b, "<tr2:GetServiceCapabilitiesResponse>");
-    put_media2_caps(b);
+    put_media2_caps(b, q);
     bput(b, "</tr2:GetServiceCapabilitiesResponse>");
     return 0;
 }
@@ -1084,6 +1141,7 @@ static const op_t OPS[] = {
     { ONVIF_NS_MEDIA, "GetProfiles", PERM_LIVE, m1_profiles },
     { ONVIF_NS_MEDIA, "GetProfile", PERM_LIVE, m1_profile },
     { ONVIF_NS_MEDIA, "GetStreamUri", PERM_LIVE, m1_uri },
+    { ONVIF_NS_MEDIA, "GetSnapshotUri", PERM_LIVE, m1_snap_uri },
     { ONVIF_NS_MEDIA, "GetVideoSources", PERM_LIVE, m1_sources },
     { ONVIF_NS_MEDIA, "GetVideoSourceConfigurations", PERM_LIVE, m1_vscs },
     { ONVIF_NS_MEDIA, "GetVideoSourceConfiguration", PERM_LIVE, m1_vsc },
@@ -1092,6 +1150,7 @@ static const op_t OPS[] = {
     { ONVIF_NS_MEDIA2, "GetServiceCapabilities", PRE_AUTH, m2_caps },
     { ONVIF_NS_MEDIA2, "GetProfiles", PERM_LIVE, m2_profiles },
     { ONVIF_NS_MEDIA2, "GetStreamUri", PERM_LIVE, m2_uri },
+    { ONVIF_NS_MEDIA2, "GetSnapshotUri", PERM_LIVE, m2_snap_uri },
     { ONVIF_NS_MEDIA2, "GetVideoSourceConfigurations", PERM_LIVE, m2_vscs },
     { ONVIF_NS_MEDIA2, "GetVideoEncoderConfigurations", PERM_LIVE, m2_vecs },
     /* GetVideoSources is media ver10's; media2 clients ask it there too */

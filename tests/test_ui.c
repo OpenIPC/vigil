@@ -216,6 +216,28 @@ static int g_ev;
 static time_t g_now = 1795703525;                       /* 2026-11-26 14:32:05 UTC */
 static time_t fake_now(void) { return g_now; }
 
+/* Snapshots: each request answers on its second look, the third
+ * channel's (an error on the tile) with a failure. */
+static int g_snap_ch[8], g_snap_n, g_snap_looks[8];
+static int fake_snapshot(int ch)
+{
+    if (g_snap_n >= 8) return -1;
+    g_snap_ch[g_snap_n] = ch;
+    g_snap_looks[g_snap_n] = 0;
+    return ++g_snap_n;
+}
+static int fake_snapshot_result(int id, char *msg, size_t cap)
+{
+    if (id < 1 || id > g_snap_n) return -1;
+    if (++g_snap_looks[id - 1] < 2) return 0;
+    if (g_snap_ch[id - 1] == 2) {
+        snprintf(msg, cap, "the camera: no answer in time; no picture");
+        return -1;
+    }
+    snprintf(msg, cap, "ch%02d_20261126-143205-000_manual.jpg", g_snap_ch[id - 1] + 1);
+    return 1;
+}
+
 static ui_event_t g_more[8];             /* pushed by the steps */
 static int        g_n_more, g_more_read;
 
@@ -1689,9 +1711,10 @@ static void test_context_and_full_screen(void)
     button(BTN_RIGHT);
     run(50);
     CHECK(ui_popup_is_open() && !find("Full screen", 1) && !find("Pin navigation bar", 1) &&
-          !find("Next page", 1), "the context menu has nothing but its seven items");
+          !find("Next page", 1), "the context menu has nothing but its eight items");
     {
-        static const char *const order[] = { "Main menu", "Channels", "Playback", "Record", "PTZ", "Display", "Split" };
+        static const char *const order[] = { "Main menu", "Snapshot", "Channels", "Playback", "Record", "PTZ",
+                                             "Display", "Split" };
         int prev = -1, ok = 1;
         for (size_t i = 0; i < sizeof order / sizeof order[0]; ++i) {
             lv_obj_t *l = find(order[i], 1);
@@ -1700,7 +1723,7 @@ static void test_context_and_full_screen(void)
             ok &= l && y > prev;
             prev = l ? y : prev;
         }
-        CHECK(ok, "context menu: Main menu, Channels, Playback, Record, PTZ, Display, Split");
+        CHECK(ok, "context menu: Main menu, Snapshot, Channels, Playback, Record, PTZ, Display, Split");
     }
     shot("context");
     button(BTN_RIGHT);                          /* right again: closed */
@@ -4063,6 +4086,47 @@ static lv_obj_t *focused(void)
 
 static int has_focus(lv_obj_t *o) { return o && lv_obj_has_state(o, LV_STATE_FOCUSED); }
 
+/* Snapshot from the context menu (of the tile it opened on) and from S or
+ * F12 (the selected tile): a toast when the worker answers. */
+static void test_snapshot_menu(void)
+{
+    quiet();
+    int n0 = g_snap_n;
+    move_to(900, 200);                          /* over CAM2 (Yard) */
+    button(BTN_RIGHT);
+    run(50);
+    click_text("Snapshot");
+    CHECK(g_snap_n == n0 + 1 && g_snap_ch[n0] == 1, "context menu Snapshot: of the tile under the pointer (CAM2)");
+    run(500);
+    CHECK(find("Yard: snapshot saved (ch02_20261126-143205-000_manual.jpg)", 1), "a toast with the file");
+    shot("snapshot_toast");
+    quiet();
+    move_to(300, 500);                          /* CAM3: its camera gives none */
+    button(BTN_RIGHT);
+    run(50);
+    click_text("Snapshot");
+    run(500);
+    CHECK(g_snap_ch[g_snap_n - 1] == 2 && find("no snapshot: the camera: no answer in time", 1),
+          "a failed snapshot says why");
+    quiet();
+}
+
+static void test_snapshot_keys(void)
+{
+    quiet();
+    int n0 = g_snap_n;
+    click_at(300, 200);                         /* CAM1 selected */
+    run(VG_DURATION_DOUBLE_CLICK + 100);
+    key(KEY_S);
+    run(500);
+    CHECK(g_snap_n == n0 + 1 && g_snap_ch[n0] == 0 && find("Gate: snapshot saved", 1), "S: a snapshot of CAM1");
+    quiet();
+    key(KEY_F12);
+    run(500);
+    CHECK(g_snap_n == n0 + 2 && g_snap_ch[n0 + 1] == 0, "F12: the same");
+    quiet();
+}
+
 static void test_keyboard_live(void)
 {
     if (pipe(g_kbd) < 0) abort();
@@ -5845,6 +5909,8 @@ int main(int argc, char **argv)
     if (ui_bridge_init(&g_model) < 0) return 1;
     g_model.chan_status = fake_status;
     g_model.next_event = fake_event;
+    g_model.snapshot = fake_snapshot;
+    g_model.snapshot_result = fake_snapshot_result;
     g_model.show_tiles = fake_tiles;
     g_model.now = fake_now;
     g_model.system_info = fake_info;
@@ -5865,6 +5931,7 @@ int main(int argc, char **argv)
     test_live();
     test_navbar();
     test_context_and_full_screen();
+    test_snapshot_menu();
     test_submenu_hover();
     test_menu_and_settings();
     test_cameras();
@@ -5877,6 +5944,7 @@ int main(int argc, char **argv)
     test_stale_and_cancel();
     test_two_mice(ptr);
     test_keyboard_live();
+    test_snapshot_keys();
     test_keyboard_settings();
     test_keyboard_dropdown();
     test_ptz();

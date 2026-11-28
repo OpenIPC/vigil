@@ -113,3 +113,5 @@ int netip_server_listening(char *listen, size_t cap, char *why, size_t wcap)
     if (why) snprintf(why, wcap, "this vigild is built without the API");
     return 0;
 }
+
+void api_set_snapshots(const api_snapshot_ops_t *ops) { (void)ops; }

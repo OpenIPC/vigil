@@ -565,6 +565,12 @@ typedef struct ui_model {
     /* Show channel i in tiles[i] (screen pixels; w == 0: hidden), n == channels. */
     void   (*show_tiles)(const ui_rect_t *tiles, int n);
     time_t (*now)(void);
+    /* A snapshot of channel `ch` (0-based) kept in the snapshot directory,
+     * taken off the UI thread: the request's id, or -1 (busy); then how it
+     * went: 0 still to come, 1 kept (`msg`: the file), -1 failed (`msg`:
+     * why). NULL: no snapshots. */
+    int    (*snapshot)(int ch);
+    int    (*snapshot_result)(int id, char *msg, size_t cap);
 
     /* settings */
     const ui_section_t *sections;

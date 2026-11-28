@@ -26,6 +26,7 @@
 #include "log.h"
 #include "md5.h"
 #include "net.h"
+#include "onvif_proto.h"
 #include "sys_time.h"
 #include "users.h"
 
@@ -39,6 +40,7 @@
 #define FAIL_DELAY_S    1            /* every failed login answers this late */
 #define LOCKOUT_MAX_S   60
 #define CACHE_SECS      300          /* a good password skips crypt() this long */
+#define NONCE_SECS      300          /* an HTTP Digest nonce is good this long */
 
 static struct mg_context *g_ctx;
 static time_t             g_t0;      /* monotonic, for "uptime" */
@@ -179,10 +181,93 @@ static fail_entry_t *fail_entry(const char *addr, int make)
     return oldest;
 }
 
-static int send_401(struct mg_connection *conn)
+/* HTTP Digest, besides Basic: what ONVIF clients, players and NVRs send
+ * for a snapshot URI (GetSnapshotUri), and a password that does not go
+ * over the wire. Nonces are ours (onvif_digest_nonce under a key of this
+ * run), good NONCE_SECS; each nonce count is taken once. */
+static unsigned char g_dkey[16];
+static onvif_nc_t    g_dnc;
+static unsigned      g_dserial;
+
+/* Basic first (what the API's own clients look for), Digest besides. */
+static int send_401(struct mg_connection *conn, int stale)
 {
-    return send_text(conn, 401, "{\"error\":\"authentication required\"}\n", "WWW-Authenticate",
-                     "Basic realm=\"vigil\", charset=\"UTF-8\"");
+    char nonce[41], dig[200];
+    pthread_mutex_lock(&g_auth_lock);
+    unsigned serial = ++g_dserial;
+    pthread_mutex_unlock(&g_auth_lock);
+    onvif_digest_nonce(g_dkey, (long)mono(), serial, nonce);
+    snprintf(dig, sizeof dig, "Digest realm=\"" USERS_REALM "\", qop=\"auth\", nonce=\"%s\", algorithm=MD5%s", nonce,
+             stale ? ", stale=true" : "");
+    static const char body[] = "{\"error\":\"authentication required\"}\n";
+    const char *basic = "Basic realm=\"" USERS_REALM "\", charset=\"UTF-8\"";
+    if (mg_response_header_start(conn, 401) == -2) {
+        mg_printf(conn, "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nCache-Control: no-store\r\n"
+                        "Content-Length: %zu\r\nConnection: close\r\nWWW-Authenticate: %s\r\nWWW-Authenticate: %s\r\n\r\n",
+                  sizeof body - 1, basic, dig);
+        mg_write(conn, body, sizeof body - 1);
+        return 401;
+    }
+    char cl[24];
+    snprintf(cl, sizeof cl, "%zu", sizeof body - 1);
+    mg_response_header_add(conn, "Content-Type", "application/json", -1);
+    mg_response_header_add(conn, "Cache-Control", "no-store", -1);
+    mg_response_header_add(conn, "Content-Length", cl, -1);
+    mg_response_header_add(conn, "WWW-Authenticate", basic, -1);
+    mg_response_header_add(conn, "WWW-Authenticate", dig, -1);
+    mg_response_header_send(conn);
+    if (strcmp(mg_get_request_info(conn)->request_method, "HEAD") != 0) mg_write(conn, body, sizeof body - 1);
+    return 401;
+}
+
+typedef struct {
+    const onvif_digest_t *d;
+    const char           *method;
+} digest_ctx_t;
+
+static int digest_check(const char *pass, void *ctx)
+{
+    const digest_ctx_t *c = ctx;
+    char want[33];
+    onvif_digest_expect(c->d, c->method, pass, want);
+    return onvif_equal(want, c->d->response);
+}
+
+/* A Digest login: 1 with *perms, 0 refused, -2 locked out, -3 stale (a
+ * new nonce is due). */
+static int digest_login(struct mg_connection *conn, const char *hdr, char *user, size_t ucap, unsigned *perms,
+                        long *retry)
+{
+    const struct mg_request_info *ri = mg_get_request_info(conn);
+    onvif_digest_t d;
+    *perms = 0;
+    if (onvif_digest_parse(hdr, &d) < 0 || strcmp(d.realm, USERS_REALM) != 0)
+        return api_login(ri->remote_addr, "", "", perms, retry);
+    long now = (long)mono(), age = onvif_digest_nonce_age(g_dkey, d.nonce, now);
+    if (age < 0) return api_login(ri->remote_addr, "", "", perms, retry);
+    if (age > NONCE_SECS) return -3;
+    /* The uri it signed is the one it asked for, with or without its query. */
+    char full[512];
+    const char *path = ri->local_uri_raw ? ri->local_uri_raw : ri->request_uri ? ri->request_uri : "";
+    snprintf(full, sizeof full, "%s%s%s", path, ri->query_string ? "?" : "", ri->query_string ? ri->query_string : "");
+    if (strcmp(d.uri, full) != 0 && strcmp(d.uri, path) != 0) return api_login(ri->remote_addr, "", "", perms, retry);
+    snprintf(user, ucap, "%s", d.username);
+    digest_ctx_t c = { &d, ri->request_method };
+    int rc = api_login_with(ri->remote_addr, d.username, digest_check, &c, perms, retry);
+    if (rc != 1) return rc;
+    /* A request word for word as one before (its nonce count used) is a
+     * replay; stale rather than refused, for a client that sent its
+     * counts out of order. */
+    pthread_mutex_lock(&g_auth_lock);
+    int fresh = onvif_nc_use(&g_dnc, &d, now - age, now, NONCE_SECS);
+    pthread_mutex_unlock(&g_auth_lock);
+    if (fresh <= 0) {
+        if (fresh == 0) vg_log("api: %s from %s: a Digest nonce count used before (a replay?)", d.username,
+                               ri->remote_addr);
+        *perms = 0;
+        return -3;
+    }
+    return 1;
 }
 
 /* One login from `addr`: 1 with *perms, 0 refused (after FAIL_DELAY_S),
@@ -320,14 +405,17 @@ static int auth_handler(struct mg_connection *conn, void *cbdata)
 
     const char *hdr = mg_get_header(conn, "Authorization");
     if (!hdr) {
-        send_401(conn);
+        send_401(conn, 0);
         return 0;
     }
     char user[128], pass[256];
     unsigned perms = 0;
     long retry = 0;
     int rc = 0;
-    if (auth_parse_basic(hdr, user, sizeof user, pass, sizeof pass) == 0) {
+    user[0] = 0;
+    if (!strncasecmp(hdr, "Digest ", 7)) {
+        rc = digest_login(conn, hdr, user, sizeof user, &perms, &retry);
+    } else if (auth_parse_basic(hdr, user, sizeof user, pass, sizeof pass) == 0) {
         rc = api_login(mg_get_request_info(conn)->remote_addr, user, pass, &perms, &retry);
     } else {
         /* Not Basic, or not decodable: a failure like a wrong password. */
@@ -346,7 +434,7 @@ static int auth_handler(struct mg_connection *conn, void *cbdata)
         snprintf(t_user, sizeof t_user, "%s", user);
         return 1;
     }
-    send_401(conn);
+    send_401(conn, rc == -3);
     return 0;
 }
 
@@ -582,6 +670,7 @@ static int request_handler(struct mg_connection *conn, void *cbdata)
     int rc = api_backup_request(conn, uri, m);
     if (!rc) rc = api_mgmt_request(conn, uri, m);
     if (rc) return rc;
+    if ((rc = api_snap_request(conn, uri, m)) != 0) return rc;
     if ((rc = api_ptz_request(conn, uri, m)) != 0) return rc;
     if (!strncmp(uri, "/api/v1/discovery", 17) || !strncmp(uri, "/api/v1/channels/", 17) ||
         !strncmp(uri, "/api/v1/devices/", 16))
@@ -905,6 +994,9 @@ static void random_key_once(void)
         unsigned v = (unsigned)ts.tv_nsec ^ (unsigned)getpid() << 16;
         for (size_t i = 0; i < sizeof g_cache_key; ++i) g_cache_key[i] = (unsigned char)(v >> (i % 4 * 8)) ^ (unsigned char)i;
     }
+    /* The Digest nonces' key, from the same randomness before it is
+     * folded into printable characters. */
+    md5_raw(g_cache_key, sizeof g_cache_key, g_dkey);
     for (size_t i = 0; i < sizeof g_cache_key; ++i)       /* printable for %.16s */
         g_cache_key[i] = (unsigned char)('!' + g_cache_key[i] % 90);
 }

@@ -72,7 +72,11 @@ Rules that keep the layers apart:
   from LVGL's flushes and the platform's `hal_display_grab`, the input
   goes into the evdev reader as one more mouse and keyboard. The NETIP
   server (`netip_srv.c`) takes the cameras' access units from stream taps
-  (`stream_tap.h`) and passes them on unchanged.
+  (`stream_tap.h`) and passes them on unchanged. Snapshots are the app's
+  too (`src/app/snapshot.c`, set with `api_set_snapshots`): a camera's own
+  JPEG comes through the core (`snap_cam.c`, compressed bytes like an
+  access unit), the recorder's own picture stays in the platform until it
+  is a JPEG (`hal_display_still`, then `jpeg_enc.c` in the app).
 - A platform provides every HAL function. Functions it cannot support
   return an error, and `hal_caps()` reports what it can do. The core reads
   those capabilities at run time and does not assume them.
@@ -351,6 +355,7 @@ page having put them in force already as the user moved them.
 | ONVIF events: one per camera that has them | its pull-point subscription: PullMessages, Renew, subscribing again (`onvif_events.c`) |
 | camera events ticker | ends momentary events when their 5 s are over (`cam_events.c`) |
 | PTZ: one per channel, once its PTZ is used | probes the camera, sends the moves, presets and their stops (`ptz.c`); its connection closes after a minute idle |
+| snapshot worker | the screen's snapshot requests and the pictures on camera events, mailing them (`src/app/snapshot.c`); the API's snapshots run on its own workers |
 | log reader (`-s`) | turns stdout/stderr lines into syslog messages |
 
 ## Sources (camera protocols)

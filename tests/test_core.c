@@ -47,6 +47,8 @@
 #include "schema.h"
 #include "schema_yaml.h"
 #include "seg_writer.h"
+#include "snap_cam.h"
+#include "snap_store.h"
 #include "sps.h"
 #include "stream_tap.h"
 
@@ -1258,6 +1260,8 @@ static void test_config_file(void)
     /* Items built in C carry their defaults themselves (an array's are zeroed). */
     snprintf(c.cameras[0].events, sizeof c.cameras[0].events, "auto");
     snprintf(c.cameras[1].events, sizeof c.cameras[1].events, "onvif");
+    snprintf(c.cameras[0].snapshot_on_event, sizeof c.cameras[0].snapshot_on_event, "off");
+    snprintf(c.cameras[1].snapshot_on_event, sizeof c.cameras[1].snapshot_on_event, "on");
     snprintf(c.cameras[1].onvif_url, sizeof c.cameras[1].onvif_url, "http://10.0.0.3:8899/onvif/device_service");
     snprintf(c.cameras[0].ptz, sizeof c.cameras[0].ptz, "auto");
     snprintf(c.cameras[1].ptz, sizeof c.cameras[1].ptz, "netip");
@@ -3900,6 +3904,166 @@ static void test_config_seal(void)
     if (system(cmd)) {}
 }
 
+/* ---- snapshots: the camera's JPEG (snap_cam.h) and the kept files (snap_store.h) ---- */
+
+static void test_snap_cam(void)
+{
+    size_t len;
+    uint8_t *jpg = load("snapshot_640x360.jpg", &len);
+    unsigned w = 0, h = 0;
+    size_t n = len;
+    CHECK(snap_jpeg_check(jpg, &n, &w, &h) == 0 && n == len && w == 640 && h == 360, "a JPEG: 640x360 (%ux%u)", w, h);
+    /* NETIP's "\n\0" after it is cut off; a cut JPEG is not one */
+    uint8_t *pad = malloc(len + 2);
+    memcpy(pad, jpg, len);
+    pad[len] = '\n';
+    pad[len + 1] = 0;
+    n = len + 2;
+    CHECK(snap_jpeg_check(pad, &n, NULL, NULL) == 0 && n == len, "trailing \"\\n\\0\" cut off");
+    n = len / 2;
+    CHECK(snap_jpeg_check(jpg, &n, NULL, NULL) < 0, "half a JPEG is refused");
+    n = 4;
+    CHECK(snap_jpeg_check((const uint8_t *)"{\"Re", &n, NULL, NULL) < 0, "JSON is not a JPEG");
+
+    char body[128];
+    CHECK(snap_netip_body(body, sizeof body, 0x1234ABCD, 2) == 0 &&
+          !strcmp(body, "{\"Name\":\"OPSNAP\",\"OPSNAP\":{\"Channel\":2},\"SessionID\":\"0x1234ABCD\"}"),
+          "OPSNAP request: %s", body);
+
+    char err[160];
+    /* one message */
+    snap_netip_rx_t rx = { 0 };
+    netip_hdr_t hd = { .msgid = SNAP_NETIP_RSP, .len = (uint32_t)len };
+    CHECK(snap_netip_take(&rx, &hd, jpg, len, err, sizeof err) == 1 && rx.jpeg.len == len &&
+          !memcmp(rx.jpeg.p, jpg, len), "NETIP: the JPEG in one message");
+    snap_jpeg_free(&rx.jpeg);
+    /* split, the header counting the messages */
+    memset(&rx, 0, sizeof rx);
+    int parts = (int)((len + 4095) / 4096), r = 0;
+    for (int i = 0; i < parts; ++i) {
+        size_t off = (size_t)i * 4096, l = len - off < 4096 ? len - off : 4096;
+        netip_hdr_t hs = { .msgid = SNAP_NETIP_RSP, .total = (uint8_t)parts, .cur = (uint8_t)i, .len = (uint32_t)l };
+        r = snap_netip_take(&rx, &hs, jpg + off, l, err, sizeof err);
+        if (i < parts - 1 && r != 0) break;
+    }
+    CHECK(r == 1 && rx.jpeg.len == len && !memcmp(rx.jpeg.p, jpg, len), "NETIP: split over %d counted messages", parts);
+    snap_jpeg_free(&rx.jpeg);
+    /* split without a count: complete at its EOI */
+    memset(&rx, 0, sizeof rx);
+    netip_hdr_t h0 = { .msgid = SNAP_NETIP_RSP };
+    int r1 = snap_netip_take(&rx, &h0, jpg, 5000, err, sizeof err);
+    int r2 = snap_netip_take(&rx, &h0, jpg + 5000, len - 5000, err, sizeof err);
+    CHECK(r1 == 0 && r2 == 1 && rx.jpeg.len == len, "NETIP: no count, complete at the end of the JPEG (%d %d)", r1, r2);
+    snap_jpeg_free(&rx.jpeg);
+    /* framed as a 0x1FE media frame */
+    memset(&rx, 0, sizeof rx);
+    uint8_t *fr = malloc(len + 16);
+    memset(fr, 0, 16);
+    fr[2] = 1;
+    fr[3] = 0xFE;
+    fr[12] = (uint8_t)len;
+    fr[13] = (uint8_t)(len >> 8);
+    fr[14] = (uint8_t)(len >> 16);
+    memcpy(fr + 16, jpg, len);
+    r1 = snap_netip_take(&rx, &h0, fr, 8000, err, sizeof err);
+    r2 = snap_netip_take(&rx, &h0, fr + 8000, len + 16 - 8000, err, sizeof err);
+    CHECK(r1 == 0 && r2 == 1 && rx.jpeg.len == len && !memcmp(rx.jpeg.p, jpg, len), "NETIP: a 0x1FE frame");
+    snap_jpeg_free(&rx.jpeg);
+    free(fr);
+    /* refused, and garbage */
+    memset(&rx, 0, sizeof rx);
+    const char *no = "{\"Name\":\"OPSNAP\",\"Ret\":103}\n";
+    CHECK(snap_netip_take(&rx, &h0, (const uint8_t *)no, strlen(no) + 1, err, sizeof err) < 0 && strstr(err, "Ret 103"),
+          "NETIP: a refusal says its Ret: %s", err);
+    snap_jpeg_free(&rx.jpeg);
+    memset(&rx, 0, sizeof rx);
+    const char *ok = "{\"Name\":\"OPSNAP\",\"Ret\":100}\n";
+    CHECK(snap_netip_take(&rx, &h0, (const uint8_t *)ok, strlen(ok) + 1, err, sizeof err) == 0 &&
+          snap_netip_take(&rx, &hd, jpg, len, err, sizeof err) == 1, "NETIP: Ret 100, then the JPEG");
+    snap_jpeg_free(&rx.jpeg);
+    memset(&rx, 0, sizeof rx);
+    CHECK(snap_netip_take(&rx, &h0, (const uint8_t *)"\x00\x00\x01\xFDxxxxxxxxxxxx", 16, err, sizeof err) < 0,
+          "NETIP: a P-frame is not a snapshot");
+    snap_jpeg_free(&rx.jpeg);
+    free(pad);
+    free(jpg);
+
+    /* RFC 2617's example, 3.5 */
+    char a[512];
+    CHECK(snap_digest("Digest realm=\"testrealm@host.com\", qop=\"auth,auth-int\", "
+                      "nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", opaque=\"5ccc069c403ebaf9f0171e9517f40e41\"",
+                      "Mufasa", "Circle Of Life", "GET", "/dir/index.html", "0a4f113b", a, sizeof a) == 0 &&
+          strstr(a, "response=\"6629fae49393a05397450978507c4ef1\"") && strstr(a, "qop=auth, nc=00000001") &&
+          strstr(a, "opaque=\"5ccc069c403ebaf9f0171e9517f40e41\""), "Digest: RFC 2617's example: %s", a);
+    CHECK(snap_digest("Digest realm=\"r\", nonce=\"n\"", "u", "p", "GET", "/x", "c", a, sizeof a) == 0 &&
+          !strstr(a, "qop") && !strstr(a, "cnonce"), "Digest without qop (RFC 2069): %s", a);
+    CHECK(snap_digest("Digest realm=\"r\", nonce=\"n\", qop=\"auth-int\"", "u", "p", "GET", "/x", "c", a, sizeof a) < 0,
+          "Digest: auth-int alone is not answered");
+    CHECK(snap_digest("Basic realm=\"r\"", "u", "p", "GET", "/x", "c", a, sizeof a) < 0, "Basic is not Digest");
+
+    char u[64], pw[64], host[64];
+    CHECK(snap_url_creds("rtsp://admin:pa:ss@10.0.0.2:554/x", u, sizeof u, pw, sizeof pw, host, sizeof host) == 0 &&
+          !strcmp(u, "admin") && !strcmp(pw, "pa:ss") && !strcmp(host, "10.0.0.2"), "URL credentials: %s %s %s", u, pw,
+          host);
+    CHECK(snap_url_creds("capture:1", u, sizeof u, pw, sizeof pw, host, sizeof host) < 0, "capture: no host");
+}
+
+static void test_snap_store(void)
+{
+    char name[SNAP_NAME_MAX];
+    struct tm tm = { .tm_year = 126, .tm_mon = 10, .tm_mday = 28, .tm_hour = 10, .tm_min = 15, .tm_sec = 0,
+                     .tm_isdst = -1 };
+    time_t t = mktime(&tm);
+    CHECK(snap_name(name, sizeof name, 3, t, 42, "motion") == 0 && !strcmp(name, "ch03_20261128-101500-042_motion.jpg"),
+          "name: %s", name);
+    CHECK(snap_name(name, sizeof name, 3, t, 0, "a/b..c") == 0 && !strcmp(name, "ch03_20261128-101500-000_a_b__c.jpg"),
+          "a kind's other characters become _: %s", name);
+    snap_file_t f;
+    CHECK(snap_name_parse("ch03_20261128-101500-042_motion.jpg", &f) == 0 && f.ch == 3 && f.time == t && f.ms == 42 &&
+          !strcmp(f.kind, "motion"), "parsed back");
+    static const char *const bad[] = { "../ch03_20261128-101500-042_motion.jpg", "ch03_20261128-101500-042_.jpg",
+                                       "ch03_20261128-101500-042_mo/tion.jpg", "ch3_20261128-101500-042_motion.jpg",
+                                       "ch03_20261128-101500-042_motion.png", "x", ".ch03_20261128-101500-042_m.jpg.tmp" };
+    int all = 1;
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; ++i) all &= snap_name_parse(bad[i], &f) < 0;
+    CHECK(all, "names that are not ours are refused");
+
+    char why[200], dir[256];
+    CHECK(snap_dir("", "", 1, dir, sizeof dir, why, sizeof why) < 0, "no record.path, no snapshot.path: nowhere (%s)",
+          why);
+    CHECK(snap_dir("/proc/vigil-snap", "", 1, dir, sizeof dir, why, sizeof why) < 0, "not onto /proc: %s", why);
+    /* On the disk the build is on (if it is one): next to the recordings */
+    char cwd[200], rec[240];
+    if (!getcwd(cwd, sizeof cwd)) return;
+    snprintf(rec, sizeof rec, "%s/snapt/rec", cwd);
+    char w2[160];
+    if (rec_place_check(cwd, 1, NULL, w2, sizeof w2) != REC_PLACE_OK) {
+        printf("skip   snap_store on disk: %s is not on one (%s)\n", cwd, w2);
+        return;
+    }
+    char want[260];
+    snprintf(want, sizeof want, "%s/snapt/snapshots", cwd);
+    CHECK(snap_dir("", rec, 1, dir, sizeof dir, why, sizeof why) == 0 && !strcmp(dir, want),
+          "next to record.path: %s", dir);
+    if (system("rm -rf snapt")) {}
+    char err[160];
+    CHECK(snap_save(dir, "ch01_20200101-000000-000_manual.jpg", "0123456789", 10, err, sizeof err) == 0 &&
+          snap_save(dir, "ch02_20200101-000001-000_motion.jpg", "0123456789", 10, err, sizeof err) == 0 &&
+          snap_save(dir, "ch01_20200101-000002-000_manual.jpg", "0123456789", 10, err, sizeof err) == 0,
+          "three saved: %s", err);
+    CHECK(snap_save(dir, "../x.jpg", "x", 1, err, sizeof err) < 0, "not under another name");
+    snap_file_t l[4];
+    uint64_t total;
+    int n = snap_list(dir, l, 4, &total);
+    CHECK(n == 3 && total == 30 && l[0].ch == 1 && l[0].time > l[1].time && l[1].ch == 2, "listed newest first");
+    CHECK(snap_trim(dir, 25) == 1 && snap_list(dir, l, 4, &total) == 2 && total == 20 &&
+          !strcmp(l[1].name, "ch02_20200101-000001-000_motion.jpg"), "trimmed: the oldest went");
+    CHECK(snap_delete(dir, "ch02_20200101-000001-000_motion.jpg") == 0 && snap_list(dir, NULL, 0, NULL) == 1,
+          "deleted");
+    CHECK(snap_delete(dir, "../../vigil.yaml") < 0, "delete refuses other names");
+    if (system("rm -rf snapt")) {}
+}
+
 /* A configuration export's pieces: a key of one's own (PBKDF2, RFC 6070's
  * style vector for SHA-256), values sealed with it that the board's key
  * does not open, and the ustar archive they travel in. */
@@ -4008,6 +4172,8 @@ int main(int argc, char **argv)
     test_qos_config();
     test_qos_sockets();
     test_ports();
+    test_snap_cam();
+    test_snap_store();
     char cmd[100];
     snprintf(cmd, sizeof cmd, "rm -rf %s", keydir);
     if (system(cmd)) {}

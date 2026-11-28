@@ -8,6 +8,7 @@
  *   -> channels_start (one thread per camera: source -> decode + record)
  *   -> mgmt_start (the management pages' jobs and timers: network
  *      rollback, NTP, DDNS, network storage, alarm center, mail)
+ *   -> snapshot_start (still pictures: on camera events, for the screen)
  *   -> ptz_start (the cameras' PTZ: a worker per channel once used)
  *   -> api_start (HTTP/WebSocket API on its own threads, if configured),
  *      web_start (the zero channel), onvif_start (the ONVIF server and
@@ -53,9 +54,29 @@
 #include "onvif_events.h"
 #include "rtsp_server.h"
 #include "secret.h"
+#include "snapshot.h"
 #include "web.h"
 
 static volatile sig_atomic_t g_stop;
+
+/* The API's snapshots (api.h) are snapshot.h's. */
+static int api_snap_take(int ch, const char *source, unsigned char **jpeg, size_t *len, char *used, size_t ucap,
+                         int *status, char *err, size_t cap)
+{
+    int src = snapshot_src(source);
+    return snapshot_take(ch, src < 0 ? SNAPSHOT_AUTO : (snapshot_src_t)src, jpeg, len, used, ucap, status, err, cap);
+}
+
+static int api_snap_save(int ch, const char *source, char *name, size_t ncap, char *used, size_t ucap, int *status,
+                         char *err, size_t cap)
+{
+    int src = snapshot_src(source);
+    return snapshot_save(ch, src < 0 ? SNAPSHOT_AUTO : (snapshot_src_t)src, "manual", name, ncap, used, ucap, status,
+                         err, cap);
+}
+
+static const api_snapshot_ops_t g_snap_ops = { api_snap_take, api_snap_save };
+
 static void on_signal(int s) { (void)s; g_stop = 1; }
 
 /* ---- -s: everything written to stdout/stderr goes to syslog ---------------
@@ -501,6 +522,7 @@ int main(int argc, char **argv)
             memset(cam, 0, sizeof *cam);
             snprintf(cam->url, sizeof cam->url, "%s", urls[i]);
             snprintf(cam->events, sizeof cam->events, "auto");
+            snprintf(cam->snapshot_on_event, sizeof cam->snapshot_on_event, "off");
             cam->enabled = 1;
             snprintf(cam->ptz, sizeof cam->ptz, "auto");
         }
@@ -574,6 +596,8 @@ int main(int argc, char **argv)
         config_mark_applied(g_applied_gen);
         if (mgmt_start() < 0) vg_log("mgmt: cannot start its threads; the management pages will not act");
         disc_set_max_channels(caps->max_channels);
+        if (snapshot_start() < 0) vg_log("snapshots: cannot start the worker; none on events or from the screen");
+        api_set_snapshots(&g_snap_ops);
         char ptz_path[256];
         ptz_names_path(ptz_path, sizeof ptz_path);
         ptz_start(ptz_path);
@@ -590,6 +614,7 @@ int main(int argc, char **argv)
         web_stop();
         api_stop();
         ptz_shutdown();                 /* every move stopped before the channels go */
+        snapshot_stop();
         disc_shutdown();
         mgmt_stop();
         channels_stop();

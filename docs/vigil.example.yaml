@@ -30,6 +30,14 @@ version: 1
 #     others when the camera has one; netip, onvif: that one (an RTSP camera's
 #     NETIP on port 34567 of its host); off: no PTZ for this camera. One of:
 #     auto, netip, onvif, off. Default auto.
+#   snapshot_url: Snapshot URL. Where the camera gives a JPEG over HTTP
+#     (http://host/cgi-bin/snapshot.cgi), for a camera with neither NETIP nor
+#     ONVIF; the URL's user and password log in. Empty: the camera's NETIP or
+#     ONVIF snapshot, else the recorder's own picture of it.
+#   snapshot_on_event: Snapshots on events. on: when the camera reports an
+#     event (motion, people, a line crossed, ...), snapshot.event_count
+#     pictures are taken and kept, named after it. One of: off, on. Default
+#     off.
 cameras:
   - url: "rtsp://admin@192.168.1.10/stream=0"
     name: Gate
@@ -38,6 +46,8 @@ cameras:
     events: auto
     onvif_url: ""
     ptz: auto
+    snapshot_url: ""
+    snapshot_on_event: "off"
   - url: "netip://admin:@192.168.1.11:34567/?ch=0&stream=main"
     name: Yard
     enabled: true
@@ -45,6 +55,8 @@ cameras:
     events: auto
     onvif_url: ""
     ptz: auto
+    snapshot_url: ""
+    snapshot_on_event: "off"
   - url: "rtsp://192.168.1.12:554/live"
     name: Garage
     enabled: false
@@ -52,6 +64,8 @@ cameras:
     events: auto
     onvif_url: ""
     ptz: auto
+    snapshot_url: ""
+    snapshot_on_event: "off"
 
 # Recording
 record:
@@ -74,6 +88,33 @@ record:
   # made them, make room; stop: recording stops (event "REC disk full") until
   # there is room again. One of: overwrite, stop. Default overwrite.
   on_full: overwrite
+
+# Snapshots: Still pictures of the cameras: taken from the live view, the API,
+# and on camera events.
+snapshot:
+  # Snapshot directory: Where snapshots are kept; on a disk or a USB stick,
+  # never the flash. Empty: next to record.path (/mnt/sda1/rec:
+  # /mnt/sda1/snapshots).
+  path: ""
+  # Source: auto: the camera's own JPEG (NETIP, ONVIF, snapshot_url: full
+  # size), else the picture the recorder decodes for the screen; camera; nvr
+  # (only a channel on screen has one). One of: auto, camera, nvr. Default
+  # auto.
+  source: auto
+  # Space (MB): The oldest snapshots go when they take more. 0: no limit.
+  # 0..1000000, default 1024.
+  max_mb: 1024
+  # JPEG quality: Of the recorder's own pictures (a camera's JPEG is kept as
+  # it comes). 10..95, default 85.
+  quality: 85
+  # Pictures per event: Taken when a camera with snapshot_on_event reports an
+  # event. 1..10, default 3.
+  event_count: 3
+  # Interval (s): Between an event's pictures. 1..60, default 1.
+  event_interval: 1
+  # Mail them: An event's pictures go to smtp.to as attachments
+  # (smtp.enabled). Default false.
+  mail: false
 
 # Recording schedule: A week per camera; a camera without one records all the
 # time. Each day is 48 letters, one per half hour from 00:00: C continuous, M

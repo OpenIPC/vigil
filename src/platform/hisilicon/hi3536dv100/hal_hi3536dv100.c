@@ -365,6 +365,7 @@ int hal_display_set_mode(const vg_mode_t *m)
 /* No picture to read back: the zero channel shows the UI over black. */
 void hal_display_grab_keep(int on) { (void)on; }
 int  hal_display_grab(const hal_pic_t *pic) { (void)pic; return -1; }
+int  hal_display_still(int ch, hal_pic_t *pic, int timeout_ms) { (void)ch; (void)pic; (void)timeout_ms; return -1; }
 
 /* No margins, picture controls or HDMI sound here yet (hal_caps: 0). */
 int hal_display_set_margins(const vg_margins_t *m) { (void)m; return -1; }

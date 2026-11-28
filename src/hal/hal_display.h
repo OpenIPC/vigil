@@ -60,6 +60,18 @@ void hal_display_grab_keep(int on);
  * 0, or -1 where the platform cannot (nothing drawn). Any thread. */
 int  hal_display_grab(const hal_pic_t *pic);
 
+/* ---- a still of one channel (snapshots, when the camera cannot give one) ---- */
+
+/* Channel `ch`'s next decoded picture, at the size its decoder puts it out
+ * (where the decoder scales to the tile, the tile's), as the decoders put
+ * it out (BT.601 video range): pic->w, h, ys, cs set and y, u, v in one
+ * malloc'd block at pic->y (free(pic->y)). Waits up to `timeout_ms` for a
+ * picture. 0, or -1: the channel has no decoder running (off screen, or no
+ * decoder to be had), none came in time, or the platform cannot (nothing
+ * allocated). Any thread; costs the video nothing it does not cost the
+ * zero channel. */
+int  hal_display_still(int ch, hal_pic_t *pic, int timeout_ms);
+
 /* ---- the output's adjustments (Display -> Output) ------------------------------------ */
 
 /* Margins around everything the output shows (overscan.h): the tiles, the

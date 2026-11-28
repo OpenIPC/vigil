@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "qos.h"
 #include "sys.h"
@@ -54,6 +55,22 @@ void test_sys_curl(void)
     CHECK(!strstr(fake_stdin, "ssl-reqd") && !strstr(fake_stdin, "user ="), "no TLS, no login:\n%s", fake_stdin);
     fake_answer("curl", 67, "curl: (67) Login denied");
     CHECK(mail_send(&s, "T", "x", msg, sizeof msg) < 0 && strstr(msg, "Login denied"), "failure: %s", msg);
+    /* Attachments: a file that cannot be read is said, nothing is sent */
+    fake_answer("curl", 0, "");
+    fake_clear_log();
+    const char *files[] = { "/nonexistent/ch01_x.jpg" };
+    CHECK(mail_send_files(&s, "T", "x", files, 1, msg, sizeof msg) < 0 && strstr(msg, "cannot read") &&
+          !fake_ran("curl"), "an unreadable attachment: %s", msg);
+    char att[] = "/tmp/vigil-att-XXXXXX";
+    int afd = mkstemp(att);
+    if (afd >= 0) {
+        if (write(afd, "\xff\xd8jpeg\xff\xd9", 8) != 8) {}
+        close(afd);
+    }
+    const char *ok_files[] = { att };
+    CHECK(mail_send_files(&s, "T", "x", ok_files, 1, msg, sizeof msg) == 0 && fake_ran("curl -K -") &&
+          strstr(fake_stdin, "upload-file = \"") && tmp_files() == 0, "with an attachment: sent, the message removed");
+    unlink(att);
     fake_have("curl", 0);
     CHECK(mail_send(&s, "T", "x", msg, sizeof msg) < 0 && strstr(msg, "no curl"), "no curl: %s", msg);
     fake_have("curl", 1);

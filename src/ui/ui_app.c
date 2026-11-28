@@ -695,6 +695,7 @@ static const char *const k_help[][2] = {
     { "1  4  8  9  0", "Split: 1, 4, 8, 9, 16 windows" },
     { "PgUp PgDn   [ ]", "Previous, next page" },
     { "M   F2", "Main menu" },
+    { "S   F12", "Snapshot of the selected camera" },
     { "Menu   Shift+F10", "Context menu (Right: Split)" },
     { "P", "PTZ of the selected camera" },
     { NULL, "PTZ" },
