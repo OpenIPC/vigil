@@ -129,6 +129,7 @@ add_library(vigil_sys STATIC
   src/sys/sys_net.c
   src/sys/sys_curl.c
   src/sys/sys_disk.c
+  src/sys/sys_log.c
   src/sys/sys_nas.c
   src/sys/sys_scan.c
   src/sys/sys_smart.c

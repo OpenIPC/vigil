@@ -16,6 +16,7 @@ void test_sys_disk(void);
 void test_sys_mgmt(void);
 void test_sys_smart(void);
 void test_sys_scan(void);
+void test_sys_log(void);
 
 void test_sys_seams(void)
 {
@@ -66,6 +67,7 @@ int main(void)
     test_sys_mgmt();
     test_sys_smart();
     test_sys_scan();
+    test_sys_log();
     printf("%d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }
