@@ -37,7 +37,7 @@ add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/web_assets.c
 
 add_library(vigil_api STATIC ${CMAKE_SOURCE_DIR}/src/api/api.c ${CMAKE_SOURCE_DIR}/src/api/api_disc.c
             ${CMAKE_SOURCE_DIR}/src/api/web.c ${CMAKE_BINARY_DIR}/web_assets.c
-            ${CMAKE_SOURCE_DIR}/src/api/api_mgmt.c ${CMAKE_SOURCE_DIR}/src/api/api_perm.c
+            ${CMAKE_SOURCE_DIR}/src/api/api_mgmt.c ${CMAKE_SOURCE_DIR}/src/api/api_perm.c ${CMAKE_SOURCE_DIR}/src/api/api_snap.c
             ${CMAKE_SOURCE_DIR}/src/api/api_users.c ${CMAKE_SOURCE_DIR}/src/api/auth.c
             ${CMAKE_SOURCE_DIR}/src/api/netip_srv.c ${CMAKE_SOURCE_DIR}/src/api/rtsp_server.c
             ${CMAKE_SOURCE_DIR}/src/api/users.c ${CMAKE_SOURCE_DIR}/src/api/onvif.c)

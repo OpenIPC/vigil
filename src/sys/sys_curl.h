@@ -22,6 +22,12 @@ int curl_available(void);
  * `msg` (curl's own words: "Login denied", "SSL connect error", ...). */
 int mail_send(const config_smtp_t *s, const char *subject, const char *body, char *msg, size_t cap);
 
+/* The same with files attached (JPEGs, image/jpeg in base64, each named
+ * by its base name), at most MAIL_FILES_MAX of 8 MiB each. */
+#define MAIL_FILES_MAX 10
+int mail_send_files(const config_smtp_t *s, const char *subject, const char *body, const char *const *files, int n,
+                    char *msg, size_t cap);
+
 /* Tell the dynamic DNS service this host's address (the service sees
  * where the request comes from). 0 on "good"/"nochg" (or a 2xx for a
  * custom URL), -1 with `msg`. */

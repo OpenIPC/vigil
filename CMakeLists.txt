@@ -147,7 +147,7 @@ add_library(vigil_platform OBJECT ${VIGIL_PLATFORM_SOURCES})
 target_include_directories(vigil_platform PRIVATE src/core src/core/source src/hal ${VIGIL_PLATFORM_INCLUDES})
 target_compile_definitions(vigil_platform PRIVATE ${VIGIL_PLATFORM_DEFS})
 
-set(VIGILD_SOURCES src/app/main.c src/app/frontend_common.c)
+set(VIGILD_SOURCES src/app/main.c src/app/frontend_common.c src/app/snapshot.c src/app/jpeg_enc.c)
 # The UI (src/ui: LVGL and hal_ui.h only) as a library: vigild links it on
 # platforms with a display, the host build for its screenshot tests.
 set(VIGIL_UI_SOURCES src/ui/ui_app.c src/ui/ui_channels.c src/ui/icons.c src/ui/ui_cursor.c src/ui/ui_form.c src/ui/ui_i18n.c src/ui/ui_settings.c src/ui/ui_set_network.c src/ui/ui_set_storage.c src/ui/ui_set_maint.c
@@ -161,7 +161,8 @@ if(VIGIL_HAS_UI OR (BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING))
 endif()
 # The zero channel (src/app/kvm.c): its pixel loops and JPEG encoder are
 # the only hot code vigild runs on the CPU, so they are built for speed.
-set(VIGIL_KVM_SOURCES src/app/kvm.c src/app/kvm_enc.c src/app/kvm_input.c src/app/jpeg_enc.c)
+# jpeg_enc.c is in every vigild (snapshots), with the UI or without.
+set(VIGIL_KVM_SOURCES src/app/kvm.c src/app/kvm_enc.c src/app/kvm_input.c)
 set_source_files_properties(src/app/kvm.c src/app/kvm_enc.c src/app/jpeg_enc.c
                             ${CMAKE_SOURCE_DIR}/src/app/kvm.c ${CMAKE_SOURCE_DIR}/src/app/kvm_enc.c
                             ${CMAKE_SOURCE_DIR}/src/app/jpeg_enc.c PROPERTIES COMPILE_OPTIONS "-O2")

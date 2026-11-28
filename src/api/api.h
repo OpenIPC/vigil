@@ -32,4 +32,16 @@ int  api_restart(const char *listen, char *err, size_t cap);
  * port in use, ...). Any thread. */
 int  api_listening(char *listen, size_t cap, char *why, size_t wcap);
 
+/* Snapshots: taking one is the app's (src/app/snapshot.c: the camera, or
+ * the platform's decoded picture), set before api_start; without it the
+ * snapshot endpoints answer 503. Each as snapshot.h's snapshot_take and
+ * snapshot_save, the source by name ("auto", "camera", "nvr"). */
+typedef struct {
+    int (*take)(int ch, const char *source, unsigned char **jpeg, size_t *len, char *used, size_t ucap,
+                int *status, char *err, size_t cap);
+    int (*save)(int ch, const char *source, char *name, size_t ncap, char *used, size_t ucap, int *status,
+                char *err, size_t cap);
+} api_snapshot_ops_t;
+void api_set_snapshots(const api_snapshot_ops_t *ops);
+
 #endif /* API_H */

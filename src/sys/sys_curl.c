@@ -101,17 +101,10 @@ static char *message(const config_smtp_t *s, const char *subject, const char *bo
     return m;
 }
 
-int mail_send(const config_smtp_t *s, const char *subject, const char *body, char *msg, size_t cap)
+/* `m` (the whole message) to every address of s->to. */
+static int mail_run(const config_smtp_t *s, char *m, char *msg, size_t cap)
 {
-    if (!curl_available()) {
-        snprintf(msg, cap, "this firmware has no curl to send mail with");
-        return -1;
-    }
-    if (!s->server[0] || !s->from[0] || !s->to[0]) {
-        snprintf(msg, cap, "set the server, the sender and at least one address first");
-        return -1;
-    }
-    char *m = message(s, subject, body), file[512];
+    char file[512];
     if (!m || temp_file("mail", m, file, sizeof file) < 0) {
         free(m);
         snprintf(msg, cap, "cannot write the message to /tmp");
@@ -143,6 +136,136 @@ int mail_send(const config_smtp_t *s, const char *subject, const char *body, cha
     snprintf(msg, cap, "%s", out[0] ? out : "curl failed");
     if (rc == 127) snprintf(msg, cap, "this firmware has no curl");
     return -1;
+}
+
+static int mail_check(const config_smtp_t *s, char *msg, size_t cap)
+{
+    if (!curl_available()) {
+        snprintf(msg, cap, "this firmware has no curl to send mail with");
+        return -1;
+    }
+    if (!s->server[0] || !s->from[0] || !s->to[0]) {
+        snprintf(msg, cap, "set the server, the sender and at least one address first");
+        return -1;
+    }
+    return 0;
+}
+
+int mail_send(const config_smtp_t *s, const char *subject, const char *body, char *msg, size_t cap)
+{
+    if (mail_check(s, msg, cap) < 0) return -1;
+    return mail_run(s, message(s, subject, body), msg, cap);
+}
+
+/* A file's bytes (malloc'd), at most `max`. NULL when it cannot be read. */
+static unsigned char *read_file(const char *path, size_t max, size_t *len)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    unsigned char *b = NULL;
+    size_t n = 0, cap = 0;
+    for (;;) {
+        if (n == cap) {
+            size_t nc = cap ? cap * 2 : 65536;
+            if (nc > max + 1) nc = max + 1;
+            if (nc <= cap) break;
+            unsigned char *nb = realloc(b, nc);
+            if (!nb) break;
+            b = nb;
+            cap = nc;
+        }
+        size_t r = fread(b + n, 1, cap - n, f);
+        if (!r) break;
+        n += r;
+    }
+    int bad = ferror(f) || n > max;
+    fclose(f);
+    if (bad) {
+        free(b);
+        return NULL;
+    }
+    *len = n;
+    return b;
+}
+
+static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/* base64 in lines of 76, CRLF (RFC 2045), appended at m + *len. */
+static void put_b64(char *m, size_t *len, const unsigned char *p, size_t n)
+{
+    size_t col = 0, o = *len;
+    for (size_t i = 0; i < n; i += 3) {
+        unsigned v = (unsigned)p[i] << 16 | (i + 1 < n ? (unsigned)p[i + 1] << 8 : 0) | (i + 2 < n ? p[i + 2] : 0);
+        m[o++] = B64[v >> 18 & 63];
+        m[o++] = B64[v >> 12 & 63];
+        m[o++] = i + 1 < n ? B64[v >> 6 & 63] : '=';
+        m[o++] = i + 2 < n ? B64[v & 63] : '=';
+        if ((col += 4) == 76) {
+            m[o++] = '\r';
+            m[o++] = '\n';
+            col = 0;
+        }
+    }
+    if (col) {
+        m[o++] = '\r';
+        m[o++] = '\n';
+    }
+    *len = o;
+}
+
+#define ATTACH_MAX (8u << 20)               /* per file */
+
+int mail_send_files(const config_smtp_t *s, const char *subject, const char *body, const char *const *files, int n,
+                    char *msg, size_t cap)
+{
+    if (mail_check(s, msg, cap) < 0) return -1;
+    unsigned char *data[MAIL_FILES_MAX] = { 0 };
+    size_t dlen[MAIL_FILES_MAX] = { 0 }, total = strlen(body) * 2 + 2048;
+    if (n > MAIL_FILES_MAX) n = MAIL_FILES_MAX;
+    for (int i = 0; i < n; ++i) {
+        data[i] = read_file(files[i], ATTACH_MAX, &dlen[i]);
+        if (!data[i]) {
+            snprintf(msg, cap, "cannot read %s", files[i]);
+            for (int k = 0; k < i; ++k) free(data[k]);
+            return -1;
+        }
+        total += dlen[i] / 57 * 78 + 160 + 512;
+    }
+    char *m = malloc(total), date[64], boundary[48];
+    if (!m) {
+        for (int i = 0; i < n; ++i) free(data[i]);
+        snprintf(msg, cap, "out of memory");
+        return -1;
+    }
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    strftime(date, sizeof date, "%a, %d %b %Y %H:%M:%S %z", &tm);
+    snprintf(boundary, sizeof boundary, "vigil-%ld-%d", (long)now, (int)getpid());
+    size_t len = (size_t)snprintf(m, total,
+                                  "From: %s\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nMIME-Version: 1.0\r\n"
+                                  "Content-Type: multipart/mixed; boundary=\"%s\"\r\n\r\n"
+                                  "--%s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n",
+                                  s->from, s->to, subject, date, boundary, boundary);
+    for (const char *p = body; *p && len + 3 < total; ++p) {
+        if (*p == '\n' && (p == body || p[-1] != '\r')) m[len++] = '\r';
+        m[len++] = *p;
+    }
+    len += (size_t)snprintf(m + len, total - len, "\r\n");
+    for (int i = 0; i < n; ++i) {
+        const char *base = strrchr(files[i], '/');
+        base = base ? base + 1 : files[i];
+        len += (size_t)snprintf(m + len, total - len,
+                                "--%s\r\nContent-Type: image/jpeg; name=\"%.80s\"\r\n"
+                                "Content-Disposition: attachment; filename=\"%.80s\"\r\n"
+                                "Content-Transfer-Encoding: base64\r\n\r\n",
+                                boundary, base, base);
+        put_b64(m, &len, data[i], dlen[i]);
+        free(data[i]);
+    }
+    len += (size_t)snprintf(m + len, total - len, "--%s--\r\n", boundary);
+    m[len] = 0;
+    return mail_run(s, m, msg, cap);
 }
 
 /* `tmpl` with {host}, {user} and {password} replaced. */

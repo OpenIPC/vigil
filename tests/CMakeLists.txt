@@ -17,6 +17,13 @@ target_include_directories(test_sys PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_sys PRIVATE vigil_sys)
 add_test(NAME sys COMMAND test_sys)
 
+# snapshot.c (src/app) on a faked decoder picture; snapshot_nvr decodes
+# what it made with PIL.
+add_executable(test_snapshot test_snapshot.c ${CMAKE_SOURCE_DIR}/src/app/snapshot.c
+               ${CMAKE_SOURCE_DIR}/src/app/jpeg_enc.c)
+target_include_directories(test_snapshot PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
+target_link_libraries(test_snapshot PRIVATE vigil_sys vigil_core)
+
 if(TARGET vigil_api)
   add_executable(test_api test_api.c)
   target_link_libraries(test_api PRIVATE vigil_api)
@@ -72,6 +79,9 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/ui_compare.py $<TARGET_FILE:test_ui>
                      ${CMAKE_CURRENT_SOURCE_DIR}/ui ${CMAKE_CURRENT_BINARY_DIR}/ui)
   endif()
+  add_test(NAME snapshot_nvr COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/snapshot_nvr_test.py
+                                    $<TARGET_FILE:test_snapshot> ${CMAKE_CURRENT_BINARY_DIR}/snapshot_nvr)
+  set_tests_properties(snapshot_nvr PROPERTIES SKIP_RETURN_CODE 77)
   foreach(clip testsrc_640x360.h264 majestic_1080p.h265)
     add_test(NAME netip_${clip}
              COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_netip.sh $<TARGET_FILE:vigild>
@@ -135,6 +145,12 @@ if(Python3_FOUND)
     # held, ended, through the status and the WebSocket.
     add_test(NAME events_e2e
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/events_test.py $<TARGET_FILE:vigild>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
+    # Snapshots: the cameras' own (NETIP, ONVIF, a URL), the API's logins
+    # (Digest too), the ONVIF server's GetSnapshotUri, pictures on events,
+    # mailed, and the directory's cap.
+    add_test(NAME snapshot_e2e
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/snapshot_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
     add_test(NAME api_e2e
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/api_test.py $<TARGET_FILE:vigild>
