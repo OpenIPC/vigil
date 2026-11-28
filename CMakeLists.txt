@@ -101,6 +101,8 @@ add_library(vigil_core STATIC
   src/core/schema_yaml.c
   src/core/secret.c
   src/core/sha1.c
+  src/core/mp4.c
+  src/core/rec_fmt.c
   src/core/rec_place.c
   src/core/rec_sched.c
   src/core/seg_writer.c

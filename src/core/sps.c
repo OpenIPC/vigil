@@ -265,3 +265,28 @@ int sps_parse(vg_codec_t codec, const uint8_t *nal, size_t len, vg_stream_info_t
     if (out->refs == 0) out->refs = 1;
     return 0;
 }
+
+int sps_hevc_parse(const uint8_t *nal, size_t len, sps_hevc_t *o)
+{
+    bits_t b;
+    memset(o, 0, sizeof *o);
+    bits_init(&b, nal, len);
+    u(&b, 16);                                          /* NAL header */
+    u(&b, 4);                                           /* vps id */
+    int max_sub = (int)u(&b, 3);
+    o->nesting = u(&b, 1);
+    o->sub_layers = (unsigned)max_sub + 1;
+    /* The general part of profile_tier_level is byte-aligned here. */
+    if (b.len < 2 + 1 + 12) return -1;
+    memcpy(o->ptl, b.buf + 3, 12);
+    skip_ptl(&b, max_sub);
+    ue(&b);                                             /* sps id */
+    o->chroma = ue(&b);
+    if (o->chroma == 3) u(&b, 1);
+    ue(&b);                                             /* width */
+    ue(&b);                                             /* height */
+    if (u(&b, 1)) { ue(&b); ue(&b); ue(&b); ue(&b); }   /* conformance window */
+    o->depth_luma = ue(&b);
+    o->depth_chroma = ue(&b);
+    return b.err || o->chroma > 3 || o->depth_luma > 8 || o->depth_chroma > 8 ? -1 : 0;
+}
