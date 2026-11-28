@@ -24,6 +24,7 @@
 #include "hal_display.h"
 #include "hal_audio.h"
 #include "ui_bridge.h"
+#include "ui_logs.h"
 
 #ifndef VIGIL_VERSION
 #define VIGIL_VERSION "dev"
@@ -662,5 +663,6 @@ int ui_bridge_init(ui_model_t *m)
     m->out_margins = out_margins;
     m->out_picture = out_picture;
     m->out_volume = out_volume;
+    ui_logs_set_source(ui_logs_bridge());
     return 0;
 }

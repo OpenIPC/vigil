@@ -31,10 +31,14 @@
 #include "hal_audio.h"
 #include "hal_ui.h"
 #include "input_evdev.h"
+#include "logs.h"
+#include "sys.h"
+#include "sys_log.h"
 #include "ui_app.h"
 #include "ui_bridge.h"
 #include "ui_cursor.h"
 #include "ui_layout.h"
+#include "ui_logs.h"
 #include "ui_osk.h"
 #include "ui_theme.h"
 #include "theme_tokens.h"
@@ -153,6 +157,7 @@ static int        g_channels = 4;       /* the platform's, as the model says */
 static void shots_status(int idx, ui_chan_t *st);
 static void quiet(void);
 static void key(int code);
+static void shots_logs(void);
 static lv_obj_t *focused(void);
 static int g_kbd[2];
 static lv_obj_t *nth_of(const lv_obj_class_t *cls, int nth);
@@ -4745,6 +4750,7 @@ static int shots_4(void)
     click_text("Channel info");
     shot("channel-info");
     button(BTN_RIGHT);
+    shots_logs();
     button(BTN_RIGHT);
     button(BTN_RIGHT);
 
@@ -5011,6 +5017,262 @@ static int shots(void)
     return rc;
 }
 
+/* ---- Operation -> Logs ---------------------------------------------------------------------- */
+
+static char g_log_dir[256];
+
+static int fake_targets(char out[][96], int max)
+{
+    if (max < 1) return 0;
+    snprintf(out[0], 96, "%.95s", g_log_dir);
+    return 1;
+}
+
+static int logs_run(const char *const *argv, const char *input, int timeout_s, char *out, size_t cap)
+{
+    (void)input;
+    (void)timeout_s;
+    if (strcmp(argv[0], "logread")) {
+        snprintf(out, cap, "%s: not found", argv[0]);
+        return 127;
+    }
+    snprintf(out, cap,
+             "Nov 26 14:20:01 nvr daemon.info vigil[812]: platform generic: display yes, decoder yes; 2 camera(s)\n"
+             "Nov 26 14:20:02 nvr daemon.info vigil[812]: CAM1 192.168.1.10: online\n"
+             "Nov 26 14:21:40 nvr daemon.warn vigil[812]: CAM2 192.168.1.11: no video for 10 s, 0 frames\n"
+             "Nov 26 14:25:13 nvr daemon.err udhcpc[301]: sending discover failed\n"
+             "Nov 26 14:30:00 nvr user.notice kernel: usb 1-1: new high-speed USB device number 2\n"
+             "Nov 26 14:31:59 nvr daemon.info vigil[812]: auth: login failed from 192.168.1.66 (3 in a row)\n");
+    return 0;
+}
+
+static int logs_klog(char *buf, size_t cap)
+{
+    snprintf(buf, cap, "<6>[    0.000000] Booting Linux on physical CPU 0x0\n<4>[   12.500000] eth0: link down\n");
+    return (int)strlen(buf);
+}
+
+/* What the logs hold: alarms over the last hours of the fake clock, of
+ * every kind, more than two pages; operations by a few people. */
+static void logs_fill(void)
+{
+    logbook_clear(logs_alarms());
+    logbook_clear(logs_ops());
+    static const struct { int ch; const char *type; int active; const char *detail; } k_al[] = {
+        { 1, "motion", 1, "" }, { 1, "motion", 0, "" }, { 2, "human", 1, "RuleEngine/People" },
+        { 2, "human", 0, "" }, { 3, "offline", 1, "192.168.1.12: connection refused" },
+        { 3, "offline", 0, "online" }, { 4, "rec_failed", -1, "" }, { 0, "disk_full", 1, "sda1" },
+        { 0, "disk_smart", 1, "sda: warning: 8 reallocated sectors" }, { 2, "video_loss", 1, "" },
+    };
+    for (int i = 0; i < 130; ++i) {
+        logrec_t r = { 0 };
+        const int k = i % (int)(sizeof k_al / sizeof k_al[0]);
+        r.time = g_now - (129 - i) * 97;
+        r.ch = k_al[k].ch;
+        r.active = k_al[k].active;
+        snprintf(r.source, sizeof r.source, "vigild");
+        snprintf(r.type, sizeof r.type, "%s", k_al[k].type);
+        snprintf(r.detail, sizeof r.detail, "%s", k_al[k].detail);
+        logbook_push(logs_alarms(), &r);
+    }
+    static const struct { const char *who, *src, *act, *detail; } k_op[] = {
+        { "root", "screen", "login", "" }, { "root", "screen", "config_saved", "record: path, segment" },
+        { "", "api", "login_failed", "from 192.168.1.66, 3 in a row" },
+        { "", "api", "lockout", "from 192.168.1.66 refused for 2 s after 5 failed logins" },
+        { "anna", "web", "login", "from 192.168.1.30" }, { "root", "api", "user_added", "vera (group user)" },
+        { "root", "api", "disk_format", "sda1 as ext4" }, { "root", "screen", "logout", "" },
+        { "anna", "api", "config_saved", "cameras: [2] url, name" }, { "root", "screen", "reboot", "" },
+    };
+    for (int i = 0; i < 70; ++i) {
+        logrec_t r = { 0 };
+        const int k = i % (int)(sizeof k_op / sizeof k_op[0]);
+        r.time = g_now - (69 - i) * 311;
+        r.active = -1;
+        snprintf(r.who, sizeof r.who, "%s", k_op[k].who);
+        snprintf(r.source, sizeof r.source, "%s", k_op[k].src);
+        snprintf(r.type, sizeof r.type, "%s", k_op[k].act);
+        snprintf(r.detail, sizeof r.detail, "%s", k_op[k].detail);
+        logbook_push(logs_ops(), &r);
+    }
+}
+
+static int logs_rows_shown(void)
+{
+    int n = 0;
+    lv_obj_t *t = NULL;
+    /* The table: the gridnav container whose children are the rows. */
+    for (int i = 0; i < 400 && !t; ++i) {
+        lv_obj_t *o = nth_of(&lv_obj_class, i);
+        if (o && lv_obj_get_child_count(o) == 50 && lv_obj_check_type(lv_obj_get_child(o, 0), &lv_button_class)) t = o;
+    }
+    if (!t) return -1;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(t); ++i) n += !lv_obj_has_flag(lv_obj_get_child(t, i), LV_OBJ_FLAG_HIDDEN);
+    return n;
+}
+
+static long file_lines_in(const char *dir, const char *prefix)
+{
+    char cmd[600];
+    snprintf(cmd, sizeof cmd, "cat %s/%s* 2>/dev/null | wc -l", dir, prefix);
+    FILE *p = popen(cmd, "r");
+    long n = -1;
+    if (p && fscanf(p, "%ld", &n) != 1) n = -1;
+    if (p) pclose(p);
+    return n;
+}
+
+/* The logs' source with an export target of the test's, a system log of
+ * its own and the logs filled (logs_fill). */
+static void logs_setup(void)
+{
+    static ui_logs_src_t src;
+    static const sys_ops_t ops = { .run = logs_run, .klog = logs_klog };
+    if (ui_logs_source() != &src) src = *ui_logs_source();
+    src.export_targets = fake_targets;
+    ui_logs_set_source(&src);
+    snprintf(g_log_dir, sizeof g_log_dir, "%s/logs-export", g_out);
+    mkdir(g_log_dir, 0755);
+    char cmd[400];
+    snprintf(cmd, sizeof cmd, "rm -f '%s'/vigil-*", g_log_dir);
+    if (system(cmd)) {}
+    sys_set_ops(&ops);
+    sys_log_set_clock(fake_now);
+    logs_fill();
+}
+
+static void logs_done(void)
+{
+    sys_set_ops(NULL);
+    sys_log_set_clock(NULL);
+}
+
+/* The Logs screen's three pages, for looking at (--shots). */
+static void shots_logs(void)
+{
+    logs_setup();
+    click_text("Logs");
+    shot("logs-alarms");
+    click_text("Older " LV_SYMBOL_RIGHT);
+    shot("logs-alarms-page2");
+    click_text("Operation log");
+    shot("logs-operations");
+    click_text("System log");
+    shot("logs-system");
+    button(BTN_RIGHT);
+    logs_done();
+}
+
+static void test_logs_page(void)
+{
+    logs_setup();
+
+    lv_mem_monitor_t m0, m1;
+    ui_menu_open();
+    click_text("OPERATION");
+    CHECK(find("Logs", 1), "Operation has Logs");
+    click_text("Logs");
+    CHECK(find("Alarm log", 0) && find("Detail", 0), "the Logs screen, on the alarm log");
+    CHECK(logs_rows_shown() == 50 && find("1 - 50", 0), "a page of 50 (%d)", logs_rows_shown());
+    CHECK(find("disk_smart", 0) && find("sda: warning: 8 reallocated sectors", 0), "the newest first");
+    shot("logs_alarms");
+    lv_mem_monitor(&m0);
+    click_text("Older " LV_SYMBOL_RIGHT);
+    CHECK(find("51 - 100", 0) && logs_rows_shown() == 50, "page 2");
+    click_text("Older " LV_SYMBOL_RIGHT);
+    CHECK(find("101 - 130 (the oldest)", 0) && logs_rows_shown() == 30, "page 3: the last 30 (%d)", logs_rows_shown());
+    lv_mem_monitor(&m1);
+    CHECK(m1.total_size - m1.free_size <= m0.total_size - m0.free_size + 2048,
+          "paging makes no widgets: %u -> %u bytes", (unsigned)(m0.total_size - m0.free_size),
+          (unsigned)(m1.total_size - m1.free_size));
+    click_text("Newer");
+    CHECK(find("51 - 100", 0), "back a page");
+
+    /* Filters: a type, a channel, the text. */
+    lv_obj_t *type = nth_of(&lv_dropdown_class, 1), *chan = nth_of(&lv_dropdown_class, 2);
+    dd_pick_text(type, "offline");
+    lv_obj_send_event(type, LV_EVENT_VALUE_CHANGED, NULL);
+    run(50);
+    CHECK(find("1 - 26 (the oldest)", 0) && find("offline", 0), "offline only: 26 (from 1)");
+    dd_pick(chan, 4);
+    CHECK(find("No entries match.", 0), "offline on channel 4: none");
+    dd_pick(chan, 3);
+    CHECK(find("1 - 26 (the oldest)", 0), "channel 3: all of them");
+    dd_pick(type, 0);
+    dd_pick(chan, 0);
+    lv_obj_t *search = textarea(0);
+    if (search) {
+        lv_textarea_set_text(search, "REALLOCATED");
+        lv_obj_send_event(search, LV_EVENT_READY, NULL);
+        run(50);
+    }
+    CHECK(find("1 - 13 (the oldest)", 0), "text, any case: 13");
+    shot("logs_alarms_search");
+    if (search) {
+        lv_textarea_set_text(search, "");
+        run(700);                                   /* the search follows the typing */
+    }
+    CHECK(find("1 - 50", 0), "the search cleared");
+
+    /* An entry, whole: Enter on a row from the keyboard. */
+    lv_obj_t *t = NULL;
+    for (int i = 0; i < 400 && !t; ++i) {
+        lv_obj_t *o = nth_of(&lv_obj_class, i);
+        if (o && lv_obj_get_child_count(o) == 50 && lv_obj_check_type(lv_obj_get_child(o, 0), &lv_button_class)) t = o;
+    }
+    if (pipe(g_kbd) == 0) {                     /* a keyboard, for this */
+        fcntl(g_kbd[0], F_SETFL, O_NONBLOCK);
+        input_evdev_attach_keyboard(g_kbd[0], "test keyboard");
+    }
+    run(50);
+    if (t) {
+        lv_group_focus_obj(t);                  /* the newest row */
+        key(KEY_DOWN);                          /* the next one */
+        key(KEY_ENTER);
+    }
+    CHECK(ui_popup_is_open() && find("Alarm", 0) && find("sda: warning: 8 reallocated sectors", 0),
+          "Enter on a row: the entry");
+    shot("logs_entry");
+    key(KEY_ENTER);                             /* Close has the focus */
+    CHECK(!ui_popup_is_open(), "closed");
+    close(g_kbd[1]);
+    g_kbd[1] = -1;
+    run(200);
+
+    /* Export: every page, to the disk chosen. */
+    click_text("Export");
+    CHECK(ui_popup_is_open() && find("Export", 0), "export: where to");
+    char csv[300];
+    snprintf(csv, sizeof csv, "CSV  %s", g_log_dir);
+    click_text(csv);
+    run(2500);
+    CHECK(file_lines_in(g_log_dir, "vigil-alarms-") == 131, "exported: a header and 130 entries (%ld)",
+          file_lines_in(g_log_dir, "vigil-alarms-"));
+    quiet();
+    logs_fill();                                /* without the export's own entry (the real clock's) */
+
+    click_text("Operation log");
+    CHECK(find("Action", 0) && find("1 - 50", 0), "the operation log");
+    CHECK(find("lockout", 0) || find("reboot", 0), "its entries");
+    shot("logs_operations");
+    dd_pick(nth_of(&lv_dropdown_class, 2), 3);      /* from: api */
+    CHECK(find("1 - 35 (the oldest)", 0), "from the API: 35");
+
+    click_text("System log");
+    CHECK(find("Message", 0) && find("sending discover failed", 0) && find("udhcpc", 0), "the system log");
+    shot("logs_system");
+    dd_pick(nth_of(&lv_dropdown_class, 2), 1);      /* errors */
+    CHECK(find("1 - 1 (the oldest)", 0) && find("sending discover failed", 0), "errors only");
+    dd_pick(nth_of(&lv_dropdown_class, 1), 1);      /* the kernel's */
+    dd_pick(nth_of(&lv_dropdown_class, 2), 0);
+    CHECK(find("eth0: link down", 0) && find("Booting Linux on physical CPU 0x0", 0), "dmesg");
+
+    button(BTN_RIGHT);
+    button(BTN_RIGHT);
+    button(BTN_RIGHT);
+    CHECK(!ui_page_top(), "back on the live view");
+    logs_done();
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 2 && !strcmp(argv[1], "--shots")) {
@@ -5094,6 +5356,7 @@ int main(int argc, char **argv)
     test_channels_scroll();
     test_channels_manual();
     test_system();
+    test_logs_page();
     test_same_redacted_urls();
     test_stale_and_cancel();
     test_two_mice(ptr);

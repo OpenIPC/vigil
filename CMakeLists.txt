@@ -152,7 +152,7 @@ set(VIGILD_SOURCES src/app/main.c src/app/frontend_common.c)
 # platforms with a display, the host build for its screenshot tests.
 set(VIGIL_UI_SOURCES src/ui/ui_app.c src/ui/ui_channels.c src/ui/icons.c src/ui/ui_cursor.c src/ui/ui_form.c src/ui/ui_i18n.c src/ui/ui_settings.c src/ui/ui_set_network.c src/ui/ui_set_storage.c src/ui/ui_set_maint.c
     src/ui/ui_set_system.c src/ui/ui_set_account.c src/ui/ui_set_display.c
-    src/ui/ui_layout.c src/ui/ui_live.c src/ui/ui_menu.c src/ui/ui_osk.c src/ui/ui_session.c src/ui/ui_system.c src/ui/ui_theme.c)
+    src/ui/ui_layout.c src/ui/ui_live.c src/ui/ui_logs.c src/ui/ui_menu.c src/ui/ui_osk.c src/ui/ui_session.c src/ui/ui_system.c src/ui/ui_theme.c)
 if(VIGIL_HAS_UI OR (BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING))
   include(cmake/lvgl.cmake)
   add_library(vigil_ui STATIC ${VIGIL_UI_SOURCES})
@@ -166,7 +166,7 @@ set_source_files_properties(src/app/kvm.c src/app/kvm_enc.c src/app/jpeg_enc.c
                             ${CMAKE_SOURCE_DIR}/src/app/kvm.c ${CMAKE_SOURCE_DIR}/src/app/kvm_enc.c
                             ${CMAKE_SOURCE_DIR}/src/app/jpeg_enc.c PROPERTIES COMPILE_OPTIONS "-O2")
 if(VIGIL_HAS_UI)
-  list(APPEND VIGILD_SOURCES src/app/frontend_ui.c src/app/ui_bridge.c src/app/ui_mgmt.c
+  list(APPEND VIGILD_SOURCES src/app/frontend_ui.c src/app/ui_bridge.c src/app/ui_logs_bridge.c src/app/ui_mgmt.c
        src/app/input_evdev.c ${VIGIL_KVM_SOURCES})
   target_link_libraries(vigil_platform PRIVATE lvgl)
 else()

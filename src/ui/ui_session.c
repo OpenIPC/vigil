@@ -18,6 +18,7 @@
 
 #include "ui_app.h"
 #include "ui_i18n.h"
+#include "ui_logs.h"
 #include "ui_osk.h"
 #include "ui_theme.h"
 
@@ -67,6 +68,9 @@ static void close_all(void)
 void ui_logout(int idle)
 {
     if (!S.in) return;
+    char why[48] = "";
+    if (idle) snprintf(why, sizeof why, "after %d min without use", S.idle_min);
+    ui_logs_audit("logout", why);
     S.in = 0;
     S.perms = 0;
     close_all();

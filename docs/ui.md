@@ -30,6 +30,8 @@ live view                  tiles over the whole screen, clock in a corner
       +-> SYSTEM           settings screen: General, HTTP API
       +-> ACCOUNT          settings screen: Users, Groups
       +-> OPERATION        platform, version, uptime, memory, storage (read-only)
+      |               +-> Logs: System log, Alarm log, Operation log (filters,
+      |               |   50 rows a page, an entry whole, Export to a disk)
       |               +-> Channel info: every channel's state, stream, codec,
       |                   size, fps, main stream, recording, events
       +-> DISPLAY          settings screen: Output, OSD (Clock, Camera names,
@@ -407,6 +409,44 @@ of earlier versions). A save applies to the live view at once.
 ![Display, Output: picture, margins, sound](../tests/ui/display_output.png)
 ![Display, OSD](../tests/ui/display_osd.png)
 ![Display, OSD, scrolled to the end](../tests/ui/display_osd_end.png)
+
+### Logs
+
+Operation's **Logs** opens a settings screen of three pages: **System
+log**, **Alarm log** (first) and **Operation log** (what each holds and
+where it is kept: [management.md](management.md#logs)).
+
+![The alarm log](../tests/ui/logs_alarms.png)
+
+- **Filters** at the top: Time (Today, Last 24 hours, Last 7 days, All,
+  or From ... to ..., which shows two date fields, `YYYY-MM-DD` with a
+  time if wanted), Type (the alarm types) or Action (the operations),
+  Channel (alarms), From (operations: screen, web, api, onvif, netip,
+  rtsp, system) or Level (system: errors, warnings and worse, ...), and
+  Search: text anywhere in the entry, any case, applied half a second
+  after the last key or at once with Enter; a mouse user gets the
+  on-screen keyboard. The system log's second drop-down picks syslog or
+  the kernel's (dmesg).
+- **The table**, newest first, 50 rows a page: **Newer** and **Older**
+  move by a page, the line between them says which entries are shown
+  ("51 - 100", "(the oldest)" on the last page). The 50 rows are made
+  once and refilled, so a long log costs no more of LVGL's memory than a
+  short one; past the newest 1000 alarms or 500 operations the pages come
+  from the files on the disk. The first page follows what comes in
+  (checked every 2 s); the system log does with **Follow** on.
+- **An entry**: the arrows move over the rows, Enter (or a click) shows
+  it whole, wrapped.
+- **Export** writes what the filters show, every page, into a new file
+  on a mounted disk or USB stick (`/mnt/...`, `/media/...`), as CSV or
+  text: `vigil-alarms-20261126-143205.csv`. It runs on a thread of its
+  own; a toast says how many entries went where. The operation log notes
+  the export. For the system log this is the way to keep it: the
+  firmware's ring is in RAM.
+
+The page needs the `system` permission, the Operation card's. The
+source behind it is `ui_logs_src_t` (`src/ui/ui_logs.h`), filled by
+`src/app/ui_logs_bridge.c`; it is not in `ui_model.h`, so the page stays
+one file and one line in the Operation page.
 
 ## Login and Exit
 
@@ -902,7 +942,8 @@ zone, the user editor),
 arrows (`live-page-arrow-next.png`, `-prev`), every tile state and the
 empty slots' "+" (`live-16.png`), `live-empty-plus-hover.png`,
 `camera-add-channel-4.png`, the Channel info page (`channel-info.png`,
-`channel-info-16.png`) and the on-screen keyboard (`osk-letters.png`,
+`channel-info-16.png`), the Logs screen (`logs-alarms.png`,
+`logs-alarms-page2.png`, `logs-operations.png`, `logs-system.png`) and the on-screen keyboard (`osk-letters.png`,
 `osk-shifted.png`, `osk-symbols.png`, `osk-above.png`), the text over a
 picture (`live-16-text-over-video.png`), Exit (`context-menu-exit.png`,
 `exit-chooser.png`, `reboot-confirm.png`, `shutdown-confirm.png`) and the

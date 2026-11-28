@@ -30,7 +30,7 @@ endif()
 if(TARGET vigil_ui)
   # The on-screen UI on an in-memory display, with the real evdev reader,
   # the bridge and the configuration store, and fake channels.
-  add_executable(test_ui test_ui.c ${CMAKE_SOURCE_DIR}/src/app/ui_bridge.c
+  add_executable(test_ui test_ui.c ${CMAKE_SOURCE_DIR}/src/app/ui_bridge.c ${CMAKE_SOURCE_DIR}/src/app/ui_logs_bridge.c
                  ${CMAKE_SOURCE_DIR}/src/app/ui_mgmt.c ${CMAKE_SOURCE_DIR}/src/app/input_evdev.c)
   target_include_directories(test_ui PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
   target_compile_definitions(test_ui PRIVATE VIGIL_VERSION="${PROJECT_VERSION}")

@@ -6,6 +6,7 @@
 
 #include "ui_app.h"
 #include "ui_layout.h"
+#include "ui_logs.h"
 #include "ui_theme.h"
 
 #define INFO_MAX 16
@@ -213,6 +214,12 @@ static void channel_info_cb(lv_event_t *e)
     ui_channel_info_open();
 }
 
+static void logs_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_logs_open(UI_LOG_ALARMS);
+}
+
 void ui_system_open(void)
 {
     sys_t *s = lv_malloc_zeroed(sizeof *s);
@@ -224,6 +231,9 @@ void ui_system_open(void)
     }
     p->user = s;
     p->on_close = sys_close;
+    /* The system, alarm and operation logs (ui_logs.c). */
+    lv_obj_t *logs_btn = ui_btn(p->actions, LV_SYMBOL_FILE, "Logs");
+    lv_obj_add_event_cb(logs_btn, logs_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *panel = info_panel(p);
     ui_info_t info[INFO_MAX];
