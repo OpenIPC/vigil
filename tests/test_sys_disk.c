@@ -246,6 +246,12 @@ static void test_format(void)
     snprintf(line, sizeof line, "mkfs.vfat -F 32 -n VIGIL %s/dev/sda1", fake_root);
     CHECK(fake_ran(line), "mkfs.vfat on sda1");
 
+    /* ext4 for few large files: the recording pool's chunks. */
+    fake_clear_log();
+    CHECK(sys_disk_format("sda1", "ext4", msg, sizeof msg) == 0, "format sda1 ext4: %s", msg);
+    snprintf(line, sizeof line, "mkfs.ext4 -F -T largefile4 -L vigil %s/dev/sda1", fake_root);
+    CHECK(fake_ran(line), "mkfs.ext4 -T largefile4 on sda1:\n%s", fake_log);
+
     /* Over 2 TiB: no table, the whole disk. */
     fake_clear_log();
     CHECK(sys_disk_format("sdd", "exfat", msg, sizeof msg) == 0, "format sdd: %s", msg);

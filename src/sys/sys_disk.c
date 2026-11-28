@@ -560,7 +560,10 @@ static int mkfs(const char *name, const char *fs, int whole, char *msg, size_t c
         rc = whole ? sys_run(out, sizeof out, MKFS_SECS, "mkfs.vfat", "-I", "-F", "32", "-n", "VIGIL", p, NULL)
                    : sys_run(out, sizeof out, MKFS_SECS, "mkfs.vfat", "-F", "32", "-n", "VIGIL", p, NULL);
     else
-        rc = sys_run(out, sizeof out, MKFS_SECS, "mkfs.ext4", "-F", "-L", "vigil", p, NULL);
+        /* largefile4: an inode per 4 MiB. The recording pool is a few large
+         * files (docs/recording.md); the default ratio would spend a few
+         * percent of the disk on inodes nobody uses, and the time to make them. */
+        rc = sys_run(out, sizeof out, MKFS_SECS, "mkfs.ext4", "-F", "-T", "largefile4", "-L", "vigil", p, NULL);
     if (rc != 0) {
         sys_trim(out);
         const char *last = strrchr(out, '\n');
