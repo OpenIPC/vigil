@@ -14,7 +14,10 @@
 #include <stdint.h>
 #include <time.h>
 
-#define EVENTS_KEEP 64
+/* Room for a burst of camera events (cam_events.h: a start and a stop per
+ * type and camera) without pushing the others out before a reader that
+ * looks a few times a second has seen them. */
+#define EVENTS_KEEP 128
 
 typedef struct {
     uint64_t seq;               /* 1, 2, ... */
@@ -22,10 +25,20 @@ typedef struct {
     time_t   time;
     char     text[40];
     unsigned missed;            /* events lost before this one, for this reader */
+    /* A camera's event (cam_events.h): its CH_EV_* bit, 0 for any other
+     * event; whether it began or ended, and the camera's name for it. */
+    unsigned cam_type;
+    int      cam_active;
+    char     cam_detail[48];
 } event_t;
 
 /* Queue an event for channel `ch` (1-based; 0 = system). Thread-safe. */
 void events_push(int ch, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+
+/* A camera event of channel `ch` (1-based): type `cam_type` (CH_EV_*)
+ * began (`active`) or ended, as the camera calls it (`detail`, may be
+ * NULL). Its text is "<name> start" / "<name> stop". */
+void events_push_camera(int ch, unsigned cam_type, int active, const char *name, const char *detail);
 
 /* The next event after *cursor (start at 0 for every kept event, or at
  * events_head() for new ones only): 1 with `ev` and the cursor advanced,

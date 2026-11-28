@@ -79,11 +79,12 @@ static int dechunk(char *body, size_t *len)
     return 0;
 }
 
-int disc_http_post(const char *host, int port, const char *path, const char *ctype, const char *auth,
-                   const char *body, int timeout_ms, disc_http_t *r, char *err, size_t errcap)
+static int http_post(const char *host, int port, const char *path, const char *ctype, const char *auth,
+                     const char *body, int timeout_ms, const volatile int *stop, disc_http_t *r, char *err,
+                     size_t errcap)
 {
     memset(r, 0, sizeof *r);
-    int fd = net_connect(host, port, CONNECT_MS, NULL, err, errcap);
+    int fd = net_connect(host, port, CONNECT_MS, stop, err, errcap);
     if (fd < 0) return -1;
     size_t bl = strlen(body);
     char head[1024];
@@ -104,6 +105,12 @@ int disc_http_post(const char *host, int port, const char *path, const char *cty
     long long want = -1;                         /* header + Content-Length, once known */
     size_t hdr_end = 0;
     while (buf) {
+        if (stop && *stop) {
+            snprintf(err, errcap, "stopped");
+            free(buf);
+            close(fd);
+            return -1;
+        }
         if (now_ms() >= deadline) {
             snprintf(err, errcap, "no answer within %d s", timeout_ms / 1000);
             free(buf);
@@ -167,6 +174,12 @@ int disc_http_post(const char *host, int port, const char *path, const char *cty
         return -1;
     }
     return 0;
+}
+
+int disc_http_post(const char *host, int port, const char *path, const char *ctype, const char *auth,
+                   const char *body, int timeout_ms, disc_http_t *r, char *err, size_t errcap)
+{
+    return http_post(host, port, path, ctype, auth, body, timeout_ms, NULL, r, err, errcap);
 }
 
 /* key="value" or key=value from a Digest challenge. */
@@ -266,15 +279,9 @@ int disc_wsse_header(const char *user, const char *pass, const char *created, co
     return n > 0 && (size_t)n < cap ? 0 : -1;
 }
 
-typedef struct {
-    char host[64];
-    int  port;
-    char path[128];
-    const char *user, *pass;
-    long clock_offset;               /* device UTC - ours, s */
-} onvif_t;
+typedef disc_onvif_t onvif_t;
 
-static int onvif_init(onvif_t *o, const char *xaddr, const disc_device_t *d, const char *user, const char *pass)
+int disc_onvif_init(disc_onvif_t *o, const char *xaddr, const char *ip, const char *user, const char *pass)
 {
     memset(o, 0, sizeof *o);
     o->user = user && *user ? user : "admin";
@@ -291,8 +298,13 @@ static int onvif_init(onvif_t *o, const char *xaddr, const disc_device_t *d, con
     /* A service address naming another host (a NAT'd or stale address in
      * the device's own settings) is reached at the address it answered
      * discovery from. */
-    if (d && d->ip[0] && strcmp(o->host, d->ip) != 0) snprintf(o->host, sizeof o->host, "%s", d->ip);
+    if (ip && ip[0] && strcmp(o->host, ip) != 0) snprintf(o->host, sizeof o->host, "%s", ip);
     return o->port > 0 && o->port < 65536 ? 0 : -1;
+}
+
+static int onvif_init(onvif_t *o, const char *xaddr, const disc_device_t *d, const char *user, const char *pass)
+{
+    return disc_onvif_init(o, xaddr, d ? d->ip : NULL, user, pass);
 }
 
 static disc_rc_t soap_fail(const disc_http_t *r, const char *what, char *err, size_t errcap)
@@ -318,8 +330,8 @@ static disc_rc_t soap_fail(const disc_http_t *r, const char *what, char *err, si
 }
 
 /* One SOAP call to `path` on the device; 0 with r->body (free it). */
-static disc_rc_t soap(onvif_t *o, const char *path, const char *body_xml, int secure, disc_http_t *r,
-                      const char *what, char *err, size_t errcap)
+static disc_rc_t soap_ex(onvif_t *o, const char *path, const char *hdr_xml, const char *body_xml, int secure,
+                         int timeout_ms, disc_http_t *r, const char *what, char *err, size_t errcap)
 {
     char sec[1536] = "";
     if (secure) {
@@ -335,7 +347,8 @@ static disc_rc_t soap(onvif_t *o, const char *path, const char *body_xml, int se
             return DISC_EINVAL;
         }
     }
-    size_t cap = strlen(sec) + strlen(body_xml) + 512;
+    if (!hdr_xml) hdr_xml = "";
+    size_t cap = strlen(sec) + strlen(hdr_xml) + strlen(body_xml) + 768;
     char *env = malloc(cap);
     if (!env) {
         snprintf(err, errcap, "out of memory");
@@ -346,18 +359,21 @@ static disc_rc_t soap(onvif_t *o, const char *path, const char *body_xml, int se
              "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\""
              " xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\""
              " xmlns:trt=\"http://www.onvif.org/ver10/media/wsdl\""
+             " xmlns:tev=\"http://www.onvif.org/ver10/events/wsdl\""
+             " xmlns:wsnt=\"http://docs.oasis-open.org/wsn/b-2\""
+             " xmlns:wsa=\"http://www.w3.org/2005/08/addressing\""
              " xmlns:tt=\"http://www.onvif.org/ver10/schema\">"
-             "<s:Header>%s</s:Header><s:Body>%s</s:Body></s:Envelope>", sec, body_xml);
+             "<s:Header>%s%s</s:Header><s:Body>%s</s:Body></s:Envelope>", hdr_xml, sec, body_xml);
     wipe(sec, sizeof sec);
     const char *ct = "application/soap+xml; charset=utf-8";
     char e2[128];
-    int rc = disc_http_post(o->host, o->port, path, ct, NULL, env, CALL_MS, r, e2, sizeof e2);
+    int rc = http_post(o->host, o->port, path, ct, NULL, env, timeout_ms, o->stop, r, e2, sizeof e2);
     if (rc == 0 && r->status == 401 && r->www_auth[0] && secure) {
         /* HTTP Digest as well as (or instead of) WS-Security. */
         char auth[1024];
         digest_header(r->www_auth, o->user, o->pass, path, auth, sizeof auth);
         free(r->body);
-        rc = disc_http_post(o->host, o->port, path, ct, auth, env, CALL_MS, r, e2, sizeof e2);
+        rc = http_post(o->host, o->port, path, ct, auth, env, timeout_ms, o->stop, r, e2, sizeof e2);
         wipe(auth, sizeof auth);
     }
     wipe(env, cap);
@@ -377,6 +393,22 @@ static disc_rc_t soap(onvif_t *o, const char *path, const char *body_xml, int se
     }
     return DISC_OK;
 }
+
+static disc_rc_t soap(onvif_t *o, const char *path, const char *body_xml, int secure, disc_http_t *r,
+                      const char *what, char *err, size_t errcap)
+{
+    return soap_ex(o, path, NULL, body_xml, secure, CALL_MS, r, what, err, errcap);
+}
+
+disc_rc_t disc_onvif_call(disc_onvif_t *o, const char *path, const char *hdr_xml, const char *body_xml,
+                          int timeout_ms, disc_http_t *r, const char *what, char *err, size_t errcap)
+{
+    return soap_ex(o, path ? path : o->path, hdr_xml, body_xml, 1, timeout_ms > 0 ? timeout_ms : CALL_MS, r, what,
+                   err, errcap);
+}
+
+static void onvif_clock(onvif_t *o);
+void disc_onvif_clock(disc_onvif_t *o) { onvif_clock(o); }
 
 /* The device's clock: WS-Security's Created must be close to it. */
 static void onvif_clock(onvif_t *o)

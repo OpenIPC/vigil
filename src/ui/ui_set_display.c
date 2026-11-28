@@ -580,7 +580,8 @@ static const drow_t k_name_rows[] = {
 static const drow_t k_icon_rows[] = {
     { "display", "rec_icon", "REC", "While the channel records.", k_bool, NULL, 2, 1 },
     { "display", "alarm_icons", "Alarms",
-      "The events the camera reports (motion, human, face, vehicle), while they last.", k_bool, NULL, 2, 1 },
+      "The events the camera reports (motion, people, vehicles, line crossing, video loss, tamper, alarm "
+      "input, ...), while they last.", k_bool, NULL, 2, 1 },
     { "display", "icons_position", "Position",
       "The corner of each tile with REC and the camera's events; in the names' corner they go just above "
       "the name (below it at the top).",

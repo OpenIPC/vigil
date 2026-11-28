@@ -42,6 +42,9 @@ void config_to_channels(const vigil_config_t *c, channels_config_t *cc)
         cc->disabled[i] = has && !c->cameras[i].enabled;
         cc->names[i] = c->cameras[i].name;
         cc->sub_urls[i] = c->cameras[i].sub_url;
+        int m = ch_events_mode(c->cameras[i].events);
+        cc->events[i] = m < 0 ? CH_EVENTS_AUTO : (ch_events_mode_t)m;
+        cc->onvif_urls[i] = c->cameras[i].onvif_url;
     }
     cc->rec_dir = c->record.path[0] ? c->record.path : NULL;
     cc->stop_when_full = !strcmp(c->record.on_full, "stop");

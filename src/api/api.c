@@ -849,6 +849,12 @@ static void *pusher(void *arg)
                 cJSON_AddNumberToObject(d, "camera", ev.ch);
                 cJSON_AddStringToObject(d, "text", ev.text);
                 if (ev.missed) cJSON_AddNumberToObject(d, "missed", ev.missed);
+                /* A camera's event: which, began or ended, its own name for it. */
+                if (ev.cam_type) {
+                    cJSON_AddStringToObject(d, "event", ch_event_name(__builtin_ctz(ev.cam_type)));
+                    cJSON_AddStringToObject(d, "state", ev.cam_active ? "start" : "stop");
+                    if (ev.cam_detail[0]) cJSON_AddStringToObject(d, "detail", ev.cam_detail);
+                }
             }
             broadcast(message("event", d), 0);
         }
