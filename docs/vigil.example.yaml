@@ -277,8 +277,9 @@ display:
   # REC icon: REC in the status icons' corner of each tile while its channel
   # records. Default true.
   rec_icon: true
-  # Alarm icons: The events the camera reports (motion, human, face, vehicle)
-  # as icons in the status icons' corner, while they last. Default true.
+  # Alarm icons: The events the camera reports (motion, people, vehicles, line
+  # crossing, video loss, tamper, alarm input, ...) as icons in the status
+  # icons' corner, while they last. Default true.
   alarm_icons: true
   # Lines between tiles: A thin line around each tile of the live view. Off:
   # the pictures touch. Default true.

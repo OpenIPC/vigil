@@ -45,8 +45,9 @@ camera's name from the configuration (else the name a NETIP camera gives
 the channel, its ChannelTitle; else `CAM n`) as outlined text straight
 on the picture (see below); in another (bottom right), icons only, a red
 dot while the channel records and an amber icon for each event the camera
-reports now (motion, human, face, vehicle; each held 5 s after the camera's
-last report). Where they go, their size and what they stand on are
+reports now (motion, human, face, vehicle, line crossing, intrusion, video
+loss, tamper, alarm input, other; each while it goes on, or 5 s after a
+momentary report). Where they go, their size and what they stand on are
 `display.*` (Display, below), and so are whether REC and the event icons
 are shown at all, the 1-pixel line around each tile (2 px between two;
 without it the pictures touch), and an alarm frame: a red 3-pixel frame

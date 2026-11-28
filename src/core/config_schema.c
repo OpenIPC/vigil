@@ -544,8 +544,8 @@ static const schema_field_t display_fields[] = {
     { .key = "rec_icon", BOOL(config_display_t, rec_icon), .def_int = 1, .live = 1, .label = "REC icon",
       .help = "REC in the status icons' corner of each tile while its channel records." },
     { .key = "alarm_icons", BOOL(config_display_t, alarm_icons), .def_int = 1, .live = 1, .label = "Alarm icons",
-      .help = "The events the camera reports (motion, human, face, vehicle) as icons in the status "
-              "icons' corner, while they last." },
+      .help = "The events the camera reports (motion, people, vehicles, line crossing, video loss, "
+              "tamper, alarm input, ...) as icons in the status icons' corner, while they last." },
     { .key = "tile_dividers", BOOL(config_display_t, tile_dividers), .def_int = 1, .live = 1,
       .label = "Lines between tiles",
       .help = "A thin line around each tile of the live view. Off: the pictures touch." },
