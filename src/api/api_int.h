@@ -63,6 +63,10 @@ int api_users_request(struct mg_connection *conn, const char *uri, const char *m
 /* /api/v1/channels/N/snapshot(.jpg), /api/v1/snapshots... (api_snap.c); 0
  * when `uri` is not one of them. */
 int api_snap_request(struct mg_connection *conn, const char *uri, const char *method);
+
+/* /api/v1/logs... (api_logs.c). */
+int api_logs_request(struct mg_connection *conn, const char *uri, const char *method);
+
 /* /api/v1/channels/N/ptz (api_ptz.c); 0 when `uri` is not that. */
 int api_ptz_request(struct mg_connection *conn, const char *uri, const char *method);
 

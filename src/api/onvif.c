@@ -52,6 +52,7 @@
 #include "discovery.h"
 #include "hal.h"
 #include "log.h"
+#include "logs.h"
 #include "md5.h"
 #include "net.h"
 #include "mgmt.h"
@@ -1217,6 +1218,7 @@ static int authenticate(req_t *q, unsigned *perms)
     long retry = 0;
     int rc;
     *perms = 0;
+    oplog_actor("", "onvif", addr);
     if (s->has_token) {
         if (!s->user[0]) return AUTH_BAD;
         snprintf(q->user, sizeof q->user, "%.*s", (int)sizeof q->user - 1, s->user);

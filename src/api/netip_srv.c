@@ -49,6 +49,7 @@
 #include "events.h"
 #include "discovery.h"
 #include "log.h"
+#include "logs.h"
 #include "md5.h"
 #include "netip_proto.h"
 #include "netip_srv.h"
@@ -503,8 +504,10 @@ static int locked_out(uint32_t ip)
     return out;
 }
 
-static void login_result(uint32_t ip, int ok)
+/* Returns 1 when this failure starts a lockout. */
+static int login_result(uint32_t ip, int ok)
 {
+    int locked = 0;
     time_t now = mono();
     pthread_mutex_lock(&g_lock);
     size_t n = sizeof g_fail / sizeof g_fail[0], k = n, old = 0;
@@ -525,9 +528,11 @@ static void login_result(uint32_t ip, int ok)
         if (++g_fail[k].fails >= FAILS_MAX) {
             g_fail[k].fails = 0;
             g_fail[k].until = now + LOCK_SECS;
+            locked = 1;
         }
     }
     pthread_mutex_unlock(&g_lock);
+    return locked;
 }
 
 /* A session id nobody can guess: a second connection that names it gets
@@ -552,14 +557,17 @@ static int do_login(conn_t *c, const netip_hdr_t *h, const cJSON *req)
     }
     unsigned perms = 0;
     char why[200] = "";
+    oplog_actor("", "netip", c->peer_s);
     int ok = users_login_netip(user, pass, &perms, why, sizeof why);
     if (ok != 1) {
-        login_result(c->peer, 0);
+        oplog_login(user, 0, 0, 0);
+        if (login_result(c->peer, 0)) oplog_lockout(FAILS_MAX, LOCK_SECS);
         vg_log("netip server: %s: login as '%.31s' refused%s%s", c->peer_s, user, why[0] ? ": " : "", why);
         reply_ret(c, h, "", 203);
         return -1;                          /* as XM devices: the connection ends */
     }
     login_result(c->peer, 1);
+    oplog_login(user, 1, 0, 1800);
     pthread_mutex_lock(&g_lock);
     uint32_t s = 0;
     for (int clash = 1; clash;) {

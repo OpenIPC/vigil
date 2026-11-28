@@ -15,6 +15,7 @@
 #include "cJSON.h"
 #include "config.h"
 #include "log.h"
+#include "logs.h"
 #include "md5.h"
 #include "schema.h"
 #include "schema_yaml.h"
@@ -629,7 +630,10 @@ users_rc_t users_add(const char *name, const char *group, const char *password, 
         snprintf(u->password, sizeof u->password, "%s", hash);
         snprintf(u->password_enc, sizeof u->password_enc, "%s", enc);
         rc = save_locked(&db, e);
-        if (!rc) vg_log("users: added %s (group %s%s)", name, group, enabled ? "" : ", disabled");
+        if (!rc) {
+            vg_log("users: added %s (group %s%s)", name, group, enabled ? "" : ", disabled");
+            oplog_pushf(NULL, NULL, "user_added", "%s (group %s%s)", name, group, enabled ? "" : ", disabled");
+        }
     }
     pthread_mutex_unlock(&g_lock);
     wipe(enc, sizeof enc);
@@ -663,9 +667,12 @@ users_rc_t users_update(const char *name, const char *group, int enabled, const 
             drop_old_user(u);
         }
         rc = save_locked(&db, e);
-        if (!rc)
+        if (!rc) {
             vg_log("users: changed %s:%s%s%s%s", name, group ? " group " : "", group ? group : "",
                    enabled < 0 ? "" : enabled ? " enabled" : " disabled", password ? " password" : "");
+            oplog_pushf(NULL, NULL, "user_changed", "%s:%s%s%s%s", name, group ? " group " : "", group ? group : "",
+                        enabled < 0 ? "" : enabled ? " enabled" : " disabled", password ? " password" : "");
+        }
     }
     pthread_mutex_unlock(&g_lock);
     wipe(enc, sizeof enc);
@@ -687,7 +694,10 @@ users_rc_t users_delete(const char *name, users_err_t *e)
         memmove(&db.users[i], &db.users[i + 1], sizeof db.users[0] * (size_t)(db.n_users - i - 1));
         --db.n_users;
         rc = save_locked(&db, e);
-        if (!rc) vg_log("users: deleted %s", name);
+        if (!rc) {
+            vg_log("users: deleted %s", name);
+            oplog_push(NULL, NULL, "user_deleted", name);
+        }
     }
     pthread_mutex_unlock(&g_lock);
     wipe(&db, sizeof db);
@@ -727,6 +737,7 @@ users_rc_t users_group_set(const char *name, unsigned perms, int create, users_e
                     snprintf(list + l, sizeof list - l, "%s%s", l ? "," : "", users_perm_names[i]);
                 }
             vg_log("users: group %s %s: %s", name, create ? "added" : "changed", list[0] ? list : "nothing");
+            oplog_pushf(NULL, NULL, create ? "group_added" : "group_changed", "%s: %s", name, list[0] ? list : "nothing");
         }
     }
     pthread_mutex_unlock(&g_lock);
@@ -753,7 +764,10 @@ users_rc_t users_group_delete(const char *name, users_err_t *e)
         memmove(&db.groups[i], &db.groups[i + 1], sizeof db.groups[0] * (size_t)(db.n_groups - i - 1));
         --db.n_groups;
         rc = save_locked(&db, e);
-        if (!rc) vg_log("users: group %s deleted", name);
+        if (!rc) {
+            vg_log("users: group %s deleted", name);
+            oplog_push(NULL, NULL, "group_deleted", name);
+        }
     }
     pthread_mutex_unlock(&g_lock);
     wipe(&db, sizeof db);
@@ -805,6 +819,7 @@ users_rc_t users_set_system_password(const char *password, users_err_t *e)
     }
     pthread_mutex_unlock(&g_lock);
     wipe(enc, sizeof enc);
+    oplog_push(NULL, NULL, "password_changed", api.user);   /* the shadow file has it either way */
     if (rc == USERS_OK) vg_log("users: the system account's (%s) password changed", api.user);
     else vg_log("users: the system account's password changed in %s, but not kept for RTSP, ONVIF and NETIP: %s",
                 api.shadow, e->msg);

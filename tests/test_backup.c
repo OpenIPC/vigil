@@ -14,6 +14,7 @@
 #include "backup.h"
 #include "cJSON.h"
 #include "config.h"
+#include "logs.h"
 #include "mgmt.h"
 #include "secret.h"
 #include "sys.h"
@@ -450,6 +451,22 @@ int main(void)
               !env_get("wlanssid")[0] && !strcmp(env_get("wlandev"), "mt7601u-generic"),
           "the image's interfaces, no Wi-Fi network, the adapter kept");
     CHECK(mgmt_power_pending() == MGMT_POWER_REBOOT, "a reboot asked for");
+
+    /* The operation log: exports, the applied import, the resets. */
+    {
+        logrec_t r[64];
+        logfilter_t f = { .ch = -1, .type = "config_export,config_import,config_reset" };
+        int n = logbook_query(logs_ops(), &f, 0, 64, r, NULL), ex = 0, im = 0, re = 0;
+        for (int i = 0; i < n; ++i) {
+            ex += !strcmp(r[i].type, "config_export");
+            im += !strcmp(r[i].type, "config_import") && strstr(r[i].detail, "from nvr-a");
+            re += !strcmp(r[i].type, "config_reset");
+            for (size_t k = 0; k < sizeof k_secrets / sizeof k_secrets[0]; ++k)
+                CHECK(!strstr(r[i].detail, k_secrets[k]), "no secret in %s", r[i].type);
+            CHECK(!strstr(r[i].detail, "export-PW"), "nor the export's password");
+        }
+        CHECK(ex >= 2 && im >= 1 && re == 2, "the operation log: %d exports, %d imports, %d resets", ex, im, re);
+    }
 
     /* ---- the full factory reset: firstboot after the stop ---- */
     CHECK(backup_reset_factory(err, sizeof err) == BACKUP_OK && mgmt_power_pending() == MGMT_POWER_FACTORY,

@@ -5,6 +5,10 @@ add_test(NAME core COMMAND test_core ${CMAKE_CURRENT_SOURCE_DIR}/data)
 add_executable(test_discovery test_discovery.c)
 target_link_libraries(test_discovery PRIVATE vigil_core)
 add_test(NAME discovery COMMAND test_discovery ${CMAKE_CURRENT_SOURCE_DIR}/data)
+# The alarm and operation logs: RAM, the disk's files, the flash copy.
+add_executable(test_logs test_logs.c)
+target_link_libraries(test_logs PRIVATE vigil_core)
+add_test(NAME logs COMMAND test_logs ${CMAKE_CURRENT_BINARY_DIR})
 add_executable(test_onvif test_onvif.c)
 target_link_libraries(test_onvif PRIVATE vigil_core)
 add_test(NAME onvif COMMAND test_onvif ${CMAKE_CURRENT_SOURCE_DIR}/data)
@@ -15,7 +19,7 @@ add_test(NAME ptz COMMAND test_ptz ${CMAKE_CURRENT_BINARY_DIR})
 # src/sys on a fake root: fake /etc, /sys, /proc and /dev files, and a
 # recorder in place of ifup, mkfs, mount, date, ntpd, hostname, curl.
 add_executable(test_sys test_sys.c sys_fake.c test_sys_net.c test_sys_time.c test_sys_curl.c
-               test_sys_disk.c test_sys_mgmt.c test_sys_maint.c)
+               test_sys_disk.c test_sys_mgmt.c test_sys_maint.c test_sys_log.c)
 target_include_directories(test_sys PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_sys PRIVATE vigil_sys)
 add_test(NAME sys COMMAND test_sys)
@@ -42,7 +46,7 @@ endif()
 if(TARGET vigil_ui)
   # The on-screen UI on an in-memory display, with the real evdev reader,
   # the bridge and the configuration store, and fake channels.
-  add_executable(test_ui test_ui.c ${CMAKE_SOURCE_DIR}/src/app/ui_bridge.c
+  add_executable(test_ui test_ui.c ${CMAKE_SOURCE_DIR}/src/app/ui_bridge.c ${CMAKE_SOURCE_DIR}/src/app/ui_logs_bridge.c
                  ${CMAKE_SOURCE_DIR}/src/app/ui_mgmt.c ${CMAKE_SOURCE_DIR}/src/app/input_evdev.c)
   target_include_directories(test_ui PRIVATE ${CMAKE_SOURCE_DIR}/src/app)
   target_compile_definitions(test_ui PRIVATE VIGIL_VERSION="${PROJECT_VERSION}")
@@ -174,6 +178,11 @@ if(Python3_FOUND)
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
     add_test(NAME api_e2e
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/api_test.py $<TARGET_FILE:vigild>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
+    # The alarm and operation logs from real actions, kept on the disk and
+    # the flash across restarts; the logs' endpoints and exports.
+    add_test(NAME logs_e2e
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/logs_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
   endif()
   foreach(case h264:none h264:digest h264:basic h265:none h264:wrong)

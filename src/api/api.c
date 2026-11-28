@@ -24,6 +24,7 @@
 #include "events.h"
 #include "hal.h"
 #include "log.h"
+#include "logs.h"
 #include "md5.h"
 #include "net.h"
 #include "onvif_proto.h"
@@ -287,11 +288,14 @@ static long locked_out(const char *addr)
 }
 
 /* After a login was checked: a success clears the address's failures, a
- * failure counts (and is answered FAIL_DELAY_S late). Returns 1 or 0. */
-static int login_counted(const char *addr, int ok, const char *why)
+ * failure counts (and is answered FAIL_DELAY_S late). Returns 1 or 0.
+ * The operation log gets it as the thread's actor's (logs.h): the API's,
+ * the zero channel's or ONVIF's. */
+static int login_counted(const char *addr, const char *user, int ok, const char *why)
 {
     pthread_mutex_lock(&g_auth_lock);
     int fails = 0;
+    long lock_s = 0;
     fail_entry_t *fe = fail_entry(addr, !ok);
     if (ok) {
         if (fe) memset(fe, 0, sizeof *fe);
@@ -301,12 +305,19 @@ static int login_counted(const char *addr, int ok, const char *why)
         if (fails >= FAIL_FREE) {
             int s = fails - FAIL_FREE + 1;
             fe->locked_until = fe->last + (s >= 6 ? LOCKOUT_MAX_S : 1 << s);
+            lock_s = (long)(fe->locked_until - fe->last);
         }
     }
     int tell = why[0] && strcmp(why, g_why_told) != 0;
     if (tell) snprintf(g_why_told, sizeof g_why_told, "%s", why);
     pthread_mutex_unlock(&g_auth_lock);
+    char source[16];
+    oplog_actor_get(NULL, 0, source, sizeof source, NULL, 0);
+    /* The API checks every request: a login is logged again only after
+     * a quiet half hour. A web page's login is one at a time. */
+    oplog_login(user, ok, fails, !strcmp(source, "web") ? 0 : 1800);
     if (ok) return 1;
+    if (lock_s) oplog_lockout(fails, lock_s);
     /* "auth": the API's logins, the zero channel's (web.c) and ONVIF's alike */
     if (tell) vg_log("auth: cannot check passwords: %s", why);
     vg_log("auth: login failed from %s (%d in a row)", addr, fails);
@@ -323,7 +334,7 @@ int api_login_with(const char *addr, const char *user, int (*check)(const char *
     char why[200] = "";
     int ok = users_login_with(user, check, ctx, perms, why, sizeof why) == 1;
     if (!ok) *perms = 0;
-    return login_counted(addr, ok, why);
+    return login_counted(addr, user, ok, why);
 }
 
 int api_login(const char *addr, const char *user, const char *pass, unsigned *perms, long *retry_after)
@@ -381,7 +392,7 @@ int api_login(const char *addr, const char *user, const char *pass, unsigned *pe
     }
 
     if (!ok) *perms = 0;
-    return login_counted(addr, ok, why);
+    return login_counted(addr, user, ok, why);
 }
 
 /* CivetWeb's authorization hook for everything under /api: 1 = go on. */
@@ -398,6 +409,8 @@ static int auth_handler(struct mg_connection *conn, void *cbdata)
     free(c);
     t_perms = 0;
     t_user[0] = 0;
+    /* Who asks, for the operation log: the user once the login is checked. */
+    oplog_actor("", "api", mg_get_request_info(conn)->remote_addr);
     if (!auth) {
         t_perms = PERM_ALL;
         return 1;
@@ -665,6 +678,7 @@ static int request_handler(struct mg_connection *conn, void *cbdata)
     if (!strcmp(uri, "/api/v1/config")) return handle_config(conn, NULL);
     if (!strncmp(uri, "/api/v1/config/", 15)) return handle_config(conn, uri + 15);
     if (!strcmp(uri, "/api/v1/ws")) return send_error(conn, 400, "WebSocket upgrade required", NULL);
+    if (!strncmp(uri, "/api/v1/logs", 12)) return api_logs_request(conn, uri, m);
     if (!strcmp(uri, "/api/v1/me") || !strncmp(uri, "/api/v1/users", 13) || !strncmp(uri, "/api/v1/groups", 14))
         return api_users_request(conn, uri, m);
     int rc = api_backup_request(conn, uri, m);

@@ -46,6 +46,7 @@
 #include "hal_display.h"
 #include "hal_audio.h"
 #include "log.h"
+#include "logs.h"
 #include "mgmt.h"
 #include "net.h"
 #include "source.h"
@@ -402,7 +403,20 @@ static void ptz_names_path(char *out, size_t cap)
     else snprintf(out, cap, "vigil.ptz.json");
 }
 
+static void apply_config_(void);
+
+/* On the main thread, which is also the screen's: what applying a
+ * configuration changes by itself (a port put back) is the system's. */
 static void apply_config(void)
+{
+    char user[32], source[16], addr[48];
+    oplog_actor_get(user, sizeof user, source, sizeof source, addr, sizeof addr);
+    oplog_actor("", "system", "");
+    apply_config_();
+    oplog_actor(user, source, addr);
+}
+
+static void apply_config_(void)
 {
     if (mgmt_power_pending() != MGMT_POWER_NONE) g_stop = 1;    /* reboot or shutdown: stop first */
     if (config_generation() == g_applied_gen) return;
@@ -560,12 +574,22 @@ int main(int argc, char **argv)
      * it exists before the first password is set. Not for -w, which may
      * run on a build host (-f /dev/null). */
     secret_ensure_key();
+    /* The alarm and operation logs: their copies on flash beside the
+     * configuration, the recording disk once there is one (logs.h). */
+    char logdir[300];
+    snprintf(logdir, sizeof logdir, "%s", cfg_path);
+    char *slash = strrchr(logdir, '/');
+    if (slash) snprintf(slash + 1, sizeof logdir - (size_t)(slash + 1 - logdir), "%s", LOGS_DIR);
+    else snprintf(logdir, sizeof logdir, "%s", LOGS_DIR);
+    if (logs_start(logdir, alarm_feed_poll) < 0) vg_log("logs: cannot start their thread; the alarm and operation logs stay in memory");
+    oplog_push("", "system", "start", "vigild " VIGIL_VERSION);
 
     vg_mode_t out = { SCREEN_W, SCREEN_H, 60 };
     if (config_output_mode(cfg.display.output, &out.w, &out.h, &out.hz) < 0) vg_log("display.output: bad");
     snprintf(g_output, sizeof g_output, "%s", cfg.display.output);
     if (hal_init(SCREEN_W, SCREEN_H, &out) < 0) {
         vg_log("platform init failed");
+        logs_stop();
         log_to_syslog_stop();
         return 1;
     }
@@ -592,6 +616,7 @@ int main(int argc, char **argv)
     apply_qos(&running);
     onvif_ev_set_self_port(running.onvif_server.enabled ? running.onvif_server.port : 0);
     if (cam_events_start() < 0) vg_log("camera events: cannot start the ticker; a pulse's stop comes late");
+    if (alarm_feed_start() < 0) vg_log("logs: no room to subscribe to the camera events; not in the alarm log");
     if (channels_start(&cc, caps->display ? tiles : NULL) == 0) {
         config_mark_applied(g_applied_gen);
         if (mgmt_start() < 0) vg_log("mgmt: cannot start its threads; the management pages will not act");
@@ -619,8 +644,11 @@ int main(int argc, char **argv)
         mgmt_stop();
         channels_stop();
     }
+    alarm_feed_stop();
     cam_events_stop();
     hal_shutdown();
+    if (mgmt_power_pending() == MGMT_POWER_NONE) oplog_push("", "system", "stop", NULL);
+    logs_stop();                        /* written out: the disk, the flash copies */
     vg_log("stopped");
     /* Reboot or shutdown asked for (UI, API): after the clean stop. */
     if (mgmt_power_pending() != MGMT_POWER_NONE) mgmt_power_run(mgmt_power_pending());

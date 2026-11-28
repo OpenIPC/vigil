@@ -357,6 +357,8 @@ saved over it until it is fixed or removed.
 | `DELETE /snapshots/…` | `storage` |
 | `/discovery…`, `/channels/…` (the rest) | `cameras` |
 | `/users…`, `/groups…` | `users` |
+| `/logs/alarms…` | `live` |
+| `/logs`, `/logs/operations…`, `/logs/system…` | `system` |
 | anything else | `system` |
 
 The table is one function, `api_perm_needed` (`src/api/api_perm.c`),
@@ -775,6 +777,7 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `POST /api/v1/channels/<n>/ptz` | Move channel n's camera, stop it, a preset, home, a tour ([PTZ](#ptz)). |
 | `POST /api/v1/discovery/autoadd` | Add every new device to the empty channels. |
 | `POST /api/v1/devices/test` | Connect to a camera described by hand: codec and size, or why not. |
+| `GET /api/v1/logs/...` | The alarm, operation and system logs ([Logs](#logs)). |
 
 A `PUT` is validated as a whole (every error is reported, at most 16 listed,
 `more_errors` counts the rest); unknown keys are errors here, to catch
@@ -1075,6 +1078,44 @@ reboot. `{"level": "factory"}`: OpenIPC's `firstboot` after vigild stops,
 the whole overlay erased, then a reboot. Answer `{"level", "rebooting"}`;
 `409` (`unmanaged`) where vigild does not manage the system (the factory
 reset, the network). Recordings stay.
+
+## Logs
+
+The three logs of the Logs page ([management.md](management.md#logs)),
+read only. The alarm and the operation log are vigild's own (kept on the
+recording disk, a short copy on the flash); the system log is the
+firmware's syslog ring and the kernel's, read when asked.
+
+| Method and path | |
+|---|---|
+| `GET /api/v1/logs` | `{"alarms": {"disk", "in_memory"}, "operations": {…}, "alarm_types": [...], "actions": [...]}`: where each is kept (`disk`: its directory, `""` while there is none), how many entries RAM holds, and the values the filters take. |
+| `GET /api/v1/logs/alarms` | `{"entries": [{"id", "time", "channel", "type", "source", "state", "detail"}], "offset", "count", "more", "disk"}`, newest first. `channel` 1-based or `null` (a disk, the system); `source` where a camera event came from (`netip`, `onvif`, `api`) or `vigild` for what vigild saw itself; `state` `"start"`, `"stop"` or `null` (a single event). Needs `live`. |
+| `GET /api/v1/logs/operations` | `{"entries": [{"id", "time", "user", "source", "action", "detail"}], …}` as above. `source`: `screen`, `web`, `api`, `onvif`, `netip`, `rtsp`, `system`. |
+| `GET /api/v1/logs/system` | `{"source", "lines": [{"time", "level", "tag", "text"}], "offset", "count", "more"}`, newest first. `503` with `error` where there is neither `logread` nor `/var/log/messages`. |
+| `GET /api/v1/logs/<log>/export` | The whole log (`alarms`, `operations`, `system`) with the same filters, as a download (`Content-Disposition: attachment`): `format=csv` (the default; a header line, RFC 4180, a cell starting with `= + - @` gets a `'` so that a spreadsheet does not run it) or `format=text`, oldest last for the alarm and operation logs, oldest first for the system log. The operation log notes the export. |
+
+Parameters, all optional:
+
+| | |
+|---|---|
+| `range` | `today`, `24h`, `7d`, `all` (the default). |
+| `from`, `to` | Seconds since 1970, or local `YYYY-MM-DD`, `YYYY-MM-DDTHH:MM[:SS]` (a date alone in `to` is its end). With `range`, `from` wins. |
+| `type` (alarms), `action` (operations) | One, or several separated by commas: `type=motion,offline`. |
+| `channel` (alarms) | 1-based. |
+| `user`, `source` (operations) | Exactly: `user=anna`, `source=web`. |
+| `q` | Text anywhere in the entry, any case. |
+| `limit`, `offset` | A page: default 100, at most 1000 entries, after `offset` matches; `more` says whether there are others. Past the newest ones (1000 alarms, 500 operations, in RAM) the disk's files are read. |
+| `source` (system) | `syslog` (the default; vigild's own lines are in it with `-s`) or `kernel` (dmesg). |
+| `level` (system) | `err`, `warning`, … (or 0–7): that and more urgent; lines without a level are kept. |
+| `grep` (system) | Text in the tag or the line, any case. |
+| `lines` (system) | Instead of `limit`: default 200, at most 2000. |
+
+```sh
+curl -s -u root:PASSWORD "$NVR/api/v1/logs/alarms?range=24h&type=offline,disk_full"
+curl -s -u root:PASSWORD "$NVR/api/v1/logs/operations?action=login_failed,lockout&limit=20"
+curl -s -u root:PASSWORD -OJ "$NVR/api/v1/logs/operations/export?format=csv&range=7d"
+curl -s -u root:PASSWORD "$NVR/api/v1/logs/system?source=kernel&level=warning&lines=50"
+```
 
 ## Discovery
 

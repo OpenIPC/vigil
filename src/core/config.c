@@ -14,6 +14,7 @@
 #include "cJSON.h"
 #include "config.h"
 #include "log.h"
+#include "logs.h"
 #include "schema_yaml.h"
 #include "secret.h"
 
@@ -813,6 +814,7 @@ config_rc_t config_put_json_at(const char *section, const char *body, size_t len
     }
     config_rc_t r = commit_locked(&nc, section ? section : "configuration", errs);
     pthread_mutex_unlock(&g_write);
+    if (r == CONFIG_OK || r == CONFIG_EUNSYNCED) oplog_config_saved(section, &old, &nc);
     return r;
 }
 
@@ -841,6 +843,7 @@ config_rc_t config_replace(const vigil_config_t *c, schema_errors_t *errs)
     else kept_free(kept);
     pthread_mutex_unlock(&g_kept_lock);
     pthread_mutex_unlock(&g_write);
+    if (r == CONFIG_OK || r == CONFIG_EUNSYNCED) oplog_config_saved(NULL, &old, &nc);
     return r;
 }
 

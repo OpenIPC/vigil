@@ -25,6 +25,7 @@
 #include "hal_capture.h"
 #include "netip_proto.h"
 #include "ptz.h"
+#include "logs.h"
 
 static int g_fail, g_checks;
 #define CHECK(cond, ...) do { ++g_checks; if (!(cond)) { ++g_fail; \
@@ -495,6 +496,15 @@ static void test_presets(const char *dir)
               !strcmp(info.presets[1].token, "7"),
           "2 Yard, 7 Road");
     CHECK(fcount("preset 0 1 -") == 1 && fcount("preset 2 1 -") == 1, "GotoPreset 1, ClearPreset 1");
+    {
+        logrec_t r[8];
+        logfilter_t f = { .ch = -1, .type = "ptz_preset_set,ptz_preset_remove,ptz_preset_rename" };
+        int n = logbook_query(logs_ops(), &f, 0, 8, r, NULL);
+        CHECK(n == 5 && !strcmp(r[0].type, "ptz_preset_remove") && !strcmp(r[0].detail, "CAM1 preset 1") &&
+                  !strcmp(r[1].detail, "CAM1 preset 7: Road") && !strcmp(r[2].type, "ptz_preset_rename") &&
+                  !strcmp(r[4].detail, "CAM1 preset 1: Gate"),
+              "the operation log: %d, %s %s", n, n ? r[0].type : "", n ? r[0].detail : "");
+    }
     CHECK(ptz_preset_set(0, NULL, NULL) == PTZ_OK, "a new one takes the free number");
     sleep_ms(200);
     CHECK(fcount("preset 1 1 -") == 1, "1 again");

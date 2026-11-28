@@ -12,4 +12,8 @@ int ui_bridge_init(ui_model_t *m);
 /* The management pages' part of the model (ui_mgmt.c). */
 const ui_mgmt_t *ui_mgmt_model(void);
 
+/* The Logs page's source (ui_logs_bridge.c, ui_logs.h). */
+struct ui_logs_src;
+const struct ui_logs_src *ui_logs_bridge(void);
+
 #endif /* UI_BRIDGE_H */
