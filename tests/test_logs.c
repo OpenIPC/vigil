@@ -9,6 +9,7 @@
  *   test_logs DIR    DIR: a directory on a disk (the build tree), since
  *                    logs_disk_dir refuses RAM and flash filesystems */
 #define _DEFAULT_SOURCE
+#include <limits.h>
 #include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
@@ -47,7 +48,7 @@ int  hal_cap_start(int in, int ch, hal_cap_cb cb, void *user) { (void)in; (void)
 void hal_cap_stop(int in) { (void)in; }
 int  hal_cap_signal(int in) { (void)in; return 0; }
 
-static char g_dir[512];
+static char g_dir[PATH_MAX];      /* realpath() writes up to PATH_MAX */
 
 static void rm_rf(const char *path)
 {
