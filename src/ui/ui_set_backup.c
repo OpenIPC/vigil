@@ -12,7 +12,8 @@
  *                   firmware; each with a word typed to confirm
  *
  * The work is the model's (cfg_*), on a thread of its own; the pages poll
- * for the outcome. Needs the system and users permissions. */
+ * for the outcome. Each sub-page needs the system and users permissions
+ * and checks them itself, so any screen can list them (ui_settings.h). */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,6 +42,28 @@ static void unavailable(ui_set_t *s, lv_obj_t *pane)
     lv_obj_t *sec = ui_set_section(pane, NULL);
     ui_label(sec, "The configuration's export needs vigild built with the HTTP API", VG_FONT_LG_LV, UI_C(TEXT));
     ui_set_note(sec, "This vigild was built without it (-DVIGIL_API=OFF), and with it its accounts.", UI_C(TEXT2));
+}
+
+#define CFG_PERMS (UI_PERM_SYSTEM | UI_PERM_USERS)
+
+static void relogin(void *s) { ui_set_reopen(s); }
+
+static void login_cb(lv_event_t *e) { ui_with_perm(CFG_PERMS, relogin, lv_event_get_user_data(e)); }
+
+/* The sub-pages hold every account: with the on-screen login on, a user
+ * without the system and users permissions sees why, and a way in. 1 when
+ * the page stops there. Each sub-page checks for itself, so a screen that
+ * lists them (Operation) needs no permission of its own for them. */
+static int need_perm(ui_set_t *s, lv_obj_t *pane)
+{
+    if (ui_allowed(CFG_PERMS)) return 0;
+    ui_set_hide_actions(s);
+    lv_obj_t *sec = ui_set_section(pane, NULL);
+    ui_label(sec, "Needs the system and users permissions", VG_FONT_LG_LV, UI_C(TEXT));
+    ui_set_note(sec, "The configuration holds every camera's and every user's password.", UI_C(TEXT2));
+    lv_obj_t *b = ui_set_button(s, ui_set_hbox(sec), LV_SYMBOL_RIGHT, "Log in");
+    lv_obj_add_event_cb(b, login_cb, LV_EVENT_CLICKED, s);
+    return 1;
 }
 
 static void enable(lv_obj_t *o, int on)
@@ -157,12 +180,13 @@ static void exp_go_cb(lv_event_t *e)
     x->poll.waiting = 1;
 }
 
-static void *exp_open(ui_set_t *s, lv_obj_t *pane)
+void *ui_cfg_export_open(ui_set_t *s, lv_obj_t *pane)
 {
     if (!have()) {
         unavailable(s, pane);
         return NULL;
     }
+    if (need_perm(s, pane)) return NULL;
     ui_set_hide_actions(s);
     exp_t *x = calloc(1, sizeof *x);
     if (!x) return NULL;
@@ -209,7 +233,7 @@ static void *exp_open(ui_set_t *s, lv_obj_t *pane)
     return x;
 }
 
-static void exp_close(void *st)
+void ui_cfg_export_close(void *st)
 {
     exp_t *x = st;
     if (!x) return;
@@ -322,12 +346,13 @@ static void imp_apply_cb(lv_event_t *e)
                "Import", imp_apply_yes, m);
 }
 
-static void *imp_open(ui_set_t *s, lv_obj_t *pane)
+void *ui_cfg_import_open(ui_set_t *s, lv_obj_t *pane)
 {
     if (!have()) {
         unavailable(s, pane);
         return NULL;
     }
+    if (need_perm(s, pane)) return NULL;
     ui_set_hide_actions(s);
     imp_t *m = calloc(1, sizeof *m);
     if (!m) return NULL;
@@ -377,7 +402,7 @@ static void *imp_open(ui_set_t *s, lv_obj_t *pane)
     return m;
 }
 
-static void imp_close(void *st)
+void ui_cfg_import_close(void *st)
 {
     imp_t *m = st;
     if (!m) return;
@@ -432,12 +457,13 @@ static void rst_go(rst_t *r, int level)
 static void rst_vigil_cb(lv_event_t *e) { rst_go(lv_event_get_user_data(e), 0); }
 static void rst_firm_cb(lv_event_t *e) { rst_go(lv_event_get_user_data(e), 1); }
 
-static void *rst_open(ui_set_t *s, lv_obj_t *pane)
+void *ui_cfg_reset_open(ui_set_t *s, lv_obj_t *pane)
 {
     if (!have() || !MG()->cfg_reset) {
         unavailable(s, pane);
         return NULL;
     }
+    if (need_perm(s, pane)) return NULL;
     ui_set_hide_actions(s);
     rst_t *r = calloc(1, sizeof *r);
     if (!r) return NULL;
@@ -478,7 +504,7 @@ static void *rst_open(ui_set_t *s, lv_obj_t *pane)
     return r;
 }
 
-static void rst_close(void *st)
+void ui_cfg_reset_close(void *st)
 {
     rst_t *r = st;
     if (!r) return;
@@ -493,9 +519,9 @@ static ui_set_item_t g_items[3];
 static void open_now(void *arg)
 {
     const ui_set_item_t items[] = {
-        { "Export", &ui_icon_nav_basic, exp_open, NULL, NULL, NULL, exp_close },
-        { "Import", &ui_icon_nav_disks, imp_open, NULL, NULL, NULL, imp_close },
-        { "Factory reset", &ui_icon_nav_maint, rst_open, NULL, NULL, NULL, rst_close },
+        { "Export", &ui_icon_nav_basic, ui_cfg_export_open, NULL, NULL, NULL, ui_cfg_export_close },
+        { "Import", &ui_icon_nav_disks, ui_cfg_import_open, NULL, NULL, NULL, ui_cfg_import_close },
+        { "Factory reset", &ui_icon_nav_maint, ui_cfg_reset_open, NULL, NULL, NULL, ui_cfg_reset_close },
     };
     memcpy(g_items, items, sizeof items);
     ui_settings_open("Configuration", g_items, 3, (int)(intptr_t)arg);

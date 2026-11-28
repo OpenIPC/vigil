@@ -49,9 +49,17 @@ void ui_storage_open(int first);
 void ui_sysset_open(int first);
 void ui_account_open(int first);
 /* Operation -> Configuration (ui_set_backup.c): export, import, factory
- * reset; needs the system and users permissions. */
+ * reset, a screen of their own; needs the system and users permissions.
+ * The three sub-pages are also rows another settings screen can list
+ * (ui_set_item_t: open, close), each checking the permissions itself. */
 enum { UI_BACKUP_EXPORT, UI_BACKUP_IMPORT, UI_BACKUP_RESET };
-void ui_backup_open(int first);
+void  ui_backup_open(int first);
+void *ui_cfg_export_open(ui_set_t *s, lv_obj_t *pane);
+void  ui_cfg_export_close(void *st);
+void *ui_cfg_import_open(ui_set_t *s, lv_obj_t *pane);
+void  ui_cfg_import_close(void *st);
+void *ui_cfg_reset_open(ui_set_t *s, lv_obj_t *pane);
+void  ui_cfg_reset_close(void *st);
 /* Display (ui_set_display.c; ui_display_open in ui_app.h: Output first). */
 enum { UI_DISPLAY_OUTPUT, UI_DISPLAY_OSD };
 void ui_display_open_at(int first);

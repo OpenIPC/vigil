@@ -39,6 +39,7 @@
 #include "ui_theme.h"
 #include "theme_tokens.h"
 #include "icons.h"
+#include "ui_settings.h"
 
 #define W 1280
 #define H 720
@@ -2405,6 +2406,30 @@ static void test_backup_pages(void)
     button(BTN_RIGHT);
     button(BTN_RIGHT);
     button(BTN_RIGHT);
+    run(300);
+    CHECK(!ui_page_top(), "back on the live view");
+
+    /* Listed on another screen (Operation, with the firmware upgrade), a
+     * sub-page checks the permissions itself. */
+    schema_errors_t se = { 0 };
+    static const char on[] = "{\"login\":true}", off[] = "{\"login\":false}";
+    CHECK(config_put_json("ui", on, strlen(on), &se) == CONFIG_OK, "login on");
+    ui_app_refresh();
+    run(300);
+    static const ui_set_item_t rows[] = {
+        { "Import", &ui_icon_nav_disks, ui_cfg_import_open, NULL, NULL, NULL, ui_cfg_import_close },
+    };
+    ui_settings_open("Operation", rows, 1, 0);
+    run(100);
+    CHECK(find("Needs the system and users permissions", 0) && !find("Import a configuration", 0),
+          "nobody logged in: the sub-page says what it needs");
+    click_btn("Log in");
+    CHECK(ui_popup_is_open() && find("Wrong user or password", 1) == NULL, "and offers the login");
+    button(BTN_RIGHT);
+    button(BTN_RIGHT);
+    run(300);
+    CHECK(config_put_json("ui", off, strlen(off), &se) == CONFIG_OK, "login off");
+    ui_app_refresh();
     run(300);
     CHECK(!ui_page_top(), "back on the live view");
 }
