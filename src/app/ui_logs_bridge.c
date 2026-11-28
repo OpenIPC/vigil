@@ -133,6 +133,7 @@ static struct {
     int             kind, csv;
     ui_log_filter_t f;
     char            path[320];
+    char            user[32];       /* who asked: the screen's user (the thread has no actor) */
 } X = { .lock = PTHREAD_MUTEX_INITIALIZER };
 
 typedef struct {
@@ -186,8 +187,9 @@ static void *export_thread(void *arg)
     pthread_mutex_lock(&X.lock);
     int kind = X.kind, csv = X.csv;
     ui_log_filter_t uf = X.f;
-    char path[320];
+    char path[320], user[32];
     snprintf(path, sizeof path, "%s", X.path);
+    snprintf(user, sizeof user, "%s", X.user);
     pthread_mutex_unlock(&X.lock);
 
     char err[200] = "";
@@ -212,7 +214,7 @@ static void *export_thread(void *arg)
     if (f) fclose(f);
     if (n < 0 && f) unlink(path);
     if (n >= 0)
-        oplog_pushf(NULL, "screen", "log_export", "%s log, %s, %ld entries, to %s",
+        oplog_pushf(user, "screen", "log_export", "%s log, %s, %ld entries, to %s",
                     kind == UI_LOG_SYSTEM ? "system" : kind == UI_LOG_ALARMS ? "alarm" : "operation", csv ? "CSV" : "text",
                     n, path);
     pthread_mutex_lock(&X.lock);
@@ -242,6 +244,7 @@ static int export_start(int kind, const ui_log_filter_t *f, int csv, const char 
              csv ? "csv" : "txt");
     X.kind = kind;
     X.csv = csv;
+    oplog_actor_get(X.user, sizeof X.user, NULL, 0, NULL, 0);
     X.f = *f;
     X.running = 1;
     X.done = 0;
