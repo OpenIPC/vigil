@@ -200,7 +200,8 @@ void ui_channel_info_open(void)
     }
     lv_obj_t *note = ui_label(p->body, "Stream: the camera's stream on the screen (main, or sub in a small tile); "
                                        "state, codec, resolution and FPS are that stream's. Main stream: the one "
-                                       "recorded. Events are held a few seconds.",
+                                       "recorded. Events: what the camera reports now, until it says they "
+                                       "are over (a moment's, a few seconds).",
                               VG_FONT_SM_LV, UI_C(TEXT2));
     lv_obj_set_width(note, LV_PCT(100));
     ci_fill(ci);
