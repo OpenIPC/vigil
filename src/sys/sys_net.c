@@ -848,7 +848,9 @@ static void env_get(const char *name, char *out, size_t cap)
     out[0] = 0;
     if (sys_run(o, sizeof o, 5, "fw_printenv", "-n", name, NULL) == 0) {
         sys_trim(o);
-        snprintf(out, cap, "%s", o);
+        size_t n = strnlen(o, cap - 1);
+        memcpy(out, o, n);
+        out[n] = 0;
     }
     memset(o, 0, sizeof o);
 }
