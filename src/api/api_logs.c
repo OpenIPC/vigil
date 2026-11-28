@@ -382,7 +382,7 @@ static cJSON *book_json(logbook_t *b)
     char disk[300];
     logbook_disk(b, disk, sizeof disk);
     cJSON_AddStringToObject(o, "disk", disk);
-    cJSON_AddNumberToObject(o, "since_start", (double)logbook_count(b));
+    cJSON_AddNumberToObject(o, "in_memory", (double)logbook_in_memory(b));
     return o;
 }
 

@@ -29,6 +29,7 @@ struct logbook {
     unsigned long   total;          /* records ever in the ring: the newest is ring[(total - 1) % ram] */
     unsigned long   disk_upto;      /* the records before this are on the disk */
     unsigned long   next_n;         /* ids: <boot>.<n> */
+    unsigned long   changes;        /* logbook_count */
     int             flash_dirty;
     pthread_mutex_t io;             /* the files */
     char            disk[256];      /* "" none */
@@ -260,6 +261,7 @@ void logbook_push(logbook_t *b, const logrec_t *r)
     snprintf(c.id, sizeof c.id, "%08x.%lu", g_boot, b->next_n++);
     *at(b, b->total) = c;
     ++b->total;
+    ++b->changes;
     b->flash_dirty = 1;
     pthread_mutex_unlock(&b->lock);
 }
@@ -268,13 +270,22 @@ void logbook_clear(logbook_t *b)
 {
     pthread_mutex_lock(&b->lock);
     b->total = b->disk_upto = 0;
+    ++b->changes;
     pthread_mutex_unlock(&b->lock);
 }
 
 unsigned long logbook_count(logbook_t *b)
 {
     pthread_mutex_lock(&b->lock);
-    unsigned long n = b->total;
+    unsigned long n = b->changes;
+    pthread_mutex_unlock(&b->lock);
+    return n;
+}
+
+unsigned long logbook_in_memory(logbook_t *b)
+{
+    pthread_mutex_lock(&b->lock);
+    unsigned long n = kept(b);
     pthread_mutex_unlock(&b->lock);
     return n;
 }
@@ -285,6 +296,7 @@ static void ring_set(logbook_t *b, const logrec_t *recs, unsigned long n)
 {
     unsigned long ram = (unsigned long)b->conf.ram, first = n > ram ? n - ram : 0;
     b->total = 0;
+    ++b->changes;
     for (unsigned long i = first; i < n; ++i) *at(b, b->total++) = recs[i];
 }
 

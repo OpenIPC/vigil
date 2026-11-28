@@ -116,8 +116,11 @@ void logbook_sync(logbook_t *b, time_t now, int final);
 /* Forget every record in RAM (the tests; the files stay). */
 void logbook_clear(logbook_t *b);
 
-/* Records pushed since the start (for the tests and the status). */
+/* Records pushed since the start: it moves with each push, and when the
+ * ring is filled again from the disk or the flash (a page shown follows
+ * it). And how many records RAM holds now. */
 unsigned long logbook_count(logbook_t *b);
+unsigned long logbook_in_memory(logbook_t *b);
 
 /* One record as a line of the disk's files (with the '\n'), into `out`;
  * its length, or -1 when it does not fit. And back: 0, or -1 when `line`

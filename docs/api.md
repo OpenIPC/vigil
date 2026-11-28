@@ -881,7 +881,7 @@ firmware's syslog ring and the kernel's, read when asked.
 
 | Method and path | |
 |---|---|
-| `GET /api/v1/logs` | `{"alarms": {"disk", "since_start"}, "operations": {…}, "alarm_types": [...], "actions": [...]}`: where each is kept (`disk`: its directory, `""` while there is none), the records pushed since the start, and the values the filters take. |
+| `GET /api/v1/logs` | `{"alarms": {"disk", "in_memory"}, "operations": {…}, "alarm_types": [...], "actions": [...]}`: where each is kept (`disk`: its directory, `""` while there is none), how many entries RAM holds, and the values the filters take. |
 | `GET /api/v1/logs/alarms` | `{"entries": [{"id", "time", "channel", "type", "source", "state", "detail"}], "offset", "count", "more", "disk"}`, newest first. `channel` 1-based or `null` (a disk, the system); `source` where a camera event came from (`netip`, `onvif`, `api`) or `vigild` for what vigild saw itself; `state` `"start"`, `"stop"` or `null` (a single event). Needs `live`. |
 | `GET /api/v1/logs/operations` | `{"entries": [{"id", "time", "user", "source", "action", "detail"}], …}` as above. `source`: `screen`, `web`, `api`, `onvif`, `netip`, `rtsp`, `system`. |
 | `GET /api/v1/logs/system` | `{"source", "lines": [{"time", "level", "tag", "text"}], "offset", "count", "more"}`, newest first. `503` with `error` where there is neither `logread` nor `/var/log/messages`. |
