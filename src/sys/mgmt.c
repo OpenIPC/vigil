@@ -757,10 +757,12 @@ static volatile int g_power;            /* mgmt_power_t; set once, read by the m
 
 int mgmt_power_request(mgmt_power_t what)
 {
-    if (what != MGMT_POWER_REBOOT && what != MGMT_POWER_OFF) return MGMT_EINVAL;
+    if (what != MGMT_POWER_REBOOT && what != MGMT_POWER_OFF && what != MGMT_POWER_FACTORY) return MGMT_EINVAL;
     if (!sys_managed()) return MGMT_EUNMANAGED;
-    vg_log("%s asked for", what == MGMT_POWER_REBOOT ? "reboot" : "shutdown");
-    events_push(0, "%s", what == MGMT_POWER_REBOOT ? "rebooting" : "shutting down");
+    static const char *const asked[] = { "", "reboot", "shutdown", "factory reset" };
+    static const char *const doing[] = { "", "rebooting", "shutting down", "factory reset: rebooting" };
+    vg_log("%s asked for", asked[what]);
+    events_push(0, "%s", doing[what]);
     __atomic_store_n(&g_power, (int)what, __ATOMIC_SEQ_CST);
     return MGMT_OK;
 }
@@ -773,6 +775,15 @@ void mgmt_power_run(mgmt_power_t what)
     /* The recordings were closed by the stop; the disks get them now. */
     sync();
     char out[256];
+    if (what == MGMT_POWER_FACTORY) {
+        /* OpenIPC's own reset: firstboot is sysupgrade -n, which erases
+         * the overlay (rootfs_data) and reboots; it returns only when it
+         * could not. The disks are not touched. */
+        int rc = sys_run(out, sizeof out, 600, "firstboot", NULL);
+        sys_trim(out);
+        vg_log("firstboot: exit status %d: %s; rebooting with the settings as they were", rc, out);
+        what = MGMT_POWER_REBOOT;
+    }
     const char *prog = what == MGMT_POWER_REBOOT ? "reboot" : "poweroff";
     int rc = sys_run(out, sizeof out, 30, prog, NULL);
     if (rc != 0) vg_log("%s: exit status %d: %s", prog, rc, out);

@@ -813,3 +813,74 @@ int lte_set_profile(const char *profile, char *err, size_t cap)
     snprintf(err, cap, "wlandev is %.47s: the modem starts at the next boot", profile);
     return 0;
 }
+
+/* ---- for a configuration export (src/api/backup.c) ------------------------------- */
+
+int net_write(const net_cfg_t *cfg, char *err, size_t cap)
+{
+    char field[32];
+    if (net_validate(cfg, field, sizeof field, err, cap) < 0) return -1;
+    char path[64];
+    stanza_path(cfg->ifname, path, sizeof path);
+    char *old = malloc(STANZA_MAX);
+    if (!old) {
+        snprintf(err, cap, "out of memory");
+        return -1;
+    }
+    if (sys_read(path, old, STANZA_MAX) < 0) {
+        free(old);
+        old = NULL;
+    }
+    char *text = net_stanza(cfg, old);
+    free(old);
+    if (!text) {
+        snprintf(err, cap, "out of memory");
+        return -1;
+    }
+    int rc = sys_write(path, text, strlen(text), 0644, err, cap);
+    free(text);
+    return rc;
+}
+
+static void env_get(const char *name, char *out, size_t cap)
+{
+    char o[160];
+    out[0] = 0;
+    if (sys_run(o, sizeof o, 5, "fw_printenv", "-n", name, NULL) == 0) {
+        sys_trim(o);
+        snprintf(out, cap, "%s", o);
+    }
+    memset(o, 0, sizeof o);
+}
+
+void wifi_env_get(wifi_env_t *w)
+{
+    memset(w, 0, sizeof *w);
+    env_get("wlanssid", w->ssid, sizeof w->ssid);
+    env_get("wlanpass", w->password, sizeof w->password);
+    env_get("wlandev", w->profile, sizeof w->profile);
+}
+
+int wifi_env_set(const wifi_env_t *w, char *err, size_t cap)
+{
+    wifi_env_t cur;
+    wifi_env_get(&cur);
+    const struct { const char *name, *now, *want; } v[] = {
+        { "wlandev", cur.profile, w->profile }, { "wlanssid", cur.ssid, w->ssid },
+        { "wlanpass", cur.password, w->password },
+    };
+    int rc = 0;
+    char out[256] = "";
+    for (size_t i = 0; i < sizeof v / sizeof v[0] && rc == 0; ++i) {
+        if (!strcmp(v[i].now, v[i].want)) continue;
+        /* fw_setenv NAME without a value removes it. */
+        rc = v[i].want[0] ? sys_run(out, sizeof out, 10, "fw_setenv", v[i].name, v[i].want, NULL)
+                          : sys_run(out, sizeof out, 10, "fw_setenv", v[i].name, NULL);
+        if (rc != 0) {
+            sys_trim(out);
+            snprintf(err, cap, "fw_setenv %s failed: %.200s", v[i].name, out);
+        }
+    }
+    memset(&cur, 0, sizeof cur);
+    return rc ? -1 : 0;
+}

@@ -21,6 +21,12 @@ if(TARGET vigil_api)
   add_executable(test_api test_api.c)
   target_link_libraries(test_api PRIVATE vigil_api)
   add_test(NAME api_auth COMMAND test_api)
+  # Configuration export and import, the resets: two recorders on fake
+  # systems, each with a key of its own.
+  add_executable(test_backup test_backup.c sys_fake.c)
+  target_include_directories(test_backup PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(test_backup PRIVATE vigil_api)
+  add_test(NAME backup COMMAND test_backup)
 endif()
 
 if(TARGET vigil_ui)
@@ -131,6 +137,12 @@ if(Python3_FOUND)
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/secrets_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
     set_tests_properties(secrets_e2e PROPERTIES RUN_SERIAL TRUE)
+    # Configuration export and import between two vigild with keys of
+    # their own, and the reset of vigil's settings, through the API.
+    add_test(NAME backup_e2e
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/backup_test.py $<TARGET_FILE:vigild>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
+    set_tests_properties(backup_e2e PROPERTIES RUN_SERIAL TRUE)
     add_test(NAME api_e2e
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/api_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)

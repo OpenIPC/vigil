@@ -156,4 +156,23 @@ int lte_set_profile(const char *profile, char *err, size_t cap);
  * and lte_info's lists. */
 int usb_radios(int modems, usb_radio_t *out, int max);
 
+/* ---- for a configuration export (src/api/backup.c) ------------------------------- */
+
+/* Write the stanza for `cfg` as net_apply does, keeping the unmanaged
+ * lines, but leave the interface as it is: the change applies at the next
+ * boot. 0, or -1 with `err`. */
+int net_write(const net_cfg_t *cfg, char *err, size_t cap);
+
+/* The Wi-Fi and modem settings the U-Boot environment holds. */
+typedef struct {
+    char ssid[64];                  /* wlanssid */
+    char password[72];              /* wlanpass (a passphrase or 64 hex digits) */
+    char profile[48];               /* wlandev: the adapter's or the modem's profile */
+} wifi_env_t;
+
+void wifi_env_get(wifi_env_t *w);
+/* fw_setenv what differs ("" removes the variable); the firmware uses it
+ * at the next boot. 0, or -1 with `err`. */
+int  wifi_env_set(const wifi_env_t *w, char *err, size_t cap);
+
 #endif /* SYS_NET_H */
