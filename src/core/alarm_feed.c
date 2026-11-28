@@ -8,6 +8,16 @@
 #include "events.h"
 #include "logs.h"
 
+int alarm_types(const char **out, int max)
+{
+    static const char *const own[] = { ALARM_OFFLINE, ALARM_REC_FAILED, ALARM_REC_OFF, ALARM_DISK_FULL,
+                                       ALARM_DISK_ERROR, ALARM_DISK_SMART, ALARM_DISK_BAD, ALARM_NO_DECODER };
+    int n = 0;
+    for (int b = 0; n < max && ch_event_name(b); ++b) out[n++] = ch_event_name(b);
+    for (size_t i = 0; n < max && i < sizeof own / sizeof own[0]; ++i) out[n++] = own[i];
+    return n;
+}
+
 static int starts(const char *s, const char *p) { return !strncmp(s, p, strlen(p)); }
 
 int alarm_feed_classify(int ch, const char *text, char *type, size_t cap, int *active)

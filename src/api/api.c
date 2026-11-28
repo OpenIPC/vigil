@@ -585,6 +585,7 @@ static int request_handler(struct mg_connection *conn, void *cbdata)
     if (!strcmp(uri, "/api/v1/config")) return handle_config(conn, NULL);
     if (!strncmp(uri, "/api/v1/config/", 15)) return handle_config(conn, uri + 15);
     if (!strcmp(uri, "/api/v1/ws")) return send_error(conn, 400, "WebSocket upgrade required", NULL);
+    if (!strncmp(uri, "/api/v1/logs", 12)) return api_logs_request(conn, uri, m);
     if (!strcmp(uri, "/api/v1/me") || !strncmp(uri, "/api/v1/users", 13) || !strncmp(uri, "/api/v1/groups", 14))
         return api_users_request(conn, uri, m);
     int rc = api_mgmt_request(conn, uri, m);

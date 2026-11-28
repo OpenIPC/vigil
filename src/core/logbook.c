@@ -142,6 +142,15 @@ static size_t csv_cell(char *out, size_t cap, size_t at, const char *s, int last
     return at;
 }
 
+int logbook_csv_row(const char *const *cells, int n, char *out, size_t cap)
+{
+    size_t at = 0;
+    for (int i = 0; i < n && at < cap; ++i) at = csv_cell(out, cap, at, cells[i] ? cells[i] : "", i == n - 1);
+    if (at >= cap) return -1;
+    out[at] = 0;
+    return (int)at;
+}
+
 int logbook_csv(const logrec_t *r, int header, char *out, size_t cap)
 {
     size_t at = 0;
@@ -156,10 +165,8 @@ int logbook_csv(const logrec_t *r, int header, char *out, size_t cap)
     if (r->ch > 0) snprintf(ch, sizeof ch, "%d", r->ch);
     const char *state = r->active == 1 ? "start" : r->active == 0 ? "stop" : "";
     const char *cells[8] = { when, ch, state, r->source, r->who, r->type, r->detail, r->id };
-    for (int i = 0; i < 8 && at < cap; ++i) at = csv_cell(out, cap, at, cells[i], i == 7);
-    if (at >= cap) return -1;
-    out[at] = 0;
-    return (int)at;
+    int n = logbook_csv_row(cells, 8, out + at, cap - at);
+    return n < 0 ? -1 : (int)at + n;
 }
 
 /* ---- matching -------------------------------------------------------------------------- */
@@ -275,10 +282,9 @@ static void ring_set(logbook_t *b, const logrec_t *recs, unsigned long n)
 
 /* ---- the disk's files, backwards ------------------------------------------------------- */
 
-typedef int (*rec_fn)(void *user, const logrec_t *r);   /* nonzero: stop */
 
 /* Every record of `path`, newest first, to `fn`; 1 when `fn` stopped it. */
-static int read_back(const char *path, rec_fn fn, void *user)
+static int read_back(const char *path, logrec_fn fn, void *user)
 {
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return 0;
@@ -325,7 +331,7 @@ static void file_name(const logbook_t *b, int gen, char *out, size_t cap)
 }
 
 /* Every record on the disk, newest first (caller holds io). */
-static int disk_back(logbook_t *b, rec_fn fn, void *user)
+static int disk_back(logbook_t *b, logrec_fn fn, void *user)
 {
     for (int g = 0; g < b->conf.files; ++g) {
         char p[320];
@@ -339,14 +345,57 @@ static int disk_back(logbook_t *b, rec_fn fn, void *user)
 
 typedef struct {
     const logfilter_t *f;
-    int                skip, limit, n, more;
-    logrec_t          *out;
+    logrec_fn          fn;
+    void              *user;
     char               until[LOG_ID];   /* skip the disk's records until past this one (in RAM) */
+} each_t;
+
+static int each_disk_cb(void *user, const logrec_t *r)
+{
+    each_t *e = user;
+    if (e->until[0]) {
+        if (!strcmp(r->id, e->until)) e->until[0] = 0;
+        return 0;
+    }
+    return logbook_match(r, e->f) ? e->fn(e->user, r) : 0;
+}
+
+int logbook_each(logbook_t *b, const logfilter_t *f, logrec_fn fn, void *user)
+{
+    if (!b) return 0;
+    each_t e = { .f = f, .fn = fn, .user = user };
+    /* A copy of the ring, so that `fn` (a network write, a file) runs
+     * without the lock that every push takes. */
+    pthread_mutex_lock(&b->lock);
+    unsigned long n = kept(b);
+    logrec_t *copy = malloc((n ? n : 1) * sizeof *copy);
+    for (unsigned long i = 0; copy && i < n; ++i) copy[i] = *at(b, b->total - 1 - i);
+    if (n) snprintf(e.until, sizeof e.until, "%s", at(b, b->total - n)->id);
+    int full = b->total >= (unsigned long)b->conf.ram;
+    pthread_mutex_unlock(&b->lock);
+    if (!copy) return 0;
+    int stopped = 0;
+    for (unsigned long i = 0; i < n && !stopped; ++i)
+        if (logbook_match(&copy[i], f)) stopped = fn(user, &copy[i]);
+    free(copy);
+    if (stopped) return 1;
+    /* Older ones are on the disk only once the ring has let some go. */
+    if (!full) return 0;
+    pthread_mutex_lock(&b->io);
+    int on_disk = b->disk[0] != 0;
+    if (on_disk && !(f && f->ram_only)) stopped = disk_back(b, each_disk_cb, &e);
+    pthread_mutex_unlock(&b->io);
+    return stopped ? 1 : on_disk && f && f->ram_only ? 2 : 0;
+}
+
+typedef struct {
+    int       skip, limit, n, more;
+    logrec_t *out;
 } query_t;
 
-static int query_take(query_t *q, const logrec_t *r)
+static int query_cb(void *user, const logrec_t *r)
 {
-    if (!logbook_match(r, q->f)) return 0;
+    query_t *q = user;
     if (q->skip > 0) {
         --q->skip;
         return 0;
@@ -359,40 +408,24 @@ static int query_take(query_t *q, const logrec_t *r)
     return 1;
 }
 
-static int query_disk_cb(void *user, const logrec_t *r)
-{
-    query_t *q = user;
-    if (q->until[0]) {
-        if (!strcmp(r->id, q->until)) q->until[0] = 0;
-        return 0;
-    }
-    return query_take(q, r);
-}
-
 int logbook_query(logbook_t *b, const logfilter_t *f, int offset, int limit, logrec_t *out, int *more)
 {
-    query_t q = { .f = f, .skip = offset < 0 ? 0 : offset, .limit = limit < 0 ? 0 : limit, .out = out };
-    if (more) *more = 0;
-    if (!b) return 0;
-    int stopped = 0, full;
-    pthread_mutex_lock(&b->lock);
-    unsigned long n = kept(b);
-    for (unsigned long i = 0; i < n && !stopped; ++i) stopped = query_take(&q, at(b, b->total - 1 - i));
-    if (n) snprintf(q.until, sizeof q.until, "%s", at(b, b->total - n)->id);
-    full = b->total >= (unsigned long)b->conf.ram;
-    pthread_mutex_unlock(&b->lock);
-    /* Older ones are on the disk only once the ring has let some go. */
-    if (!stopped && full && !(f && f->ram_only)) {
-        pthread_mutex_lock(&b->io);
-        if (b->disk[0]) disk_back(b, query_disk_cb, &q);
-        pthread_mutex_unlock(&b->io);
-    } else if (!stopped && full && f && f->ram_only) {
-        pthread_mutex_lock(&b->io);
-        q.more |= b->disk[0] != 0;      /* there may be more on the disk */
-        pthread_mutex_unlock(&b->io);
-    }
-    if (more) *more = q.more;
+    query_t q = { .skip = offset < 0 ? 0 : offset, .limit = limit < 0 ? 0 : limit, .out = out };
+    int rc = logbook_each(b, f, query_cb, &q);
+    if (more) *more = q.more || rc == 2;       /* RAM only: there may be more on the disk */
     return q.n;
+}
+
+int logbook_text(const logrec_t *r, char *out, size_t cap)
+{
+    char when[32] = "-", ch[16] = "", who[LOG_WHO + LOG_SOURCE + 4];
+    struct tm tm;
+    if (localtime_r(&r->time, &tm)) strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", &tm);
+    if (r->ch > 0) snprintf(ch, sizeof ch, "CAM%d ", r->ch);
+    snprintf(who, sizeof who, "%s%s%s", r->who, r->who[0] ? "/" : "", r->source);
+    int n = snprintf(out, cap, "%s  %s%s%s  %s  %s\n", when, ch, r->type,
+                     r->active == 1 ? " start" : r->active == 0 ? " stop" : "", who, r->detail);
+    return n < 0 || (size_t)n >= cap ? -1 : n;
 }
 
 /* ---- the flash copy -------------------------------------------------------------------- */

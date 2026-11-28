@@ -138,6 +138,11 @@ if(Python3_FOUND)
     add_test(NAME api_e2e
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/api_test.py $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
+    # The alarm and operation logs from real actions, kept on the disk and
+    # the flash across restarts; the logs' endpoints and exports.
+    add_test(NAME logs_e2e
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/logs_test.py $<TARGET_FILE:vigild>
+                     ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264)
   endif()
   foreach(case h264:none h264:digest h264:basic h265:none h264:wrong)
     string(REPLACE ":" "_" name ${case})

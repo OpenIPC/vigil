@@ -43,6 +43,11 @@ unsigned api_perm_needed(const char *method, const char *uri)
             if (!strcmp(uri + 15, SECTIONS[i].key)) return SECTIONS[i].perm;
         return PERM_SYSTEM;
     }
+    /* The alarm log is what the live view shows as it happens (events,
+     * a camera offline, recording failing): a viewer may read it. The
+     * system and operation logs (addresses, users, who did what) are an
+     * administrator's: "system", the default below. */
+    if (at(uri, "/api/v1/logs/alarms")) return PERM_LIVE;
     if (at(uri, "/api/v1/network")) return PERM_NETWORK;
     if (at(uri, "/api/v1/system")) return PERM_SYSTEM;
     if (!strncmp(uri, "/api/v1/disks", 13) || at(uri, "/api/v1/storage")) return PERM_STORAGE;

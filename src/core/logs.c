@@ -75,6 +75,17 @@ void oplog_actor_get(char *user, size_t ucap, char *source, size_t scap, char *a
 
 /* ---- the operation log ------------------------------------------------------------------ */
 
+const char *const oplog_actions[] = {
+    "login", "login_failed", "lockout", "logout", "config_saved", "user_added", "user_changed", "user_deleted",
+    "group_added", "group_changed", "group_deleted", "password_changed", "reboot", "shutdown", "start", "stop",
+    "disk_format", "disk_mount", "disk_unmount", "scan_start", "scan_pause", "scan_resume", "scan_stop",
+    "smart_selftest", "network_changed", "network_confirmed", "network_rolled_back", "wifi_changed",
+    "time_zone_set", "clock_set", "ntp_servers_set", "hostname_set", "log_export",
+    /* the hooks others call */
+    "firmware_upgrade", "config_import", "config_export", "config_reset",
+    NULL,
+};
+
 /* A user name as typed at a failed login is anyone's text: printable
  * ASCII only, so that the log reads the same everywhere. */
 static void clean(char *s)
@@ -366,9 +377,9 @@ int logs_start(const char *dir, void (*feed)(time_t now))
     if (dir && *dir) {
         char path[320];
         mkdir(dir, 0700);
-        snprintf(path, sizeof path, "%s/alarms.log", dir);
+        snprintf(path, sizeof path, "%s/alarms-recent.log", dir);
         logbook_set_flash(logs_alarms(), path);
-        snprintf(path, sizeof path, "%s/operations.log", dir);
+        snprintf(path, sizeof path, "%s/operations-recent.log", dir);
         logbook_set_flash(logs_ops(), path);
     }
     g_stop = 0;

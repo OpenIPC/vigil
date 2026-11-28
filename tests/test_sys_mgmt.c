@@ -10,6 +10,7 @@
 
 #include "config.h"
 #include "events.h"
+#include "logs.h"
 #include "mgmt.h"
 #include "sys.h"
 #include "sys_fake.h"
@@ -144,11 +145,22 @@ void test_sys_mgmt(void)
           "zone and clock: %s", err);
     CHECK(mgmt_time_set("", "nonsense", 0, 0, err, sizeof err) == MGMT_EINVAL, "bad zone refused");
 
-    /* Reboot: asked for, seen by the main loop, then busybox's reboot. */
+    /* Reboot: asked for, seen by the main loop, then busybox's reboot;
+     * the operation log says who asked (the thread's actor, logs.h). */
+    oplog_actor("anna", "api", "10.1.2.3");
     CHECK(mgmt_power_pending() == MGMT_POWER_NONE, "nothing asked for");
     CHECK(mgmt_power_request(MGMT_POWER_NONE) == MGMT_EINVAL, "neither reboot nor shutdown");
     CHECK(mgmt_power_request(MGMT_POWER_REBOOT) == MGMT_OK && mgmt_power_pending() == MGMT_POWER_REBOOT,
           "reboot asked for");
+    {
+        logrec_t r[8];
+        logfilter_t f = { .ch = -1, .type = "reboot,hostname_set,time_zone_set,clock_set" };
+        int n = logbook_query(logs_ops(), &f, 0, 8, r, NULL);
+        CHECK(n == 4 && !strcmp(r[0].type, "reboot") && !strcmp(r[0].who, "anna") && !strcmp(r[0].source, "api") &&
+                  !strcmp(r[3].type, "hostname_set") && !strcmp(r[3].detail, "nvr-2") && !strcmp(r[3].source, "system"),
+              "the operation log: %d, %s by %s/%s", n, n ? r[0].type : "", n ? r[0].who : "", n ? r[0].source : "");
+    }
+    oplog_actor("", "system", "");
     mgmt_power_run(MGMT_POWER_OFF);
     CHECK(fake_ran("poweroff"), "poweroff run");
     mgmt_power_run(MGMT_POWER_REBOOT);

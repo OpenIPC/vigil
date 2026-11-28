@@ -456,7 +456,7 @@ static void test_disk_dir(void)
     char *t = slurp(p);
     CHECK(t && strstr(t, "\tdisk_format\tsdz1 as ext4\n"), "on the disk");
     free(t);
-    snprintf(p, sizeof p, "%s/operations.log", flash);
+    snprintf(p, sizeof p, "%s/operations-recent.log", flash);
     t = slurp(p);
     CHECK(t && strstr(t, "\tdisk_format\tsdz1 as ext4\n"), "and on the flash at the stop");
     free(t);

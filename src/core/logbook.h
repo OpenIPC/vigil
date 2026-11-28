@@ -83,6 +83,14 @@ void logbook_push(logbook_t *b, const logrec_t *r);
  * ring it reads the disk's files (a few KiB at a time, backwards). */
 int logbook_query(logbook_t *b, const logfilter_t *f, int offset, int limit, logrec_t *out, int *more);
 
+/* Every record that matches `f`, newest first, to `fn` until it returns
+ * nonzero (an export: one pass over the disk's files). `fn` runs without
+ * the book's lock (pushes go on) but with its files' (the disk waits).
+ * Returns 1 when `fn` stopped it, 2 when `f` was RAM only and the disk
+ * has more, else 0. */
+typedef int (*logrec_fn)(void *user, const logrec_t *r);
+int logbook_each(logbook_t *b, const logfilter_t *f, logrec_fn fn, void *user);
+
 /* Does `r` match `f`? */
 int logbook_match(const logrec_t *r, const logfilter_t *f);
 
@@ -117,5 +125,11 @@ int logbook_parse(const char *line, size_t len, logrec_t *r);
  * (local, "YYYY-MM-DD HH:MM:SS"), channel, active, source, who, type,
  * detail, id. Returns the length, or -1 when it does not fit. */
 int logbook_csv(const logrec_t *r, int header, char *out, size_t cap);
+/* Any `n` cells as one CSV line, with the same quoting and guard. */
+int logbook_csv_row(const char *const *cells, int n, char *out, size_t cap);
+
+/* `r` as a line of text: "2026-11-28 14:32:05  CAM3 motion start  user/source
+ * detail\n" (local time). Its length, or -1. */
+int logbook_text(const logrec_t *r, char *out, size_t cap);
 
 #endif /* LOGBOOK_H */

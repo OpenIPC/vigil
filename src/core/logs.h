@@ -17,8 +17,10 @@
  *
  * Both are logbooks (logbook.h): RAM rings, appended to the recording
  * disk's vigil-logs/ directory when there is one, and a small copy beside
- * vigil.yaml written at most every LOGS_FLASH_SECS and at the clean stop
- * (the alarms' only while there is no disk). The system log (syslog and
+ * vigil.yaml (vigil-logs/operations-recent.log, alarms-recent.log: other
+ * names than the disk's, should both be one directory) written at most
+ * every LOGS_FLASH_SECS and at the clean stop (the alarms' only while
+ * there is no disk). The system log (syslog and
  * the kernel's) is not kept here: it is the firmware's own ring, read
  * when shown (sys_log.h).
  *
@@ -69,6 +71,9 @@ int logs_disk_dir(const char *rec_path, int allow_rootfs, char *out, size_t cap)
 
 /* ---- the operation log ---------------------------------------------------------------- */
 
+/* The actions vigild logs (NULL-terminated), for the pages' filters. */
+extern const char *const oplog_actions[];
+
 /* `user` (NULL: this thread's actor's; "" none) did `action` from
  * `source` (NULL: the actor's), `detail` (may be NULL). A secret never
  * goes into `detail`. Any thread. The actions vigild logs are listed in
@@ -112,6 +117,10 @@ void oplog_config_saved(const char *section, const void *old, const void *nc);
 #define ALARM_DISK_SMART  "disk_smart"      /* SMART says warning or failing (start), good (stop) */
 #define ALARM_DISK_BAD    "disk_bad_sectors" /* a surface scan found bad ranges */
 #define ALARM_NO_DECODER  "no_decoder"
+
+/* Every alarm type: the camera events' (ch_event_name), then vigild's
+ * own above. Returns how many (at most `max`). */
+int alarm_types(const char **out, int max);
 
 /* Channel `ch` (1-based; 0: none) `type` began (1), ended (0) or
  * happened (-1); `detail` may be NULL. Any thread. */
