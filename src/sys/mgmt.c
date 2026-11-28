@@ -3,12 +3,14 @@
 #define _DEFAULT_SOURCE
 #include <errno.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 #include "cJSON.h"
 #include "channel.h"
@@ -767,6 +769,14 @@ int mgmt_power_request(mgmt_power_t what)
     return MGMT_OK;
 }
 
+/* sysupgrade, run by firstboot, asks vigild to stop: it has nothing left
+ * to close. */
+static void factory_term(int sig)
+{
+    (void)sig;
+    _exit(0);
+}
+
 mgmt_power_t mgmt_power_pending(void) { return (mgmt_power_t)__atomic_load_n(&g_power, __ATOMIC_SEQ_CST); }
 
 void mgmt_power_run(mgmt_power_t what)
@@ -777,11 +787,32 @@ void mgmt_power_run(mgmt_power_t what)
     char out[256];
     if (what == MGMT_POWER_FACTORY) {
         /* OpenIPC's own reset: firstboot is sysupgrade -n, which erases
-         * the overlay (rootfs_data) and reboots; it returns only when it
-         * could not. The disks are not touched. */
-        int rc = sys_run(out, sizeof out, 600, "firstboot", NULL);
-        sys_trim(out);
-        vg_log("firstboot: exit status %d: %s; rebooting with the settings as they were", rc, out);
+         * the overlay (rootfs_data) and reboots. It stops vigild on its
+         * way (S95vigil stop), so it runs in a session of its own with its
+         * output in a file, and vigild then simply goes. A firstboot that
+         * ends instead refused before erasing anything: the board reboots
+         * as it was. The disks are not touched. */
+        static const char *const argv[] = { "firstboot", NULL };
+        pid_t pid = sys_ops()->spawn ? sys_ops()->spawn(argv, MGMT_FACTORY_LOG) : -1;
+        if (pid < 0) {
+            vg_log("firstboot: cannot start it: %s; rebooting with the settings as they were", strerror(errno));
+        } else {
+            signal(SIGTERM, factory_term);
+            int st = 0;
+            pid_t r = 0;
+            for (int i = 0; i < 600 && r == 0; ++i) {
+                r = waitpid(pid, &st, WNOHANG);
+                if (r == 0) usleep(100 * 1000);
+            }
+            if (r == 0) return;             /* still at it after a minute: it has the board */
+            char log[512] = "";
+            sys_read(MGMT_FACTORY_LOG, log, sizeof log);
+            sys_trim(log);
+            const char *last = strrchr(log, '\n');
+            vg_log("firstboot ended (%s %d) without a reset: %s; rebooting with the settings as they were",
+                   r > 0 && WIFEXITED(st) ? "exit status" : "signal",
+                   r > 0 && WIFEXITED(st) ? WEXITSTATUS(st) : r > 0 ? WTERMSIG(st) : -1, last ? last + 1 : log);
+        }
         what = MGMT_POWER_REBOOT;
     }
     const char *prog = what == MGMT_POWER_REBOOT ? "reboot" : "poweroff";

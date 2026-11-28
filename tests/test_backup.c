@@ -61,6 +61,17 @@ static int env_run(const char *const *argv, const char *input, int t, char *out,
     return g_fake_ops.run(argv, input, t, out, cap);
 }
 
+/* firstboot as a child that refuses at once (so the board reboots as it was). */
+static int g_spawned;
+static pid_t fake_spawn(const char *const *argv, const char *log)
+{
+    (void)log;
+    g_spawned = !strcmp(argv[0], "firstboot");
+    pid_t pid = fork();
+    if (pid == 0) _exit(1);
+    return pid;
+}
+
 static void env_set(const char *name, const char *value) { snprintf(env_slot(name, 1), 96, "%s", value); }
 static const char *env_get(const char *name)
 {
@@ -81,6 +92,7 @@ static void device(const char *host, const char *mac, const char *cfg_yaml)
     g_fake_ops = *sys_ops();
     ops = g_fake_ops;
     ops.run = env_run;
+    ops.spawn = fake_spawn;
     sys_set_ops(&ops);
     memset(g_env, 0, sizeof g_env);
     path_of(g_cfg, sizeof g_cfg, "/etc/vigil.yaml");
@@ -443,9 +455,8 @@ int main(void)
     CHECK(backup_reset_factory(err, sizeof err) == BACKUP_OK && mgmt_power_pending() == MGMT_POWER_FACTORY,
           "factory reset asked for: %s", err);
     fake_clear_log();
-    fake_answer("firstboot", 1, "erase failed");
     mgmt_power_run(MGMT_POWER_FACTORY);
-    CHECK(fake_ran("firstboot") && fake_ran("reboot"), "firstboot, then a reboot when it returns: %s", fake_log);
+    CHECK(g_spawned && fake_ran("reboot"), "firstboot on its own, then a reboot when it refuses: %s", fake_log);
 
     free(c);
     free(c2);
