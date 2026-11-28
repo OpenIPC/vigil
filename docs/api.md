@@ -537,6 +537,77 @@ Not verified with XM's own CMS / VMS or XMEye: they are tested only
 through what python-dvr and vigil's own NETIP source do (`ctest -R
 netip_server_e2e`).
 
+## Camera events
+
+Each camera's events come from one place, `cameras[].events`:
+
+| `events` | `netip://` camera | other camera (`rtsp://`) |
+|---|---|---|
+| `auto` (default) | its NETIP alarms | its ONVIF events, if it has them |
+| `netip` | its NETIP alarms | none |
+| `onvif` | its ONVIF events | its ONVIF events |
+| `off` | none | none |
+
+A change applies at once, without reconnecting the camera's streams. An
+event is held while the camera says it goes on and ends at its stop; one
+the camera reports only as a moment (a line crossed) is held 5 s. When the
+connection or the subscription is lost, what it said goes on ends.
+
+**NETIP alarms.** The main stream's connection, once logged in and
+streaming, sends AlarmSet (msgid 1500) and is then pushed AlarmInfo
+(msgid 1504), `{"AlarmInfo": {"Channel": 0, "Event": "VideoMotion",
+"StartTime": "...", "Status": "Start"}}` and later `"Stop"`; asked again on
+every connection. An NVR's or DVR's other channels' alarms are left out
+(`Channel` against the URL's `ch`).
+
+| NETIP `Event` | Event |
+|---|---|
+| `VideoMotion` | `motion` |
+| `HumanDetect`, `appEventHumanDetectAlarm` (OpenIPC majestic) | `human` |
+| `FaceDetect` | `face` |
+| `CarShapeDetect` | `vehicle` |
+| `VideoLoss` | `video_loss` |
+| `VideoBlind` | `tamper` |
+| `LocalAlarm` | `alarm_input` |
+| `VideoAnalyze`, `NetAlarm`, `Storage…`, `NetAbort`, `NetIPConflict`, unknown | `other` (an unknown name is logged once) |
+
+A camera that refuses AlarmSet is logged once and streams on. Some XM
+firmwares accept it and push nothing: they send alarms only to the alarm
+server of their own settings.
+
+**ONVIF events.** A thread per camera finds the device's Events service
+(`GetCapabilities`, else `GetServices`) at `cameras[].onvif_url`, else at
+the address discovery heard from it, else `http://host/onvif/device_service`
+on port 80, then 8899 (XM's), logged in with the user and password of the
+camera's URL (WS-UsernameToken in the camera's clock; HTTP Digest when it
+asks). It holds a pull-point subscription (`CreatePullPointSubscription`,
+`PullMessages` with a 5 s timeout, `Renew` before its 120 s run out,
+`Unsubscribe` at the end) and starts a new one after two failed calls or a
+refused `Renew`. With `auto`, a camera without events is logged once and
+tried again every 10 minutes; with `onvif`, sooner, each new failure
+logged. A camera added over ONVIF gets its device service as `onvif_url`.
+
+| ONVIF topic (any prefixes; vendors' variants by what the name contains) | Event |
+|---|---|
+| `VideoSource/MotionAlarm`, `RuleEngine/CellMotionDetector/Motion`, `…/MotionRegionDetector/Motion`, Axis VMD | `motion` |
+| `RuleEngine/MyRuleDetector/PeopleDetect`, `…/HumanDetect`, any `People`/`Human`/`Person` | `human` |
+| `…/FaceDetect` | `face` |
+| `…/VehicleDetect`, `Car` | `vehicle` |
+| `RuleEngine/LineDetector/Crossed`, `LineCrossing`, `Tripwire` | `line_crossing` |
+| `RuleEngine/FieldDetector/ObjectsInside`, `Intrusion` | `intrusion` |
+| `VideoSource/SignalLoss` | `video_loss` |
+| `VideoSource/GlobalSceneChange/…`, `RuleEngine/TamperDetector/Tamper`, `VideoSource/ImageToo…` | `tamper` |
+| `Device/Trigger/DigitalInput`, Axis `IO/Port` | `alarm_input` |
+| `…/DogCatDetect`, `Visitor`, `Device/HardwareFailure/…`, an object detector of another class | `other` |
+| `Monitoring/…`, `Device/Trigger/Relay`, configuration changes | not an event (logged once with `VIGIL_DEBUG` set) |
+
+The first boolean Data item (`IsMotion`, `State`, `IsInside`, `IsTamper`,
+`LogicalState`, …) says start or stop; without one (a line's `ObjectId`)
+it is a moment. Each rule (its Source items) is followed on its own: two
+field rules hold `intrusion` until both are over. All of a device's
+notifications go to its channel; an ONVIF NVR's channels are not told
+apart.
+
 ## Passwords in camera URLs
 
 Camera URLs carry their passwords (`rtsp://admin:12345@…`). The API never
