@@ -664,7 +664,7 @@ static void status_update(void)
     case UI_PTZ_PROBING: snprintf(t, sizeof t, "Asking the camera what it can do..."); c = UI_C(WARN); break;
     case UI_PTZ_READY:
         snprintf(t, sizeof t, "%s%s", P.info.backend[0] ? (strcmp(P.info.backend, "netip") ? "ONVIF" : "NETIP") : "",
-                 P.info.moving ? "  ·  moving" : "");
+                 P.info.moving ? ", moving" : "");
         break;
     case UI_PTZ_NONE:    snprintf(t, sizeof t, "This camera has no PTZ%s%s", P.info.error[0] ? ": " : "", P.info.error);
                          c = UI_C(WARN); break;
