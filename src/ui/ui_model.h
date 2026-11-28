@@ -246,6 +246,35 @@ typedef struct {
     char msg[256];
 } ui_mjob_t;
 
+/* Operation -> Configuration (src/api/backup.h): where an export goes and
+ * the exports found on the disks. */
+typedef struct {
+    char path[128];
+    char label[128];
+} ui_cfg_place_t;
+
+typedef struct {
+    char      path[256];
+    char      name[100];
+    long long size, mtime;
+} ui_cfg_file_t;
+
+/* The outcome of an export, an import (checked or applied) or a reset. */
+enum { UI_CFG_OK = 0, UI_CFG_EINVAL = -1, UI_CFG_EPASSWORD = -2, UI_CFG_ECHANGED = -3, UI_CFG_EVERSION = -4,
+       UI_CFG_EIO = -5, UI_CFG_EUNMANAGED = -6, UI_CFG_EBUSY = -7 };
+#define UI_CFG_LINES 24
+typedef struct {
+    int  rc;                        /* UI_CFG_* */
+    char msg[300];                  /* why not; or what was done */
+    char path[256];                 /* an export: the file written */
+    int  secrets;                   /* an import: the export has its passwords, sealed */
+    int  applied, reboot;           /* applied; the network settings wait for a reboot */
+    int  net_cuts;                  /* the recorder's address may change at that reboot */
+    int  n_lines;
+    int  kind[UI_CFG_LINES];        /* 0 information, 1 warning */
+    char line[UI_CFG_LINES][200];
+} ui_cfg_result_t;
+
 typedef struct {
     long long last;                 /* 0: never */
     int       ok;
@@ -404,6 +433,20 @@ typedef struct {
     int  (*curl)(void);             /* mail and DDNS can work */
 
     int  (*job)(int id, ui_mjob_t *j);              /* 0, or -1 when forgotten */
+
+    /* configuration export and import, the resets (NULL: not in this
+     * build). Each of cfg_export, cfg_import and cfg_reset starts the
+     * work on a thread of its own (the key derivation alone takes a
+     * second): 0, or < 0 with err; cfg_poll says UI_MGMT_EBUSY while it
+     * runs, then gives the outcome once (0). cfg_import with apply 0 only
+     * checks and summarises. cfg_reset: level 0 vigil's settings (network
+     * 1: the interfaces too, and a reboot), 1 the whole firmware. */
+    int (*cfg_places)(ui_cfg_place_t *out, int max);
+    int (*cfg_files)(ui_cfg_file_t *out, int max);
+    int (*cfg_export)(const char *dir, const char *password, char *err, size_t cap);
+    int (*cfg_import)(const char *path, const char *password, int hostname, int apply, char *err, size_t cap);
+    int (*cfg_reset)(int level, int network, char *err, size_t cap);
+    int (*cfg_poll)(ui_cfg_result_t *r);
 
     /* disks */
     int  (*disks)(ui_disk_t *out, int max);
