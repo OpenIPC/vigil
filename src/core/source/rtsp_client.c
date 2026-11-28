@@ -15,6 +15,7 @@
 #include "net.h"
 #include "rtsp_client.h"
 #include "source.h"
+#include "vg_random.h"
 
 #define BUF_MAX  (1u << 20)         /* an interleaved frame is at most 64 KiB */
 
@@ -248,9 +249,9 @@ static void auth_header(rtsp_t *r, const char *method, const char *uri, char *ou
         char resp[33], nc[9] = "", cnonce[17] = "", extra[256] = "";
         if (r->qop_auth) {
             snprintf(nc, sizeof nc, "%08x", ++r->nc);
-            snprintf(cnonce, sizeof cnonce, "%08lx%08lx",
-                     (unsigned long)random() ^ (unsigned long)time(NULL),
-                     (unsigned long)random() ^ ((unsigned long)getpid() << 8));
+            unsigned char r[8];
+            vg_random(r, sizeof r, VG_RAND_WEAK);   /* a client's nonce to a camera: only has to differ */
+            for (int i = 0; i < 8; ++i) snprintf(cnonce + 2 * i, 3, "%02x", r[i]);
             snprintf(extra, sizeof extra, ", qop=auth, nc=%s, cnonce=\"%s\"", nc, cnonce);
         }
         rtsp_digest_response(r->user, r->realm, r->pass, method, uri, r->nonce,

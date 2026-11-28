@@ -14,7 +14,8 @@
  * a value moved to another field does not open there.
  *
  * The key file is made the first time something is sealed and there is
- * none, mode 0600, written atomically; it is never replaced. Without it
+ * none (not at start-up: the kernel's random numbers may not be ready
+ * then), mode 0600, written atomically; it is never replaced. Without it
  * (deleted, another board's file) sealed values cannot be opened: they
  * count as unknown, and are set again. Thread-safe. */
 #ifndef SECRET_H
@@ -25,6 +26,10 @@
 #define SECRET_PREFIX   "enc:v1:"
 #define SECRET_KEY_LEN  32
 #define SECRET_FILE     "vigil.key"
+/* How long sealing waits for the kernel's random numbers (vg_random.h)
+ * when they are not ready yet: only in the first moments after a first
+ * power-on, and only the save that seals waits. */
+#define SECRET_RAND_WAIT_MS 5000
 
 /* The sealed length of a value of `len` bytes, with the NUL. */
 #define SECRET_SEALED_SIZE(len) (sizeof SECRET_PREFIX + 4 * ((12 + (len) + 16 + 2) / 3))
@@ -37,6 +42,8 @@ typedef enum {
                                  * another field's value, or changed */
     SECRET_EFORMAT = -4,        /* not a sealed value, or does not fit `cap` */
     SECRET_ENOMEM = -5,         /* no memory to put a value in place (config.c) */
+    SECRET_ENORAND = -6,        /* the kernel's random numbers are not ready yet (seal):
+                                 * just after power-on; nothing sealed, try again */
 } secret_rc_t;
 
 /* The key file: `path`, or NULL for the default, vigil.key in the
@@ -46,8 +53,8 @@ void secret_set_key_path(const char *path);
 /* The key file in force, into `out`. */
 const char *secret_key_path(char *out, size_t cap);
 
-/* Read the key, or make it when there is no file: at start-up, so the
- * file exists before anything needs it. SECRET_OK, or the reason. */
+/* Read the key, or make it when there is no file (waiting for random
+ * numbers as sealing does). SECRET_OK, or the reason. */
 secret_rc_t secret_ensure_key(void);
 
 /* `v` is a sealed value (starts with SECRET_PREFIX). */
@@ -76,7 +83,8 @@ int         secret_is_export_sealed(const char *v);
 /* PBKDF2-HMAC-SHA256 of `password` (mbedTLS): 0, or -1. */
 int         secret_derive(const char *password, const unsigned char *salt, size_t salt_len, unsigned iterations,
                           unsigned char key[SECRET_KEY_LEN]);
-/* `len` bytes from /dev/urandom: 0, or -1. */
+/* `len` strong random bytes (vg_random.h), waiting for the kernel's pool
+ * as sealing does: 0, or -1 (errno EAGAIN: not ready yet). */
 int         secret_random(void *buf, size_t len);
 /* A new vigil.key in place of the old one (a reset of vigil's settings:
  * every value sealed with the old key is lost with it). SECRET_OK, or the

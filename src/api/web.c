@@ -50,6 +50,7 @@
 #include "log.h"
 #include "net.h"
 #include "users.h"
+#include "vg_random.h"
 #include "web.h"
 
 #define THREADS      "6"            /* KVM_CLIENTS WebSockets + pages and logins */
@@ -110,14 +111,14 @@ static void stat_or_none(const char *path, struct stat *st)
     if (stat(path, st) < 0) memset(st, 0, sizeof *st);
 }
 
+/* A session token: strong or none (vg_random.h); -1 just after power-on,
+ * before the kernel's random numbers are ready, and the login is asked to
+ * come back. */
 static int random_hex(char *out, size_t bytes)
 {
     unsigned char r[32];
     if (bytes > sizeof r) return -1;
-    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-    ssize_t n = fd >= 0 ? read(fd, r, bytes) : -1;
-    if (fd >= 0) close(fd);
-    if (n != (ssize_t)bytes) return -1;
+    if (vg_random(r, bytes, VG_RAND_STRONG) < 0) return -1;
     for (size_t i = 0; i < bytes; ++i) snprintf(out + 2 * i, 3, "%02x", r[i]);
     return 0;
 }
@@ -309,7 +310,12 @@ static int do_login(struct mg_connection *conn)
                           NULL, NULL);
     }
     char tok[65], cookie[160];
-    if (sess_new(user, perms, tok) < 0) return login_page(conn, 500, "No random numbers for a session.", NULL, NULL);
+    if (sess_new(user, perms, tok) < 0) {
+        vg_log("web: %s from %s: no random numbers for a session yet (just started); asked to retry", user,
+               ri->remote_addr);
+        return login_page(conn, 503, "The recorder has just started: try again in a few seconds.", "Retry-After",
+                          "5");
+    }
     snprintf(cookie, sizeof cookie, COOKIE "=%s; Path=/; HttpOnly; SameSite=Strict", tok);
     vg_log("web: %s logged in from %s", user, ri->remote_addr);
     return redirect(conn, 303, "/", cookie);

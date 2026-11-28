@@ -269,7 +269,11 @@ static int export_locked(const char *password, char **out, size_t *len, char *na
             return BACKUP_EINVAL;
         }
         iter = kdf_iterations();
-        if (secret_random(salt, sizeof salt) < 0 || secret_derive(password, salt, sizeof salt, iter, x.key) < 0) {
+        if (secret_random(salt, sizeof salt) < 0) {
+            snprintf(err, cap, "%s", secret_strerror(SECRET_ENORAND));
+            return BACKUP_EIO;
+        }
+        if (secret_derive(password, salt, sizeof salt, iter, x.key) < 0) {
             snprintf(err, cap, "cannot derive a key from the password");
             return BACKUP_EIO;
         }

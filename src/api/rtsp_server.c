@@ -49,6 +49,7 @@
 #include "sha1.h"
 #include "stream_tap.h"
 #include "users.h"
+#include "vg_random.h"
 
 #define CONN_MAX        33          /* connections; rtsp_server.max_clients streams among them */
 #define IN_CAP          4096        /* a request with its headers */
@@ -157,8 +158,6 @@ static atomic_int      g_wake_pending;
 static int             g_port, g_enabled;          /* what runs */
 static int             g_auth = 1, g_max = 8;      /* read as the configuration changes */
 static unsigned        g_cfg_gen;
-static unsigned char   g_key[16];
-static unsigned        g_nonce_n;
 static uint8_t         g_udp_buf[UDP_TURN];
 static int             g_behind;   /* a UDP client has more to send now */
 
@@ -382,10 +381,9 @@ static rs_stream_t *stream_get(int ch, int sub, vg_codec_t codec)
     st->ch = ch;
     st->sub = sub;
     st->codec = codec;
-    uint8_t r[16];
-    md5_raw(g_key, sizeof g_key, r);
-    st->ssrc = (uint32_t)r[0] << 24 ^ (uint32_t)r[1] << 16 ^ (uint32_t)r[2] << 8 ^ r[3] ^ (uint32_t)(ch * 2 + sub) ^
-               (uint32_t)mono_us();
+    uint8_t r[4];
+    vg_random(r, sizeof r, VG_RAND_WEAK);   /* an SSRC only has to differ */
+    st->ssrc = (uint32_t)r[0] << 24 ^ (uint32_t)r[1] << 16 ^ (uint32_t)r[2] << 8 ^ r[3] ^ (uint32_t)(ch * 2 + sub);
     st->seq = (uint16_t)(st->ssrc >> 7);
     pthread_mutex_unlock(&st->lock);
     st->tap = stream_tap_open(ch, sub, on_au, st);
@@ -461,12 +459,15 @@ static void conn_close(int i, const char *why)
     g_conns[i] = NULL;
 }
 
+/* A Digest nonce, strong (vg_random.h): "" just after power-on, before
+ * the kernel's random numbers are ready, and no login is asked for then
+ * (503, come back) rather than with a nonce that could be guessed. */
 static void make_nonce(char out[33])
 {
-    char buf[64];
-    int n = snprintf(buf, sizeof buf, "%.16s%u:%llu", (const char *)g_key, ++g_nonce_n,
-                     (unsigned long long)mono_us());
-    md5_hex(buf, (size_t)n, out);
+    unsigned char r[16];
+    out[0] = 0;
+    if (vg_random(r, sizeof r, VG_RAND_STRONG) < 0) return;
+    for (int i = 0; i < 16; ++i) snprintf(out + 2 * i, 3, "%02x", r[i]);
 }
 
 static void conn_accept(void)
@@ -755,7 +756,7 @@ static int login(rs_conn_t *c, const char *method, const char *auth, unsigned *p
             param(auth, "cnonce", cnonce, sizeof cnonce);
             char ha1[33], want[33];
             int known = users_digest(user, ha1, perms);
-            if (known > 0 && !strcmp(nonce, c->nonce)) {
+            if (known > 0 && c->nonce[0] && !strcmp(nonce, c->nonce)) {
                 rtsp_server_digest(ha1, nonce, method, uri, nc, cnonce, qop, want);
                 if (auth_equal(want, resp)) {
                     if (f) memset(f, 0, sizeof *f);
@@ -766,7 +767,7 @@ static int login(rs_conn_t *c, const char *method, const char *auth, unsigned *p
                 vg_log("rtsp: %s cannot log in yet: vigil does not know its password; set it again, "
                        "or log in once on the screen, the web page or the API", user);
             }
-            if (strcmp(nonce, c->nonce)) {
+            if (!c->nonce[0] || strcmp(nonce, c->nonce)) {
                 *perms = 0;
                 return 0;                       /* stale: a fresh challenge, not a failure */
             }
@@ -981,10 +982,10 @@ static void do_setup(rs_conn_t *c, const char *req, const char *cseq, int ch, in
         c->st = st;
         c->ch = ch;
         c->sub = sub;
-        uint8_t r[16];
-        char buf[64];
-        int n = snprintf(buf, sizeof buf, "%.16s%s%llu", (const char *)g_key, c->nonce, (unsigned long long)mono_us());
-        md5_raw(buf, (size_t)n, r);
+        /* Only this connection's requests name it (one session per
+         * connection), so it only has to differ. */
+        uint8_t r[8];
+        vg_random(r, sizeof r, VG_RAND_WEAK);
         for (int i = 0; i < 8; ++i) snprintf(c->session + i * 2, 3, "%02X", r[i]);
     }
     c->tcp = tcp;
@@ -1070,6 +1071,11 @@ static void handle(rs_conn_t *c, char *req)
         } else {
             char ch[160];
             if (rc != -2) make_nonce(c->nonce);
+            if (!c->nonce[0]) {
+                vg_log("rtsp: %s: no random numbers for a login yet (just started); asked to retry", c->addr);
+                reply(c, 503, "Service Unavailable", cseq, "Retry-After: 5\r\n", NULL, 0);
+                return;
+            }
             snprintf(ch, sizeof ch, "WWW-Authenticate: Digest realm=\"%s\", nonce=\"%s\"\r\n", USERS_REALM, c->nonce);
             reply(c, 401, "Unauthorized", cseq, ch, NULL, 0);
             return;
@@ -1322,18 +1328,6 @@ static int udp_bind(int port)
     return fd;
 }
 
-static void random_key(void)
-{
-    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-    ssize_t n = fd >= 0 ? read(fd, g_key, sizeof g_key) : -1;
-    if (fd >= 0) close(fd);
-    if (n != (ssize_t)sizeof g_key) {
-        uint64_t v = mono_us() ^ (uint64_t)getpid() << 32;
-        for (size_t i = 0; i < sizeof g_key; ++i) g_key[i] = (unsigned char)(v >> (i % 8 * 8)) ^ (unsigned char)i;
-    }
-    for (size_t i = 0; i < sizeof g_key; ++i) g_key[i] = (unsigned char)('!' + g_key[i] % 90);
-}
-
 /* What runs, for rtsp_server_listening (Network -> Ports). */
 static pthread_mutex_t g_state_lock = PTHREAD_MUTEX_INITIALIZER;
 static int             g_listening;
@@ -1451,7 +1445,6 @@ int rtsp_server_start(void)
     if (!locks_made) {
         for (int i = 0; i < CHANNEL_MAX * 2; ++i) pthread_mutex_init(&g_streams[i].lock, NULL);
         locks_made = 1;
-        random_key();
     }
     config_rtsp_server_t rs;
     if (read_section(&rs) < 0) return -1;

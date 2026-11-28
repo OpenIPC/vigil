@@ -57,7 +57,10 @@ comments; options override the file.
 
 - `src/core/` — channel threads, the access-unit normalizer (`au_norm`), SPS
   parsing, the segment writer, events, small net/md5 helpers, the
-  passwords' cipher (`secret.c`, AES-GCM through libmbedcrypto), and the
+  passwords' cipher (`secret.c`, AES-GCM through libmbedcrypto), random
+  numbers (`vg_random.c`: strong for keys, nonces and session tokens,
+  refused before the kernel's pool is ready; weak only where a value just
+  has to differ), and the
   configuration: `schema.c` (generic engine), `config_schema.c` (every
   setting as a table row), `schema_yaml.c` (the file's YAML, via libyaml,
   to and from the same cJSON document), `config.c` (the file and the store).

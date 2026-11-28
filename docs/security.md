@@ -19,9 +19,9 @@ in vigil's files: they are written where the firmware keeps them
 
 ## The key
 
-`vigil.key` is 32 random bytes from `/dev/urandom`, written the first time
-vigild starts (or seals a password before that: `vigild -w`),
-mode 0600, never replaced. One found readable by others (copied back
+`vigil.key` is 32 random bytes from the kernel (`getrandom`), written the
+first time a password is sealed (a password set, a login whose password is
+kept for RTSP, ONVIF and NETIP, `vigild -w`), mode 0600, never replaced. One found readable by others (copied back
 with `cp`, restored from an archive) is made 0600 again when vigild owns
 it, and logged otherwise. A key file that is there but unusable (not 64
 hex digits) is left alone and logged; nothing new can be sealed until it is
@@ -34,6 +34,38 @@ additional data — `config:cameras[0].url`, `config:smtp.password`,
 into another field, another user or another camera's place does not open
 there. The cipher is mbedTLS's (`libmbedcrypto`, already on OpenIPC
 images); `src/core/secret.c`.
+
+### Random numbers just after power-on
+
+Until the kernel's random pool is initialised (on a board without a
+hardware generator, the first seconds to minutes after power-on) the
+bytes `/dev/urandom` gives may be predictable, and Linux logs
+`random: vigild: uninitialized urandom read`. vigild never takes those
+for anything that has to stay secret (`src/core/vg_random.c`):
+
+- **The key, the nonces and salts of sealing and of exports** wait for the
+  pool. vigild's start does not: the key is made at the first sealing, not
+  at start-up. A save that seals (a password set on the screen, through the
+  API or the web page) waits up to 5 s for the pool and is otherwise
+  refused with "no random numbers yet (the system has just started): try
+  again in a moment"; nothing is sealed with weaker bytes. Passwords found
+  in the clear in `vigil.yaml` at start-up are sealed as soon as the pool
+  is ready, by a thread that waits for it; a login's password kept for
+  RTSP, ONVIF and NETIP, and an older users file's, at a later login or
+  start.
+- **Session tokens and ids, and the nonces a server checks** (the web
+  page's session, NETIP session ids, the RTSP server's and ONVIF's Digest
+  nonces) never wait: until the pool is ready a login is refused and asked
+  to come back (`503` with `Retry-After: 5` from the web page, RTSP and
+  ONVIF; NETIP's login answer `101`, after which XM clients log in again).
+- **Values that only have to differ** (message ids, RTP SSRCs, the RTSP
+  server's session ids, which only that connection's requests name, the
+  nonces vigild sends cameras as a client, the API's login cache key) take
+  the kernel's bytes when it has them and a mix of the clocks before that.
+
+On a kernel or C library without `getrandom` (before Linux 3.17), the
+pool counts as ready once `/dev/random` is readable, and the bytes come
+from `/dev/urandom`.
 
 ## What it protects, and what it does not
 

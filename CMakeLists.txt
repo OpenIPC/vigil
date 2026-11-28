@@ -111,6 +111,7 @@ add_library(vigil_core STATIC
   src/core/seg_writer.c
   src/core/stream_tap.c
   src/core/tar.c
+  src/core/vg_random.c
   src/core/sps.c
   src/core/source/rtp_depay.c
   src/core/source/rtsp_client.c

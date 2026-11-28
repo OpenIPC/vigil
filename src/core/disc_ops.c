@@ -19,6 +19,7 @@
 #include "net.h"
 #include "rtsp_client.h"
 #include "sha1.h"
+#include "vg_random.h"
 
 #define HTTP_MAX     (256u << 10)
 #define CALL_MS      5000            /* one HTTP exchange */
@@ -201,21 +202,11 @@ static void auth_param(const char *h, const char *key, char *out, size_t cap)
     }
 }
 
-static void random_bytes(unsigned char *b, size_t n)
-{
-    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-    ssize_t r = fd >= 0 ? read(fd, b, n) : -1;
-    if (fd >= 0) close(fd);
-    if (r != (ssize_t)n) {
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        unsigned v = (unsigned)ts.tv_nsec ^ (unsigned)getpid() << 16;
-        for (size_t i = 0; i < n; ++i) {
-            v = v * 1103515245u + 12345u;
-            b[i] = (unsigned char)(v >> 16);
-        }
-    }
-}
+/* The nonces vigil sends a camera as a client (Digest's cnonce,
+ * WS-Security's Nonce): the camera checks them, they only have to differ,
+ * and talking to cameras does not wait for the kernel's random numbers
+ * after power-on. Weak (vg_random.h). */
+static void random_bytes(unsigned char *b, size_t n) { vg_random(b, n, VG_RAND_WEAK); }
 
 static void digest_header(const char *www, const char *user, const char *pass, const char *path, char *out,
                           size_t cap)
