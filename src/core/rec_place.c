@@ -85,6 +85,7 @@ static int contains(const char *mnt, const char *path)
 typedef struct {
     char mnt[PATH_MAX];
     char fs[64];
+    char src[256];
     int  ro;
     int  found;
 } mount_t;
@@ -108,7 +109,7 @@ static int find_mount(const char *file, const char *path, mount_t *best)
         if (n < 6) continue;
         char *mnt = fld[4], *opts = fld[5];
         char *rest = sep + 3, *fs = strtok_r(rest, " ", &save);
-        strtok_r(NULL, " ", &save);                          /* source */
+        char *src = strtok_r(NULL, " ", &save);
         char *sopts = strtok_r(NULL, " \n", &save);
         if (!fs) continue;
         unescape(mnt);
@@ -118,6 +119,8 @@ static int find_mount(const char *file, const char *path, mount_t *best)
         if (best->found && len < strlen(best->mnt)) continue;
         snprintf(best->mnt, sizeof best->mnt, "%s", mnt);
         snprintf(best->fs, sizeof best->fs, "%s", fs);
+        snprintf(best->src, sizeof best->src, "%s", src ? src : "");
+        unescape(best->src);
         best->ro = has_opt(opts, "ro") || (sopts && has_opt(sopts, "ro"));
         best->found = 1;
     }
@@ -218,4 +221,17 @@ rec_place_t rec_place_check(const char *dir, int allow_rootfs, const rec_place_o
     }
     snprintf(why, cap, "%s (%s)", m.mnt, m.fs);
     return REC_PLACE_OK;
+}
+
+int rec_place_mount(const char *dir, const rec_place_ops_t *ops, char *fs, size_t fs_cap, char *src,
+                    size_t src_cap)
+{
+    char *(*rp_fn)(const char *, char *) = ops && ops->realpath_fn ? ops->realpath_fn : realpath;
+    const char *mi = ops && ops->mountinfo ? ops->mountinfo : "/proc/self/mountinfo";
+    char real[PATH_MAX];
+    mount_t m;
+    if (!rp_fn(dir, real) || find_mount(mi, real, &m) < 0 || !m.found) return -1;
+    snprintf(fs, fs_cap, "%s", m.fs);
+    snprintf(src, src_cap, "%s", m.src);
+    return 0;
 }

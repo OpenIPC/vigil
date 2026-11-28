@@ -2,6 +2,10 @@
 add_executable(test_core test_core.c)
 target_link_libraries(test_core PRIVATE vigil_core)
 add_test(NAME core COMMAND test_core ${CMAKE_CURRENT_SOURCE_DIR}/data)
+# The recording store: records, boxes, the ring, power cuts, rebuild, export.
+add_executable(test_rec test_rec.c)
+target_link_libraries(test_rec PRIVATE vigil_core)
+add_test(NAME rec COMMAND test_rec ${CMAKE_CURRENT_SOURCE_DIR}/data ${CMAKE_CURRENT_BINARY_DIR}/rec-work)
 add_executable(test_discovery test_discovery.c)
 target_link_libraries(test_discovery PRIVATE vigil_core)
 add_test(NAME discovery COMMAND test_discovery ${CMAKE_CURRENT_SOURCE_DIR}/data)
@@ -142,3 +146,9 @@ if(Python3_FOUND)
     set_tests_properties(rtsp_${name} PROPERTIES SKIP_RETURN_CODE 77)
   endforeach()
 endif()
+
+# A pool never takes more than this in a test, whatever the test's
+# configuration says (rec_pool.c): a record.path in the build tree must
+# not fill the build machine's disk.
+get_property(_vigil_tests DIRECTORY PROPERTY TESTS)
+set_property(TEST ${_vigil_tests} APPEND PROPERTY ENVIRONMENT "VIGIL_REC_POOL_MB_MAX=64")

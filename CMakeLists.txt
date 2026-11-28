@@ -104,7 +104,10 @@ add_library(vigil_core STATIC
   src/core/mp4.c
   src/core/rec_fmt.c
   src/core/rec_place.c
+  src/core/rec_pool.c
+  src/core/rec_read.c
   src/core/rec_sched.c
+  src/core/rec_store.c
   src/core/seg_writer.c
   src/core/stream_tap.c
   src/core/sps.c

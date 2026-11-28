@@ -48,6 +48,11 @@ typedef struct {
 rec_place_t rec_place_check(const char *dir, int allow_rootfs, const rec_place_ops_t *ops,
                             char *why, size_t cap);
 
+/* The filesystem type and the source (a device, a share) of the mount
+ * holding `dir` (which exists). 0, or -1 when it cannot be told. */
+int rec_place_mount(const char *dir, const rec_place_ops_t *ops, char *fs, size_t fs_cap, char *src,
+                    size_t src_cap);
+
 /* Short state for the status and the events: "waiting for disk", ... */
 const char *rec_place_name(rec_place_t p);
 
