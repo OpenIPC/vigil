@@ -48,6 +48,7 @@
 #include "hal_decoder.h"
 #include "hal_display.h"
 #include "log.h"
+#include "onvif_events.h"
 #include "rec_place.h"
 #include "rec_sched.h"
 #include "schema.h"
@@ -121,6 +122,7 @@ struct channel {
      * the main session's NETIP connection (its source's `events`). */
     ch_events_mode_t ev_mode;
     char            onvif_url[160];
+    onvif_ev_t     *onvif;          /* the ONVIF events' watcher; NULL none */
 
     sess_t          s[S_N];
     seg_writer_t    seg;            /* the main session's */
@@ -1029,12 +1031,15 @@ static int slot_matches(const channel_t *c, const channels_config_t *cfg, int i)
 static void slot_stop(channel_t *c)
 {
     for (int i = 0; i < S_N; ++i) c->s[i].stop = 1;
+    onvif_ev_signal(c->onvif);
 }
 
 /* Tear down a channel whose sessions have been told to stop. */
 static void slot_teardown(channel_t *c)
 {
     for (int i = 0; i < S_N; ++i) sess_reap(c, i);
+    onvif_ev_join(c->onvif);
+    c->onvif = NULL;
     /* The camera is gone: nothing it said goes on. */
     cam_events_clear(c->idx, CAM_EV_SRC_NETIP);
     cam_events_clear(c->idx, CAM_EV_SRC_ONVIF);
@@ -1056,16 +1061,27 @@ static int is_netip(const char *url) { return !strncmp(url, "netip://", 8); }
 
 /* Where channel c's camera events come from, from the thread that calls
  * channels_apply: its NETIP connection's alarms (auto or netip, a NETIP
- * camera), or none. A change applies at once, the streams untouched. */
+ * camera), or ONVIF events (onvif; auto, a camera that is not NETIP's),
+ * or none. A change applies at once, the streams untouched. */
 static void events_apply(channel_t *c, ch_events_mode_t mode, const char *onvif_url)
 {
-    int changed = !c->s[S_MAIN].src || c->ev_mode != mode || strcmp(c->onvif_url, onvif_url ? onvif_url : "");
+    if (!onvif_url) onvif_url = "";
+    int changed = c->ev_mode != mode || strcmp(c->onvif_url, onvif_url) != 0;
     c->ev_mode = mode;
-    snprintf(c->onvif_url, sizeof c->onvif_url, "%s", onvif_url ? onvif_url : "");
+    snprintf(c->onvif_url, sizeof c->onvif_url, "%s", onvif_url);
     int netip = is_netip(c->url) && (mode == CH_EVENTS_AUTO || mode == CH_EVENTS_NETIP);
+    int onvif = !c->self_displayed && strstr(c->url, "://") &&
+                (mode == CH_EVENTS_ONVIF || (mode == CH_EVENTS_AUTO && !is_netip(c->url)));
     if (c->s[S_MAIN].src) c->s[S_MAIN].src->events = netip;
-    if (!changed) return;
-    if (mode == CH_EVENTS_NETIP && !is_netip(c->url))
+    if (c->onvif && (changed || !onvif)) {
+        onvif_ev_join(c->onvif);
+        c->onvif = NULL;
+    }
+    if (onvif && !c->onvif) {
+        c->onvif = onvif_ev_start(c->idx, c->url, onvif_url, mode == CH_EVENTS_AUTO);
+        if (!c->onvif) vg_log("CAM%d: cannot watch its ONVIF events", c->idx + 1);
+    }
+    if (changed && mode == CH_EVENTS_NETIP && !is_netip(c->url))
         vg_log("CAM%d: events netip: not a netip:// camera, no events", c->idx + 1);
 }
 

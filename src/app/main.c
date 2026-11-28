@@ -44,6 +44,7 @@
 #include "net.h"
 #include "source.h"
 #include "onvif.h"
+#include "onvif_events.h"
 #include "rtsp_server.h"
 #include "secret.h"
 #include "web.h"
@@ -361,6 +362,7 @@ static void apply_config(void)
     rec_week_t weeks[CHANNEL_MAX];
     rec_sched_set(weeks, config_to_schedule(&c, weeks));
     apply_qos(&c);
+    onvif_ev_set_self_port(c.onvif_server.enabled ? c.onvif_server.port : 0);
     int failed = channels_apply(&cc);
     apply_output(c.display.output);
     apply_output_adj(&c.display, 0);
@@ -531,6 +533,7 @@ int main(int argc, char **argv)
     rec_week_t weeks[CHANNEL_MAX];
     rec_sched_set(weeks, config_to_schedule(&running, weeks));
     apply_qos(&running);
+    onvif_ev_set_self_port(running.onvif_server.enabled ? running.onvif_server.port : 0);
     if (cam_events_start() < 0) vg_log("camera events: cannot start the ticker; a pulse's stop comes late");
     if (channels_start(&cc, caps->display ? tiles : NULL) == 0) {
         config_mark_applied(g_applied_gen);

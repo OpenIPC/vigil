@@ -197,6 +197,22 @@ void disc_clear(void)
 }
 
 /* A device by MAC or address (copied out). */
+int disc_xaddr_of(const char *ip, char *out, size_t cap)
+{
+    int found = 0;
+    if (cap) out[0] = 0;
+    if (!ip || !*ip) return -1;
+    pthread_mutex_lock(&g_lock);
+    expire();
+    for (int i = 0; i < g_ndev && !found; ++i)
+        if (!strcmp(g_dev[i].ip, ip) && g_dev[i].xaddr[0]) {
+            snprintf(out, cap, "%s", g_dev[i].xaddr);
+            found = 1;
+        }
+    pthread_mutex_unlock(&g_lock);
+    return found ? 0 : -1;
+}
+
 static int table_find(const char *key, disc_device_t *out)
 {
     char mac[18];
@@ -1039,7 +1055,8 @@ out:
 
 /* ---- adding to channels ------------------------------------------------------------------ */
 
-char *disc_cameras_with(const char *cameras, int ch, const char *url, const char *sub_url, const char *name)
+char *disc_cameras_with(const char *cameras, int ch, const char *url, const char *sub_url, const char *name,
+                        const char *onvif_url)
 {
     if (ch < 1 || ch > CHANNEL_MAX) return NULL;
     cJSON *arr = cameras && *cameras ? cJSON_Parse(cameras) : cJSON_CreateArray();
@@ -1057,10 +1074,19 @@ char *disc_cameras_with(const char *cameras, int ch, const char *url, const char
     cJSON_AddStringToObject(cam, "name", name ? name : "");
     cJSON_AddBoolToObject(cam, "enabled", 1);
     cJSON_AddStringToObject(cam, "sub_url", sub_url ? sub_url : "");
+    if (onvif_url && *onvif_url) cJSON_AddStringToObject(cam, "onvif_url", onvif_url);
     cJSON_ReplaceItemInArray(arr, ch - 1, cam);
     char *text = cJSON_PrintUnformatted(arr);
     cJSON_Delete(arr);
     return text;
+}
+
+/* A device's ONVIF device service, for a camera's onvif_url: the one it
+ * answered discovery with (any of its protocols may have added it). */
+static const char *onvif_url_of(const disc_device_t *d)
+{
+    return (d->protos & DISC_ONVIF) && !strncmp(d->xaddr, "http://", 7) && !strchr(d->xaddr + 7, '@') ? d->xaddr
+                                                                                                          : "";
 }
 
 /* The URLs for `d` over `proto` (0: by preference); the protocol used. */
@@ -1187,7 +1213,8 @@ static void run_assign(job_args_t *a)
     char name[32];
     channel_name(&d, a->name, url, name, sizeof name);
     cams = config_get_json("cameras", 0);
-    text = cams ? disc_cameras_with(cams, ch, url, sub, name) : NULL;
+    /* Where its events are (cameras[].onvif_url), while discovery knows. */
+    text = cams ? disc_cameras_with(cams, ch, url, sub, name, onvif_url_of(&d)) : NULL;
     if (!text) {
         r.rc = DISC_EPROTO;
         snprintf(r.msg, sizeof r.msg, "out of memory");
@@ -1241,7 +1268,7 @@ static void run_autoadd(job_args_t *a)
         device_urls(d, 0, a->user, a->pass, url, sizeof url, sub, sizeof sub, &r.rc, r.msg, sizeof r.msg, &r.proto);
         if (r.rc == DISC_OK) {
             channel_name(d, NULL, url, name, sizeof name);
-            char *t = disc_cameras_with(cams, ch, url, sub, name);
+            char *t = disc_cameras_with(cams, ch, url, sub, name, onvif_url_of(d));
             if (t) {
                 wipe(cams, strlen(cams));
                 free(cams);
@@ -1593,7 +1620,11 @@ static void run_assign_manual(job_args_t *a)
     char name[32];
     channel_name(NULL, a->name, url, name, sizeof name);
     cams = config_get_json("cameras", 0);
-    text = cams ? disc_cameras_with(cams, ch, url, sub, name) : NULL;
+    char xaddr[160] = "";
+    if (a->manual.kind == DISC_MANUAL_ONVIF)
+        snprintf(xaddr, sizeof xaddr, "http://%s:%d/onvif/device_service", a->manual.host,
+                 a->manual.port > 0 ? a->manual.port : disc_manual_port(DISC_MANUAL_ONVIF));
+    text = cams ? disc_cameras_with(cams, ch, url, sub, name, xaddr) : NULL;
     if (!text) {
         r.rc = DISC_EPROTO;
         snprintf(r.msg, sizeof r.msg, "out of memory");

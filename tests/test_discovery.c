@@ -407,7 +407,7 @@ static void test_devices(void)
     CHECK(disc_plan("192.168.1.0", "255.255.255.0", 1, NULL, NULL, plan) == 0, "network address is no start");
     CHECK(disc_plan("192.168.1.5", "255.0.255.0", 1, NULL, NULL, plan) == 0, "bad mask");
 
-    char *t = disc_cameras_with("[{\"url\":\"rtsp://a/x\",\"name\":\"A\"}]", 3, "netip://u:p@h/", "", "C");
+    char *t = disc_cameras_with("[{\"url\":\"rtsp://a/x\",\"name\":\"A\"}]", 3, "netip://u:p@h/", "", "C", NULL);
     cJSON *arr = t ? cJSON_Parse(t) : NULL;
     CHECK(cJSON_GetArraySize(arr) == 3 &&
           !strcmp(cJSON_GetObjectItem(cJSON_GetArrayItem(arr, 0), "url")->valuestring, "rtsp://a/x") &&
@@ -415,11 +415,14 @@ static void test_devices(void)
           !strcmp(cJSON_GetObjectItem(cJSON_GetArrayItem(arr, 2), "name")->valuestring, "C"), "cameras_with %s", t);
     cJSON_Delete(arr);
     free(t);
-    t = disc_cameras_with("[{\"url\":\"rtsp://a/x\"},{\"url\":\"rtsp://b/x\"}]", 1, "netip://h/", "", "N");
-    CHECK(t && strstr(t, "netip://h/") && !strstr(t, "rtsp://a/x") && strstr(t, "rtsp://b/x"), "replace %s", t);
+    t = disc_cameras_with("[{\"url\":\"rtsp://a/x\"},{\"url\":\"rtsp://b/x\"}]", 1, "netip://h/", "", "N",
+                          "http://h:8899/onvif/device_service");
+    CHECK(t && strstr(t, "netip://h/") && !strstr(t, "rtsp://a/x") && strstr(t, "rtsp://b/x") &&
+              strstr(t, "\"onvif_url\":\"http://h:8899/onvif/device_service\""),
+          "replace, with the ONVIF address %s", t);
     free(t);
-    CHECK(!disc_cameras_with("{}", 1, "x", "", "") && !disc_cameras_with("[]", 0, "x", "", "") &&
-          !disc_cameras_with("[]", 999, "x", "", ""), "cameras_with refuses");
+    CHECK(!disc_cameras_with("{}", 1, "x", "", "", NULL) && !disc_cameras_with("[]", 0, "x", "", "", NULL) &&
+          !disc_cameras_with("[]", 999, "x", "", "", NULL), "cameras_with refuses");
 
     CHECK(disc_proto_bits("all") == DISC_ALL && disc_proto_bits("netip, dhip") == (DISC_NETIP | DISC_DHIP) &&
           disc_proto_bits("netip,ftp") == 0, "proto bits");
