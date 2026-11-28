@@ -60,7 +60,7 @@ int mp4_codec_string(const mp4_track_t *t, char *out, size_t cap);
 
 /* A stored init segment (ftyp + moov as mp4_init wrote it) with an edit
  * list added: the presentation starts `elst_media` ticks into the media
- * and lasts `dur_ms` (also the movie's duration, mehd). 0 or -1. */
+ * and lasts `dur_ms` (also the movie's duration: mehd, mvhd, tkhd). 0 or -1. */
 int mp4_init_edit(const uint8_t *init, size_t len, int64_t elst_media, uint64_t dur_ms, mp4_buf_t *out);
 
 /* The codecs string of a stored init segment (from its avcC / hvcC). */

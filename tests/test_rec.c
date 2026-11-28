@@ -860,7 +860,8 @@ static void test_export_day(void)
         CHECK(rec_q_plan(&p, 1, 0, from, to, 0, 0, &pl) == 0 && pl.n > 12 && !pl.format_change, "a plan: %d", pl.n);
         CHECK(pl.p[0].key, "the export starts at a keyframe");
         mp4_buf_t init = { 0 };
-        CHECK(rec_q_export_init(&pl, from, to, mode, &init) == 0, "export init");
+        CHECK(rec_q_export_init(&pl, from, to, mode, &init) == 0 && rec_q_export_sidx(&pl, mode, &init) == 0,
+              "export init and segment index");
         snprintf(file, sizeof file, "%s/day-%s.mp4", g_work, mode ? "remove" : "keep");
         fsink_t s = { fopen(file, "wb"), 0 };
         CHECK(s.f && to_file(&s, init.p, init.len) == 0 && rec_q_send(&p, &pl, pl.first_tick, mode, 1, to_file, &s) == 0,

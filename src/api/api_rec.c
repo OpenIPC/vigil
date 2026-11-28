@@ -403,7 +403,7 @@ static int h_export(struct mg_connection *conn)
     rec_plan_t pl;
     rec_q_plan(p, cam, stream, from, to, PLAN_MAX, 0, &pl);
     mp4_buf_t init = { 0 };
-    if (!pl.n || rec_q_export_init(&pl, from, to, mode, &init) < 0) {
+    if (!pl.n || rec_q_export_init(&pl, from, to, mode, &init) < 0 || rec_q_export_sidx(&pl, mode, &init) < 0) {
         rec_plan_free(&pl);
         mp4_buf_free(&init);
         return send_error(conn, 404, "no video in that range", NULL);

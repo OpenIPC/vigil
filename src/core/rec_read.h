@@ -76,4 +76,10 @@ int rec_q_send(rec_pool_t *p, const rec_plan_t *pl, int64_t base_tick, int gaps,
  * REMOVE when `gaps` says so). */
 int rec_q_export_init(const rec_plan_t *pl, uint64_t from_us, uint64_t to_us, int gaps, mp4_buf_t *out);
 
+/* An export's segment index ('sidx'), placed right after its init
+ * segment: each fragment's size and how long it lasts on the export's
+ * clock (to the next one when the gaps are kept), so a player knows the
+ * whole file's duration and where to seek without reading it all. */
+int rec_q_export_sidx(const rec_plan_t *pl, int gaps, mp4_buf_t *out);
+
 #endif /* REC_READ_H */

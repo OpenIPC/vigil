@@ -450,7 +450,9 @@ Where the code settles what the design leaves open, or differs from it:
 - **API** (docs/api.md, "Recordings"): times are Unix seconds with
   decimals. `fragments` re-bases to `base` (default: local midnight of
   `from`) and says where to go on (`X-Vigil-Next`, then `cont=1`).
-  `export.mp4` knows its size ahead (`Content-Length`); `gaps=split`
+  `export.mp4` knows its size ahead (`Content-Length`) and carries a
+  `sidx` after its init segment and the duration in `mvhd`/`tkhd`/`mehd`
+  (without them Chrome took the first fragment's length for the file's); `gaps=split`
   answers a list of one URL per span; `gaps=remove` has no subtitle track
   with the real times yet; a change of format ends the file there
   (`X-Vigil-Format-Change`); `layout=faststart` is phase 2 (501).

@@ -477,3 +477,28 @@ int rec_q_export_init(const rec_plan_t *pl, uint64_t from, uint64_t to, int gaps
     }
     return mp4_init_edit(pl->init, pl->init_len, media, dur_us / 1000, out);
 }
+
+int rec_q_export_sidx(const rec_plan_t *pl, int gaps, mp4_buf_t *out)
+{
+    if (!pl->n || pl->n > 0xFFFF) return pl->n ? 0 : -1;    /* more than one sidx holds: none */
+    size_t box = mp4_full_box_open(out, "sidx", 1, 0);
+    mp4_u32(out, 1);                                    /* reference_ID: the track */
+    mp4_u32(out, MP4_TIMESCALE);                        /* the track's: players expect it */
+    mp4_u64(out, 0);                                    /* earliest_presentation_time */
+    mp4_u64(out, 0);                                    /* first_offset: the first moof follows */
+    mp4_u16(out, 0);
+    mp4_u16(out, (uint16_t)pl->n);
+    for (int i = 0; i < pl->n; ++i) {
+        const rec_piece_t *x = &pl->p[i];
+        uint64_t d = x->dur_ms;
+        if (gaps != REC_GAPS_REMOVE && i + 1 < pl->n) {
+            uint64_t a = x->chunk_start_us / 1000 + x->t_ms, b = pl->p[i + 1].chunk_start_us / 1000 + pl->p[i + 1].t_ms;
+            d = b > a ? b - a : 0;
+        }
+        mp4_u32(out, x->size & 0x7FFFFFFF);             /* reference_type 0: media */
+        mp4_u32(out, (uint32_t)(d * 90));
+        mp4_u32(out, x->key ? 0x90000000u : 0);         /* starts_with_SAP, SAP_type 1 */
+    }
+    mp4_box_close(out, box);
+    return out->err ? -1 : 0;
+}

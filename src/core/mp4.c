@@ -354,7 +354,20 @@ static void copy_edit(mp4_buf_t *o, const uint8_t *b, size_t len, int64_t media,
 {
     int trak = !memcmp(b + 4, "trak", 4), mvex = !memcmp(b + 4, "mvex", 4), moov = !memcmp(b + 4, "moov", 4);
     if (!trak && !mvex && !moov) {
+        size_t at = o->len;
         mp4_put(o, b, len);
+        /* The movie's and the track's duration too (version 0 boxes, as
+         * mp4_init writes them): a browser playing the file takes it from
+         * there, not from mehd or the edit list. */
+        if (!o->err && dur_ms && dur_ms <= 0xFFFFFFFFu && b[8] == 0) {
+            size_t f = !memcmp(b + 4, "mvhd", 4) && len >= 28 ? 24 : !memcmp(b + 4, "tkhd", 4) && len >= 32 ? 28 : 0;
+            if (f) {
+                o->p[at + f] = (uint8_t)(dur_ms >> 24);
+                o->p[at + f + 1] = (uint8_t)(dur_ms >> 16);
+                o->p[at + f + 2] = (uint8_t)(dur_ms >> 8);
+                o->p[at + f + 3] = (uint8_t)dur_ms;
+            }
+        }
         return;
     }
     size_t at = o->len;
