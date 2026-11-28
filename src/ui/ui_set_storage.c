@@ -140,8 +140,28 @@ typedef struct {
     unsigned  gen;
     int       seg_s, seg_min0, onfull0, rootfs0;
     char      path0[VAL_MAX];
-    lv_obj_t *onfull, *seg, *path, *rootfs, *state;
+    lv_obj_t *onfull, *seg, *path, *rootfs, *state, *pool;
+    lv_timer_t *timer;
 } basic_t;
+
+static void rec_state_text(lv_obj_t *l);
+
+/* The pool (docs/recording.md): size, chunks, oldest video, a rebuild. */
+static void pool_text(basic_t *b)
+{
+    char text[512] = "";
+    int n = MG() && MG()->rec_pool ? MG()->rec_pool(text, sizeof text) : 0;
+    if (n) lv_label_set_text(b->pool, text);
+    if (n) lv_obj_remove_flag(b->pool, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(b->pool, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void basic_tick(lv_timer_t *t)
+{
+    basic_t *b = lv_timer_get_user_data(t);
+    rec_state_text(b->state);
+    pool_text(b);
+}
 
 static void rec_state_text(lv_obj_t *l)
 {
@@ -218,6 +238,11 @@ static void *basic_open(ui_set_t *s, lv_obj_t *pane)
     lv_obj_set_width(b->state, LV_PCT(100));
     lv_label_set_long_mode(b->state, LV_LABEL_LONG_WRAP);
     rec_state_text(b->state);
+    b->pool = ui_label(pane, "", VG_FONT_SM_LV, UI_C(TEXT2));
+    lv_obj_set_width(b->pool, LV_PCT(100));
+    lv_label_set_long_mode(b->pool, LV_LABEL_LONG_WRAP);
+    pool_text(b);
+    b->timer = lv_timer_create(basic_tick, REFRESH_MS, b);
 
     lv_obj_t *sec = ui_set_section(pane, NULL);
     b->onfull = ui_set_dropdown(s, ui_set_row(sec, "When the disk is full",
@@ -225,9 +250,11 @@ static void *basic_open(ui_set_t *s, lv_obj_t *pane)
                                               "make room. Stop: nothing is deleted; recording stops with the "
                                               "event \"REC disk full\" until there is room again."),
                                 "Overwrite\nStop", 0, 240);
-    char help[96] = "A new file starts at the first keyframe after this long.";
+    char help[160] = "Local inputs only (cameras go into the pool): a new file starts at the first keyframe "
+                     "after this long.";
     if (b->seg_s % 60)
-        snprintf(help, sizeof help, "A new file starts at the first keyframe after this long. Stored: %d s.",
+        snprintf(help, sizeof help, "Local inputs only (cameras go into the pool): a new file starts at the first "
+                                    "keyframe after this long. Stored: %d s.",
                  b->seg_s);
     b->seg = ui_set_number(s, ui_set_row(sec, "Segment length (min)", help), b->seg_min0, 1, 60);
 
@@ -312,6 +339,7 @@ static void basic_close(void *st)
 {
     basic_t *b = st;
     if (!b) return;
+    if (b->timer) lv_timer_delete(b->timer);
     rows_free(&b->rec);
     free(b);
 }

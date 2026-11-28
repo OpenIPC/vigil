@@ -7,9 +7,11 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include <string.h>
 
 #include "mgmt.h"
+#include "rec_store.h"
 #include "sys.h"
 #include "sys_curl.h"
 #include "sys_disk.h"
@@ -624,6 +626,57 @@ static void listening(int server, ui_listen_t *out)
 }
 #endif
 
+static void human(char *out, size_t cap, uint64_t bytes)
+{
+    if (bytes >= (1ull << 40)) snprintf(out, cap, "%.1f TiB", bytes / 1099511627776.0);
+    else if (bytes >= (1ull << 30)) snprintf(out, cap, "%.1f GiB", bytes / 1073741824.0);
+    else snprintf(out, cap, "%llu MiB", (unsigned long long)(bytes >> 20));
+}
+
+static int rec_pool(char *out, size_t cap)
+{
+    rec_store_status_t st;
+    rec_store_status(&st);
+    out[0] = 0;
+    if (st.state == RP_OFF) return 0;
+    size_t n = 0;
+#define ADDF(...) do { if (n < cap) n += (size_t)snprintf(out + n, cap - n, __VA_ARGS__); } while (0)
+    if (st.state == RP_WAITING || st.state == RP_ERROR) {
+        ADDF("Pool: %s", st.state == RP_WAITING && st.place[0] ? st.place : "error");
+        if (st.why[0]) ADDF(" (%.100s)", st.why);
+        return 1;
+    }
+    char size[24], used[24];
+    human(size, sizeof size, st.size_bytes);
+    human(used, sizeof used, st.used_bytes);
+    ADDF("Pool: %s in %u chunks of %u MiB, %s used; %u free, %u recording", size, st.chunks, st.chunk_mb, used,
+         st.free, st.open);
+    if (st.chunks < st.want) ADDF("; %u more being made", st.want - st.chunks);
+    ADDF(". On %s, flushed every %u s.", st.media, st.flush_s);
+    int lines = 1;
+    if (st.state == RP_READONLY) {
+        ADDF("\nAnother recorder's pool, %s: playback only.", st.why);
+        ++lines;
+    }
+    if (st.rebuilding) {
+        ADDF("\nRebuilding the index: %u of %u chunks read.", st.rebuild_done, st.chunks);
+        ++lines;
+    }
+    int first = 1;
+    for (int i = 0; i < REC_CAMS; ++i) {
+        if (!st.cam[i].chunks) continue;
+        time_t t = (time_t)(st.cam[i].oldest_us / 1000000);
+        struct tm tm;
+        localtime_r(&t, &tm);
+        ADDF("%sCAM%d %04d-%02d-%02d %02d:%02d", first ? "\nOldest video: " : ", ", i + 1, tm.tm_year + 1900,
+             tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min);
+        first = 0;
+    }
+    if (!first) ++lines;
+#undef ADDF
+    return lines;
+}
+
 static const ui_mgmt_t g_mgmt = {
     .managed = managed,
     .eth_get = eth_get, .eth_apply = eth_apply, .net_pending = net_pending, .net_confirm = net_confirm,
@@ -632,6 +685,7 @@ static const ui_mgmt_t g_mgmt = {
     .services = services, .ddns_update = mgmt_ddns_update, .smtp_test = mgmt_smtp_test,
     .nas_test = mgmt_nas_test, .nas_support = sys_nas_support, .nas_mounted = nas_mounted,
     .curl = curl_available, .job = job,
+    .rec_pool = rec_pool,
     .disks = disks, .disk_formats = sys_disk_formats, .disk_format = mgmt_disk_format,
     .disk_mount = mgmt_disk_mount, .disk_unmount = mgmt_disk_unmount,
     .smart_read = smart_read_, .smart_get = smart_get, .selftest = mgmt_selftest, .scan_start = scan_start_,

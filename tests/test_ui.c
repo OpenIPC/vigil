@@ -1164,6 +1164,13 @@ static int fa_power(int reboot)
     return 0;
 }
 
+static int fm_rec_pool(char *out, size_t cap)
+{
+    snprintf(out, cap, "Pool: 1.8 TiB in 7420 chunks of 256 MiB, 1.2 TiB used; 2310 free, 2 recording. On disk, "
+                       "flushed every 2 s.\nOldest video: CAM1 2026-11-02 08:14, CAM2 2026-11-02 08:14");
+    return 2;
+}
+
 static void fake_mgmt(ui_model_t *m)
 {
     g_mg = *m->mgmt;                    /* real: time zone parsing */
@@ -1189,6 +1196,7 @@ static void fake_mgmt(ui_model_t *m)
     g_mg.listening = fm_listening;
     g_mg.job = fm_job;
     g_mg.disks = fm_disks;
+    g_mg.rec_pool = fm_rec_pool;
     g_mg.disk_formats = fm_formats;
     g_mg.disk_format = fm_disk_format;
     g_mg.disk_mount = fm_disk_act;

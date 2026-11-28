@@ -405,6 +405,11 @@ typedef struct {
 
     int  (*job)(int id, ui_mjob_t *j);              /* 0, or -1 when forgotten */
 
+    /* The recording pool in a few lines (docs/recording.md): its state,
+     * size and chunks, the oldest video of each camera, a rebuild under
+     * way. Returns the lines (0: no pool set up). */
+    int  (*rec_pool)(char *out, size_t cap);
+
     /* disks */
     int  (*disks)(ui_disk_t *out, int max);
     int  (*disk_formats)(char out[][8], int max);
