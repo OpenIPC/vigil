@@ -57,6 +57,7 @@
 #include "stream_tap.h"
 #include "sys_net.h"
 #include "users.h"
+#include "vg_random.h"
 
 #ifndef VIGIL_VERSION
 #define VIGIL_VERSION "0"
@@ -537,14 +538,13 @@ static int login_result(uint32_t ip, int ok)
 
 /* A session id nobody can guess: a second connection that names it gets
  * its login's media (do_monitor). 31 bits, never 0: some clients read
- * "0x%08X" into a signed int. 0, or -1 without randomness. */
+ * "0x%08X" into a signed int. 0, or -1 without strong randomness (just
+ * after power-on, before the kernel's pool is ready: vg_random.h). */
 static int session_id(uint32_t *s)
 {
-    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-    ssize_t n = fd < 0 ? -1 : read(fd, s, sizeof *s);
-    if (fd >= 0) close(fd);
+    int rc = vg_random(s, sizeof *s, VG_RAND_STRONG);
     *s &= 0x7fffffffu;
-    return n == (ssize_t)sizeof *s ? 0 : -1;
+    return rc;
 }
 
 static int do_login(conn_t *c, const netip_hdr_t *h, const cJSON *req)
@@ -573,7 +573,10 @@ static int do_login(conn_t *c, const netip_hdr_t *h, const cJSON *req)
     for (int clash = 1; clash;) {
         if (session_id(&s) < 0) {
             pthread_mutex_unlock(&g_lock);
-            vg_log("netip server: %s: no random numbers (/dev/urandom) for a session", c->peer_s);
+            /* Refused rather than given a guessable id; XM clients log in
+             * again on their own. */
+            vg_log("netip server: %s: no random numbers for a session yet (just started): login refused, to be "
+                   "tried again", c->peer_s);
             reply_ret(c, h, "", 101);
             return -1;
         }

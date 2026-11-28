@@ -570,10 +570,9 @@ int main(int argc, char **argv)
         log_to_syslog_stop();
         return wrc;
     }
-    /* The passwords' key (secret.h), made now if there is none, so that
-     * it exists before the first password is set. Not for -w, which may
-     * run on a build host (-f /dev/null). */
-    secret_ensure_key();
+    /* The passwords' key (secret.h) is not made here but when the first
+     * password is sealed: just after a first power-on the kernel's random
+     * numbers may not be ready yet, and start-up does not wait for them. */
     /* The alarm and operation logs: their copies on flash beside the
      * configuration, the recording disk once there is one (logs.h). */
     char logdir[300];

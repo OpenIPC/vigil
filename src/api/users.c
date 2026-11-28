@@ -2,7 +2,6 @@
 /* users.c — vigil's own accounts (see users.h). */
 #define _DEFAULT_SOURCE
 #include <errno.h>
-#include <fcntl.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -22,6 +21,7 @@
 #include "secret.h"
 #include "sha1.h"
 #include "users.h"
+#include "vg_random.h"
 
 #define FILE_MAX (64u << 10)
 #define HASH_MAX 128
@@ -343,9 +343,13 @@ static int drop_old_system(system_rec_t *s)
 static int migrate(users_db_t *db)
 {
     int change = 0, sealed = 0;
+    /* Not while the kernel's random numbers are not ready (just after
+     * power-on): the first load is at start-up, which does not wait for
+     * them; the old field works meanwhile, and is sealed at a later start. */
+    int may_seal = vg_random_ready();
     for (int i = 0; i < db->n_users; ++i) {
         user_rec_t *u = &db->users[i];
-        if (!u->password_enc[0] && u->onvif[0]) {
+        if (!u->password_enc[0] && u->onvif[0] && may_seal) {
             unsigned char pass[KEY_MAX];
             char aad[64];
             int n = auth_base64_decode(u->onvif, strlen(u->onvif), pass, sizeof pass - 1);
@@ -543,10 +547,7 @@ static const char SALT_CHARS[] = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgh
 int users_hash(const char *pass, char *out, size_t cap)
 {
     unsigned char rnd[16];
-    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-    ssize_t n = fd >= 0 ? read(fd, rnd, sizeof rnd) : -1;
-    if (fd >= 0) close(fd);
-    if (n != (ssize_t)sizeof rnd) return -1;            /* no salt without randomness */
+    if (secret_random(rnd, sizeof rnd) < 0) return -2;  /* no salt without randomness */
     char salt[sizeof rnd + 1];
     for (size_t i = 0; i < sizeof rnd; ++i) salt[i] = SALT_CHARS[rnd[i] % 64];
     salt[sizeof rnd] = 0;
@@ -588,8 +589,9 @@ static users_rc_t new_password(const char *aad, const char *pass, char hash[HASH
 {
     users_rc_t rc = check_password(pass, e);
     if (rc) return rc;
-    if (users_hash(pass, hash, HASH_MAX) < 0)
-        return fail(e, USERS_EIO, "password", "%scannot hash passwords here (crypt)", "");
+    int h = users_hash(pass, hash, HASH_MAX);
+    if (h == -2) return fail(e, USERS_EIO, "password", "%s", secret_strerror(SECRET_ENORAND));
+    if (h < 0) return fail(e, USERS_EIO, "password", "%scannot hash passwords here (crypt)", "");
     secret_rc_t s = secret_seal(aad, pass, enc, ENC_MAX);
     if (s != SECRET_OK) {
         char key[200];
@@ -837,6 +839,9 @@ users_rc_t users_set_system_password(const char *password, users_err_t *e)
 static void keep_password(const char *name, const char *pass, const char *acct, const char *id)
 {
     char aad[96];
+    /* A login does not wait for random numbers (just after power-on): the
+     * password is kept at a later one. */
+    if (!vg_random_ready()) return;
     if (id) system_aad(acct, aad, sizeof aad);
     else user_aad(name, aad, sizeof aad);
     users_db_t *db = malloc(sizeof *db);

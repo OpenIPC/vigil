@@ -60,6 +60,7 @@
 #include "onvif_proto.h"
 #include "sys_net.h"
 #include "users.h"
+#include "vg_random.h"
 
 #ifndef VIGIL_VERSION
 #define VIGIL_VERSION "dev"
@@ -81,7 +82,9 @@ static int               g_thread_up;
 static atomic_int        g_stop;
 static struct mg_context *g_ctx;            /* the supervisor's */
 static atomic_int        g_port;            /* where g_ctx listens; 0 none */
-static unsigned char     g_key[16];         /* HTTP Digest nonces */
+static unsigned char     g_key[16];         /* HTTP Digest nonces' MAC key (nonce_key) */
+static atomic_int        g_key_ok;
+static pthread_mutex_t   g_key_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static pthread_mutex_t   g_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned char     g_seen[SEEN_N][16];    /* md5 of UsernameToken nonces */
@@ -109,26 +112,24 @@ static long mono(void)
     return (long)ts.tv_sec;
 }
 
-static void random_bytes(unsigned char *b, size_t n)
+/* The key the Digest nonces are signed with, drawn at the first login
+ * rather than at start-up, and strong (vg_random.h): with a guessable one
+ * anyone could mint fresh nonces. Just after power-on, until the kernel's
+ * random numbers are ready, there is none and a login is asked to come
+ * back (503). 1 when there is one. */
+static int nonce_key(void)
 {
-    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-    ssize_t r = fd >= 0 ? read(fd, b, n) : -1;
-    if (fd >= 0) close(fd);
-    if (r != (ssize_t)n) {
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        unsigned v = (unsigned)ts.tv_nsec ^ (unsigned)getpid() << 16;
-        for (size_t i = 0; i < n; ++i) {
-            v = v * 1103515245u + 12345u;
-            b[i] = (unsigned char)(v >> 16);
-        }
-    }
+    if (atomic_load(&g_key_ok)) return 1;
+    pthread_mutex_lock(&g_key_lock);
+    if (!atomic_load(&g_key_ok) && vg_random(g_key, sizeof g_key, VG_RAND_STRONG) == 0) atomic_store(&g_key_ok, 1);
+    pthread_mutex_unlock(&g_key_lock);
+    return atomic_load(&g_key_ok);
 }
 
 static void new_uuid(char out[46])
 {
     unsigned char r[16];
-    random_bytes(r, sizeof r);
+    vg_random(r, sizeof r, VG_RAND_WEAK);  /* a message id: only has to differ */
     r[6] = (unsigned char)((r[6] & 0x0f) | 0x40);
     r[8] = (unsigned char)((r[8] & 0x3f) | 0x80);
     snprintf(out, 46, "urn:uuid:%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", r[0], r[1],
@@ -1247,6 +1248,7 @@ static int authenticate(req_t *q, unsigned *perms)
     if (!hdr) return AUTH_NONE;
     if (!strncasecmp(hdr, "Digest", 6)) {
         onvif_digest_t d;
+        if (!nonce_key()) return AUTH_NONE;     /* no nonce of ours is out yet */
         if (onvif_digest_parse(hdr, &d) < 0 || strcmp(d.realm, REALM) != 0) return AUTH_BAD;
         long now = mono(), age = onvif_digest_nonce_age(g_key, d.nonce, now);
         if (age < 0) return AUTH_BAD;
@@ -1367,6 +1369,14 @@ static void req_host(req_t *q)
     snprintf(q->host, sizeof q->host, "%s:%d", q->hostname, mg_get_request_info(q->conn)->server_port);
 }
 
+/* No nonce to ask for a login with yet (nonce_key): come back. */
+static int not_yet(struct mg_connection *conn)
+{
+    vg_log("onvif: no random numbers for a login yet (just started); asked to retry");
+    return send_plain(conn, 503, "ONVIF: the recorder has just started; try again in a few seconds\n", "Retry-After",
+                      "5");
+}
+
 static int handler(struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
@@ -1398,6 +1408,8 @@ static int handler(struct mg_connection *conn, void *cbdata)
     int parsed = onvif_soap_parse(body, n, &q->soap) == 0;
     if (!cfg->onvif_server.enabled) {
         rc = send_plain(conn, 503, "ONVIF is turned off (onvif_server.enabled)\n", NULL, NULL);
+    } else if (!parsed && !n && !mg_get_header(conn, "Authorization") && !nonce_key()) {
+        rc = not_yet(conn);
     } else if (!parsed && !n && !mg_get_header(conn, "Authorization")) {
         /* An HTTP client that logs in first (curl --digest) sends no
          * body until it has been asked to. */
@@ -1421,11 +1433,15 @@ static int handler(struct mg_connection *conn, void *cbdata)
             /* No (or a stale) HTTP login: ask for one. A client that sent
              * a UsernameToken is told by the fault below instead. */
             char nonce[41], www[160];
-            onvif_digest_nonce(g_key, mono(), atomic_fetch_add(&g_nonce_serial, 1), nonce);
-            snprintf(www, sizeof www, "Digest realm=\"" REALM "\", qop=\"auth\", nonce=\"%s\", algorithm=MD5%s", nonce,
-                     a == AUTH_STALE ? ", stale=true" : "");
-            fault(q, 401, "s:Sender", "ter:NotAuthorized", NULL, "Sender not authorized");
-            rc = send_fault(q, "WWW-Authenticate", www);
+            if (!nonce_key()) {
+                rc = not_yet(conn);
+            } else {
+                onvif_digest_nonce(g_key, mono(), atomic_fetch_add(&g_nonce_serial, 1), nonce);
+                snprintf(www, sizeof www, "Digest realm=\"" REALM "\", qop=\"auth\", nonce=\"%s\", algorithm=MD5%s",
+                         nonce, a == AUTH_STALE ? ", stale=true" : "");
+                fault(q, 401, "s:Sender", "ter:NotAuthorized", NULL, "Sender not authorized");
+                rc = send_fault(q, "WWW-Authenticate", www);
+            }
         } else if (a != AUTH_OK) {
             fault(q, 400, "s:Sender", "ter:NotAuthorized", NULL,
                   a == AUTH_LOCKED ? "Too many failed logins from this address; try again later"
@@ -1733,7 +1749,6 @@ int onvif_start(void)
 {
     if (g_thread_up) return 0;
     ident_init(&g_id);
-    random_bytes(g_key, sizeof g_key);
     api_auth_init();
     disc_set_self(g_id.uuid);
     mg_init_library(0);

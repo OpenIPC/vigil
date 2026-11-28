@@ -178,7 +178,8 @@ int users_login_with(const char *name, int (*check)(const char *pass, void *ctx)
 int users_login_netip(const char *name, const char *xm, unsigned *perms, char *why, size_t cap);
 
 /* A crypt(3) hash of `pass` with a fresh random salt: SHA-512, else
- * SHA-256, else MD5, whichever the C library has. 0, or -1. */
+ * SHA-256, else MD5, whichever the C library has. 0, -1, or -2 when the
+ * kernel's random numbers are not ready yet (secret_random). */
 int users_hash(const char *pass, char *out, size_t cap);
 
 /* ---- configuration exports (src/api/backup.c) -------------------------------------

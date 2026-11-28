@@ -16,6 +16,7 @@
 #include "config.h"
 #include "log.h"
 #include "logbook.h"
+#include "vg_random.h"
 
 #define CHUNK      16384            /* the disk's files are read backwards this much at a time */
 #define LINE_MAX_  2048             /* a longer "line" is not one of ours */
@@ -47,10 +48,8 @@ static uint32_t       g_boot;
 
 static void boot_init(void)
 {
-    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-    if (fd < 0 || read(fd, &g_boot, sizeof g_boot) != (ssize_t)sizeof g_boot)
-        g_boot = (uint32_t)time(NULL) ^ ((uint32_t)getpid() << 16);
-    if (fd >= 0) close(fd);
+    /* Weak is enough (vg_random.h): ids only have to differ between boots. */
+    vg_random(&g_boot, sizeof g_boot, VG_RAND_WEAK);
 }
 
 /* ---- lines ----------------------------------------------------------------------------- */

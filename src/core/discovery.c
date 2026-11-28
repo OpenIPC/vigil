@@ -26,6 +26,7 @@
 #include "log.h"
 #include "schema.h"
 #include "source.h"
+#include "vg_random.h"
 
 #define IFACE_MAX   16
 #define ROUNDS      3                /* searches per scan, a second apart */
@@ -557,12 +558,7 @@ static int scanner_open(scanner_t *s, const disc_scan_opts_t *o)
     s->fd[1] = s->protos & DISC_ONVIF ? udp_socket(0) : -1;
     s->fd[2] = s->protos & DISC_DHIP ? udp_socket(0) : -1;
     unsigned char rb[8];
-    FILE *f = fopen("/dev/urandom", "rb");
-    if (!f || fread(rb, 1, sizeof rb, f) != sizeof rb) {
-        long long t = mono_ms();
-        memcpy(rb, &t, sizeof rb);
-    }
-    if (f) fclose(f);
+    vg_random(rb, sizeof rb, VG_RAND_WEAK);     /* a search's message id: only has to differ */
     snprintf(s->msgid, sizeof s->msgid, "uuid:%02x%02x%02x%02x-%02x%02x-4%01x%02x-8000-%012llx",
              rb[0], rb[1], rb[2], rb[3], rb[4], rb[5], rb[6] & 15, rb[7], (unsigned long long)mono_ms() & 0xffffffffffffULL);
     return (s->fd[0] >= 0 || s->fd[1] >= 0 || s->fd[2] >= 0) ? 0 : -1;

@@ -17,6 +17,7 @@
 #include "logs.h"
 #include "schema_yaml.h"
 #include "secret.h"
+#include "vg_random.h"
 
 #define FILE_MAX (256u << 10)       /* far above any real configuration */
 
@@ -559,6 +560,77 @@ static void log_errors(const char *what, const schema_errors_t *errs)
     if (errs->total > errs->n) vg_log("%s: %d more errors", what, errs->total - errs->n);
 }
 
+/* Passwords found in the clear by config_init while the kernel's random
+ * numbers were not ready yet (just after a first power-on): start-up does
+ * not wait for them. The file as loaded is sealed by seal_later once they
+ * are, unless a save (commit_locked) has sealed everything first. Under
+ * g_write. */
+static vigil_config_t *g_plain_cfg;
+static char            g_plain_path[256];
+static int             g_plain_waits;   /* seal_later runs */
+
+static void plain_drop(void)
+{
+    if (g_plain_cfg) {
+        secret_wipe(g_plain_cfg, sizeof *g_plain_cfg);
+        free(g_plain_cfg);
+        g_plain_cfg = NULL;
+    }
+}
+
+static void *seal_later(void *arg)
+{
+    (void)arg;
+    unsigned char x;
+    int ready = vg_random_wait(&x, 1, -1) == 0;
+    pthread_mutex_lock(&g_write);
+    vigil_config_t *c = g_plain_cfg;
+    g_plain_cfg = NULL;
+    g_plain_waits = 0;
+    if (c && ready) {
+        char err[700];
+        if (config_save_file(g_plain_path, c, err, sizeof err) < 0)
+            vg_log("%s: the password(s) in the clear still not sealed: %s", g_plain_path, err);
+        else
+            vg_log("%s: the password(s) found in the clear sealed, now that there are random numbers", g_plain_path);
+    }
+    pthread_mutex_unlock(&g_write);
+    if (c) {
+        secret_wipe(c, sizeof *c);
+        free(c);
+    }
+    return NULL;
+}
+
+static void seal_when_ready(const vigil_config_t *loaded, int n)
+{
+    vigil_config_t *c = malloc(sizeof *c);
+    if (!c) return;
+    *c = *loaded;
+    pthread_mutex_lock(&g_write);
+    plain_drop();
+    g_plain_cfg = c;
+    snprintf(g_plain_path, sizeof g_plain_path, "%s", g_path);
+    if (!g_plain_waits) {
+        pthread_t t;
+        pthread_attr_t a;
+        pthread_attr_init(&a);
+        pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+        g_plain_waits = pthread_create(&t, &a, seal_later, NULL) == 0;
+        pthread_attr_destroy(&a);
+    }
+    if (!g_plain_waits) {
+        g_plain_cfg = NULL;
+        secret_wipe(c, sizeof *c);
+        free(c);
+        vg_log("%s: %d password(s) in the clear, not sealed: no thread to wait for random numbers", g_path, n);
+    } else {
+        vg_log("%s: %d password(s) found in the clear: sealed once the kernel's random numbers are ready", g_path,
+               n);
+    }
+    pthread_mutex_unlock(&g_write);
+}
+
 int config_init(const char *path)
 {
     vigil_config_t c;
@@ -579,11 +651,16 @@ int config_init(const char *path)
     if (rc != 0) kept_free(st.kept);
     if (rc == 0 && st.lost)
         vg_log("%s: %d password(s) cannot be read; kept sealed in the file until set again", g_path, st.lost);
+    pthread_mutex_lock(&g_write);
+    plain_drop();                       /* another file now */
+    pthread_mutex_unlock(&g_write);
     if (rc == 0 && st.plain) {
         /* Passwords in the clear (a file from before they were sealed, or
          * typed in by hand): sealed now, not at the next change. */
         char err[700];
-        if (config_save_file(g_path, &c, err, sizeof err) < 0)
+        if (!vg_random_ready())
+            seal_when_ready(&c, st.plain);
+        else if (config_save_file(g_path, &c, err, sizeof err) < 0)
             vg_log("%s: %d password(s) in the clear, not sealed: %s", g_path, st.plain, err);
         else
             vg_log("%s: %d password(s) found in the clear, sealed", g_path, st.plain);
@@ -741,7 +818,9 @@ static config_rc_t commit_locked(vigil_config_t *nc, const char *what, schema_er
         return CONFIG_EIO;
     }
     /* Saved, or at least renamed into place (saved == 1): the new file is
-     * what the next start reads, so it is also what runs now. */
+     * what the next start reads, so it is also what runs now. Every
+     * password in it is sealed: seal_later has nothing left to do. */
+    plain_drop();
     pthread_mutex_lock(&g_lock);
     g_cfg = *nc;
     g_file_bad = 0;

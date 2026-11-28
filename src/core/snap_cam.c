@@ -21,6 +21,7 @@
 #include "onvif_proto.h"
 #include "sha1.h"
 #include "snap_cam.h"
+#include "vg_random.h"
 #include "source.h"
 
 #define CONNECT_MS   3000
@@ -536,16 +537,9 @@ static int http_get_once(const char *host, int port, const char *path, const cha
 static void random_hex(char *out, size_t n)
 {
     unsigned char b[16];
-    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-    ssize_t r = fd >= 0 ? read(fd, b, sizeof b) : -1;
-    if (fd >= 0) close(fd);
-    if (r != (ssize_t)sizeof b) {
-        unsigned v = (unsigned)now_ms() ^ (unsigned)getpid() << 16;
-        for (size_t i = 0; i < sizeof b; ++i) {
-            v = v * 1103515245u + 12345u;
-            b[i] = (unsigned char)(v >> 16);
-        }
-    }
+    /* Weak is enough (vg_random.h): a client's cnonce to a camera only has
+     * to differ. */
+    vg_random(b, sizeof b, VG_RAND_WEAK);
     for (size_t i = 0; i < n / 2 && i < sizeof b; ++i) snprintf(out + 2 * i, 3, "%02x", b[i]);
 }
 

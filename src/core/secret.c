@@ -19,6 +19,7 @@
 #include "config.h"
 #include "log.h"
 #include "secret.h"
+#include "vg_random.h"
 
 #define NONCE_LEN 12
 #define TAG_LEN   16
@@ -109,56 +110,60 @@ static secret_rc_t read_key(const char *path)
     return SECRET_OK;
 }
 
-static int random_bytes(void *buf, size_t len)
+/* Keys, nonces and salts only from an initialised pool (vg_random.h).
+ * The key is made at the first sealing, not at start-up, so by the time
+ * someone sets a password the pool is long ready; if not (a password set
+ * in the first seconds after a first power-on), that save waits for it a
+ * moment, and fails with SECRET_ENORAND rather than seal with less. -1
+ * with errno EAGAIN: not ready yet. */
+static int random_bytes(void *buf, size_t len) { return vg_random_wait(buf, len, SECRET_RAND_WAIT_MS); }
+
+static secret_rc_t no_random(void) { return errno == EAGAIN ? SECRET_ENORAND : SECRET_ENOKEY; }
+
+/* The bytes for a new key, drawn before g_lock is taken: they may take a
+ * moment, and opening a password (a login, a camera) must not wait. */
+static secret_rc_t fresh_key(unsigned char key[SECRET_KEY_LEN])
 {
-    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return -1;
-    size_t done = 0;
-    while (done < len) {
-        ssize_t n = read(fd, (char *)buf + done, len - done);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) break;
-        done += (size_t)n;
-    }
-    close(fd);
-    return done == len ? 0 : -1;
+    if (random_bytes(key, SECRET_KEY_LEN) == 0) return SECRET_OK;
+    secret_rc_t rc = no_random();
+    char path[300];
+    vg_log("%s: no key made: %s", secret_key_path(path, sizeof path),
+           rc == SECRET_ENORAND ? "the kernel's random numbers are not ready yet" : "no random numbers");
+    return rc;
 }
 
-/* A new key at `path`, only where there is no file: an unreadable one is
- * someone's key, never replaced. */
-static secret_rc_t make_key(const char *path)
+/* Under g_lock: `key` (fresh_key's) as the key at `path`, written over
+ * whatever is there; key_locked makes it only where there is no file (an
+ * unreadable one is someone's key, never replaced). */
+static secret_rc_t make_key(const char *path, const unsigned char key[SECRET_KEY_LEN])
 {
-    unsigned char key[SECRET_KEY_LEN];
     char text[2 * SECRET_KEY_LEN + 2], err[300];
-    if (random_bytes(key, sizeof key) < 0) {
-        vg_log("%s: no randomness (/dev/urandom) for a key", path);
-        return SECRET_ENOKEY;
-    }
     for (int i = 0; i < SECRET_KEY_LEN; ++i) snprintf(text + 2 * i, 3, "%02x", key[i]);
     text[2 * SECRET_KEY_LEN] = '\n';
     text[2 * SECRET_KEY_LEN + 1] = 0;
     int rc = config_write_atomic(path, text, 2 * SECRET_KEY_LEN + 1, err, sizeof err);
     secret_wipe(text, sizeof text);
     if (rc < 0) {
-        secret_wipe(key, sizeof key);
         vg_log("cannot make the key for vigil's passwords: %s", err);
         return SECRET_ENOKEY;
     }
-    memcpy(g_key, key, sizeof key);
-    secret_wipe(key, sizeof key);
+    memcpy(g_key, key, SECRET_KEY_LEN);
     g_have = 1;
     vg_log("%s: a new key for the passwords vigil keeps (keep it with the board, not with its backups)", path);
     return SECRET_OK;
 }
 
-/* Under g_lock: the key in g_key, read or (`create`) made. */
-static secret_rc_t key_locked(int create)
+/* Under g_lock: the key in g_key, read, or made from `fresh` when there
+ * is no file. Without `fresh`, `quiet` leaves a missing file unsaid (the
+ * caller is about to make one). */
+static secret_rc_t key_locked(const unsigned char *fresh, int quiet)
 {
     if (g_have) return SECRET_OK;
     char path[300];
     path_locked(path, sizeof path);
     secret_rc_t rc = read_key(path);
-    if (rc == SECRET_ENOKEY && create) rc = make_key(path);
+    if (rc == SECRET_ENOKEY && fresh) rc = make_key(path, fresh);
+    if (rc == SECRET_ENOKEY && quiet) return rc;
     if (rc != SECRET_OK && rc != g_why) {
         g_why = rc;
         vg_log("%s: %s", path, rc == SECRET_ENOKEY ? "no key: the passwords sealed with one cannot be read"
@@ -168,11 +173,31 @@ static secret_rc_t key_locked(int create)
     return rc;
 }
 
-secret_rc_t secret_ensure_key(void)
+/* The key into `out`: read, or (`create`) made when there is no file. */
+static secret_rc_t key_get(int create, unsigned char out[SECRET_KEY_LEN])
 {
     pthread_mutex_lock(&g_lock);
-    secret_rc_t rc = key_locked(1);
+    secret_rc_t rc = key_locked(NULL, create);
+    if (rc == SECRET_OK) memcpy(out, g_key, SECRET_KEY_LEN);
     pthread_mutex_unlock(&g_lock);
+    if (rc != SECRET_ENOKEY || !create) return rc;
+    unsigned char fresh[SECRET_KEY_LEN];
+    rc = fresh_key(fresh);
+    if (rc == SECRET_OK) {
+        pthread_mutex_lock(&g_lock);
+        rc = key_locked(fresh, 0);      /* or the one another thread made meanwhile */
+        if (rc == SECRET_OK) memcpy(out, g_key, SECRET_KEY_LEN);
+        pthread_mutex_unlock(&g_lock);
+    }
+    secret_wipe(fresh, sizeof fresh);
+    return rc;
+}
+
+secret_rc_t secret_ensure_key(void)
+{
+    unsigned char key[SECRET_KEY_LEN];
+    secret_rc_t rc = key_get(1, key);
+    secret_wipe(key, sizeof key);
     return rc;
 }
 
@@ -189,7 +214,7 @@ static secret_rc_t seal_key(const unsigned char *key, const char *prefix, const 
     size_t len = strlen(plain), pre = strlen(prefix);
     if (len > PLAIN_MAX || cap < SECRET_SEALED_SIZE(len) - sizeof SECRET_PREFIX + 1 + pre) return SECRET_EFORMAT;
     unsigned char buf[NONCE_LEN + PLAIN_MAX + TAG_LEN];
-    if (random_bytes(buf, NONCE_LEN) < 0) return SECRET_ENOKEY;
+    if (random_bytes(buf, NONCE_LEN) < 0) return no_random();
     mbedtls_gcm_context gcm;
     mbedtls_gcm_init(&gcm);
     int bad = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 8 * SECRET_KEY_LEN) ||
@@ -249,10 +274,7 @@ secret_rc_t secret_seal(const char *aad, const char *plain, char *out, size_t ca
     size_t len = strlen(plain);
     if (len > PLAIN_MAX || cap < SECRET_SEALED_SIZE(len)) return SECRET_EFORMAT;
     unsigned char key[SECRET_KEY_LEN];
-    pthread_mutex_lock(&g_lock);
-    secret_rc_t rc = key_locked(1);
-    if (rc == SECRET_OK) memcpy(key, g_key, sizeof key);
-    pthread_mutex_unlock(&g_lock);
+    secret_rc_t rc = key_get(1, key);
     if (rc != SECRET_OK) return rc;
     rc = seal_key(key, SECRET_PREFIX, aad, plain, out, cap);
     secret_wipe(key, sizeof key);
@@ -268,10 +290,7 @@ secret_rc_t secret_open(const char *aad, const char *in, char *out, size_t cap)
     if (!n) return SECRET_EFORMAT;
     if (n - NONCE_LEN - TAG_LEN >= cap) return SECRET_EFORMAT;
     unsigned char key[SECRET_KEY_LEN];
-    pthread_mutex_lock(&g_lock);
-    secret_rc_t rc = key_locked(0);
-    if (rc == SECRET_OK) memcpy(key, g_key, sizeof key);
-    pthread_mutex_unlock(&g_lock);
+    secret_rc_t rc = key_get(0, key);
     if (rc == SECRET_OK) rc = open_key(key, buf, n, aad, out, cap);
     secret_wipe(key, sizeof key);
     secret_wipe(buf, sizeof buf);
@@ -316,6 +335,9 @@ int secret_random(void *buf, size_t len) { return random_bytes(buf, len); }
 
 secret_rc_t secret_new_key(void)
 {
+    unsigned char fresh[SECRET_KEY_LEN];
+    secret_rc_t rc = fresh_key(fresh);
+    if (rc != SECRET_OK) return rc;     /* the old key is kept */
     char path[300];
     pthread_mutex_lock(&g_lock);
     path_locked(path, sizeof path);
@@ -325,7 +347,7 @@ secret_rc_t secret_new_key(void)
     g_have = 0;
     /* make_key writes over the file: here, and only here, replacing a key
      * is what is asked for (a reset: what it sealed is gone with it). */
-    secret_rc_t rc = make_key(path);
+    rc = make_key(path, fresh);
     if (rc != SECRET_OK && had) {
         memcpy(g_key, old, sizeof old);
         g_have = 1;
@@ -333,6 +355,7 @@ secret_rc_t secret_new_key(void)
     g_why = SECRET_OK;
     pthread_mutex_unlock(&g_lock);
     secret_wipe(old, sizeof old);
+    secret_wipe(fresh, sizeof fresh);
     return rc;
 }
 
@@ -345,6 +368,7 @@ const char *secret_strerror(secret_rc_t rc)
     case SECRET_EAUTH:   return "sealed with another key, or for another setting";
     case SECRET_EFORMAT: return "not a sealed value";
     case SECRET_ENOMEM:  return "out of memory";
+    case SECRET_ENORAND: return "no random numbers yet (the system has just started): try again in a moment";
     }
     return "?";
 }

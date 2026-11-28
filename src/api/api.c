@@ -30,6 +30,7 @@
 #include "onvif_proto.h"
 #include "sys_time.h"
 #include "users.h"
+#include "vg_random.h"
 
 #define BODY_MAX        (64u << 10)  /* a full configuration is ~10 KiB */
 #define WS_MAX          4            /* each WebSocket holds a CivetWeb worker and a writer */
@@ -998,18 +999,12 @@ static int log_message(const struct mg_connection *conn, const char *msg)
 
 static void random_key_once(void)
 {
-    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
-    ssize_t n = fd >= 0 ? read(fd, g_cache_key, sizeof g_cache_key) : -1;
-    if (fd >= 0) close(fd);
-    if (n != (ssize_t)sizeof g_cache_key) {
-        /* No urandom: the cache key only has to differ from run to run. */
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        unsigned v = (unsigned)ts.tv_nsec ^ (unsigned)getpid() << 16;
-        for (size_t i = 0; i < sizeof g_cache_key; ++i) g_cache_key[i] = (unsigned char)(v >> (i % 4 * 8)) ^ (unsigned char)i;
-    }
-    /* The Digest nonces' key, from the same randomness before it is
-     * folded into printable characters. */
+    /* Weak is enough (vg_random.h): the cache key only has to differ from
+     * run to run, and it is drawn at start-up, which does not wait for the
+     * kernel's random numbers. */
+    vg_random(g_cache_key, sizeof g_cache_key, VG_RAND_WEAK);
+    /* The Digest nonces' key, from the same bytes before they are folded
+     * into printable characters. */
     md5_raw(g_cache_key, sizeof g_cache_key, g_dkey);
     for (size_t i = 0; i < sizeof g_cache_key; ++i)       /* printable for %.16s */
         g_cache_key[i] = (unsigned char)('!' + g_cache_key[i] % 90);

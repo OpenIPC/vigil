@@ -41,6 +41,7 @@
 #include "rec_sched.h"
 #include "secret.h"
 #include "tar.h"
+#include "vg_random.h"
 #include "rtp_depay.h"
 #include "source.h"
 #include "rtsp_client.h"
@@ -4117,6 +4118,132 @@ static void test_export_pieces(void)
     tar_out_free(&t);
 }
 
+/* ---- random numbers before the kernel's pool is ready (vg_random.c) ---------------- */
+
+static atomic_int g_pool_ready, g_pool_calls, g_pool_short;
+
+/* getrandom(2) of a kernel just after power-on: EAGAIN until
+ * g_pool_ready; a blocking call waits for it. g_pool_short: a byte at a
+ * time, as getrandom may on a signal. */
+static long pool_stub(void *buf, size_t n, int nonblock)
+{
+    atomic_fetch_add(&g_pool_calls, 1);
+    while (!atomic_load(&g_pool_ready)) {
+        if (nonblock) {
+            errno = EAGAIN;
+            return -1;
+        }
+        usleep(5000);
+    }
+    if (atomic_load(&g_pool_short) && n > 1) n = 1;
+    static unsigned char v = 1;
+    for (size_t i = 0; i < n; ++i) ((unsigned char *)buf)[i] = v++;
+    return (long)n;
+}
+
+static void *pool_ready_later(void *arg)
+{
+    usleep((useconds_t)(intptr_t)arg * 1000);
+    atomic_store(&g_pool_ready, 1);
+    return NULL;
+}
+
+static long ms_since(const struct timeval *t0)
+{
+    struct timeval t;
+    gettimeofday(&t, NULL);
+    return (t.tv_sec - t0->tv_sec) * 1000 + (t.tv_usec - t0->tv_usec) / 1000;
+}
+
+static void test_random_pool(const char *keydir)
+{
+    unsigned char a[32], b[32], z[32] = { 0 };
+    /* The kernel's own, here long initialised. */
+    CHECK(vg_random(a, sizeof a, VG_RAND_STRONG) == 0 && vg_random(b, sizeof b, VG_RAND_STRONG) == 0 &&
+              memcmp(a, b, sizeof a) && memcmp(a, z, sizeof a) && vg_random_ready(),
+          "strong bytes from the kernel");
+
+    atomic_store(&g_pool_ready, 0);
+    atomic_store(&g_pool_calls, 0);
+    vg_random_set_source(pool_stub);
+    errno = 0;
+    CHECK(vg_random(a, sizeof a, VG_RAND_STRONG) < 0 && errno == EAGAIN && !vg_random_ready(),
+          "not ready: strong refuses (EAGAIN), never blocks");
+    int calls = atomic_load(&g_pool_calls);
+    CHECK(vg_random(a, sizeof a, VG_RAND_WEAK) == 0 && vg_random(b, sizeof b, VG_RAND_WEAK) == 0 &&
+              memcmp(a, b, sizeof a) && atomic_load(&g_pool_calls) == calls + 2,
+          "not ready: weak still gives bytes, different each time, the kernel asked first");
+    struct timeval t0;
+    gettimeofday(&t0, NULL);
+    errno = 0;
+    CHECK(vg_random_wait(a, sizeof a, 150) < 0 && errno == EAGAIN && ms_since(&t0) >= 140,
+          "a wait that runs out: EAGAIN after it (%ld ms)", ms_since(&t0));
+    pthread_t th;
+    pthread_create(&th, NULL, pool_ready_later, (void *)(intptr_t)100);
+    gettimeofday(&t0, NULL);
+    CHECK(vg_random_wait(a, sizeof a, 3000) == 0 && ms_since(&t0) < 2000 && vg_random_ready(),
+          "a wait that sees the pool ready: the bytes (%ld ms)", ms_since(&t0));
+    pthread_join(th, NULL);
+    atomic_store(&g_pool_short, 1);
+    memset(a, 0, sizeof a);
+    CHECK(vg_random(a, sizeof a, VG_RAND_STRONG) == 0 && a[0] && a[31], "short reads: all of it filled");
+    atomic_store(&g_pool_short, 0);
+
+    /* The passwords' key: made at the first sealing, and not from a pool
+     * that is not ready. */
+    char key[160], old[160], sealed[200], out[64];
+    secret_key_path(old, sizeof old);
+    snprintf(key, sizeof key, "%s/lazy.key", keydir);
+    secret_set_key_path(key);
+    atomic_store(&g_pool_ready, 0);
+    vg_random_set_source(pool_stub);
+    gettimeofday(&t0, NULL);
+    secret_rc_t rc = secret_seal("t:a", "pw", sealed, sizeof sealed);
+    CHECK(rc == SECRET_ENORAND && access(key, F_OK) != 0 && !sealed[0] && ms_since(&t0) >= SECRET_RAND_WAIT_MS - 100,
+          "not ready: no key made, nothing sealed, after waiting a moment (%d, %ld ms)", rc, ms_since(&t0));
+    CHECK(strstr(secret_strerror(SECRET_ENORAND), "try again"), "and the reason says to try again");
+    pthread_create(&th, NULL, pool_ready_later, (void *)(intptr_t)200);
+    rc = secret_seal("t:a", "pw", sealed, sizeof sealed);
+    CHECK(rc == SECRET_OK && access(key, F_OK) == 0 && secret_open("t:a", sealed, out, sizeof out) == SECRET_OK &&
+              !strcmp(out, "pw"),
+          "ready in that moment: the key made, the password sealed (%d)", rc);
+    pthread_join(th, NULL);
+    /* With the key there, a seal still needs a nonce. */
+    atomic_store(&g_pool_ready, 0);
+    vg_random_set_source(pool_stub);
+    pthread_create(&th, NULL, pool_ready_later, (void *)(intptr_t)100);
+    CHECK(secret_seal("t:a", "pw", sealed, sizeof sealed) == SECRET_OK, "a nonce waited for as well");
+    pthread_join(th, NULL);
+
+    /* Passwords in the clear at start-up, the pool not ready: the start
+     * does not wait; they are sealed once it is. */
+    char cfg[160];
+    snprintf(cfg, sizeof cfg, "%s/early.yaml", keydir);
+    write_file(cfg, "cameras:\n  - url: \"rtsp://admin:Early-Pa55@10.0.0.2/stream\"\n");
+    atomic_store(&g_pool_ready, 0);
+    vg_random_set_source(pool_stub);
+    gettimeofday(&t0, NULL);
+    CHECK(config_init(cfg) == 0 && ms_since(&t0) < 1000, "start-up does not wait (%ld ms)", ms_since(&t0));
+    char *t = read_file(cfg);
+    CHECK(t && strstr(t, "Early-Pa55"), "still in the clear while the pool is not ready");
+    free(t);
+    atomic_store(&g_pool_ready, 1);
+    int sealed_now = 0;
+    for (int i = 0; i < 200 && !sealed_now; ++i) {
+        usleep(10000);
+        t = read_file(cfg);
+        sealed_now = t && !strstr(t, "Early-Pa55") && strstr(t, "rtsp://admin:enc:v1:");
+        free(t);
+    }
+    CHECK(sealed_now, "sealed once it is ready");
+    vigil_config_t d;
+    config_get(&d);
+    CHECK(!strcmp(d.cameras[0].url, "rtsp://admin:Early-Pa55@10.0.0.2/stream"), "in force all along");
+
+    vg_random_set_source(NULL);
+    secret_set_key_path(old);
+}
+
 int main(int argc, char **argv)
 {
     g_data = argc > 1 ? argv[1] : "tests/data";
@@ -4126,6 +4253,7 @@ int main(int argc, char **argv)
     snprintf(key, sizeof key, "%s/vigil.key", keydir);
     secret_set_key_path(key);
     test_secret_cipher(keydir);
+    test_random_pool(keydir);
     test_export_pieces();
     test_sps();
     test_au_norm();
