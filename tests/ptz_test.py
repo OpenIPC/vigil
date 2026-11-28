@@ -5,13 +5,17 @@
     ptz_test.py VIGILD CLIP
 
 Starts the NETIP camera emulator with a simulated PTZ head (netip_server.py
---ptz-log) as channel 1, an empty channel 2, and vigild with the API on a
-free port; then: the capabilities, a move that stops on its own when its
-timeout runs out, a move stopped by the client, presets set / renamed /
-gone to / removed and their names kept in vigil.ptz.json (no password in
-it), what is refused (bad values, no camera, the ptz permission), and a
-camera left moving when vigild stops being stopped. Only the standard
-library.
+--ptz-log) as channel 1, an empty channel 2, three fake ONVIF cameras
+(fake_onvif_ptz.py: a PTZ dome as channel 3, one refusing ContinuousMove's
+Timeout as 4, one without PTZ as 5), and vigild with the API on a free
+port; then, over NETIP: the capabilities, a move that stops on its own when
+its timeout runs out, a move stopped by the client, presets set / renamed
+/ gone to / removed and their names kept in vigil.ptz.json (no password in
+it), what is refused (bad values, no camera, the ptz permission); over
+ONVIF: the services found, a move repeated while it lasts and stopped,
+focus and auto focus, the camera's presets with a rename kept here, home,
+a tour, a camera that refuses the Timeout, one without PTZ; and a camera
+left moving when vigild stops being stopped. Only the standard library.
 """
 import base64
 import json
@@ -85,6 +89,7 @@ def main():
     vigild, clip = sys.argv[1], sys.argv[2]
     tmp = tempfile.mkdtemp(prefix="vigil-ptz-", dir=os.getcwd())
     api_port, cam_port = free_port(), free_port()
+    onvif_ports = [free_port(), free_port(), free_port()]
     shadow = os.path.join(tmp, "shadow")
     with open(shadow, "w") as f:
         f.write("root:%s:19000:0:99999:7:::\n" % HASH)
@@ -92,13 +97,25 @@ def main():
     with open(cfg, "w") as f:
         f.write("cameras:\n  - url: \"netip://admin:cam@127.0.0.1:%d/?ch=0\"\n    name: Dome\n"
                 "  - url: \"\"\n"
+                "  - url: \"rtsp://admin:onv@127.0.0.1:9/dome\"\n    name: Dome ONVIF\n"
+                "    onvif_url: \"http://127.0.0.1:%d/onvif/device_service\"\n"
+                "  - url: \"rtsp://admin:onv@127.0.0.1:9/old\"\n"
+                "    onvif_url: \"http://127.0.0.1:%d/onvif/device_service\"\n"
+                "  - url: \"rtsp://admin:onv@127.0.0.1:9/fixed\"\n"
+                "    onvif_url: \"http://127.0.0.1:%d/onvif/device_service\"\n"
                 "api:\n  listen: 127.0.0.1:%d\n  shadow: %s\n  users: %s\n"
                 "onvif_server:\n  enabled: false\nrtsp_server:\n  enabled: false\nnetip_server:\n  enabled: false\n"
-                % (cam_port, api_port, json.dumps(shadow), json.dumps(os.path.join(tmp, "users.yaml"))))
+                % (cam_port, onvif_ports[0], onvif_ports[1], onvif_ports[2], api_port, json.dumps(shadow),
+                   json.dumps(os.path.join(tmp, "users.yaml"))))
     log = os.path.join(tmp, "ptz.log")
     cam = subprocess.Popen([sys.executable, os.path.join(HERE, "netip_server.py"), clip, "--port", str(cam_port),
                             "--password", "cam", "--ptz-log", log],
                            stdout=open(os.path.join(tmp, "camera.log"), "w"), stderr=subprocess.STDOUT)
+    olog = [os.path.join(tmp, "onvif%d.log" % i) for i in range(3)]
+    fakes = [subprocess.Popen([sys.executable, os.path.join(HERE, "fake_onvif_ptz.py"), "--port", str(onvif_ports[i]),
+                               "--password", "onv", "--log", olog[i]] + extra,
+                              stdout=open(os.path.join(tmp, "onvif%d.out" % i), "w"), stderr=subprocess.STDOUT)
+             for i, extra in enumerate(([], ["--no-timeout"], ["--no-ptz"]))]
     vlog = os.path.join(tmp, "vigild.log")
     vd = subprocess.Popen([vigild, "-f", cfg, "-o", "none", "-t", "120"], stdout=open(vlog, "w"),
                           stderr=subprocess.STDOUT)
@@ -239,6 +256,69 @@ def main():
         st, _ = api(api_port, "POST", "/api/v1/channels/1/ptz", {"stop": True}, "otto", "ottopw")
         check(st == 202, "otto may (%s)" % st)
 
+        # ---- ONVIF
+        st, b = api(api_port, "GET", "/api/v1/channels/3/ptz?wait=8000")
+        check(st == 200 and b["state"] == "ready" and b["backend"] == "onvif" and
+              set(b["capabilities"]) == {"pan_tilt", "zoom", "focus", "focus_auto", "presets", "tours", "home"} and
+              b["presets"] == [{"id": "1", "name": "Door"}, {"id": "2", "name": "Window"}] and b["tours"] == 2,
+              "ONVIF: ready, its services, presets and tours (%s)" % b)
+        t0 = time.time()
+        api(api_port, "POST", "/api/v1/channels/3/ptz", {"move": {"pan": 0.5, "tilt": -0.25}, "timeout": 2500})
+        lines = wait_log(olog[0], lambda l: any(x["op"] == "Stop" for x in l), 6)
+        moves = [x for x in lines if x["op"] == "ContinuousMove"]
+        check(moves and moves[0]["x"] == 0.5 and moves[0]["y"] == -0.25 and moves[0]["zoom_v"] == 0 and
+              moves[0]["profile"] == "Profile_1" and moves[0]["timeout"] == "PT2S",
+              "ContinuousMove on the main profile, its velocity, Timeout PT2S (%s)" % (moves[:1],))
+        check(len(moves) >= 2, "sent again while it lasts (%d), so the camera's own Timeout never ends it" % len(moves))
+        stops = [x for x in lines if x["op"] == "Stop"]
+        check(stops and stops[0]["pantilt"] == "true" and 2.2 <= stops[0]["t"] - t0 <= 3.6,
+              "Stop when the move's 2.5 s ran out (%.2f s)" % ((stops[0]["t"] - t0) if stops else -1))
+        n = len(ptz_log(olog[0]))
+        api(api_port, "POST", "/api/v1/channels/3/ptz", {"focus": 1, "timeout": 300})
+        lines = wait_log(olog[0], lambda l: any(x["op"] == "Imaging.Stop" for x in l[n:]))
+        check([(x["op"], x.get("speed")) for x in lines[n:]] == [("Imaging.Move", 1.0), ("Imaging.Stop", None)],
+              "focus: Imaging Move continuous, then Stop")
+        api(api_port, "POST", "/api/v1/channels/3/ptz", {"focus": "auto"})
+        lines = wait_log(olog[0], lambda l: l[-1]["op"] == "Imaging.SetImagingSettings")
+        check(lines[-1].get("autofocus") == "AUTO", "focus auto: SetImagingSettings AutoFocusMode AUTO")
+        api(api_port, "POST", "/api/v1/channels/3/ptz", {"preset": {"set": None, "name": "Gate"}})
+        lines = wait_log(olog[0], lambda l: l[-1]["op"] == "GetPresets" and any(x["op"] == "SetPreset" for x in l))
+        time.sleep(0.3)
+        st, b = api(api_port, "GET", "/api/v1/channels/3/ptz")
+        check({"id": "Preset_3", "name": "Gate"} in b["presets"], "a new preset: the camera's token (%s)" % b["presets"])
+        n = len(ptz_log(olog[0]))
+        api(api_port, "POST", "/api/v1/channels/3/ptz", {"preset": {"rename": "Preset_3", "name": "Lane"}})
+        time.sleep(0.5)
+        st, b = api(api_port, "GET", "/api/v1/channels/3/ptz")
+        check({"id": "Preset_3", "name": "Lane"} in b["presets"] and len(ptz_log(olog[0])) == n,
+              "renamed here, the camera not touched")
+        api(api_port, "POST", "/api/v1/channels/3/ptz", {"preset": {"goto": "2"}})
+        lines = wait_log(olog[0], lambda l: l[-1]["op"] == "GotoPreset")
+        check(lines[-1]["token"] == "2" and lines[-1]["pan"] == 30.0 and lines[-1]["tilt"] == -10.0,
+              "goto 2: Window's position")
+        api(api_port, "POST", "/api/v1/channels/3/ptz", {"preset": {"remove": "Preset_3"}})
+        wait_log(olog[0], lambda l: l[-1]["op"] == "GetPresets" and l[-2]["op"] == "RemovePreset")
+        time.sleep(0.3)
+        st, b = api(api_port, "GET", "/api/v1/channels/3/ptz")
+        check(all(p["id"] != "Preset_3" for p in b["presets"]), "removed")
+        api(api_port, "POST", "/api/v1/channels/3/ptz", {"home": True})
+        lines = wait_log(olog[0], lambda l: l[-1]["op"] == "GotoHomePosition")
+        check(lines[-1]["op"] == "GotoHomePosition" and lines[-1]["pan"] == 0, "home")
+        api(api_port, "POST", "/api/v1/channels/3/ptz", {"tour": {"start": 2}})
+        lines = wait_log(olog[0], lambda l: l[-1]["op"] == "OperatePresetTour")
+        check(lines[-1].get("tour") == "Tour_2" and lines[-1].get("operation") == "Start", "tour 2: Tour_2 Start")
+        st, b = api(api_port, "POST", "/api/v1/channels/3/ptz", {"iris": 1})
+        check(st == 409, "iris: not over ONVIF (%s)" % st)
+
+        st, b = api(api_port, "GET", "/api/v1/channels/4/ptz?wait=8000")
+        api(api_port, "POST", "/api/v1/channels/4/ptz", {"move": {"pan": 1}, "timeout": 300})
+        lines = wait_log(olog[1], lambda l: any(x["op"] == "Stop" for x in l))
+        ops = [(x["op"], x.get("refused"), x.get("timeout")) for x in lines if x["op"] != "GetPresets"]
+        check(ops[:3] == [("ContinuousMove", "Timeout", None), ("ContinuousMove", None, ""), ("Stop", None, None)],
+              "a camera refusing the Timeout: moved without one, then stopped (%s)" % ops)
+        st, b = api(api_port, "GET", "/api/v1/channels/5/ptz?wait=8000")
+        check(b["state"] == "none" and "no PTZ" in b["error"], "a camera without PTZ: none (%s)" % b.get("error"))
+
         # ---- vigild stops while the camera moves
         n = len(ptz_log(log))
         api(api_port, "POST", "/api/v1/channels/1/ptz", {"move": {"pan": -0.5, "tilt": -0.5}, "timeout": 10000})
@@ -255,6 +335,8 @@ def main():
         if vd.poll() is None:
             vd.kill()
         cam.kill()
+        for f in fakes:
+            f.kill()
     print("%d failure(s)" % len(failures))
     sys.exit(1 if failures else 0)
 

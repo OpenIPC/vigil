@@ -103,6 +103,105 @@ static void test_netip_commands(void)
     CHECK(ptz_netip_body(body, 64, 1, "DirectionUp", 0, -1, 1, 0) < 0, "too small: -1");
 }
 
+
+/* ---- ONVIF's wire --------------------------------------------------------------------------- */
+
+static const char CAPS_XM[] =
+    "<SOAP-ENV:Envelope xmlns:SOAP-ENV=\"http://www.w3.org/2003/05/soap-envelope\" xmlns:tt=\"http://www.onvif.org/ver10/schema\""
+    " xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\"><SOAP-ENV:Body><tds:GetCapabilitiesResponse><tds:Capabilities>"
+    "<tt:Analytics><tt:XAddr>http://192.168.1.10:8899/onvif/analytics</tt:XAddr></tt:Analytics>"
+    "<tt:Device><tt:XAddr>http://192.168.1.10:8899/onvif/device_service</tt:XAddr></tt:Device>"
+    "<tt:Imaging><tt:XAddr>http://192.168.1.10:8899/onvif/imaging</tt:XAddr></tt:Imaging>"
+    "<tt:Media><tt:XAddr>http://192.168.1.10:8899/onvif/media</tt:XAddr><tt:StreamingCapabilities/></tt:Media>"
+    "<tt:PTZ><tt:XAddr>http://192.168.1.10:8899/onvif/ptz</tt:XAddr></tt:PTZ>"
+    "</tds:Capabilities></tds:GetCapabilitiesResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>";
+
+static const char SERVICES[] =
+    "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\"><s:Body><tds:GetServicesResponse>"
+    "<tds:Service><tds:Namespace>http://www.onvif.org/ver10/device/wsdl</tds:Namespace>"
+    "<tds:XAddr>http://10.0.0.5/onvif/device_service</tds:XAddr></tds:Service>"
+    "<tds:Service><tds:Namespace>http://www.onvif.org/ver10/media/wsdl</tds:Namespace>"
+    "<tds:XAddr>http://10.0.0.5/onvif/Media</tds:XAddr></tds:Service>"
+    "<tds:Service><tds:Namespace>http://www.onvif.org/ver20/ptz/wsdl</tds:Namespace>"
+    "<tds:XAddr>http://10.0.0.5/onvif/PTZ</tds:XAddr></tds:Service>"
+    "</tds:GetServicesResponse></s:Body></s:Envelope>";
+
+static const char PROFILES[] =
+    "<s:Envelope><s:Body><trt:GetProfilesResponse>"
+    "<trt:Profiles token=\"Fixed\" fixed=\"true\"><tt:Name>fixed</tt:Name><tt:VideoSourceConfiguration token=\"V0\">"
+    "<tt:SourceToken>VS_A</tt:SourceToken></tt:VideoSourceConfiguration></trt:Profiles>"
+    "<trt:Profiles token=\"Main&amp;1\" fixed=\"true\"><tt:Name>main</tt:Name><tt:VideoSourceConfiguration token=\"V1\">"
+    "<tt:SourceToken>VS_B</tt:SourceToken></tt:VideoSourceConfiguration><tt:PTZConfiguration token=\"P1\">"
+    "<tt:Name>ptz</tt:Name><tt:NodeToken>NODE_1</tt:NodeToken></tt:PTZConfiguration></trt:Profiles>"
+    "<trt:Profiles token=\"Sub\"><tt:PTZConfiguration token=\"P1\"><tt:NodeToken>NODE_1</tt:NodeToken>"
+    "</tt:PTZConfiguration></trt:Profiles></trt:GetProfilesResponse></s:Body></s:Envelope>";
+
+static const char NODE[] =
+    "<tptz:GetNodeResponse><tptz:PTZNode token=\"NODE_1\"><tt:SupportedPTZSpaces>"
+    "<tt:AbsolutePanTiltPositionSpace><tt:URI>x</tt:URI></tt:AbsolutePanTiltPositionSpace>"
+    "<tt:ContinuousPanTiltVelocitySpace><tt:URI>x</tt:URI></tt:ContinuousPanTiltVelocitySpace>"
+    "</tt:SupportedPTZSpaces><tt:MaximumNumberOfPresets>255</tt:MaximumNumberOfPresets>"
+    "<tt:HomeSupported>false</tt:HomeSupported><tt:Extension><tt:SupportedPresetTour>"
+    "<tt:MaximumNumberOfPresetTour>4</tt:MaximumNumberOfPresetTour></tt:SupportedPresetTour></tt:Extension>"
+    "</tptz:PTZNode></tptz:GetNodeResponse>";
+
+static const char PRESETS[] =
+    "<tptz:GetPresetsResponse><tptz:Preset token=\"1\"><tt:Name>Gate &amp; road</tt:Name><tt:PTZPosition>"
+    "<tt:PanTilt x=\"0.1\" y=\"0.2\"/></tt:PTZPosition></tptz:Preset><tptz:Preset token=\"Preset_7\">"
+    "</tptz:Preset></tptz:GetPresetsResponse>";
+
+static void test_onvif_wire(void)
+{
+    char m[128], p[128], i[128];
+    CHECK(ptz_onvif_services(CAPS_XM, strlen(CAPS_XM), m, p, i, sizeof m) == 0 &&
+              !strcmp(m, "http://192.168.1.10:8899/onvif/media") && !strcmp(p, "http://192.168.1.10:8899/onvif/ptz") &&
+              !strcmp(i, "http://192.168.1.10:8899/onvif/imaging"),
+          "GetCapabilities (tt: namespace, as XM writes it): media, ptz, imaging");
+    CHECK(ptz_onvif_services(SERVICES, strlen(SERVICES), m, p, i, sizeof m) == 0 && !strcmp(p, "http://10.0.0.5/onvif/PTZ") &&
+              !strcmp(m, "http://10.0.0.5/onvif/Media") && !i[0],
+          "GetServices: by namespace");
+    static const char only_media[] = "<tt:Media><tt:XAddr>http://h/m</tt:XAddr></tt:Media>";
+    CHECK(ptz_onvif_services(only_media, strlen(only_media), m, p, i, sizeof m) < 0, "media alone: no PTZ");
+    char prof[64], vs[64], node[64];
+    CHECK(ptz_onvif_profile(PROFILES, strlen(PROFILES), prof, vs, node, sizeof prof) == 0 && !strcmp(prof, "Main&1") &&
+              !strcmp(vs, "VS_B") && !strcmp(node, "NODE_1"),
+          "the first profile with PTZ: '%s' '%s' '%s'", prof, vs, node);
+    static const char nopt[] = "<trt:Profiles token=\"A\"><tt:VideoSourceConfiguration><tt:SourceToken>S</tt:SourceToken>"
+                               "</tt:VideoSourceConfiguration></trt:Profiles>";
+    CHECK(ptz_onvif_profile(nopt, strlen(nopt), prof, vs, node, sizeof prof) == 1 && !strcmp(prof, "A") && !node[0],
+          "no PTZ configuration: the first profile, 1");
+    int tours = 0;
+    unsigned caps = ptz_onvif_node_caps(NODE, strlen(NODE), &tours);
+    CHECK(caps == (PTZ_CAP_PAN_TILT | PTZ_CAP_PRESETS) && tours == 4,
+          "node: continuous pan/tilt, no zoom, presets, no home, 4 tours (%#x, %d)", caps, tours);
+    ptz_preset_t pr[4];
+    int n = ptz_onvif_presets(PRESETS, strlen(PRESETS), pr, 4);
+    CHECK(n == 2 && !strcmp(pr[0].token, "1") && !strcmp(pr[0].name, "Gate & road") && !strcmp(pr[1].token, "Preset_7") &&
+              !pr[1].name[0],
+          "presets: tokens and names");
+    char body[512];
+    CHECK(ptz_onvif_move_body(body, sizeof body, "Main&1", -0.5, 0.25, 0, PTZ_CAP_PAN_TILT | PTZ_CAP_ZOOM, 2) > 0 &&
+              strstr(body, "<tptz:ProfileToken>Main&amp;1</tptz:ProfileToken>") &&
+              strstr(body, "<tt:PanTilt x=\"-0.500\" y=\"0.250\"/>") && strstr(body, "<tt:Zoom x=\"0.000\"/>") &&
+              strstr(body, "<tptz:Timeout>PT2S</tptz:Timeout>") && strstr(body, "xmlns:tptz="),
+          "ContinuousMove: %s", body);
+    CHECK(ptz_onvif_move_body(body, sizeof body, "P", 0, 0, 1, PTZ_CAP_ZOOM, 0) > 0 && !strstr(body, "PanTilt") &&
+              !strstr(body, "Timeout") && strstr(body, "<tt:Zoom x=\"1.000\"/>"),
+          "zoom only, no Timeout");
+    /* Every prefix of the answers: nothing read past them. */
+    const char *all[] = { CAPS_XM, SERVICES, PROFILES, NODE, PRESETS };
+    for (size_t k = 0; k < sizeof all / sizeof all[0]; ++k)
+        for (size_t len = 0; len <= strlen(all[k]); ++len) {
+            char *b = malloc(len ? len : 1);
+            memcpy(b, all[k], len);
+            ptz_onvif_services(b, len, m, p, i, sizeof m);
+            ptz_onvif_profile(b, len, prof, vs, node, sizeof prof);
+            ptz_onvif_node_caps(b, len, &tours);
+            ptz_onvif_presets(b, len, pr, 4);
+            free(b);
+        }
+}
+
 /* ---- a fake backend ------------------------------------------------------------------------ */
 
 static pthread_mutex_t g_flock = PTHREAD_MUTEX_INITIALIZER;
@@ -650,6 +749,7 @@ int main(int argc, char **argv)
 {
     const char *dir = argc > 1 ? argv[1] : ".";
     test_netip_commands();
+    test_onvif_wire();
     test_backend_choice();
     ptz_start(NULL);
     test_safety();

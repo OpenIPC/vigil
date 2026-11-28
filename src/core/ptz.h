@@ -203,4 +203,18 @@ const char *ptz_netip_command(const double v[PTZ_AXES], int *step);
 int ptz_netip_body(char *out, size_t cap, unsigned session, const char *cmd, int ch, int preset, int step,
                    int tour);
 
+/* ONVIF: the Media, PTZ and Imaging addresses in a GetCapabilities or
+ * GetServices answer (0 when there is Media and PTZ or Imaging); the
+ * profile to move (the first with a PTZConfiguration, else the first:
+ * 1), its video source and PTZ node (-1: no profile); a PTZ node's
+ * capabilities and its MaximumNumberOfPresetTour; the presets of a
+ * GetPresets answer; the ContinuousMove body (`caps` says which of
+ * PanTilt and Zoom go in; timeout_s 0: none). */
+int      ptz_onvif_services(const char *xml, size_t len, char *media, char *ptz, char *imaging, size_t cap);
+int      ptz_onvif_profile(const char *xml, size_t len, char *profile, char *vsrc, char *node, size_t cap);
+unsigned ptz_onvif_node_caps(const char *xml, size_t len, int *max_tours);
+int      ptz_onvif_presets(const char *xml, size_t len, ptz_preset_t *out, int max);
+int      ptz_onvif_move_body(char *out, size_t cap, const char *profile, double pan, double tilt, double zoom,
+                             unsigned caps, int timeout_s);
+
 #endif /* PTZ_H */

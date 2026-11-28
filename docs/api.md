@@ -1131,6 +1131,23 @@ connection of its own, logged in with the URL's user and password,
 `IrisLarge`/`IrisSmall`, `SetPreset`/`GotoPreset`/`ClearPreset`,
 `StartTour`/`StopTour`. There is no home position or automatic focus.
 
+**ONVIF**: the device service at `cameras[].onvif_url`, else the address
+discovery heard, else `http://<host>/onvif/device_service` on port 80 and
+8899 (as for the camera's events), logged in with the URL's user and
+password (WS-UsernameToken in the camera's clock, HTTP Digest when it asks).
+`GetCapabilities` (or `GetServices`) for the Media, PTZ and Imaging
+services; `GetProfiles`: the first profile with a PTZ configuration (the
+main stream's), its video source and node; `GetNode`: continuous pan/tilt
+and zoom, presets, home, preset tours. A move is `ContinuousMove` (`PanTilt
+x, y`, `Zoom x`) with `Timeout PT2S`, sent again every second while it
+lasts so the camera ends it by itself if vigild goes quiet (a camera that
+refuses the Timeout gets none), and `Stop`; focus is the Imaging service's
+`Move` (`Continuous Speed`) and `Stop`, automatic focus `SetImagingSettings`
+`AutoFocusMode AUTO`; presets `GetPresets`, `GotoPreset`, `SetPreset`,
+`RemovePreset`; `GotoHomePosition`; tours `GetPresetTours` and
+`OperatePresetTour` (tour N is the camera's Nth). ONVIF has no continuous
+iris move, so there is no iris.
+
 ### `POST /api/v1/devices/test`
 
 The same description as `manual` above, as the body. The job connects as
