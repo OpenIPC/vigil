@@ -65,7 +65,8 @@ Rules that keep the layers apart:
   through `ui_model.h`, which `src/app/ui_bridge.c` fills from the core.
 - `src/api` knows CivetWeb, `crypt(3)` and the core's public headers. It
   reads snapshots and writes the configuration store; it never drives the
-  channels or the UI itself. The zero channel's web server (`web.c`) gets
+  channels or the UI itself. What it asks of a camera (discovery's jobs,
+  a PTZ command) is queued for a thread of the core's that does it. The zero channel's web server (`web.c`) gets
   the screen's pictures and hands the browser's input on through `kvm.h`,
   which the app implements (`src/app/kvm.c`): the pictures are composed
   from LVGL's flushes and the platform's `hal_display_grab`, the input
@@ -308,6 +309,7 @@ page having put them in force already as the user moved them.
 | zero channel viewers (2) | one per viewer, at nice 10: composes, encodes and sends its pictures (`kvm_next`) |
 | NETIP server: listener | accepts NETIP connections, answers XM's LAN search (`src/api/netip_srv.c`) |
 | NETIP server: one per connection (24 at most) | its requests, and its stream's queue onto the socket; the camera's session thread only copies into that queue |
+| PTZ: one per channel, once its PTZ is used | probes the camera, sends the moves, presets and their stops (`ptz.c`); its connection closes after a minute idle |
 | log reader (`-s`) | turns stdout/stderr lines into syslog messages |
 
 ## Sources (camera protocols)
@@ -332,6 +334,17 @@ settings pages do. Its network work runs as jobs on a thread of its own;
 the API (`api_disc.c`) and the UI (through `ui_model.h`) start them and
 read their state. Formats, sources and the protocol matrix are in
 `disc_proto.h`, `disc_ops.h` and [api.md](api.md#discovery).
+
+**PTZ** is not a source either: `ptz.c` gives each channel a backend
+(`ptz_netip.c`: NETIP's `OPPTZControl` on a control connection of its
+own; `ptz_onvif.c`: ONVIF's PTZ and Imaging services), chosen by
+`cameras[].ptz` and the URL's scheme, and a worker thread of the
+channel's own, started the first time the channel's PTZ is used, which
+does every network call; the UI (through `ui_model.h`) and the API
+(`api_ptz.c`) only queue commands and read its state. A continuous move
+lasts a hold (1 s) unless asked again, and a stop is retried, then the
+connection dropped; so a lost stop, or a client gone, never leaves a
+camera moving ([api.md](api.md#ptz), [ui.md](ui.md#ptz)).
 
 The other way round, the **ONVIF server** (`src/api/onvif.c`,
 [onvif.md](onvif.md)) makes the recorder an ONVIF device for VMS: like
@@ -427,6 +440,14 @@ adding a platform is covered in [porting.md](porting.md).
   vectors), WS-Discovery probes and their matching, our ProbeMatches as
   the camera search reads them; each request cut at every length.
   `onvif_e2e`: `vigild`'s ONVIF server as a client sees it.
+- `ptz`: NETIP's PTZ commands and bodies, the backend chosen per camera,
+  the safety stops (a hold that runs out, a stop retried then hung up, a
+  camera replaced or vigild stopping while it moves), presets and their
+  names across a restart, and the NETIP backend against a camera in a
+  thread over a socket. `ptz_e2e`: the API against the NETIP emulator's
+  simulated head (`netip_server.py --ptz-log`): moves stopped by their
+  timeout and by the client, presets, refusals, the `ptz` permission, a
+  move stopped when vigild stops.
 - `theme_tokens`: the generated `theme_tokens.h` and `web/theme.css` match
   `src/ui/theme.json`.
 - `ui_screens`: the UI on an in-memory display, driven through the evdev

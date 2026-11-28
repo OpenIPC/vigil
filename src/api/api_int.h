@@ -54,6 +54,9 @@ unsigned    api_request_perms(void);
 /* /api/v1/me, /api/v1/users..., /api/v1/groups... (api_users.c). */
 int api_users_request(struct mg_connection *conn, const char *uri, const char *method);
 
+/* /api/v1/channels/N/ptz (api_ptz.c); 0 when `uri` is not that. */
+int api_ptz_request(struct mg_connection *conn, const char *uri, const char *method);
+
 /* /api/v1/discovery..., /api/v1/channels/N/assign (api_disc.c). */
 int api_disc_request(struct mg_connection *conn, const char *uri, const char *method);
 

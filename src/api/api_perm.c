@@ -2,6 +2,7 @@
 /* api_perm.c — which permission each endpoint needs (api_int.h). One
  * table, read before any request is dispatched: an endpoint added later
  * gets "system" until it is listed here, never "anyone". */
+#include <stdio.h>
 #include <string.h>
 
 #include "api_int.h"
@@ -46,6 +47,9 @@ unsigned api_perm_needed(const char *method, const char *uri)
     if (at(uri, "/api/v1/network")) return PERM_NETWORK;
     if (at(uri, "/api/v1/system")) return PERM_SYSTEM;
     if (!strncmp(uri, "/api/v1/disks", 13) || at(uri, "/api/v1/storage")) return PERM_STORAGE;
+    /* Moving a camera is its own permission, reading its PTZ too. */
+    int ch, used = 0;
+    if (sscanf(uri, "/api/v1/channels/%d/ptz%n", &ch, &used) == 1 && used && !uri[used]) return PERM_PTZ;
     if (!strncmp(uri, "/api/v1/discovery", 17) || at(uri, "/api/v1/channels")) return PERM_CAMERAS;
     if (!strncmp(uri, "/api/v1/users", 13) || !strncmp(uri, "/api/v1/groups", 14)) return PERM_USERS;
     return PERM_SYSTEM;

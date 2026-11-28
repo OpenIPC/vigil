@@ -24,7 +24,7 @@
 #include "source.h"
 
 #define OPS_MAX        8
-#define RETRY_ERROR_MS 10000        /* an unreachable camera is probed again after */
+#define RETRY_ERROR_MS 5000         /* an unreachable camera is probed again after */
 #define RETRY_NONE_MS  300000       /* ... one without PTZ */
 #define STOP_GAP_MS    300          /* between the tries of a stop */
 #define EPS            0.02

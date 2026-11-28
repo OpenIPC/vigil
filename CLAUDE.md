@@ -61,6 +61,8 @@ comments; options override the file.
   configuration: `schema.c` (generic engine), `config_schema.c` (every
   setting as a table row), `schema_yaml.c` (the file's YAML, via libyaml,
   to and from the same cJSON document), `config.c` (the file and the store).
+- `src/core/ptz*.c` — moving the cameras (PTZ): a worker per channel,
+  NETIP and ONVIF backends, the moves' safety stops (`docs/api.md`, PTZ).
 - `src/core/source/` — camera protocols behind `source_ops_t`: RTSP
   (`rtsp_client`, `rtp_depay`), NETIP, `capture:N`. A new protocol is one
   `source_<name>.c` listed in `source.c`.
