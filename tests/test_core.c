@@ -1253,6 +1253,9 @@ static void test_config_file(void)
     c.cameras[0].enabled = 1;
     snprintf(c.cameras[1].url, sizeof c.cameras[1].url, "netip://admin:@10.0.0.3/?ch=1&stream=extra");
     c.cameras[1].enabled = 0;
+    /* Items built in C carry their defaults themselves (an array's are zeroed). */
+    snprintf(c.cameras[0].ptz, sizeof c.cameras[0].ptz, "auto");
+    snprintf(c.cameras[1].ptz, sizeof c.cameras[1].ptz, "netip");
     snprintf(c.record.path, sizeof c.record.path, "/mnt/sda1/rec");
     c.record.segment = 300;
     /* A world-readable file and a symlink where an older vigild put its

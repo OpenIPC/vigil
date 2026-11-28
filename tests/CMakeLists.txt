@@ -8,6 +8,9 @@ add_test(NAME discovery COMMAND test_discovery ${CMAKE_CURRENT_SOURCE_DIR}/data)
 add_executable(test_onvif test_onvif.c)
 target_link_libraries(test_onvif PRIVATE vigil_core)
 add_test(NAME onvif COMMAND test_onvif)
+add_executable(test_ptz test_ptz.c)
+target_link_libraries(test_ptz PRIVATE vigil_core)
+add_test(NAME ptz COMMAND test_ptz ${CMAKE_CURRENT_BINARY_DIR})
 
 # src/sys on a fake root: fake /etc, /sys, /proc and /dev files, and a
 # recorder in place of ifup, mkfs, mount, date, ntpd, hostname, curl.

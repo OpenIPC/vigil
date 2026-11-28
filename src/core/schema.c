@@ -428,6 +428,9 @@ static cJSON *object_to_json(const schema_section_t *sec, const void *base, int 
         if (f->type == SCHEMA_STRING || f->type == SCHEMA_ENUM) {
             const char *s = cstr_at(base, f);
             char red[1024];
+            /* An enum never set (an array's item built in C: zeroed) is its
+             * default, not a value the file could not be read back with. */
+            if (f->type == SCHEMA_ENUM && !*s && f->def_str) s = f->def_str;
             if (redact && f->secret != SCHEMA_PLAIN) {
                 schema_redact_field(f, base, red, sizeof red);
                 s = red;

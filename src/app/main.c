@@ -8,6 +8,7 @@
  *   -> channels_start (one thread per camera: source -> decode + record)
  *   -> mgmt_start (the management pages' jobs and timers: network
  *      rollback, NTP, DDNS, network storage, alarm center, mail)
+ *   -> ptz_start (the cameras' PTZ: a worker per channel once used)
  *   -> api_start (HTTP/WebSocket API on its own threads, if configured),
  *      web_start (the zero channel), onvif_start (the ONVIF server and
  *      WS-Discovery, while onvif_server.enabled), netip_server_start (the
@@ -16,7 +17,8 @@
  *   -> frontend_run (LVGL quad view, or status lines when headless); on
  *      this thread, a configuration the API saved is applied
  *      (channels_apply)
- *   -> SIGINT/SIGTERM: api_stop, channels_stop, hal_shutdown.
+ *   -> SIGINT/SIGTERM: api_stop, ptz_shutdown (every move stopped),
+ *      channels_stop, hal_shutdown.
  */
 #include <errno.h>
 #include <pthread.h>
@@ -43,6 +45,7 @@
 #include "net.h"
 #include "source.h"
 #include "onvif.h"
+#include "ptz.h"
 #include "rtsp_server.h"
 #include "secret.h"
 #include "web.h"
@@ -349,6 +352,29 @@ static int listen_check(const char *what, const char *listen, char *err, size_t 
     return net_listen_check(listen, err, cap);
 }
 
+/* The cameras as the PTZ core takes them (ptz_apply). */
+static void apply_ptz(const vigil_config_t *c)
+{
+    static ptz_camera_t cams[PTZ_CH_MAX];
+    int n = c->n_cameras < PTZ_CH_MAX ? c->n_cameras : PTZ_CH_MAX;
+    memset(cams, 0, sizeof cams);
+    for (int i = 0; i < n; ++i) {
+        snprintf(cams[i].url, sizeof cams[i].url, "%s", c->cameras[i].url);
+        snprintf(cams[i].mode, sizeof cams[i].mode, "%s", c->cameras[i].ptz[0] ? c->cameras[i].ptz : "auto");
+        cams[i].enabled = c->cameras[i].enabled;
+    }
+    ptz_apply(cams, n);
+    memset(cams, 0, sizeof cams);
+}
+
+/* The preset names next to the configuration file: /etc/vigil.ptz.json. */
+static void ptz_names_path(char *out, size_t cap)
+{
+    const char *cfg = config_path(), *slash = cfg ? strrchr(cfg, '/') : NULL;
+    if (slash) snprintf(out, cap, "%.*s/vigil.ptz.json", (int)(slash - cfg), cfg);
+    else snprintf(out, cap, "vigil.ptz.json");
+}
+
 static void apply_config(void)
 {
     if (mgmt_power_pending() != MGMT_POWER_NONE) g_stop = 1;    /* reboot or shutdown: stop first */
@@ -361,6 +387,7 @@ static void apply_config(void)
     rec_sched_set(weeks, config_to_schedule(&c, weeks));
     apply_qos(&c);
     int failed = channels_apply(&cc);
+    apply_ptz(&c);
     apply_output(c.display.output);
     apply_output_adj(&c.display, 0);
     channels_set_aspect(video_aspect(c.display.video_aspect));
@@ -467,6 +494,7 @@ int main(int argc, char **argv)
             memset(cam, 0, sizeof *cam);
             snprintf(cam->url, sizeof cam->url, "%s", urls[i]);
             cam->enabled = 1;
+            snprintf(cam->ptz, sizeof cam->ptz, "auto");
         }
     }
     if (rec_dir) snprintf(cfg.record.path, sizeof cfg.record.path, "%s", strcmp(rec_dir, "none") ? rec_dir : "");
@@ -533,6 +561,10 @@ int main(int argc, char **argv)
         config_mark_applied(g_applied_gen);
         if (mgmt_start() < 0) vg_log("mgmt: cannot start its threads; the management pages will not act");
         disc_set_max_channels(caps->max_channels);
+        char ptz_path[256];
+        ptz_names_path(ptz_path, sizeof ptz_path);
+        ptz_start(ptz_path);
+        apply_ptz(&running);
         api_start();                    /* failing to start it is logged, not fatal */
         web_start();                    /* the same */
         onvif_start();                  /* the same */
@@ -544,6 +576,7 @@ int main(int argc, char **argv)
         onvif_stop();
         web_stop();
         api_stop();
+        ptz_shutdown();                 /* every move stopped before the channels go */
         disc_shutdown();
         mgmt_stop();
         channels_stop();

@@ -17,19 +17,27 @@ version: 1
 #   sub_url: Sub-stream URL. Used in multi-window views; the main URL is used
 #     full screen and for recording. Empty: derived for NETIP, otherwise the
 #     main stream everywhere.
+#   ptz: PTZ. How the camera is moved (pan, tilt, zoom, focus, presets). auto:
+#     NETIP's PTZ control for a netip:// camera, ONVIF's PTZ service for the
+#     others when the camera has one; netip, onvif: that one (an RTSP camera's
+#     NETIP on port 34567 of its host); off: no PTZ for this camera. One of:
+#     auto, netip, onvif, off. Default auto.
 cameras:
   - url: "rtsp://admin@192.168.1.10/stream=0"
     name: Gate
     enabled: true
     sub_url: ""
+    ptz: auto
   - url: "netip://admin:@192.168.1.11:34567/?ch=0&stream=main"
     name: Yard
     enabled: true
     sub_url: ""
+    ptz: auto
   - url: "rtsp://192.168.1.12:554/live"
     name: Garage
     enabled: false
     sub_url: ""
+    ptz: auto
 
 # Recording
 record:

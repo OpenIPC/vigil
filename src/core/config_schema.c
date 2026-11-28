@@ -234,6 +234,7 @@ static int check_url_path(const char *v, char *msg, size_t cap)
     return check_word(v, msg, cap);
 }
 
+static const char *const ptz_modes[] = { "auto", "netip", "onvif", "off", NULL };
 static const char *const on_full_values[] = { "overwrite", "stop", NULL };
 static const char *const nas_types[] = { "none", "cifs", "nfs", NULL };
 static const char *const ddns_providers[] = { "dyndns", "noip", "custom", NULL };
@@ -297,6 +298,10 @@ static const schema_field_t camera_fields[] = {
       .live = 1, .check = check_sub_url, .label = "Sub-stream URL",
       .help = "Used in multi-window views; the main URL is used full screen and for recording. "
               "Empty: derived for NETIP, otherwise the main stream everywhere." },
+    { .key = "ptz", ENUM(config_camera_t, ptz, ptz_modes), .def_str = "auto", .live = 1, .label = "PTZ",
+      .help = "How the camera is moved (pan, tilt, zoom, focus, presets). auto: NETIP's PTZ control for a "
+              "netip:// camera, ONVIF's PTZ service for the others when the camera has one; netip, onvif: "
+              "that one (an RTSP camera's NETIP on port 34567 of its host); off: no PTZ for this camera." },
 };
 
 static const schema_field_t record_fields[] = {

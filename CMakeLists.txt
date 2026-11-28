@@ -95,6 +95,9 @@ add_library(vigil_core STATIC
   src/core/netip_proto.c
   src/core/overscan.c
   src/core/picture.c
+  src/core/ptz.c
+  src/core/ptz_netip.c
+  src/core/ptz_onvif.c
   src/core/onvif_proto.c
   src/core/qos.c
   src/core/schema.c

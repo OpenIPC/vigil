@@ -51,6 +51,7 @@ typedef struct {
     char sub_url[512];              /* "": derived, or none (channels_config_t) */
     char name[32];
     int  enabled;
+    char ptz[8];                    /* "auto" | "netip" | "onvif" | "off" (ptz.h) */
 } config_camera_t;
 
 typedef struct {
