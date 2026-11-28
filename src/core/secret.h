@@ -61,6 +61,28 @@ secret_rc_t secret_seal(const char *aad, const char *plain, char *out, size_t ca
  * any failure `out` is "". */
 secret_rc_t secret_open(const char *aad, const char *in, char *out, size_t cap);
 
+/* ---- configuration exports (docs/security.md, "Configuration export") ----------------
+ * A value sealed with a key of the caller's (derived from a password with
+ * secret_derive) instead of vigil.key: SECRET_EXPORT_PREFIX and the same
+ * base64(nonce | ciphertext | tag), the field as additional data. Never
+ * opened by secret_open, so a copied export cannot pass for the board's own
+ * file. */
+#define SECRET_EXPORT_PREFIX "enc:p1:"
+secret_rc_t secret_seal_with(const unsigned char key[SECRET_KEY_LEN], const char *aad, const char *plain, char *out,
+                             size_t cap);
+secret_rc_t secret_open_with(const unsigned char key[SECRET_KEY_LEN], const char *aad, const char *in, char *out,
+                             size_t cap);
+int         secret_is_export_sealed(const char *v);
+/* PBKDF2-HMAC-SHA256 of `password` (mbedTLS): 0, or -1. */
+int         secret_derive(const char *password, const unsigned char *salt, size_t salt_len, unsigned iterations,
+                          unsigned char key[SECRET_KEY_LEN]);
+/* `len` bytes from /dev/urandom: 0, or -1. */
+int         secret_random(void *buf, size_t len);
+/* A new vigil.key in place of the old one (a reset of vigil's settings:
+ * every value sealed with the old key is lost with it). SECRET_OK, or the
+ * reason (the old key is kept then). */
+secret_rc_t secret_new_key(void);
+
 /* For the log: what a secret_rc_t means. */
 const char *secret_strerror(secret_rc_t rc);
 

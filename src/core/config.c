@@ -112,6 +112,8 @@ typedef struct {
     int lost;                       /* sealed ones that did not open */
     secret_rc_t why;                /* the first failure */
     kept_t *kept;                   /* opening: those that did not open; sealing: those to keep */
+    config_secret_fn fn;            /* instead of sealing or opening: an export's (config_export_text) */
+    void *ctx;
 } seal_stats_t;
 
 /* The sealed values of the store's file that did not open (config_init). */
@@ -165,7 +167,7 @@ static int keep_field(cJSON *v, const char *aad, seal_stats_t *st)
 static int seal_field(cJSON *o, const schema_field_t *f, const char *aad, int seal, seal_stats_t *st)
 {
     cJSON *v = cJSON_GetObjectItemCaseSensitive(o, f->key);
-    if (seal && st->kept) {
+    if (seal && st->kept && !st->fn) {
         int k = keep_field(v, aad, st);
         if (k) {
             if (k < 0) st->why = SECRET_ENOMEM;
@@ -189,7 +191,13 @@ static int seal_field(cJSON *o, const schema_field_t *f, const char *aad, int se
     memcpy(part, s + b, plen);
     part[plen] = 0;
     res[0] = 0;
-    if (seal) {
+    if (st->fn) {
+        if (st->fn(st->ctx, aad, part, res, cap) < 0) {
+            st->why = SECRET_EAUTH;
+            rc = -1;
+            goto out;
+        }
+    } else if (seal) {
         /* Even one that looks sealed: it is opened once, and is itself again. */
         secret_rc_t r = secret_seal(aad, part, res, cap);
         if (r != SECRET_OK) {
@@ -449,6 +457,51 @@ char *config_file_text(const vigil_config_t *c, config_format_t fmt)
     return text;
 }
 
+static const char export_header[] =
+    "vigil configuration export: https://github.com/OpenIPC/vigil/blob/main/docs/management.md\n"
+    "The passwords are sealed with the export's password (enc:p1:...), or left out;\n"
+    "vigild seals them with the recorder's own key when the export is imported.";
+
+char *config_export_text(const vigil_config_t *c, config_secret_fn fn, void *ctx, char *err, size_t cap)
+{
+    if (config_check_text(c, CONFIG_YAML, err, cap) < 0) return NULL;
+    cJSON *doc = schema_to_json(&config_schema, c, 0);
+    seal_stats_t st = { .fn = fn, .ctx = ctx };
+    char *text = NULL;
+    if (!doc) snprintf(err, cap, "out of memory");
+    else if (seal_doc(doc, 1, &st) < 0) snprintf(err, cap, "cannot seal the passwords for the export");
+    else if (!(text = schema_yaml_emit(&config_schema, doc, export_header))) snprintf(err, cap, "out of memory");
+    /* The document held the passwords in the clear until sealed. */
+    if (doc && !text) {
+        char *p = cJSON_PrintUnformatted(doc);
+        if (p) secret_wipe(p, strlen(p));
+        free(p);
+    }
+    cJSON_Delete(doc);
+    return text;
+}
+
+int config_import_text(const char *text, size_t len, config_secret_fn fn, void *ctx, vigil_config_t *c,
+                       schema_errors_t *errs)
+{
+    config_defaults(c);
+    cJSON *doc = schema_yaml_parse(&config_schema, text, len, errs);
+    if (!doc) return -1;
+    seal_stats_t st = { .fn = fn, .ctx = ctx };
+    if (seal_doc(doc, 0, &st) < 0) {
+        schema_error(errs, "", "a password in the export does not open with its password: the file was changed");
+        cJSON_Delete(doc);
+        return -1;
+    }
+    /* As a file is loaded: a key this vigild does not know is skipped. */
+    int rc = schema_from_json(&config_schema, doc, c, 0, errs);
+    cJSON_Delete(doc);
+    if (rc == 0) rc = schema_validate(&config_schema, c, errs);
+    if (rc == 0) rc = config_check_ports(c, errs);
+    if (rc < 0) config_defaults(c);
+    return rc;
+}
+
 int config_save_file(const char *path, const vigil_config_t *c, char *err, size_t cap)
 {
     if (config_check_text(c, config_format(path), err, cap) < 0) return -1;
@@ -659,6 +712,46 @@ static int resolve_secrets(vigil_config_t *nc, const vigil_config_t *old, schema
     return rc;
 }
 
+/* Under g_write: save `nc` (checked) and make it the settings in force. */
+static config_rc_t commit_locked(vigil_config_t *nc, const char *what, schema_errors_t *errs)
+{
+    config_trim(nc);
+
+    char err[700];
+    if (g_file_bad) {
+        /* The file the user wrote failed to load; it is not replaced
+         * unless a copy of it is kept. */
+        char bad[300];
+        snprintf(bad, sizeof bad, "%s.bad", g_path);
+        if (keep_copy(g_path, bad, err, sizeof err) < 0) {
+            vg_log("config: %s; not saving over it", err);
+            schema_error(errs, "", "%s; not saving over it", err);
+            return CONFIG_EIO;
+        }
+        vg_log("the invalid %s is kept as %s", g_path, bad);
+    }
+    int saved = config_save_file(g_path, nc, err, sizeof err);
+    if (saved < 0) {
+        vg_log("config: %s", err);
+        schema_error(errs, "", "%s", err);
+        return CONFIG_EIO;
+    }
+    /* Saved, or at least renamed into place (saved == 1): the new file is
+     * what the next start reads, so it is also what runs now. */
+    pthread_mutex_lock(&g_lock);
+    g_cfg = *nc;
+    g_file_bad = 0;
+    ++g_gen;
+    pthread_mutex_unlock(&g_lock);
+    if (saved > 0) {
+        vg_log("config: %s; it is in force, but may not survive a power cut", err);
+        schema_error(errs, "", "%s; the configuration is in force, but may not survive a power cut", err);
+        return CONFIG_EUNSYNCED;
+    }
+    vg_log("config: %s saved", what);
+    return CONFIG_OK;
+}
+
 config_rc_t config_put_json(const char *section, const char *body, size_t len,
                             schema_errors_t *errs)
 {
@@ -715,44 +808,37 @@ config_rc_t config_put_json_at(const char *section, const char *body, size_t len
         pthread_mutex_unlock(&g_write);
         return CONFIG_EINVAL;
     }
-    config_trim(&nc);
-
-    char err[700];
-    if (g_file_bad) {
-        /* The file the user wrote failed to load; it is not replaced
-         * unless a copy of it is kept. */
-        char bad[300];
-        snprintf(bad, sizeof bad, "%s.bad", g_path);
-        if (keep_copy(g_path, bad, err, sizeof err) < 0) {
-            pthread_mutex_unlock(&g_write);
-            vg_log("config: %s; not saving over it", err);
-            schema_error(errs, "", "%s; not saving over it", err);
-            return CONFIG_EIO;
-        }
-        vg_log("the invalid %s is kept as %s", g_path, bad);
-    }
-    int saved = config_save_file(g_path, &nc, err, sizeof err);
-    if (saved < 0) {
-        pthread_mutex_unlock(&g_write);
-        vg_log("config: %s", err);
-        schema_error(errs, "", "%s", err);
-        return CONFIG_EIO;
-    }
-    /* Saved, or at least renamed into place (saved == 1): the new file is
-     * what the next start reads, so it is also what runs now. */
-    pthread_mutex_lock(&g_lock);
-    g_cfg = nc;
-    g_file_bad = 0;
-    ++g_gen;
-    pthread_mutex_unlock(&g_lock);
+    config_rc_t r = commit_locked(&nc, section ? section : "configuration", errs);
     pthread_mutex_unlock(&g_write);
-    if (saved > 0) {
-        vg_log("config: %s; it is in force, but may not survive a power cut", err);
-        schema_error(errs, "", "%s; the configuration is in force, but may not survive a power cut", err);
-        return CONFIG_EUNSYNCED;
+    return r;
+}
+
+config_rc_t config_replace(const vigil_config_t *c, schema_errors_t *errs)
+{
+    pthread_mutex_lock(&g_write);
+    vigil_config_t old, nc = *c;
+    config_get(&old);
+    int rc = schema_check_utf8(&config_schema, NULL, &nc, errs);
+    if (rc == 0) rc = schema_validate(&config_schema, &nc, errs);
+    if (rc == 0) rc = config_check_ports(&nc, errs);
+    if (rc == 0) rc = check_listens(&nc, &old, errs);
+    if (rc < 0) {
+        pthread_mutex_unlock(&g_write);
+        return CONFIG_EINVAL;
     }
-    vg_log("config: %s saved", section ? section : "configuration");
-    return CONFIG_OK;
+    /* Everything is replaced: a sealed value kept from a lost key belongs
+     * to settings that are gone. */
+    pthread_mutex_lock(&g_kept_lock);
+    kept_t *kept = g_kept;
+    g_kept = NULL;
+    pthread_mutex_unlock(&g_kept_lock);
+    config_rc_t r = commit_locked(&nc, "configuration (replaced)", errs);
+    pthread_mutex_lock(&g_kept_lock);
+    if (r == CONFIG_EIO && !g_kept) g_kept = kept;      /* nothing changed: still the file's */
+    else kept_free(kept);
+    pthread_mutex_unlock(&g_kept_lock);
+    pthread_mutex_unlock(&g_write);
+    return r;
 }
 
 char *config_get_json(const char *section, int redact)
