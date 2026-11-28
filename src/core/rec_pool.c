@@ -749,11 +749,11 @@ int rec_pool_mount(rec_pool_t *p, const rec_pool_cfg_t *cfg, time_t now)
     snprintf(p->dir, sizeof p->dir, "%s", cfg->path);
     pthread_mutex_unlock(&p->mu);
     char sub[300];
-    if (mkdirs(p->dir) < 0) return fail(p, RP_ERROR, "cannot create %s: %s", p->dir);
+    if (mkdirs(p->dir) < 0) return fail(p, RP_ERROR, "cannot create %.100s: %s", p->dir);
     path_of(p, "pool", sub, sizeof sub);
-    if (mkdir(sub, 0755) < 0 && errno != EEXIST) return fail(p, RP_ERROR, "cannot create %s: %s", sub);
+    if (mkdir(sub, 0755) < 0 && errno != EEXIST) return fail(p, RP_ERROR, "cannot create %.100s: %s", sub);
     path_of(p, "index", sub, sizeof sub);
-    if (mkdir(sub, 0755) < 0 && errno != EEXIST) return fail(p, RP_ERROR, "cannot create %s: %s", sub);
+    if (mkdir(sub, 0755) < 0 && errno != EEXIST) return fail(p, RP_ERROR, "cannot create %.100s: %s", sub);
 
     id_t_ id;
     int fresh = 0, readonly = 0;
@@ -797,13 +797,13 @@ int rec_pool_mount(rec_pool_t *p, const rec_pool_cfg_t *cfg, time_t now)
         }
         if (want < 2 && files < 2) {
             errno = ENOSPC;
-            return fail(p, RP_ERROR, "%s: no room for a pool of two chunks: %s", p->dir);
+            return fail(p, RP_ERROR, "%.100s: no room for a pool of two chunks: %s", p->dir);
         }
         if (fresh || want != id.want || strcmp(id.owner, cfg->owner) || strcmp(id.host, cfg->host)) {
             id.want = want;
             snprintf(id.owner, sizeof id.owner, "%s", cfg->owner);
             snprintf(id.host, sizeof id.host, "%s", cfg->host);
-            if (id_write(p->dir, &id) < 0) return fail(p, RP_ERROR, "cannot write %s/vigil-rec.id: %s", p->dir);
+            if (id_write(p->dir, &id) < 0) return fail(p, RP_ERROR, "cannot write %.100s/vigil-rec.id: %s", p->dir);
         }
     }
     p->want = id.want;
@@ -823,7 +823,7 @@ int rec_pool_mount(rec_pool_t *p, const rec_pool_cfg_t *cfg, time_t now)
         free(ta);
         free(tb);
         errno = ENOMEM;
-        return fail(p, RP_ERROR, "%s: %s", p->dir);
+        return fail(p, RP_ERROR, "%.100s: %s", p->dir);
     }
     p->n = n;
     if (have_table) {
@@ -858,7 +858,7 @@ int rec_pool_mount(rec_pool_t *p, const rec_pool_cfg_t *cfg, time_t now)
     char path[300];
     path_of(p, "index/journal", path, sizeof path);
     p->journal_fd = open(path, readonly ? O_RDONLY : O_RDWR | O_CREAT, 0644);
-    if (p->journal_fd < 0 && !readonly) return fail(p, RP_ERROR, "cannot open %s: %s", path);
+    if (p->journal_fd < 0 && !readonly) return fail(p, RP_ERROR, "cannot open %.100s: %s", path);
     if (readonly) {
         path_of(p, "index/events.log", path, sizeof path);
         p->events_fd = open(path, O_RDONLY);
@@ -869,7 +869,7 @@ int rec_pool_mount(rec_pool_t *p, const rec_pool_cfg_t *cfg, time_t now)
             p->ev_head = eh.head;
         }
     } else if (evlog_open(p, fresh || !n) < 0) {
-        return fail(p, RP_ERROR, "cannot open %s/index/events.log: %s", p->dir);
+        return fail(p, RP_ERROR, "cannot open %.100s/index/events.log: %s", p->dir);
     }
 
     if (!readonly) {
@@ -885,7 +885,7 @@ int rec_pool_mount(rec_pool_t *p, const rec_pool_cfg_t *cfg, time_t now)
         /* While a rebuild runs the chunks' headers are the index: a
          * table written now would hide those not read yet. */
         if ((!p->rebuilding && table_write(p) < 0) || journal_reset(p) < 0)
-            return fail(p, RP_ERROR, "cannot write the index in %s: %s", p->dir);
+            return fail(p, RP_ERROR, "cannot write the index in %.100s: %s", p->dir);
     }
     char kind[8];
     unsigned fl = rec_media_flush(p->dir, kind, sizeof kind);

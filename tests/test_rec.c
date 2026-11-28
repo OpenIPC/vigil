@@ -10,6 +10,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -782,7 +783,7 @@ static void test_power_cut(int all)
     char dir[600];
     snprintf(dir, sizeof dir, "%s/cut", g_work);
     long writes = 0;
-    pc_run(dir, 1L << 40, 0, &writes);           /* no cut: count the writes */
+    pc_run(dir, LONG_MAX, 0, &writes);          /* no cut: count the writes */
     CHECK(writes > 100, "the scenario writes %ld times", writes);
     struct timespec t0;
     clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -1033,6 +1034,63 @@ static void test_query_speed(void)
     rec_pool_free(&p);
 }
 
+/* The writer's pace: 16 cameras at 4 Mbit/s and 25 fps (the clip's AUs
+ * with filler data to ~20 KiB), as fast as it goes, ticking (flushes,
+ * saves) on the recording's clock. A rough proxy for the board: run it
+ * there (test_rec DATA DIR --bench SECS) with the disk in DIR. */
+static int bench(const char *dir, int secs)
+{
+    rec_pool_t p;
+    rec_pool_init(&p);
+    rec_pool_cfg_t cfg = pool_cfg(dir, 64, 1024);
+    if (mount_full(&p, &cfg) < 0) {
+        fprintf(stderr, "bench: %s\n", p.why);
+        return 1;
+    }
+    static uint8_t buf[64 << 10];
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    clock_t c0 = clock();
+    uint64_t bytes = 0, t = T0;
+    for (int f = 0; f < secs * 25; ++f, t += FRAME) {
+        for (int cam = 0; cam < 16; ++cam) {
+            const clip_t *c = cam % 2 ? &g_h265 : &g_h264;
+            int i = f % c->n;
+            size_t n = c->au[i].len;
+            memcpy(buf, c->au[i].p, n);
+            /* filler: H.264 type 12, H.265 type 38 */
+            size_t fill = n < 20000 ? 20000 - n : 0;
+            buf[n] = 0; buf[n + 1] = 0; buf[n + 2] = 1;
+            if (c->codec == VG_CODEC_H264) {
+                buf[n + 3] = 12;
+                memset(buf + n + 4, 0xFF, fill);
+                n += 4 + fill;
+            } else {
+                buf[n + 3] = 38 << 1;
+                buf[n + 4] = 1;
+                memset(buf + n + 5, 0xFF, fill);
+                n += 5 + fill;
+            }
+            buf[n++] = 0x80;
+            vg_au_t au = { .codec = c->codec, .data = buf, .len = n, .pts_us = t, .key = c->au[i].key };
+            rec_au_t *a = rec_au_from(cam, 0, &au, t, 0);
+            if (a) {
+                rec_pool_put(&p, a);
+                bytes += a->len;
+                free(a);
+            }
+        }
+        if (f % 25 == 24) rec_pool_tick(&p, (time_t)(t / 1000000), t);
+    }
+    rec_pool_unmount(&p);
+    double wall = ms_since(&t0) / 1000, cpu = (double)(clock() - c0) / CLOCKS_PER_SEC;
+    printf("bench: 16 streams, %d s of video, %.1f MiB in %.2f s (%.1f MiB/s, %.1fx real time), CPU %.2f s "
+           "(%.1f %% of one core at real time)\n", secs, bytes / 1048576.0, wall, bytes / 1048576.0 / wall,
+           secs / wall, cpu, cpu * 100 / secs);
+    rec_pool_free(&p);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     g_data = argc > 1 ? argv[1] : "tests/data";
@@ -1042,6 +1100,7 @@ int main(int argc, char **argv)
     clip_load(&g_h264, "testsrc_640x360.h264", VG_CODEC_H264);
     clip_load(&g_h265, "testsrc_640x360.h265", VG_CODEC_H265);
     CHECK(g_h264.n >= 100 && g_h264.au[0].key && g_h265.n >= 100, "clips: %d and %d AUs", g_h264.n, g_h265.n);
+    if (argc > 4 && !strcmp(argv[3], "--bench")) return bench(g_work, atoi(argv[4]));
     test_records();
     test_mp4();
     test_pool_basic();
