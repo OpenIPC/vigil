@@ -21,6 +21,8 @@
 
 #include <stddef.h>
 
+#include "lvgl.h"
+
 typedef enum { UI_LOG_SYSTEM = 0, UI_LOG_ALARMS, UI_LOG_OPS, UI_LOG_KINDS } ui_log_kind_t;
 
 typedef struct {
@@ -74,6 +76,18 @@ const ui_logs_src_t *ui_logs_source(void);
 
 /* The Logs screen, on `first` (ui_log_kind_t). */
 void ui_logs_open(int first);
+
+/* For another settings screen (ui_settings.h) that lists the logs among
+ * its entries, as Operation may, an ui_set_item_t's open and close: one
+ * log as a sub-page (ui_logs_page_open, closed by ui_logs_close), or all
+ * three in one sub-page with System / Alarm / Operation log buttons on
+ * top, showing `first` (ui_logs_pane_open, closed by
+ * ui_logs_pane_close). */
+struct ui_set;
+void *ui_logs_page_open(struct ui_set *s, lv_obj_t *pane, int kind);
+void  ui_logs_close(void *st);
+void *ui_logs_pane_open(struct ui_set *s, lv_obj_t *pane, int first);
+void  ui_logs_pane_close(void *st);
 
 /* Tell the operation log what the screen did (ui_session.c's logout). */
 void ui_logs_audit(const char *action, const char *detail);

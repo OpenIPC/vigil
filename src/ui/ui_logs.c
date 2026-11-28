@@ -635,6 +635,11 @@ static void *logs_open(ui_set_t *s, lv_obj_t *pane, int kind)
     return l;
 }
 
+void *ui_logs_page_open(ui_set_t *s, lv_obj_t *pane, int kind)
+{
+    return kind >= 0 && kind < UI_LOG_KINDS ? logs_open(s, pane, kind) : NULL;
+}
+
 static void *sys_open(ui_set_t *s, lv_obj_t *pane) { return logs_open(s, pane, UI_LOG_SYSTEM); }
 static void *alarms_open(ui_set_t *s, lv_obj_t *pane) { return logs_open(s, pane, UI_LOG_ALARMS); }
 static void *ops_open(ui_set_t *s, lv_obj_t *pane) { return logs_open(s, pane, UI_LOG_OPS); }
@@ -647,6 +652,71 @@ static void logs_close(void *st)
     lv_timer_delete(l->tick);
     lv_timer_delete(l->debounce);
     free(l);
+}
+
+void ui_logs_close(void *st) { logs_close(st); }
+
+/* ---- the three in one sub-page ---------------------------------------------------------------- */
+
+typedef struct {
+    ui_set_t *s;
+    lv_obj_t *tab[UI_LOG_KINDS], *content;
+    logs_t   *cur;
+    int       kind;
+} pane_t;
+
+static void pane_show(pane_t *p, int kind)
+{
+    if (p->cur) logs_close(p->cur);
+    p->cur = NULL;
+    lv_obj_clean(p->content);
+    p->kind = kind;
+    for (int k = 0; k < UI_LOG_KINDS; ++k) {
+        if (k == kind) lv_obj_add_state(p->tab[k], LV_STATE_CHECKED);
+        else lv_obj_remove_state(p->tab[k], LV_STATE_CHECKED);
+    }
+    p->cur = logs_open(p->s, p->content, kind);
+}
+
+static void tab_cb(lv_event_t *e)
+{
+    pane_t *p = lv_event_get_user_data(e);
+    lv_obj_t *b = lv_event_get_target(e);
+    for (int k = 0; k < UI_LOG_KINDS; ++k)
+        if (p->tab[k] == b && k != p->kind) pane_show(p, k);
+}
+
+void *ui_logs_pane_open(ui_set_t *s, lv_obj_t *pane, int first)
+{
+    pane_t *p = calloc(1, sizeof *p);
+    if (!p) return NULL;
+    p->s = s;
+    p->kind = -1;
+    static const char *const names[UI_LOG_KINDS] = { "System log", "Alarm log", "Operation log" };
+    lv_obj_t *row = ui_set_hbox(pane);
+    for (int k = 0; k < UI_LOG_KINDS; ++k) {
+        p->tab[k] = ui_set_button(s, row, NULL, names[k]);
+        lv_obj_set_style_bg_color(p->tab[k], UI_C(ACCENT), LV_STATE_CHECKED);
+        lv_obj_set_style_bg_opa(p->tab[k], LV_OPA_COVER, LV_STATE_CHECKED);
+        lv_obj_add_event_cb(p->tab[k], tab_cb, LV_EVENT_CLICKED, p);
+    }
+    p->content = lv_obj_create(pane);
+    ui_plain(p->content);
+    ui_ring_room(p->content);
+    lv_obj_set_size(p->content, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_layout(p->content, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(p->content, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(p->content, VG_SPACE_MD, 0);
+    pane_show(p, first >= 0 && first < UI_LOG_KINDS ? first : UI_LOG_ALARMS);
+    return p;
+}
+
+void ui_logs_pane_close(void *st)
+{
+    pane_t *p = st;
+    if (!p) return;
+    if (p->cur) logs_close(p->cur);
+    free(p);
 }
 
 static const ui_set_item_t k_items[UI_LOG_KINDS] = {

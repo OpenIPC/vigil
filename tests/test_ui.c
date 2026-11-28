@@ -5939,6 +5939,8 @@ static void shots_logs(void)
     logs_done();
 }
 
+static void *logs_pane_open(ui_set_t *s, lv_obj_t *pane) { return ui_logs_pane_open(s, pane, UI_LOG_ALARMS); }
+
 static void test_logs_page(void)
 {
     logs_setup();
@@ -6048,6 +6050,19 @@ static void test_logs_page(void)
     button(BTN_RIGHT);
     CHECK(!ui_page_top(), "back on the live view");
 
+    /* The three logs as one entry of another settings screen (Operation's
+     * list): the buttons on top switch the log. */
+    logs_fill();
+    static const ui_set_item_t items[] = { { "Logs", NULL, logs_pane_open, NULL, NULL, NULL, ui_logs_pane_close } };
+    ui_settings_open("Operation", items, 1, 0);
+    run(100);
+    CHECK(find("Channel", 0) && find("1 - 50", 0), "one entry: the alarm log first");
+    click_text("Operation log");
+    CHECK(find("Action", 0) && find("1 - 50", 0) && !find("Channel", 0), "its button: the operation log");
+    click_text("System log");
+    CHECK(find("Message", 0) && find("sending discover failed", 0), "and the system log");
+    button(BTN_RIGHT);
+    CHECK(!ui_page_top(), "closed");
     logs_done();
 }
 
