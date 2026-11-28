@@ -75,6 +75,27 @@ ICONS = [
     ("nav_groups", "users-group.svg", 22, 2),
     ("nav_output", "device-desktop.svg", 22, 2),
     ("nav_osd", "clock.svg", 22, 2),
+    # the PTZ panel (ui_ptz.c): its direction pad, lens and preset buttons
+    ("ptz_up", "arrow-up.svg", 24, 2.25),
+    ("ptz_down", "arrow-down.svg", 24, 2.25),
+    ("ptz_left", "arrow-left.svg", 24, 2.25),
+    ("ptz_right", "arrow-right.svg", 24, 2.25),
+    ("ptz_up_left", "arrow-up-left.svg", 24, 2.25),
+    ("ptz_up_right", "arrow-up-right.svg", 24, 2.25),
+    ("ptz_down_left", "arrow-down-left.svg", 24, 2.25),
+    ("ptz_down_right", "arrow-down-right.svg", 24, 2.25),
+    ("ptz_home", "home.svg", 24, 2),
+    ("ptz_zoom", "zoom-in.svg", 20, 2),
+    ("ptz_focus", "focus-2.svg", 20, 2),
+    ("ptz_iris", "aperture.svg", 20, 2),
+    ("ptz_minus", "minus.svg", 20, 2.25),
+    ("ptz_plus", "plus.svg", 20, 2.25),
+    ("ptz_save", "device-floppy.svg", 18, 2),
+    ("ptz_edit", "pencil.svg", 18, 2),
+    ("ptz_delete", "trash.svg", 18, 2),
+    ("ptz_play", "player-play.svg", 18, 2),
+    ("ptz_stop", "player-stop.svg", 18, 2),
+    ("ptz_close", "x.svg", 20, 2.25),
 ]
 
 

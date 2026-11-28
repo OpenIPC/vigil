@@ -10,6 +10,7 @@
  */
 #define _DEFAULT_SOURCE
 #include <fcntl.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -229,6 +230,111 @@ static void push_event(int ch, const char *text)
     if (g_n_more == (int)(sizeof g_more / sizeof g_more[0])) abort();
     g_more[g_n_more] = (ui_event_t){ .ch = ch };
     snprintf(g_more[g_n_more++].text, sizeof g_more[0].text, "%s", text);
+}
+
+/* ---- PTZ: what the panel asks the camera, recorded --------------------------------------- */
+
+static ui_ptz_t g_fptz;
+static char     g_pl[256][64];
+static int      g_pn;
+
+static void fplog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void fplog(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    if (g_pn < 256) vsnprintf(g_pl[g_pn++], sizeof g_pl[0], fmt, ap);
+    va_end(ap);
+}
+
+static int fpcount(const char *prefix)
+{
+    int n = 0;
+    for (int i = 0; i < g_pn; ++i) n += !strncmp(g_pl[i], prefix, strlen(prefix));
+    return n;
+}
+
+static const char *fplast(void) { return g_pn ? g_pl[g_pn - 1] : ""; }
+
+static void fptz_reset(void)
+{
+    memset(&g_fptz, 0, sizeof g_fptz);
+    g_fptz.state = UI_PTZ_READY;
+    snprintf(g_fptz.backend, sizeof g_fptz.backend, "netip");
+    g_fptz.caps = UI_PTZ_CAP_PAN_TILT | UI_PTZ_CAP_ZOOM | UI_PTZ_CAP_FOCUS | UI_PTZ_CAP_IRIS | UI_PTZ_CAP_PRESETS |
+                  UI_PTZ_CAP_TOURS | UI_PTZ_CAP_HOME;
+    static const char *const names[] = { "Gate", "Driveway", "" };
+    for (int i = 0; i < 3; ++i) {
+        snprintf(g_fptz.presets[i].token, sizeof g_fptz.presets[i].token, "%d", i + 1);
+        snprintf(g_fptz.presets[i].name, sizeof g_fptz.presets[i].name, "%s", names[i]);
+    }
+    g_fptz.n_presets = 3;
+    g_fptz.tours = 4;
+    g_fptz.gen = 1;
+    g_pn = 0;
+}
+
+static int fp_info(int ch, ui_ptz_t *o)
+{
+    (void)ch;
+    *o = g_fptz;
+    return 0;
+}
+static int fp_move(int ch, double p, double t, double z, int hold)
+{
+    (void)hold;
+    fplog("move %d %.2f %.2f %.2f", ch, p, t, z);
+    return 0;
+}
+static int fp_lens(int ch, int what, double d, int hold)
+{
+    (void)hold;
+    fplog("%s %d %.2f", what == UI_PTZ_IRIS ? "iris" : "focus", ch, d);
+    return 0;
+}
+static int fp_stop(int ch)
+{
+    fplog("stop %d", ch);
+    return 0;
+}
+static int fp_preset(int ch, int op, const char *tok, const char *name)
+{
+    fplog("preset %d %d %s %s", ch, op, tok && *tok ? tok : "-", name ? name : "-");
+    if (op == UI_PTZ_PRESET_SET && !(tok && *tok) && g_fptz.n_presets < UI_PTZ_PRESETS) {
+        ui_ptz_preset_t *p = &g_fptz.presets[g_fptz.n_presets++];
+        snprintf(p->token, sizeof p->token, "%d", g_fptz.n_presets);
+        snprintf(p->name, sizeof p->name, "%s", name ? name : "");
+        ++g_fptz.gen;
+    }
+    return 0;
+}
+static int fp_home(int ch)
+{
+    fplog("home %d", ch);
+    return 0;
+}
+static int fp_af(int ch)
+{
+    fplog("af %d", ch);
+    return 0;
+}
+static int fp_tour(int ch, int n, int start)
+{
+    fplog("tour %d %d %d", ch, n, start);
+    return 0;
+}
+
+static void fake_ptz(ui_model_t *m)
+{
+    fptz_reset();
+    m->ptz_info = fp_info;
+    m->ptz_move = fp_move;
+    m->ptz_lens = fp_lens;
+    m->ptz_stop = fp_stop;
+    m->ptz_preset = fp_preset;
+    m->ptz_home = fp_home;
+    m->ptz_focus_auto = fp_af;
+    m->ptz_tour = fp_tour;
 }
 
 static void fake_tiles(const ui_rect_t *t, int n)
@@ -3057,7 +3163,7 @@ static int put_display(const char *json)
  * clicks still land where it is. Returns the new pointer. */
 static lv_indev_t *test_cursor_plane(lv_display_t *disp)
 {
-    static const input_hooks_t hooks = { ui_app_back, ui_app_key, ui_app_keyboards, ui_app_wheel };
+    static const input_hooks_t hooks = { ui_app_back, ui_app_key, ui_app_keyboards, ui_app_wheel, ui_app_key_up };
     uint32_t drawn = lv_obj_get_child_count(lv_layer_sys());
     input_evdev_delete();                       /* closes the test mouse's end */
     close(g_mouse[1]);
@@ -4169,6 +4275,324 @@ static void test_session(void)
     --g_nfg;
 }
 
+
+/* ---- PTZ ----------------------------------------------------------------------------------- */
+
+/* The `nth` image showing `src` under `o` (depth first), or NULL. */
+static lv_obj_t *img_in(lv_obj_t *o, const void *src, int *nth)
+{
+    if (lv_obj_check_type(o, &lv_image_class) && lv_image_get_src(o) == src && visible(o) && (*nth)-- == 0) return o;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(o); ++i) {
+        lv_obj_t *r = img_in(lv_obj_get_child(o, (int32_t)i), src, nth);
+        if (r) return r;
+    }
+    return NULL;
+}
+
+/* The button showing icon `src` (the `nth`), its middle in x, y. */
+static lv_obj_t *icon_button(const void *src, int nth, int *x, int *y)
+{
+    lv_obj_t *i = img_in(lv_screen_active(), src, &nth);
+    lv_obj_t *b = i ? lv_obj_get_parent(i) : NULL;
+    if (b && x) center_of(b, x, y);
+    return b;
+}
+
+static void press(int down)
+{
+    ev(EV_KEY, BTN_LEFT, down);
+    ev(EV_SYN, SYN_REPORT, 0);
+}
+
+/* The last move's pan, tilt, zoom; -1 when the last call was not one. */
+static int last_move(double *p, double *t, double *z)
+{
+    int ch;
+    return sscanf(fplast(), "move %d %lf %lf %lf", &ch, p, t, z) == 4 ? ch : -1;
+}
+
+static int stopped(void) { return !strncmp(fplast(), "stop", 4); }
+
+static void test_ptz(void)
+{
+    run(VG_DURATION_TOAST);
+    fptz_reset();
+    double p, t, z;
+    int x, y;
+
+    /* The context menu on CAM2 (top right of the 2x2): its PTZ. */
+    move_to(900, 200);
+    button(BTN_RIGHT);
+    run(50);
+    lv_obj_t *item = find("PTZ", 1);
+    CHECK(item && lv_obj_get_style_text_color(lv_obj_get_parent(item), 0).red != UI_C(TEXT2).red,
+          "PTZ is in the context menu, no longer muted");
+    click_text("PTZ");
+    run(100);
+    CHECK(ui_ptz_is_open() && ui_ptz_channel() == 1, "PTZ opened on the camera the menu was opened on");
+    CHECK(g_tiles[1].w == W && g_tiles[1].h == H && g_tiles[0].w == 0, "that camera full screen under the panel");
+    CHECK(find("Gate", 1) && find("Driveway", 1) && find("NETIP", 1), "the presets and the protocol");
+    CHECK(icon_button(&ui_icon_ptz_up_left, 0, NULL, NULL) && icon_button(&ui_icon_ptz_home, 0, NULL, NULL),
+          "the pad, home in the middle");
+    CHECK(img_in(lv_screen_active(), &ui_icon_ptz_iris, &(int){ 0 }) && find("Tour", 1),
+          "zoom, focus, iris rows and the tours, all of which this camera has");
+
+    /* Held on the picture, up and left of the middle: a move that way,
+     * faster further out, kept going, stopped on release. */
+    g_pn = 0;
+    move_to(160, 90);
+    press(1);
+    run(100);
+    CHECK(last_move(&p, &t, &z) == 1 && p < -0.6 && t > 0.6 && z == 0, "pressed up left: '%s'", fplast());
+    int n = fpcount("move");
+    run(800);
+    CHECK(fpcount("move") >= n + 2, "held: repeated while it holds (%d)", fpcount("move") - n);
+    CHECK(find("Moving up left", 1), "the chip says what moves");
+    move_to(170, 95);                           /* a nudge is not a new command */
+    CHECK(last_move(&p, &t, &z) == 1, "still the move");
+    press(0);
+    run(60);
+    CHECK(stopped(), "released: stopped ('%s')", fplast());
+
+    /* Pressed, then the pointer onto the panel: stopped there. */
+    g_pn = 0;
+    move_to(800, 600);
+    press(1);
+    run(100);
+    CHECK(last_move(&p, &t, &z) == 1 && p > 0 && t < 0, "pressed down right: '%s'", fplast());
+    move_to(1100, 600);
+    run(60);
+    CHECK(stopped(), "the pointer left the picture: stopped ('%s')", fplast());
+    press(0);
+    run(60);
+
+    /* The wheel over the picture zooms for a moment. */
+    g_pn = 0;
+    move_to(400, 300);
+    ev(EV_REL, REL_WHEEL, 1);
+    ev(EV_SYN, SYN_REPORT, 0);
+    run(100);
+    CHECK(last_move(&p, &t, &z) == 1 && z > 0 && !p && !t, "wheel up: zoom in ('%s')", fplast());
+    run(700);
+    CHECK(stopped(), "and stopped after it");
+    g_pn = 0;
+    ev(EV_REL, REL_WHEEL, -1);
+    ev(EV_SYN, SYN_REPORT, 0);
+    run(100);
+    CHECK(last_move(&p, &t, &z) == 1 && z < 0, "wheel down: zoom out");
+    run(700);
+
+    /* The pad's buttons and the lens ones, held. */
+    g_pn = 0;
+    CHECK(icon_button(&ui_icon_ptz_up, 0, &x, &y), "the up button");
+    move_to(x, y);
+    press(1);
+    run(400);
+    CHECK(last_move(&p, &t, &z) == 1 && p == 0 && t > 0.6 && t < 0.7, "up at the speed (5 of 8): '%s'", fplast());
+    press(0);
+    run(60);
+    CHECK(stopped(), "released: stopped");
+    g_pn = 0;
+    icon_button(&ui_icon_ptz_plus, 0, &x, &y);  /* zoom + (the first +) */
+    move_to(x, y);
+    press(1);
+    run(300);
+    CHECK(last_move(&p, &t, &z) == 1 && z > 0, "zoom + held: '%s'", fplast());
+    move_to(x + 200, y + 300);                   /* slid off it */
+    run(60);
+    CHECK(stopped(), "slid off the button: stopped");
+    press(0);
+    run(60);
+    g_pn = 0;
+    icon_button(&ui_icon_ptz_minus, 1, &x, &y);  /* focus - */
+    move_to(x, y);
+    press(1);
+    run(100);
+    CHECK(!strcmp(fplast(), "focus 1 -1.00"), "focus near: '%s'", fplast());
+    press(0);
+    run(60);
+    CHECK(stopped(), "and stopped");
+    icon_button(&ui_icon_ptz_home, 0, &x, &y);
+    click_at(x, y);
+    CHECK(fpcount("home 1") == 1, "the middle: home");
+
+    /* Keys: arrows held and let go, two at once, one whose release is
+     * never told; + and -, PgUp, digits, Home. */
+    move_to(400, 300);
+    g_pn = 0;
+    kev(g_kbd[1], KEY_LEFT, 1);
+    run(100);
+    CHECK(last_move(&p, &t, &z) == 1 && p < 0 && t == 0, "Left: '%s'", fplast());
+    for (int i = 0; i < 6; ++i) {
+        kev(g_kbd[1], KEY_LEFT, 2);
+        run(100);
+    }
+    CHECK(!fpcount("stop"), "held (the kernel's repeats): still moving");
+    kev(g_kbd[1], KEY_UP, 1);
+    run(100);
+    CHECK(last_move(&p, &t, &z) == 1 && p < 0 && t > 0, "Left and Up: a diagonal");
+    kev(g_kbd[1], KEY_LEFT, 0);
+    run(100);
+    CHECK(last_move(&p, &t, &z) == 1 && p == 0 && t > 0, "Left let go: up only");
+    kev(g_kbd[1], KEY_UP, 0);
+    run(100);
+    CHECK(stopped(), "both let go: stopped");
+    g_pn = 0;
+    kev(g_kbd[1], KEY_DOWN, 1);
+    run(100);
+    CHECK(last_move(&p, &t, &z) == 1 && t < 0, "Down");
+    run(VG_DURATION_PTZ_HOLD + 300);
+    CHECK(stopped(), "no repeat and no release (a keyboard gone): stopped after the hold");
+    kev(g_kbd[1], KEY_DOWN, 0);
+    run(60);
+    g_pn = 0;
+    kev(g_kbd[1], KEY_KPPLUS, 1);
+    run(100);
+    CHECK(last_move(&p, &t, &z) == 1 && z > 0, "+: zoom in");
+    kev(g_kbd[1], KEY_KPPLUS, 0);
+    run(60);
+    CHECK(stopped(), "+ let go");
+    kev(g_kbd[1], KEY_MINUS, 1);
+    run(100);
+    CHECK(last_move(&p, &t, &z) == 1 && z < 0, "-: zoom out");
+    kev(g_kbd[1], KEY_MINUS, 0);
+    run(60);
+    kev(g_kbd[1], KEY_PAGEUP, 1);
+    run(100);
+    CHECK(!strcmp(fplast(), "focus 1 1.00"), "PgUp: focus far");
+    kev(g_kbd[1], KEY_PAGEUP, 0);
+    run(60);
+    CHECK(stopped(), "PgUp let go");
+    g_pn = 0;
+    key(KEY_2);
+    CHECK(!strcmp(fplast(), "preset 1 0 2 -"), "2: preset 2 ('%s')", fplast());
+    key(KEY_7);
+    CHECK(fpcount("preset") == 1 && find("no preset 7", 1), "7: no such preset, said");
+    key(KEY_HOME);
+    CHECK(fpcount("home 1") == 1, "Home: the home position");
+    CHECK(ui_ptz_is_open() && g_tiles[1].w == W, "the keys did not change the live view");
+
+    /* A click on a preset goes there; a new one named with the keyboard. */
+    g_pn = 0;
+    click_text("Driveway");
+    CHECK(!strcmp(fplast(), "preset 1 0 2 -"), "a click on a preset: goto");
+    icon_button(&ui_icon_ptz_plus, 3, &x, &y);  /* the presets' + (after zoom, focus, iris) */
+    click_at(x, y);
+    CHECK(ui_popup_is_open() && find("New preset", 1), "+: the name dialog");
+    type("Porch");
+    key(KEY_ENTER);
+    run(300);
+    CHECK(fpcount("preset 1 1 - Porch") == 1 && !ui_popup_is_open(), "stored as a new preset: '%s'", fplast());
+    CHECK(find("Porch", 1), "and listed");
+    icon_button(&ui_icon_ptz_delete, 2, &x, &y);    /* the third row's */
+    click_at(x, y);
+    CHECK(find("Delete preset 3?", 1), "delete asks first");
+    lv_obj_t *yes = find_in(lv_layer_top(), "Delete", 0);
+    if (yes) {
+        center_of(yes, &x, &y);
+        click_at(x, y);
+    }
+    CHECK(!strcmp(fplast(), "preset 1 2 3 -"), "deleted: '%s'", fplast());
+    icon_button(&ui_icon_ptz_edit, 1, &x, &y);
+    click_at(x, y);
+    CHECK(find("Rename preset 2", 1), "rename: the dialog");
+    int seen = 0;
+    lv_obj_t *ta = find_textarea(lv_layer_top(), 0, &seen);
+    CHECK(ta && !strcmp(lv_textarea_get_text(ta), "Driveway"), "with the name in it");
+    if (ta) lv_textarea_set_text(ta, "Lane");
+    key(KEY_ENTER);
+    run(100);
+    CHECK(!strcmp(fplast(), "preset 1 3 2 Lane"), "renamed: '%s'", fplast());
+    icon_button(&ui_icon_ptz_save, 0, &x, &y);
+    click_at(x, y);
+    CHECK(find("Store the camera's position now as preset 1 (Gate)?", 1), "store asks first");
+    yes = find_in(lv_layer_top(), "Store", 0);
+    if (yes) {
+        center_of(yes, &x, &y);
+        click_at(x, y);
+    }
+    CHECK(!strcmp(fplast(), "preset 1 1 1 -"), "stored again: '%s'", fplast());
+    icon_button(&ui_icon_ptz_play, 0, &x, &y);
+    click_at(x, y);
+    CHECK(!strcmp(fplast(), "tour 1 1 1"), "tour 1 started: '%s'", fplast());
+
+    /* Esc: closed, stopped, the grid back. */
+    move_to(400, 300);
+    press(1);
+    run(100);
+    g_pn = 0;
+    key(KEY_ESC);
+    press(0);
+    run(100);
+    CHECK(!ui_ptz_is_open() && fpcount("stop 1") >= 1, "Esc while moving: closed and stopped");
+    CHECK(g_tiles[0].w == 640 && g_tiles[1].x == 640 && g_tiles[1].w == 640, "the 2x2 back");
+
+    /* P on the selected camera; the right button closes it, stopping. */
+    click_at(300, 200);
+    run(VG_DURATION_DOUBLE_CLICK + 100);
+    key(KEY_P);
+    run(100);
+    CHECK(ui_ptz_is_open() && ui_ptz_channel() == 0, "P: PTZ on the selected camera");
+    move_to(200, 600);
+    press(1);
+    run(100);
+    g_pn = 0;
+    button(BTN_RIGHT);
+    run(60);
+    press(0);
+    run(60);
+    CHECK(!ui_ptz_is_open() && fpcount("stop 0") >= 1, "right button: closed and stopped");
+
+    /* A camera without PTZ says so; one being asked shows its controls
+     * when it has answered; a lens-only camera has no pad. */
+    g_fptz.state = UI_PTZ_NONE;
+    snprintf(g_fptz.error, sizeof g_fptz.error, "the camera has no PTZ (Ret 607)");
+    key(KEY_P);
+    run(100);
+    CHECK(find("This camera has no PTZ: the camera has no PTZ (Ret 607)", 1) &&
+              !icon_button(&ui_icon_ptz_up, 0, NULL, NULL),
+          "no PTZ: said, no controls");
+    g_fptz.state = UI_PTZ_PROBING;
+    g_fptz.error[0] = 0;
+    ++g_fptz.gen;
+    run(300);
+    CHECK(find("Asking the camera", 1), "probing");
+    g_fptz.state = UI_PTZ_READY;
+    g_fptz.caps = UI_PTZ_CAP_ZOOM | UI_PTZ_CAP_FOCUS | UI_PTZ_CAP_FOCUS_AUTO;
+    ++g_fptz.gen;
+    run(300);
+    CHECK(!icon_button(&ui_icon_ptz_up, 0, NULL, NULL) && icon_button(&ui_icon_ptz_plus, 0, NULL, NULL) &&
+              !find("Presets", 0) && find("AF", 0),
+          "a lens without pan/tilt or presets: zoom, focus, AF");
+    g_pn = 0;
+    move_to(400, 300);
+    press(1);
+    run(100);
+    press(0);
+    run(60);
+    CHECK(fpcount("move") == 0, "the picture does not pan a lens");
+    click_text("AF");
+    CHECK(!strcmp(fplast(), "af 0"), "AF: the camera's own focus");
+    key(KEY_ESC);
+    run(100);
+    fptz_reset();
+
+    /* With the on-screen login on, PTZ asks for a user with ptz. */
+    schema_errors_t se = { 0 };
+    static const char on[] = "{\"login\":true}", off[] = "{\"login\":false}";
+    CHECK(config_put_json("ui", on, strlen(on), &se) == CONFIG_OK, "login on");
+    ui_app_refresh();
+    run(300);
+    key(KEY_P);
+    run(100);
+    CHECK(!ui_ptz_is_open() && ui_popup_is_open() && find("Log in", 1), "PTZ: the login first");
+    key(KEY_ESC);
+    run(100);
+    CHECK(config_put_json("ui", off, strlen(off), &se) == CONFIG_OK, "login off");
+    ui_app_refresh();
+    run(VG_DURATION_TOAST);
+}
+
 /* Caps Lock, Num Lock, a second keyboard, and unplugging with Shift held. */
 static void test_keyboard_plug(void)
 {
@@ -4422,11 +4846,12 @@ static int setup(int channels, const char *json, char *path, size_t cap)
     g_model.system_info = fake_info;
     if (!g_live) fake_discovery(&g_model);
     fake_mgmt(&g_model);
+    fake_ptz(&g_model);
     ui_app_create(&g_model);
     if (pipe(g_mouse) < 0 || pipe(g_kbd) < 0) return -1;
     fcntl(g_mouse[0], F_SETFL, O_NONBLOCK);
     fcntl(g_kbd[0], F_SETFL, O_NONBLOCK);
-    static const input_hooks_t hooks = { ui_app_back, ui_app_key, ui_app_keyboards, ui_app_wheel };
+    static const input_hooks_t hooks = { ui_app_back, ui_app_key, ui_app_keyboards, ui_app_wheel, ui_app_key_up };
     ui_app_set_pointer(input_evdev_create(disp, &hooks, 0));
     ui_app_set_keypad(input_evdev_keypad());
     input_evdev_attach(g_mouse[0], "test mouse", 0, 0, 0, 0, 0);
@@ -4577,6 +5002,53 @@ static void shots_osd(void)
     g_video_all = 0;
 }
 
+/* The PTZ panel (screens for people; test_ptz checks it). */
+static void shots_ptz(void)
+{
+    ui_popup_close();
+    fptz_reset();
+    move_to(300, 200);
+    button(BTN_RIGHT);
+    click_text("PTZ");
+    move_to(700, 500);
+    run(300);
+    shot("ptz-panel");
+    move_to(150, 100);
+    press(1);
+    run(400);
+    shot("ptz-moving");
+    press(0);
+    run(100);
+    int x, y;
+    icon_button(&ui_icon_ptz_plus, 3, &x, &y);
+    click_at(x, y);
+    int seen = 0;
+    lv_obj_t *ta = find_textarea(lv_layer_top(), 0, &seen);
+    if (ta) lv_textarea_set_text(ta, "Porch");
+    shot("ptz-new-preset");
+    button(BTN_RIGHT);                          /* the dialog closed */
+    icon_button(&ui_icon_ptz_delete, 1, &x, &y);
+    click_at(x, y);
+    shot("ptz-delete-preset");
+    button(BTN_RIGHT);
+    run(100);
+    g_fptz.caps = UI_PTZ_CAP_ZOOM | UI_PTZ_CAP_FOCUS | UI_PTZ_CAP_FOCUS_AUTO;
+    ++g_fptz.gen;
+    run(300);
+    shot("ptz-lens-only");
+    g_fptz.state = UI_PTZ_NONE;
+    snprintf(g_fptz.error, sizeof g_fptz.error, "the camera has no PTZ (Ret 607)");
+    ++g_fptz.gen;
+    run(300);
+    shot("ptz-none");
+    button(BTN_RIGHT);                          /* PTZ closed */
+    run(100);
+    fptz_reset();
+    move_to(300, 200);
+    button(BTN_RIGHT);
+    click_text("Split");
+}
+
 static int shots_4(void)
 {
     char path[512];
@@ -4588,6 +5060,7 @@ static int shots_4(void)
     shot("context-menu");
     click_text("Split");
     shot("context-split");
+    shots_ptz();
     click_text("1 window");
     shot("live-1x1");
     move_to(W - 20, H / 2);                     /* one camera a page: the page arrows */
@@ -5073,11 +5546,12 @@ int main(int argc, char **argv)
     g_model.system_info = fake_info;
     fake_discovery(&g_model);
     fake_mgmt(&g_model);
+    fake_ptz(&g_model);
     ui_app_create(&g_model);
 
     if (pipe(g_mouse) < 0) return 1;
     fcntl(g_mouse[0], F_SETFL, O_NONBLOCK);
-    static const input_hooks_t hooks = { ui_app_back, ui_app_key, ui_app_keyboards, ui_app_wheel };
+    static const input_hooks_t hooks = { ui_app_back, ui_app_key, ui_app_keyboards, ui_app_wheel, ui_app_key_up };
     lv_indev_t *ptr = input_evdev_create(disp, &hooks, 0);
     ui_app_set_pointer(ptr);
     ui_app_set_keypad(input_evdev_keypad());
@@ -5100,6 +5574,7 @@ int main(int argc, char **argv)
     test_keyboard_live();
     test_keyboard_settings();
     test_keyboard_dropdown();
+    test_ptz();
     test_keyboard_plug();
     test_empty_slot();
     test_session();
