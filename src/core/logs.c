@@ -81,8 +81,10 @@ const char *const oplog_actions[] = {
     "disk_format", "disk_mount", "disk_unmount", "scan_start", "scan_pause", "scan_resume", "scan_stop",
     "smart_selftest", "network_changed", "network_confirmed", "network_rolled_back", "wifi_changed",
     "time_zone_set", "clock_set", "ntp_servers_set", "hostname_set", "log_export",
+    "config_import", "config_export", "config_reset", "factory_reset", "ptz_preset_set", "ptz_preset_remove",
+    "ptz_preset_rename",
     /* the hooks others call */
-    "firmware_upgrade", "config_import", "config_export", "config_reset",
+    "firmware_upgrade",
     NULL,
 };
 

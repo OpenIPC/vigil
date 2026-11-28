@@ -347,7 +347,9 @@ Operation -> **Logs** ([ui.md](ui.md#logs)) and `/api/v1/logs`
 |---|---|---|
 | System | The firmware's syslog (BusyBox `logread`; vigild's own lines are in it, it runs with `-s`) and the kernel's (dmesg), read when shown, filtered by level and text. | The firmware's RAM ring only. Export saves it to a disk. |
 | Alarm | A camera's events as they start and stop (`motion`, `human`, `face`, `vehicle`, ... as the camera reports them), a camera `offline` (it cannot be reached, or the stream was lost; with why) and back, `rec_failed` (writing failed), `rec_off` (no disk, not a disk, read-only) and back, `disk_full` (`record.on_full: stop`) and room again, `disk_error` (a format failed), `disk_smart` (SMART turned warning or failing, and good again), `disk_bad_sectors` (a surface scan found bad ranges), `no_decoder`. Each with the time, the channel (or none), the type, start / stop, a detail. | vigild: RAM, the disk, a short copy on flash (below). |
-| Operation | Who did what: `login` (the screen, the web page, the API; NETIP, RTSP and ONVIF clients too), `login_failed` (with the user name tried, the address, how many in a row), `lockout`, `logout`, `config_saved` (the section and the names of the fields that changed, never a value: `record: path, segment`, `cameras: 2 -> 3 items; [3] url, name`), `user_added`, `user_changed`, `user_deleted`, `group_*`, `password_changed`, `reboot`, `shutdown`, `factory_reset`, `start` and `stop` of vigild, `disk_format`, `disk_mount`, `disk_unmount`, `scan_start` / `pause` / `resume` / `stop`, `smart_selftest`, `network_changed` / `confirmed` / `rolled_back`, `wifi_changed`, `time_zone_set`, `clock_set`, `ntp_servers_set`, `hostname_set`, `log_export`. Each with the user, where from (`screen`, `web`, `api`, `onvif`, `netip`, `rtsp`, `system`) and a detail. | As the alarm log. |
+| Operation | Who did what: `login` (the screen, the web page, the API; NETIP, RTSP and ONVIF clients too), `login_failed` (with the user name tried, the address, how many in a row), `lockout`, `logout`, `config_saved` (the section and the names of the fields that changed, never a value: `record: path, segment`, `cameras: 2 -> 3 items; [3] url, name`), `user_added`, `user_changed`, `user_deleted`, `group_*`, `password_changed`, `reboot`, `shutdown`, `factory_reset`,
+`config_export`, `config_import`, `config_reset`, `ptz_preset_set` /
+`remove` / `rename`, `start` and `stop` of vigild, `disk_format`, `disk_mount`, `disk_unmount`, `scan_start` / `pause` / `resume` / `stop`, `smart_selftest`, `network_changed` / `confirmed` / `rolled_back`, `wifi_changed`, `time_zone_set`, `clock_set`, `ntp_servers_set`, `hostname_set`, `log_export`. Each with the user, where from (`screen`, `web`, `api`, `onvif`, `netip`, `rtsp`, `system`) and a detail. | As the alarm log. |
 
 A login through the API is a check of every request: it is logged once
 per user and address, and again after a quiet half hour (so are RTSP,
@@ -392,12 +394,16 @@ detail)` (`src/core/logs.h`; `NULL` user and source: the thread's
 actor, see below) and `alarmlog_push(channel, type, active, detail)`.
 Already called: `config_put_json`, `users.c` (users, groups, the system
 password), `mgmt.c` (reboot, shutdown, format, mount, unmount, scans,
-self-tests, network, time, host name, factory reset), the logins of the
-API, the zero channel, ONVIF, NETIP, RTSP and the screen, the screen's
-logout, the exports. Waiting for their branches: `firmware_upgrade`
-(start, done, failed: the detail says which image and why),
-`config_import`, `config_export` and `config_reset` (the detail: which
-sections; never a password). The actor: whoever takes requests on a thread says who sends
+self-tests, network, time, host name, factory reset), `backup.c`
+(`config_export` with the file's name and whether the passwords are in
+it, `config_import` when applied or refused with where it came from and
+what it brought, `config_reset`; an import or reset is also a
+`config_saved` naming the sections that changed), `ptz.c`
+(`ptz_preset_set`, `ptz_preset_remove`, `ptz_preset_rename`), the logins
+of the API, the zero channel, ONVIF, NETIP, RTSP and the screen, the
+screen's logout, the exports. Waiting for its branch: `firmware_upgrade`
+(start, done, failed: the detail says which image and why; never a
+password). The actor: whoever takes requests on a thread says who sends
 them (`oplog_actor(user, source, address)`: the API's authorization
 hook, the zero channel's login, ONVIF, the NETIP and RTSP servers, the
 UI bridge for the main thread), so code called from any of them logs the

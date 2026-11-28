@@ -23,6 +23,7 @@
 #include "config.h"
 #include "events.h"
 #include "log.h"
+#include "logs.h"
 #include "mgmt.h"
 #include "secret.h"
 #include "sys.h"
@@ -424,6 +425,9 @@ int backup_export(const char *password, char **out, size_t *len, char *name, siz
     }
     int rc = export_locked(password, out, len, name, ncap, err, cap);
     pthread_mutex_unlock(&g_busy);
+    if (rc == BACKUP_OK)
+        oplog_pushf(NULL, NULL, "config_export", "%s, %s", name,
+                    password && *password ? "passwords sealed with a password" : "without the passwords");
     return rc;
 }
 
@@ -1090,6 +1094,13 @@ int backup_import(const void *data, size_t len, const backup_import_opts_t *o, b
     int rc = import_locked(data, len, o, s, err, cap);
     pthread_mutex_unlock(&g_busy);
     if (rc != BACKUP_OK) vg_log("configuration import refused: %s", err);
+    /* A dry run changes nothing: only what was applied, or refused. */
+    if (o && o->apply && rc == BACKUP_OK)
+        oplog_pushf(NULL, NULL, "config_import", "from %s (%s): %d camera(s), %d user(s)%s%s", s->from_host[0] ? s->from_host : "?",
+                    s->created, s->cameras_new, s->users_new, s->root_password ? ", root's password" : "",
+                    s->reboot ? ", network at the next boot" : "");
+    else if (o && o->apply)
+        oplog_pushf(NULL, NULL, "config_import", "refused: %.100s", err);
     return rc;
 }
 
@@ -1238,6 +1249,7 @@ int backup_reset_vigil(int network, int *reboot, char *err, size_t cap)
     }
     int rc = reset_locked(network, reboot, err, cap);
     pthread_mutex_unlock(&g_busy);
+    if (rc == BACKUP_OK) oplog_push(NULL, NULL, "config_reset", network ? "vigil's settings and the network" : "vigil's settings");
     return rc;
 }
 

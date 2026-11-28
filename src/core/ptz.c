@@ -20,6 +20,7 @@
 #include "cJSON.h"
 #include "config.h"
 #include "log.h"
+#include "logs.h"
 #include "ptz.h"
 #include "source.h"
 
@@ -256,6 +257,8 @@ typedef struct ptz_slot {
     long long        last_cmd_ms;
     ptz_op_t         q[OPS_MAX];
     int              qn;
+    ptz_op_t         running;           /* the op being sent (out of q, its result not in info yet) */
+    int              has_running;
     struct ptz_slot *next;           /* the retired list */
 } ptz_slot_t;
 
@@ -503,9 +506,12 @@ static void *worker(void *arg)
         if (s->qn) {
             ptz_op_t op = s->q[0];
             memmove(s->q, s->q + 1, sizeof s->q[0] * (size_t)--s->qn);
+            s->running = op;
+            s->has_running = 1;
             pthread_mutex_unlock(&s->lock);
             run_op(s, l, &op);
             pthread_mutex_lock(&s->lock);
+            s->has_running = 0;
             s->last_cmd_ms = mono_ms();
             continue;
         }
@@ -848,6 +854,9 @@ static void free_number(const ptz_slot_t *s, char *out, size_t cap)
         for (int i = 0; i < s->info.n_presets && !used; ++i) used = !strcmp(s->info.presets[i].token, t);
         for (int i = 0; i < s->qn && !used; ++i)
             used = s->q[i].kind == OP_PRESET && s->q[i].sub == PTZ_PRESET_SET && !strcmp(s->q[i].token, t);
+        /* Nor the one being set now: out of the queue, not in the list yet. */
+        if (!used && s->has_running)
+            used = s->running.kind == OP_PRESET && s->running.sub == PTZ_PRESET_SET && !strcmp(s->running.token, t);
         if (!used) {
             snprintf(out, cap, "%s", t);
             return;
@@ -875,6 +884,9 @@ int ptz_preset_set(int ch, const char *token, const char *name)
     if (!rc && s->qn == OPS_MAX) rc = PTZ_EBUSY;
     if (!rc) s->q[s->qn++] = op;
     slot_unlock(s);
+    if (!rc)
+        oplog_pushf(NULL, NULL, "ptz_preset_set", "CAM%d preset %s%s%s", ch + 1, op.token, op.name[0] ? ": " : "",
+                    op.name);
     return rc;
 }
 
@@ -883,7 +895,9 @@ int ptz_preset_remove(int ch, const char *token)
     if (!token_ok(token)) return PTZ_EINVAL;
     ptz_op_t op = { .kind = OP_PRESET, .sub = PTZ_PRESET_REMOVE };
     snprintf(op.token, sizeof op.token, "%s", token);
-    return queue(ch, PTZ_CAP_PRESETS, &op);
+    int rc = queue(ch, PTZ_CAP_PRESETS, &op);
+    if (!rc) oplog_pushf(NULL, NULL, "ptz_preset_remove", "CAM%d preset %s", ch + 1, token);
+    return rc;
 }
 
 int ptz_preset_rename(int ch, const char *token, const char *name)
@@ -892,7 +906,9 @@ int ptz_preset_rename(int ch, const char *token, const char *name)
     ptz_op_t op = { .kind = OP_RENAME, .has_name = 1 };
     snprintf(op.token, sizeof op.token, "%s", token);
     snprintf(op.name, sizeof op.name, "%s", name);
-    return queue(ch, PTZ_CAP_PRESETS, &op);
+    int rc = queue(ch, PTZ_CAP_PRESETS, &op);
+    if (!rc) oplog_pushf(NULL, NULL, "ptz_preset_rename", "CAM%d preset %s: %s", ch + 1, token, name);
+    return rc;
 }
 
 int ptz_home(int ch)
