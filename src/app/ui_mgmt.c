@@ -11,6 +11,7 @@
 
 #include "logs.h"
 #include "mgmt.h"
+#include "secret.h"
 #include "sys.h"
 #include "sys_curl.h"
 #include "sys_disk.h"
@@ -18,6 +19,7 @@
 #include "ui_bridge.h"
 #ifdef VIGIL_HAVE_USERS
 #include "api.h"
+#include "backup.h"
 #include "netip_srv.h"
 #include "onvif.h"
 #include "rtsp_server.h"
@@ -628,6 +630,187 @@ static void listening(int server, ui_listen_t *out)
 }
 #endif
 
+#ifdef VIGIL_HAVE_USERS
+/* ---- configuration export and import, the resets (backup.h) -------------------------
+ * The work runs on a thread of its own: an export or import derives its
+ * key for a second or more, and the screen must not stop meanwhile. One
+ * at a time; the page polls for the outcome. */
+
+_Static_assert((int)UI_CFG_EPASSWORD == (int)BACKUP_EPASSWORD && (int)UI_CFG_ECHANGED == (int)BACKUP_ECHANGED &&
+                   (int)UI_CFG_EVERSION == (int)BACKUP_EVERSION && (int)UI_CFG_EBUSY == (int)BACKUP_EBUSY &&
+                   (int)UI_CFG_EUNMANAGED == (int)BACKUP_EUNMANAGED,
+               "the model's codes are backup.h's");
+
+static struct {
+    pthread_mutex_t lock;
+    int             busy, done;
+    int             op;             /* 0 export, 1 import, 2 reset */
+    char            dir[128], path[256], pw[160];
+    int             hostname, apply, level, network;
+    ui_cfg_result_t r;
+} g_cj = { .lock = PTHREAD_MUTEX_INITIALIZER };
+
+static int cfg_places(ui_cfg_place_t *out, int max)
+{
+    backup_place_t p[16];
+    int n = backup_places(p, max < 16 ? max : 16);
+    for (int i = 0; i < n; ++i) {
+        CP(out[i].path, p[i].path);
+        CP(out[i].label, p[i].label);
+    }
+    return n;
+}
+
+static int cfg_files(ui_cfg_file_t *out, int max)
+{
+    backup_file_t *f = calloc(32, sizeof *f);
+    int n = f ? backup_files(f, max < 32 ? max : 32) : 0;
+    for (int i = 0; i < n; ++i) {
+        CP(out[i].path, f[i].path);
+        CP(out[i].name, f[i].name);
+        out[i].size = f[i].size;
+        out[i].mtime = f[i].mtime;
+    }
+    free(f);
+    return n;
+}
+
+static void *cfg_worker(void *arg)
+{
+    (void)arg;
+    ui_cfg_result_t *r = calloc(1, sizeof *r);
+    backup_summary_t *s = calloc(1, sizeof *s);
+    char err[300] = "";
+    if (!r || !s) {
+        free(r);
+        free(s);
+        pthread_mutex_lock(&g_cj.lock);
+        g_cj.r.rc = UI_CFG_EIO;
+        snprintf(g_cj.r.msg, sizeof g_cj.r.msg, "out of memory");
+        g_cj.busy = 0;
+        g_cj.done = 1;
+        pthread_mutex_unlock(&g_cj.lock);
+        return NULL;
+    }
+    if (g_cj.op == 0) {
+        r->rc = backup_export_to(g_cj.dir, g_cj.pw[0] ? g_cj.pw : NULL, r->path, sizeof r->path, err, sizeof err);
+        if (r->rc == BACKUP_OK) snprintf(err, sizeof err, "Saved as %s", r->path);
+    } else if (g_cj.op == 1) {
+        backup_import_opts_t o = { .password = g_cj.pw, .apply = g_cj.apply, .hostname = g_cj.hostname };
+        r->rc = backup_import_file(g_cj.path, &o, s, err, sizeof err);
+        r->secrets = s->secrets;
+        r->applied = s->applied;
+        r->reboot = s->reboot;
+        r->net_cuts = s->net_cuts;
+        for (int i = 0; i < s->n_lines && i < UI_CFG_LINES; ++i) {
+            r->kind[i] = s->kind[i];
+            CP(r->line[i], s->line[i]);
+        }
+        r->n_lines = s->n_lines < UI_CFG_LINES ? s->n_lines : UI_CFG_LINES;
+        if (r->rc == BACKUP_OK) snprintf(err, sizeof err, "%s", s->applied ? "Imported" : "Checked");
+    } else if (g_cj.level == 0) {
+        r->rc = backup_reset_vigil(g_cj.network, &r->reboot, err, sizeof err);
+        if (r->rc == BACKUP_OK)
+            snprintf(err, sizeof err, "vigil's settings are the image's again%s",
+                     r->reboot ? "; rebooting for the network" : "");
+    } else {
+        r->rc = backup_reset_factory(err, sizeof err);
+        r->reboot = r->rc == BACKUP_OK;
+        if (r->rc == BACKUP_OK) snprintf(err, sizeof err, "Factory reset: vigild stops, the firmware resets and reboots");
+    }
+    CP(r->msg, err);
+    pthread_mutex_lock(&g_cj.lock);
+    g_cj.r = *r;
+    secret_wipe(g_cj.pw, sizeof g_cj.pw);
+    g_cj.busy = 0;
+    g_cj.done = 1;
+    pthread_mutex_unlock(&g_cj.lock);
+    free(r);
+    free(s);
+    return NULL;
+}
+
+/* Start `op` with the arguments already in g_cj (under its lock). */
+static int cfg_start_locked(char *err, size_t cap)
+{
+    g_cj.busy = 1;
+    g_cj.done = 0;
+    memset(&g_cj.r, 0, sizeof g_cj.r);
+    pthread_t t;
+    pthread_attr_t at;
+    pthread_attr_init(&at);
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    int rc = pthread_create(&t, &at, cfg_worker, NULL);
+    pthread_attr_destroy(&at);
+    if (rc != 0) {
+        g_cj.busy = 0;
+        secret_wipe(g_cj.pw, sizeof g_cj.pw);
+        snprintf(err, cap, "cannot start it (no thread)");
+        return UI_MGMT_EFAIL;
+    }
+    return 0;
+}
+
+static int cfg_begin(char *err, size_t cap)
+{
+    pthread_mutex_lock(&g_cj.lock);
+    if (g_cj.busy) {
+        pthread_mutex_unlock(&g_cj.lock);
+        snprintf(err, cap, "another export, import or reset is under way");
+        return UI_MGMT_EBUSY;
+    }
+    return 0;
+}
+
+static int cfg_export(const char *dir, const char *password, char *err, size_t cap)
+{
+    if (cfg_begin(err, cap) < 0) return UI_MGMT_EBUSY;
+    g_cj.op = 0;
+    CP(g_cj.dir, dir);
+    CP(g_cj.pw, password ? password : "");
+    int rc = cfg_start_locked(err, cap);
+    pthread_mutex_unlock(&g_cj.lock);
+    return rc;
+}
+
+static int cfg_import(const char *path, const char *password, int hostname, int apply, char *err, size_t cap)
+{
+    if (cfg_begin(err, cap) < 0) return UI_MGMT_EBUSY;
+    g_cj.op = 1;
+    CP(g_cj.path, path);
+    CP(g_cj.pw, password ? password : "");
+    g_cj.hostname = hostname;
+    g_cj.apply = apply;
+    int rc = cfg_start_locked(err, cap);
+    pthread_mutex_unlock(&g_cj.lock);
+    return rc;
+}
+
+static int cfg_reset(int level, int network, char *err, size_t cap)
+{
+    if (cfg_begin(err, cap) < 0) return UI_MGMT_EBUSY;
+    g_cj.op = 2;
+    g_cj.level = level;
+    g_cj.network = network;
+    g_cj.pw[0] = 0;
+    int rc = cfg_start_locked(err, cap);
+    pthread_mutex_unlock(&g_cj.lock);
+    return rc;
+}
+
+static int cfg_poll(ui_cfg_result_t *r)
+{
+    pthread_mutex_lock(&g_cj.lock);
+    int rc = g_cj.busy ? UI_MGMT_EBUSY : g_cj.done ? 0 : UI_MGMT_EINVAL;
+    if (rc == 0) {
+        *r = g_cj.r;
+        g_cj.done = 0;
+    }
+    pthread_mutex_unlock(&g_cj.lock);
+    return rc;
+}
+#endif
+
 static const ui_mgmt_t g_mgmt = {
     .managed = managed,
     .eth_get = eth_get, .eth_apply = eth_apply, .net_pending = net_pending, .net_confirm = net_confirm,
@@ -648,6 +831,8 @@ static const ui_mgmt_t g_mgmt = {
     .n_perms = PERM_N, .user_add = user_add, .user_update = user_update, .user_delete = user_delete,
     .group_set = group_set, .group_delete = group_delete, .login = login_, .listening = listening,
     .system_password = system_password,
+    .cfg_places = cfg_places, .cfg_files = cfg_files, .cfg_export = cfg_export, .cfg_import = cfg_import,
+    .cfg_reset = cfg_reset, .cfg_poll = cfg_poll,
 #endif
     .system_user = system_user, .power = power,
 };

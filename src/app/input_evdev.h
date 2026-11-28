@@ -21,6 +21,9 @@ typedef struct {
     /* The mouse wheel turned `steps` notches (> 0: away from the user,
      * up), after LVGL's input processing; LVGL's pointer has no wheel. */
     void (*wheel)(int steps);
+    /* A key let go (`key` as the press gave it), after the presses before
+     * it; LVGL does not see it. NULL: releases are not told. */
+    void (*key_up)(uint32_t key);
 } input_hooks_t;
 
 /* The pointer for `disp` with its cursor, the keypad (input_evdev_keypad),

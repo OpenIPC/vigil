@@ -85,6 +85,7 @@ typedef struct {
 typedef struct {
     uint32_t key;
     unsigned mods;
+    int      up;                    /* a release, for hooks.key_up */
 } key_t_;
 
 /* Everything in g that the reader thread touches is under g_lock: the
@@ -268,10 +269,10 @@ static void leds_all(void)
 
 /* Never full: dev_drain reads a keyboard only while the queue has room
  * for every event it reads (the rest waits in the kernel's buffer). */
-static void key_push(uint32_t key, unsigned mods)
+static void key_push(uint32_t key, unsigned mods, int up)
 {
     if (g.k_len == KEYS_MAX) return;
-    g.keys[(g.k_head + g.k_len++) % KEYS_MAX] = (key_t_){ key, mods };
+    g.keys[(g.k_head + g.k_len++) % KEYS_MAX] = (key_t_){ key, mods, up };
 }
 
 static void key_event(dev_t_ *d, unsigned code, int value)
@@ -282,7 +283,11 @@ static void key_event(dev_t_ *d, unsigned code, int value)
         else if (value == 0) d->held &= ~bit;
         return;
     }
-    if (value == 0) return;                     /* releases: each press is a press and a release */
+    if (value == 0) {                           /* each press is a press and a release for LVGL; */
+        uint32_t key = g.hooks.key_up ? keymap(code, mods_now()) : 0;  /* the hook hears the key's own */
+        if (key) key_push(key, mods_now(), 1);
+        return;
+    }
     if (code == KEY_CAPSLOCK || code == KEY_NUMLOCK) {
         if (value != 1) return;
         if (code == KEY_CAPSLOCK) g.caps = !g.caps;
@@ -291,7 +296,7 @@ static void key_event(dev_t_ *d, unsigned code, int value)
         return;
     }
     uint32_t key = keymap(code, mods_now());
-    if (key) key_push(key, mods_now());
+    if (key) key_push(key, mods_now(), 0);
 }
 
 /* ---- pointer ------------------------------------------------------------------------------- */
@@ -511,6 +516,11 @@ static void key_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     g.k_head = (g.k_head + 1) % KEYS_MAX;
     --g.k_len;
     pthread_mutex_unlock(&g_lock);
+    if (k.up) {
+        if (g.hooks.key_up) g.hooks.key_up(k.key);
+        data->continue_reading = 1;
+        return;
+    }
     uint32_t key = g.hooks.key ? g.hooks.key(k.key, k.mods) : k.key;
     if (!key) return;                           /* taken by the UI: the rest after what it started */
     pthread_mutex_lock(&g_lock);

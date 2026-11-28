@@ -23,6 +23,7 @@
 #include "hal.h"
 #include "hal_display.h"
 #include "hal_audio.h"
+#include "ptz.h"
 #include "ui_bridge.h"
 #include "ui_logs.h"
 
@@ -633,6 +634,51 @@ static int out_volume(int volume, int mute)
     return hal_audio_set_volume(volume < 0 ? 0u : volume > 100 ? 100u : (unsigned)volume, mute);
 }
 
+/* ---- PTZ ---------------------------------------------------------------------------------- */
+
+_Static_assert((int)UI_PTZ_READY == (int)PTZ_READY && (int)UI_PTZ_ERROR == (int)PTZ_ERROR &&
+                   (unsigned)UI_PTZ_CAP_PAN_TILT == (unsigned)PTZ_CAP_PAN_TILT &&
+                   (unsigned)UI_PTZ_CAP_HOME == (unsigned)PTZ_CAP_HOME &&
+                   (unsigned)UI_PTZ_CAP_IRIS == (unsigned)PTZ_CAP_IRIS && UI_PTZ_PRESETS == PTZ_PRESETS_MAX,
+               "ui_ptz_t follows ptz_info_t");
+
+static int ptz_info_ui(int ch, ui_ptz_t *out)
+{
+    static ptz_info_t i;                /* the UI's thread only */
+    memset(out, 0, sizeof *out);
+    if (ptz_info(ch, &i) < 0) return -1;
+    out->state = (ui_ptz_state_t)i.state;
+    snprintf(out->backend, sizeof out->backend, "%s", ptz_backend_name(i.backend));
+    out->caps = i.caps;
+    snprintf(out->error, sizeof out->error, "%s", i.error);
+    out->error_seq = i.error_seq;
+    out->n_presets = i.n_presets;
+    for (int k = 0; k < i.n_presets && k < UI_PTZ_PRESETS; ++k) {
+        snprintf(out->presets[k].token, sizeof out->presets[k].token, "%s", i.presets[k].token);
+        snprintf(out->presets[k].name, sizeof out->presets[k].name, "%s", i.presets[k].name);
+    }
+    out->tours = i.tours;
+    out->moving = i.moving;
+    out->gen = i.gen;
+    return 0;
+}
+
+static int ptz_lens_ui(int ch, int what, double dir, int hold_ms)
+{
+    return what == UI_PTZ_IRIS ? ptz_iris(ch, dir, hold_ms) : ptz_focus(ch, dir, hold_ms);
+}
+
+static int ptz_preset_ui(int ch, int op, const char *token, const char *name)
+{
+    switch (op) {
+    case UI_PTZ_PRESET_GOTO:   return ptz_preset_goto(ch, token);
+    case UI_PTZ_PRESET_SET:    return ptz_preset_set(ch, token, name);
+    case UI_PTZ_PRESET_REMOVE: return ptz_preset_remove(ch, token);
+    case UI_PTZ_PRESET_RENAME: return ptz_preset_rename(ch, token, name);
+    }
+    return PTZ_EINVAL;
+}
+
 int ui_bridge_init(ui_model_t *m)
 {
     if (!g_sections && sections_build() < 0) return -1;
@@ -667,6 +713,14 @@ int ui_bridge_init(ui_model_t *m)
     m->disc_autoadd = disc_autoadd_ui;
     m->disc_test = disc_test_ui;
     m->disc_assign_manual = disc_assign_manual_ui;
+    m->ptz_info = ptz_info_ui;
+    m->ptz_move = ptz_move;
+    m->ptz_lens = ptz_lens_ui;
+    m->ptz_stop = ptz_stop;
+    m->ptz_preset = ptz_preset_ui;
+    m->ptz_home = ptz_home;
+    m->ptz_focus_auto = ptz_focus_auto;
+    m->ptz_tour = ptz_tour;
     g_ev_cursor = 0;                    /* every event still kept, the start-up ones too */
     m->mgmt = ui_mgmt_model();
     m->out_adj_caps = out_adj_caps;

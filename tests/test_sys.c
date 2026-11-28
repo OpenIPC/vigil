@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/wait.h>
 
 #include "sys.h"
 #include "sys_fake.h"
@@ -55,6 +57,34 @@ void test_sys_seams(void)
     CHECK(sys_ops()->run(argv, "in put", 5, out, sizeof out) == 0 && !strcmp(out, "in put"), "stdin: %s", out);
     CHECK(sys_run(out, sizeof out, 1, "sleep", "5", NULL) == 124, "timeout: 124");
     CHECK(sys_run(out, sizeof out, 1, "no-such-program-here", NULL) == 127, "not found: 127");
+
+    /* spawn: its own session, the output appended to a fresh log, the
+     * caller reaps it. */
+    char log[64];
+    snprintf(log, sizeof log, "/tmp/vigil-spawn-%d.log", (int)getpid());
+    FILE *old = fopen(log, "w");
+    if (old) {
+        fputs("from before\n", old);
+        fclose(old);
+    }
+    const char *sp[] = { "sh", "-c", "echo out; echo err >&2; read x || echo no-stdin; exit 4", NULL };
+    pid_t pid = sys_ops()->spawn(sp, log);
+    int st = 0;
+    CHECK(pid > 0 && getsid(pid) == pid, "spawn: a session of its own");
+    CHECK(pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 4, "spawn: reaped, 4");
+    char *lt = NULL;
+    FILE *lf = fopen(log, "r");
+    if (lf) {
+        lt = calloc(1, 256);
+        if (lt && fread(lt, 1, 255, lf) == 0) lt[0] = 0;
+        fclose(lf);
+    }
+    CHECK(lt && !strcmp(lt, "out\nerr\nno-stdin\n"), "spawn: stdout and stderr in the log, no stdin: %s",
+          lt ? lt : "");
+    free(lt);
+    unlink(log);
+    const char *nx[] = { "no-such-program-here", NULL };
+    CHECK(sys_ops()->spawn(nx, log) < 0, "spawn: not found");
 }
 
 int main(void)

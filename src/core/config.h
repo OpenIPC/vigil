@@ -53,6 +53,7 @@ typedef struct {
     int  enabled;
     char events[8];                 /* "auto" | "netip" | "onvif" | "off" (ch_events_mode) */
     char onvif_url[160];            /* "": found from the camera's address */
+    char ptz[8];                    /* "auto" | "netip" | "onvif" | "off" (ptz.h) */
 } config_camera_t;
 
 typedef struct {
@@ -369,6 +370,27 @@ config_rc_t config_put_json(const char *section, const char *body, size_t len,
  * from generation `gen` cannot overwrite a newer change it has not seen. */
 config_rc_t config_put_json_at(const char *section, const char *body, size_t len, unsigned gen,
                                schema_errors_t *errs);
+
+/* ---- configuration exports (src/api/backup.c) ---------------------------------------
+ * A password of the settings on its way into or out of an export: `in`
+ * (as it is in memory, or as the export has it) into `out` (cap bytes,
+ * enough for a sealed value), "" to leave it out. 0, or -1 to stop. */
+typedef int (*config_secret_fn)(void *ctx, const char *aad, const char *in, char *out, size_t cap);
+
+/* `c` as the YAML of an export, every password through `fn`. malloc'd, or
+ * NULL with `err`. */
+char *config_export_text(const vigil_config_t *c, config_secret_fn fn, void *ctx, char *err, size_t cap);
+
+/* The settings of an export's YAML into `c`, every password through `fn`
+ * (opened). As when the file is loaded, a key this vigild does not know is
+ * skipped and a missing one gets its default. 0, or -1 with `errs`. */
+int config_import_text(const char *text, size_t len, config_secret_fn fn, void *ctx, vigil_config_t *c,
+                       schema_errors_t *errs);
+
+/* Replace the whole configuration with `c` (an import, a reset), checked
+ * as config_put_json checks a document, saved (the passwords sealed with
+ * the key in force), then in force. */
+config_rc_t config_replace(const vigil_config_t *c, schema_errors_t *errs);
 
 /* The settings in force as JSON text (malloc'd; NULL for an unknown
  * section). `redact` hides camera passwords. */

@@ -22,9 +22,14 @@ version: 1
 #     for a netip:// camera, else ONVIF events when it has them; netip; onvif
 #     (a NETIP camera's too); off. One of: auto, netip, onvif, off. Default
 #     auto.
-#   onvif_url: ONVIF address. Its ONVIF device service for the events,
+#   onvif_url: ONVIF address. Its ONVIF device service for the events and PTZ,
 #     http://host[:port]/onvif/device_service; the URL's user and password log
 #     in. Empty: found from its address.
+#   ptz: PTZ. How the camera is moved (pan, tilt, zoom, focus, presets). auto:
+#     NETIP's PTZ control for a netip:// camera, ONVIF's PTZ service for the
+#     others when the camera has one; netip, onvif: that one (an RTSP camera's
+#     NETIP on port 34567 of its host); off: no PTZ for this camera. One of:
+#     auto, netip, onvif, off. Default auto.
 cameras:
   - url: "rtsp://admin@192.168.1.10/stream=0"
     name: Gate
@@ -32,18 +37,21 @@ cameras:
     sub_url: ""
     events: auto
     onvif_url: ""
+    ptz: auto
   - url: "netip://admin:@192.168.1.11:34567/?ch=0&stream=main"
     name: Yard
     enabled: true
     sub_url: ""
     events: auto
     onvif_url: ""
+    ptz: auto
   - url: "rtsp://192.168.1.12:554/live"
     name: Garage
     enabled: false
     sub_url: ""
     events: auto
     onvif_url: ""
+    ptz: auto
 
 # Recording
 record:

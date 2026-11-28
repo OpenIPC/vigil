@@ -3,12 +3,14 @@
 #define _DEFAULT_SOURCE
 #include <errno.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 #include "cJSON.h"
 #include "channel.h"
@@ -774,13 +776,24 @@ static volatile int g_power;            /* mgmt_power_t; set once, read by the m
 
 int mgmt_power_request(mgmt_power_t what)
 {
-    if (what != MGMT_POWER_REBOOT && what != MGMT_POWER_OFF) return MGMT_EINVAL;
+    if (what != MGMT_POWER_REBOOT && what != MGMT_POWER_OFF && what != MGMT_POWER_FACTORY) return MGMT_EINVAL;
     if (!sys_managed()) return MGMT_EUNMANAGED;
-    vg_log("%s asked for", what == MGMT_POWER_REBOOT ? "reboot" : "shutdown");
-    oplog_push(NULL, NULL, what == MGMT_POWER_REBOOT ? "reboot" : "shutdown", NULL);
-    events_push(0, "%s", what == MGMT_POWER_REBOOT ? "rebooting" : "shutting down");
+    static const char *const asked[] = { "", "reboot", "shutdown", "factory reset" };
+    static const char *const doing[] = { "", "rebooting", "shutting down", "factory reset: rebooting" };
+    vg_log("%s asked for", asked[what]);
+    static const char *const action[] = { "", "reboot", "shutdown", "factory_reset" };
+    oplog_push(NULL, NULL, action[what], NULL);
+    events_push(0, "%s", doing[what]);
     __atomic_store_n(&g_power, (int)what, __ATOMIC_SEQ_CST);
     return MGMT_OK;
+}
+
+/* sysupgrade, run by firstboot, asks vigild to stop: it has nothing left
+ * to close. */
+static void factory_term(int sig)
+{
+    (void)sig;
+    _exit(0);
 }
 
 mgmt_power_t mgmt_power_pending(void) { return (mgmt_power_t)__atomic_load_n(&g_power, __ATOMIC_SEQ_CST); }
@@ -791,6 +804,36 @@ void mgmt_power_run(mgmt_power_t what)
     /* The recordings were closed by the stop; the disks get them now. */
     sync();
     char out[256];
+    if (what == MGMT_POWER_FACTORY) {
+        /* OpenIPC's own reset: firstboot is sysupgrade -n, which erases
+         * the overlay (rootfs_data) and reboots. It stops vigild on its
+         * way (S95vigil stop), so it runs in a session of its own with its
+         * output in a file, and vigild then simply goes. A firstboot that
+         * ends instead refused before erasing anything: the board reboots
+         * as it was. The disks are not touched. */
+        static const char *const argv[] = { "firstboot", NULL };
+        pid_t pid = sys_ops()->spawn ? sys_ops()->spawn(argv, MGMT_FACTORY_LOG) : -1;
+        if (pid < 0) {
+            vg_log("firstboot: cannot start it: %s; rebooting with the settings as they were", strerror(errno));
+        } else {
+            signal(SIGTERM, factory_term);
+            int st = 0;
+            pid_t r = 0;
+            for (int i = 0; i < 600 && r == 0; ++i) {
+                r = waitpid(pid, &st, WNOHANG);
+                if (r == 0) usleep(100 * 1000);
+            }
+            if (r == 0) return;             /* still at it after a minute: it has the board */
+            char log[512] = "";
+            sys_read(MGMT_FACTORY_LOG, log, sizeof log);
+            sys_trim(log);
+            const char *last = strrchr(log, '\n');
+            vg_log("firstboot ended (%s %d) without a reset: %s; rebooting with the settings as they were",
+                   r > 0 && WIFEXITED(st) ? "exit status" : "signal",
+                   r > 0 && WIFEXITED(st) ? WEXITSTATUS(st) : r > 0 ? WTERMSIG(st) : -1, last ? last + 1 : log);
+        }
+        what = MGMT_POWER_REBOOT;
+    }
     const char *prog = what == MGMT_POWER_REBOOT ? "reboot" : "poweroff";
     int rc = sys_run(out, sizeof out, 30, prog, NULL);
     if (rc != 0) vg_log("%s: exit status %d: %s", prog, rc, out);

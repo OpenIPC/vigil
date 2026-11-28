@@ -60,6 +60,8 @@
   --vg-size-page-header: 56px;
   --vg-size-button: 40px;
   --vg-size-cursor: 19px;
+  --vg-size-ptz-panel: 320px;
+  --vg-size-ptz-pad: 52px;
   --vg-duration-fast: 150ms;
   --vg-duration-normal: 250ms;
   --vg-duration-navbar-hide: 3000ms;
@@ -68,4 +70,6 @@
   --vg-duration-flash: 3000ms;
   --vg-duration-submenu-open: 200ms;
   --vg-duration-submenu-close: 300ms;
+  --vg-duration-ptz-repeat: 250ms;
+  --vg-duration-ptz-hold: 1000ms;
 }

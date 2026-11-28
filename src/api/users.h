@@ -181,4 +181,39 @@ int users_login_netip(const char *name, const char *xm, unsigned *perms, char *w
  * SHA-256, else MD5, whichever the C library has. 0, or -1. */
 int users_hash(const char *pass, char *out, size_t cap);
 
+/* ---- configuration exports (src/api/backup.c) -------------------------------------
+ * A password on its way into or out of an export, as config.h's
+ * config_secret_fn: `in` into `out`, "" to leave it out; 0, or -1. */
+typedef int (*users_secret_fn)(void *ctx, const char *aad, const char *in, char *out, size_t cap);
+
+/* The accounts as the YAML of an export: the groups, the users (name,
+ * group, enabled) and, with `fn`, each user's password (opened with
+ * vigil.key, passed through `fn`, which seals it with the export's key)
+ * and the system account's while vigil knows it and it is still root's
+ * in the shadow file. No crypt(3) hash goes out: an import makes new
+ * ones from the passwords. malloc'd, or NULL with `err`; the counts of
+ * users, of passwords included and whether root's is. */
+char *users_export_text(users_secret_fn fn, void *ctx, int *n_users, int *n_pass, int *root, char *err,
+                        size_t cap);
+
+/* An export's accounts read and made ready to replace this board's: each
+ * password opened through `fn`, then hashed and sealed with this board's
+ * key; `acct` is the system account the export names (api.user). Nothing
+ * changes until users_import_commit. NULL with `err`. */
+typedef struct users_import users_import_t;
+users_import_t *users_import_prepare(const char *text, size_t len, users_secret_fn fn, void *ctx,
+                                     const char *acct, char *err, size_t cap);
+void        users_import_info(const users_import_t *im, int *n_users, int *n_pass, int *n_groups, int *root);
+/* User `i`'s name (NULL past the last) and whether it has a password. */
+const char *users_import_user(const users_import_t *im, int i, int *has_pass);
+/* The system account's password the export carries ("" none): for
+ * users_set_system_password once committed. */
+const char *users_import_root(const users_import_t *im);
+/* Replace the users file with the import (an invalid one is kept as .bad). */
+users_rc_t  users_import_commit(users_import_t *im, users_err_t *e);
+void        users_import_free(users_import_t *im);
+
+/* No users, the built-in groups as they come (a reset of vigil's settings). */
+users_rc_t users_reset(users_err_t *e);
+
 #endif /* USERS_H */
