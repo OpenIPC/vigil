@@ -46,6 +46,7 @@ enum {
     NETIP_ABILITY_GET = 1360,
     NETIP_MONITOR = 1410, NETIP_MONITOR_DATA = 1412, NETIP_MONITOR_CLAIM = 1413,
     NETIP_TIME_QUERY = 1452,
+    NETIP_ALARM_SET = 1500, NETIP_ALARM_INFO = 1504,
 };
 
 typedef struct {
@@ -76,5 +77,37 @@ int netip_session_parse(const char *s, uint32_t *v);
 
 /* OPMonitor's StreamType: "Main" 0, "Extra1"/"Extra"/"Sub" 1, -1 other. */
 int netip_stream_type(const char *s);
+
+/* ---- alarms -------------------------------------------------------------
+ *
+ * A client that sends AlarmSet (msgid 1500, {"Name": "", "SessionID": ...};
+ * python-dvr's alarmStart) on a logged-in connection is answered 1501
+ * {"Ret": 100} and from then on pushed AlarmInfo messages (msgid 1504) on
+ * that connection, one per change:
+ *   {"Name": "AlarmInfo", "SessionID": "0x...", "AlarmInfo": {"Channel": 0,
+ *    "Event": "VideoMotion", "StartTime": "2026-11-28 10:00:00",
+ *    "Status": "Start"}}
+ * "Stop" when it ends. Events seen from XM firmwares and OpenIPC majestic:
+ * VideoMotion, VideoLoss, VideoBlind, LocalAlarm, NetAlarm, VideoAnalyze,
+ * HumanDetect, appEventHumanDetectAlarm, FaceDetect, CarShapeDetect, and
+ * the device's own (StorageNotExist, StorageFailure, StorageLowSpace,
+ * NetAbort, NetIPConflict). Some firmwares push only to an alarm server
+ * set in their configuration; they answer AlarmSet and send nothing. */
+
+typedef struct {
+    int      channel;               /* the device's channel, 0-based; -1 not said */
+    char     event[32];             /* its name, cut to fit */
+    unsigned type;                  /* CH_EV_* (CH_EV_OTHER for one vigil does not know) */
+    int      what;                  /* CAM_EV_START, CAM_EV_STOP, CAM_EV_PULSE (no Status) */
+    int      known;                 /* the name was recognised */
+} netip_alarm_t;
+
+/* An AlarmInfo message's body (JSON, with or without the trailing
+ * "\n\0"). 0, or -1 when it holds no AlarmInfo with an Event. */
+int netip_alarm_parse(const char *body, size_t len, netip_alarm_t *a);
+
+/* The CH_EV_* type of an AlarmInfo Event; 0 if the name says nothing vigil
+ * knows (it is then CH_EV_OTHER). */
+unsigned netip_alarm_type(const char *event);
 
 #endif /* NETIP_PROTO_H */

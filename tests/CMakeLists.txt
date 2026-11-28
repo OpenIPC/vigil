@@ -85,7 +85,7 @@ if(Python3_FOUND)
   add_test(NAME netip_wide
            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_netip.sh $<TARGET_FILE:vigild>
                    ${CMAKE_CURRENT_SOURCE_DIR}/data/majestic_1080p.h265 wide)
-  foreach(case title notitle)
+  foreach(case title notitle alarms noalarms)
     add_test(NAME netip_${case}
              COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_netip.sh $<TARGET_FILE:vigild>
                      ${CMAKE_CURRENT_SOURCE_DIR}/data/testsrc_640x360.h264 ${case})

@@ -117,6 +117,10 @@ struct channel {
     time_t          quota_age;
     int             self_displayed; /* the platform shows its source (local capture) */
     char            title[32];      /* the camera's name for the channel (under lock) */
+    /* Where its events come from (channels_config_t.events, onvif_urls):
+     * the main session's NETIP connection (its source's `events`). */
+    ch_events_mode_t ev_mode;
+    char            onvif_url[160];
 
     sess_t          s[S_N];
     seg_writer_t    seg;            /* the main session's */
@@ -1031,6 +1035,9 @@ static void slot_stop(channel_t *c)
 static void slot_teardown(channel_t *c)
 {
     for (int i = 0; i < S_N; ++i) sess_reap(c, i);
+    /* The camera is gone: nothing it said goes on. */
+    cam_events_clear(c->idx, CAM_EV_SRC_NETIP);
+    cam_events_clear(c->idx, CAM_EV_SRC_ONVIF);
     pthread_mutex_lock(c->lock);
     c->active = 0;
     pthread_mutex_unlock(c->lock);
@@ -1041,6 +1048,25 @@ static void slot_teardown(channel_t *c)
     pthread_mutex_lock(c->lock);
     rec_close(c);
     pthread_mutex_unlock(c->lock);
+}
+
+/* ---- events ------------------------------------------------------------------ */
+
+static int is_netip(const char *url) { return !strncmp(url, "netip://", 8); }
+
+/* Where channel c's camera events come from, from the thread that calls
+ * channels_apply: its NETIP connection's alarms (auto or netip, a NETIP
+ * camera), or none. A change applies at once, the streams untouched. */
+static void events_apply(channel_t *c, ch_events_mode_t mode, const char *onvif_url)
+{
+    int changed = !c->s[S_MAIN].src || c->ev_mode != mode || strcmp(c->onvif_url, onvif_url ? onvif_url : "");
+    c->ev_mode = mode;
+    snprintf(c->onvif_url, sizeof c->onvif_url, "%s", onvif_url ? onvif_url : "");
+    int netip = is_netip(c->url) && (mode == CH_EVENTS_AUTO || mode == CH_EVENTS_NETIP);
+    if (c->s[S_MAIN].src) c->s[S_MAIN].src->events = netip;
+    if (!changed) return;
+    if (mode == CH_EVENTS_NETIP && !is_netip(c->url))
+        vg_log("CAM%d: events netip: not a netip:// camera, no events", c->idx + 1);
 }
 
 static int slot_start(int i, const channels_config_t *cfg)
@@ -1092,6 +1118,7 @@ static int slot_start(int i, const channels_config_t *cfg)
         slot_teardown(c);
         return -1;
     }
+    events_apply(c, cfg->events[i], cfg->onvif_urls[i]);
     /* Both streams for as long as the channel runs: the sub-stream's
      * picture is there the moment a tile wants it. */
     if (c->sub_url[0] && sess_start(c, S_SUB, c->sub_url) < 0)
@@ -1132,6 +1159,7 @@ int channels_apply(const channels_config_t *cfg)
                 pthread_mutex_lock(c->lock);
                 snprintf(c->st.name, sizeof c->st.name, "%s", name);
                 pthread_mutex_unlock(c->lock);
+                events_apply(c, cfg->events[i], cfg->onvif_urls[i]);
                 /* A new sub-stream: only that session starts again. */
                 char sub[sizeof c->sub_url];
                 if (!c->self_displayed) sub_url_of(cfg, i, sub, sizeof sub);

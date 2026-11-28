@@ -2668,6 +2668,45 @@ static void send_frame(source_t *src, const uint8_t *head, size_t hl, const uint
     free(f);
 }
 
+/* NETIP AlarmInfo (msgid 1504) as XM cameras and OpenIPC majestic push them. */
+static void test_netip_alarm_parse(void)
+{
+    netip_alarm_t a;
+    /* An XM camera's, spaced as Sofia prints, with the "\n\0" tail. */
+    static const char xm[] = "{ \"AlarmInfo\" : { \"Channel\" : 0, \"Event\" : \"VideoMotion\", "
+                             "\"StartTime\" : \"2026-11-28 10:00:00\", \"Status\" : \"Start\" }, "
+                             "\"Name\" : \"AlarmInfo\", \"SessionID\" : \"0x00000003\" }\n";
+    CHECK(netip_alarm_parse(xm, sizeof xm, &a) == 0 && a.channel == 0 && a.type == CH_EV_MOTION &&
+              a.what == CAM_EV_START && a.known && !strcmp(a.event, "VideoMotion"),
+          "XM VideoMotion Start (%d %u %d %s)", a.channel, a.type, a.what, a.event);
+    static const char maj[] = "{\"AlarmInfo\":{\"Channel\":0,\"Event\":\"appEventHumanDetectAlarm\","
+                              "\"StartTime\":\"2026-11-27 04:44:10\",\"Status\":\"Stop\"},\"Name\":\"AlarmInfo\","
+                              "\"SessionID\":\"0x0000000b\"}";
+    CHECK(netip_alarm_parse(maj, strlen(maj), &a) == 0 && a.type == CH_EV_HUMAN && a.what == CAM_EV_STOP,
+          "majestic's human detection, Stop");
+    static const char dvr[] = "{\"AlarmInfo\":{\"Channel\":\"3\",\"Event\":\"VideoLoss\",\"Status\":\"START\"},"
+                              "\"Name\":\"AlarmInfo\"}";
+    CHECK(netip_alarm_parse(dvr, strlen(dvr), &a) == 0 && a.channel == 3 && a.type == CH_EV_VIDEO_LOSS &&
+              a.what == CAM_EV_START,
+          "a DVR's channel 4 lost its video (channel as text, status in capitals)");
+    static const char bare[] = "{\"Event\":\"LocalAlarm\",\"Channel\":0}";
+    CHECK(netip_alarm_parse(bare, strlen(bare), &a) == 0 && a.type == CH_EV_ALARM_IN && a.what == CAM_EV_PULSE,
+          "no Status: a moment; the bare object taken");
+    static const char odd[] = "{\"Name\":\"AlarmInfo\",\"AlarmInfo\":{\"Event\":\"SmartLightFlash\"}}";
+    CHECK(netip_alarm_parse(odd, strlen(odd), &a) == 0 && a.type == CH_EV_OTHER && !a.known && a.channel == -1,
+          "an unknown event: other, no channel");
+    static const char noev[] = "{\"AlarmInfo\":{\"Status\":\"Start\"}}";
+    CHECK(netip_alarm_parse(noev, strlen(noev), &a) < 0 &&
+              netip_alarm_parse("not json", 8, &a) < 0 && netip_alarm_parse("", 0, &a) < 0,
+          "no Event, not JSON: refused");
+    CHECK(netip_alarm_type("VideoBlind") == CH_EV_TAMPER && netip_alarm_type("CarShapeDetect") == CH_EV_VEHICLE &&
+              netip_alarm_type("FaceDetect") == CH_EV_FACE && netip_alarm_type("VideoAnalyze") == CH_EV_OTHER &&
+              netip_alarm_type("PedestrianDetect") == CH_EV_HUMAN && netip_alarm_type("TripwireAlarm") == CH_EV_LINE &&
+              netip_alarm_type("PerimeterAlarm") == CH_EV_INTRUSION && netip_alarm_type("Offline") == 0 &&
+              netip_alarm_type("") == 0 && netip_alarm_type(NULL) == 0,
+          "names to types");
+}
+
 static void test_netip_server_proto(void)
 {
     /* The header. */
@@ -3902,6 +3941,7 @@ int main(int argc, char **argv)
     test_channel_stream_states();
     test_camera_slots();
     test_fail_kinds();
+    test_netip_alarm_parse();
     test_channel_events();
     test_cam_events();
     test_rec_policies();
