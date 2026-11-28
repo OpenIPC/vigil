@@ -1085,8 +1085,10 @@ char *disc_cameras_with(const char *cameras, int ch, const char *url, const char
  * answered discovery with (any of its protocols may have added it). */
 static const char *onvif_url_of(const disc_device_t *d)
 {
-    return (d->protos & DISC_ONVIF) && !strncmp(d->xaddr, "http://", 7) && !strchr(d->xaddr + 7, '@') ? d->xaddr
-                                                                                                          : "";
+    return (d->protos & DISC_ONVIF) && !strncmp(d->xaddr, "http://", 7) && !strchr(d->xaddr + 7, '@') &&
+                   strlen(d->xaddr) < sizeof ((config_camera_t *)0)->onvif_url
+               ? d->xaddr
+               : "";
 }
 
 /* The URLs for `d` over `proto` (0: by preference); the protocol used. */
@@ -1620,10 +1622,12 @@ static void run_assign_manual(job_args_t *a)
     char name[32];
     channel_name(NULL, a->name, url, name, sizeof name);
     cams = config_get_json("cameras", 0);
-    char xaddr[160] = "";
-    if (a->manual.kind == DISC_MANUAL_ONVIF)
+    /* cameras[].onvif_url's size: a longer one is left out, not cut. */
+    char xaddr[200] = "";
+    if (a->manual.kind == DISC_MANUAL_ONVIF &&
         snprintf(xaddr, sizeof xaddr, "http://%s:%d/onvif/device_service", a->manual.host,
-                 a->manual.port > 0 ? a->manual.port : disc_manual_port(DISC_MANUAL_ONVIF));
+                 a->manual.port > 0 ? a->manual.port : disc_manual_port(DISC_MANUAL_ONVIF)) >= 160)
+        xaddr[0] = 0;
     text = cams ? disc_cameras_with(cams, ch, url, sub, name, xaddr) : NULL;
     if (!text) {
         r.rc = DISC_EPROTO;
