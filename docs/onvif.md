@@ -37,6 +37,18 @@ used to reach the ONVIF service. With the RTSP server off
 (`rtsp_server.enabled`), `GetStreamUri` answers a fault
 (`ter:ActionNotSupported`) rather than an address nothing answers at.
 
+Snapshots come from the [API](api.md#snapshots): `GetSnapshotUri` answers
+`http://<recorder>:<api.listen's port>/api/v1/channels/<N>/snapshot.jpg`
+(the camera's own JPEG when it gives one, else the recorder's picture of
+a channel on the screen), for either stream's profile, with the host the
+client used. The client fetches it with the same user, by HTTP Digest
+(what ONVIF clients send) or Basic: the API takes both. While the API is
+off (`api.listen` empty) the capabilities say `SnapshotUri="false"` and
+`GetSnapshotUri` answers `ter:ActionNotSupported`. With `api.listen` on
+one address only (`127.0.0.1:8080`), the URI names the host the ONVIF
+client reached, where the API does not listen: keep the API on all
+addresses for ONVIF clients.
+
 ## Logging in
 
 ONVIF clients log in as [vigil's users](api.md#accounts-and-permissions),
@@ -122,12 +134,12 @@ Device (`http://www.onvif.org/ver10/device/wsdl`, `/onvif/device_service`):
   closed). Refused on a system `vigild` does not manage (a desktop).
 
 Media (`ver10`, `/onvif/media_service`): `GetProfiles`, `GetProfile`,
-`GetStreamUri`, `GetVideoSources`, `GetVideoSourceConfigurations`,
+`GetStreamUri`, `GetSnapshotUri`, `GetVideoSources`, `GetVideoSourceConfigurations`,
 `GetVideoSourceConfiguration`, `GetVideoEncoderConfigurations`,
 `GetVideoEncoderConfiguration`, `GetServiceCapabilities`.
 
 Media2 (`ver20`, `/onvif/media2_service`): `GetProfiles` (with the
-configurations asked for by `Type`), `GetStreamUri`,
+configurations asked for by `Type`), `GetStreamUri`, `GetSnapshotUri`,
 `GetVideoSourceConfigurations`, `GetVideoEncoderConfigurations`,
 `GetServiceCapabilities`.
 
@@ -155,8 +167,7 @@ client that checks the schema fails on any other value. An H.265 stream
 is therefore listed as `H264` in media ver10, as other devices do, and as
 `H265` in media2, which clients that play H.265 use.
 
-Not there: snapshots (`GetSnapshotUri`; `SnapshotUri="false"` in the
-capabilities), multicast streaming, audio, OSD, changing a configuration.
+Not there: multicast streaming, audio, OSD, changing a configuration.
 
 ## WS-Discovery
 
@@ -196,6 +207,11 @@ as a camera.
 - `tests/onvif_test.py` (`ctest -R onvif`): discovery, the operations
   allowed before a login, both media services, HTTP Digest, replays and
   wrong passwords, permissions, the system account.
+- `onvif-zeep` (`ONVIFCamera`, media `GetServiceCapabilities`,
+  `GetProfiles`, `GetSnapshotUri`) and `requests`' `HTTPDigestAuth` on the
+  URIs, against the SSR621Q in emulation; `tests/snapshot_test.py`
+  (`ctest -R snapshot_e2e`): `GetSnapshotUri` on both media services and
+  the URI fetched with Digest.
 
 Not yet tried with ONVIF Device Manager, Milestone XProtect, Blue Iris,
 Hikvision iVMS or Synology Surveillance Station.

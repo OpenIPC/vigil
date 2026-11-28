@@ -15,8 +15,8 @@ configuration schema, and how to run and test it without a board.
 live view                  tiles over the whole screen, clock in a corner
  |  navigation bar         bottom edge; Main menu, layouts, < page >, Pin, totals, clock
  |  page arrows            < > at the left and right edges, half way down
- |  context menu           right button: Main menu, Channels, Playback, Record, PTZ,
- |                         Display, Split > (layouts)
+ |  context menu           right button: Main menu, Snapshot (of that tile), Channels,
+ |                         Playback, Record, PTZ, Display, Split > (layouts)
  +-> Main menu             cards: PLAYBACK, AI, ALARM, OPERATION, BACKUP, DISPLAY
       |                    MANAGEMENT: CAMERA, NETWORK, STORAGE, SYSTEM, ACCOUNT
       +-> CAMERA           Channels: cameras found on the network (Search, Add,
@@ -148,7 +148,8 @@ every chip over the video. PgUp/PgDn and `[`/`]` do the same.
 ![Page arrow](../tests/ui/page_arrow.png)
 
 The **context menu** (right button, or the Menu key) is, in this order:
-**Main menu**; **Channels** (the Channels page); **Playback**; **Record**
+**Main menu**; **Snapshot**, of the tile it was opened on (there only on a
+tile with a camera; full screen, of that camera); **Channels** (the Channels page); **Playback**; **Record**
 (the recording settings); **PTZ**; **Display** (the Display settings
 screen, below); **Split**, a
 submenu of the layouts; and **Exit**: Logout, Reboot, Shutdown, Cancel
@@ -159,6 +160,18 @@ are in the menu, muted, and say "not available yet" when chosen; they are
 placeholders for what comes next.
 
 ![Context menu with Split](../tests/ui/split_menu16.png)
+
+**Snapshot** (also `S` or F12 for the selected tile, or the one full
+screen) keeps a still picture of the camera in the snapshot directory on
+the recording disk ([api.md](api.md#snapshots)): the camera's own JPEG at
+its full size when it gives one (NETIP, ONVIF, a snapshot URL), else the
+picture decoded for the screen, at the tile's size. It is taken off the
+UI thread; a toast says the file's name, or why there is none (no disk
+for it, the camera has none and the channel is not decoded). There is no
+page to look through them yet: the API lists and serves them, and the
+playback page to come will show them on its timeline.
+
+![A snapshot kept](../tests/ui/snapshot_toast.png)
 
 **A submenu opens under the pointer**, as on a desktop: resting on Split
 for 200 ms (`duration.submenu_open` in `src/ui/theme.json`) opens it, so
@@ -830,6 +843,7 @@ longer opens the on-screen keyboard: type into it.
 | | `1`, `4`, `8`, `9`, `0` | 1, 4, 8, 9 or 16 windows, with the selected camera in view (up to what the platform shows) |
 | | PgUp / PgDn, `[` / `]` | previous / next page |
 | | `M`, F2 | main menu |
+| | `S`, F12 | a snapshot of the selected camera (or the one full screen), kept; a toast says where |
 | | Menu key, Shift+F10 | context menu of the selected camera; Right (or Enter) on Split opens it, Left or Esc closes it |
 | | Tab | to the navigation bar (it comes up while it has the focus) |
 | | Esc | close a menu or popup; from the navigation bar back to the tiles |

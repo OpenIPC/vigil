@@ -71,7 +71,11 @@ Rules that keep the layers apart:
   from LVGL's flushes and the platform's `hal_display_grab`, the input
   goes into the evdev reader as one more mouse and keyboard. The NETIP
   server (`netip_srv.c`) takes the cameras' access units from stream taps
-  (`stream_tap.h`) and passes them on unchanged.
+  (`stream_tap.h`) and passes them on unchanged. Snapshots are the app's
+  too (`src/app/snapshot.c`, set with `api_set_snapshots`): a camera's own
+  JPEG comes through the core (`snap_cam.c`, compressed bytes like an
+  access unit), the recorder's own picture stays in the platform until it
+  is a JPEG (`hal_display_still`, then `jpeg_enc.c` in the app).
 - A platform provides every HAL function. Functions it cannot support
   return an error, and `hal_caps()` reports what it can do. The core reads
   those capabilities at run time and does not assume them.
@@ -308,6 +312,7 @@ page having put them in force already as the user moved them.
 | zero channel viewers (2) | one per viewer, at nice 10: composes, encodes and sends its pictures (`kvm_next`) |
 | NETIP server: listener | accepts NETIP connections, answers XM's LAN search (`src/api/netip_srv.c`) |
 | NETIP server: one per connection (24 at most) | its requests, and its stream's queue onto the socket; the camera's session thread only copies into that queue |
+| snapshot worker | the screen's snapshot requests and the pictures on camera events, mailing them (`src/app/snapshot.c`); the API's snapshots run on its own workers |
 | log reader (`-s`) | turns stdout/stderr lines into syslog messages |
 
 ## Sources (camera protocols)

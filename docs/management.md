@@ -18,7 +18,7 @@ The same actions are in the HTTP API ([api.md](api.md#management)).
 | | Ports | works | The web server's (`web.listen`, 80), the API's (`api.listen`, 8080), ONVIF's (`onvif_server.port`, 8899) and NETIP's (`netip_server.port`, 34567) ports, moved at once when saved, each with what it listens on now (or why not); the RTSP port (554) kept for a server vigild does not have yet, said so on the page. No two on one port; a port that is taken is refused with the reason. |
 | | DDNS | works | dyndns2 (Dyn and compatibles), No-IP, or a custom URL, every N minutes, through curl. |
 | | UPnP | stored | The settings are kept; vigild has no UPnP client yet. |
-| | SMTP | works | A test mail; trouble (disk full, recording failed, a camera offline) mailed, at most one mail per 10 minutes, through curl. |
+| | SMTP | works | A test mail; trouble (disk full, recording failed, a camera offline) mailed, at most one mail per 10 minutes, through curl. A camera event's snapshots mailed as attachments when `snapshot.mail` is on ([Snapshots](#snapshots)); no page sets that yet. |
 | | Alarm center | works | Every event POSTed as JSON to `http://server:port/path`, and a heartbeat. |
 | | QoS | works | DSCP marking of vigild's own packets (`qos`): off, standard (RFC 4594: video AF41, management CS2, cameras AF41, alarms AF21) or custom values 0..63 per class; applied at once. Other programs (sshd, ntpd) are not marked: the firmware's kernel has no netfilter, so no iptables `DSCP` target. |
 | | P2P | none | vigil has no P2P service; the page says so. |
@@ -35,7 +35,7 @@ The same actions are in the HTTP API ([api.md](api.md#management)).
 
 Settings that are vigild's own live in `/etc/vigil.yaml` like every other
 setting ([api.md](api.md#the-configuration-file)): `record.on_full`,
-`schedule`, `quota`, `nas`, `ddns`, `upnp`, `smtp`, `alarm`, `time.ntp`,
+`snapshot`, `schedule`, `quota`, `nas`, `ddns`, `upnp`, `smtp`, `alarm`, `time.ntp`,
 `time.ntp_interval`, `ui.language`, `ui.date_format`, `ui.time_format`.
 Users and groups are in `/etc/vigil.users.yaml` (mode 0600). Passwords in
 either file are sealed with the key in `/etc/vigil.key` ([security.md](security.md)). What belongs to
@@ -198,6 +198,27 @@ each LBA range once.
   nothing.
 - `record.segment` stays in seconds in the file and the API, so existing
   files, `-S` and clients keep working; the UI shows minutes.
+
+## Snapshots
+
+Still pictures ([api.md](api.md#snapshots)) are kept in one directory of
+JPEG files on the recording disk: `snapshot.path`, else next to the
+recordings (`record.path` `/mnt/sda1/rec`: `/mnt/sda1/snapshots`), or a
+USB stick by giving its path. Like a recording directory it is used only
+on a disk: never the root filesystem (the flash) unless
+`record.allow_rootfs`, never a RAM or flash filesystem, never read-only;
+with no disk there a picture is refused, not written to the flash. The
+files' names say the channel, the time and why (`manual`, or the camera
+event: `motion`, `human`, ...). After each picture the oldest go while the
+directory's snapshots take more than `snapshot.max_mb` (1 GiB by default;
+nothing but snapshots' files is touched). While a disk is being unmounted
+or formatted (Disk Manager), no picture is written to it. An event's
+pictures (`cameras[].snapshot_on_event`, `snapshot.event_count`,
+`snapshot.event_interval`) are mailed together through the SMTP settings
+when `snapshot.mail` is on: a `multipart/mixed` message with the JPEGs as
+base64 attachments, through curl like the other mails. The settings have no
+page of their own yet (the Alarm page will hold the per-event actions);
+they are in `vigil.yaml` and the API's `snapshot` section.
 
 ## Time
 

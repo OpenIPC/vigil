@@ -76,11 +76,19 @@ defaults, commented.
 | `cameras[].sub_url` | string | `""` | The sub-stream for small tiles; empty: derived for NETIP, else the main stream. |
 | `cameras[].events` | `auto`, `netip`, `onvif`, `off` | `auto` | Where the camera's events come from ([Camera events](#camera-events)): `auto` NETIP alarms for a `netip://` camera, else ONVIF events if it has them. Changes without reconnecting the streams. |
 | `cameras[].onvif_url` | `http://…`, no user or password | `""` | Its ONVIF device service, for the events (the URL's user and password log in). Empty: found from its address. Set when a camera is added over ONVIF. |
+| `cameras[].snapshot_url` | `http://…`, no user or password | `""` | Where the camera gives a JPEG over HTTP, for a camera with neither NETIP's nor ONVIF's snapshot (the URL's user and password log in, Digest or Basic). Empty: NETIP's or ONVIF's ([Snapshots](#snapshots)). |
+| `cameras[].snapshot_on_event` | `off`, `on` | `off` | Take `snapshot.event_count` pictures when the camera reports an event. |
 | `record.path` | absolute path, no `.` or `..` | `""` | Where streams are recorded. Empty: no recording. Used only on a disk: see [Where recordings may go](#where-recordings-may-go). |
 | `record.segment` | integer 10..3600 | 60 | Segment length in seconds. |
 | `record.keep` | integer 0..64 | 3 | Segments kept per camera; 0 keeps all (the free-space reserve still applies). 64 is what the segment writer can track. |
 | `record.allow_rootfs` | boolean | `false` | Count the root filesystem as a disk. For a host whose root filesystem is one; never on a board, where it is the flash. |
 | `record.on_full` | `overwrite` or `stop` | `overwrite` | A full disk: the oldest recordings make room, or recording stops (`REC disk full`) until there is room. |
+| `snapshot.path` | absolute path, no `.` or `..` | `""` | Where snapshots are kept, on a disk or a USB stick (judged like `record.path`). Empty: next to `record.path` (`/mnt/sda1/rec` → `/mnt/sda1/snapshots`; inside it when its parent is not on the disk). |
+| `snapshot.source` | `auto`, `camera`, `nvr` | `auto` | Where the screen's and the events' pictures come from ([Snapshots](#snapshots)). |
+| `snapshot.max_mb` | integer 0..1000000 | 1024 | The snapshot directory's size; the oldest go past it. 0: no limit (the disk's own space is the limit). |
+| `snapshot.quality` | integer 10..95 | 85 | JPEG quality of the pictures vigild encodes itself. |
+| `snapshot.event_count`, `event_interval` | 1..10, 1..60 s | 3, 1 | Pictures per camera event, and the seconds between them. |
+| `snapshot.mail` | boolean | `false` | Mail an event's pictures (to `smtp.to`, when `smtp.enabled`). |
 | `schedule[]` | array, up to 16 | `[]` | A week per camera ([management.md](management.md#recording-policies)); a camera without one records all the time. |
 | `schedule[].camera` | integer 1..16, required | | The camera's channel. |
 | `schedule[].mon` … `sun` | 48 letters of `C`, `M`, `-` | all `C` | One per half hour from 00:00 local time: continuous, motion only, off. |
@@ -243,8 +251,14 @@ HTTP Basic, checked against vigil's own users ([Accounts and
 permissions](#accounts-and-permissions)) or the system account: the hash
 of `api.user` in `api.shadow` is verified with `crypt(3)` (whatever
 methods the C library supports: `$1$`, `$5$`, `$6$`, …), and compared in
-constant time. Without credentials, or with wrong ones, the answer is
-`401` with `WWW-Authenticate: Basic realm="vigil"`; a user who logged in
+constant time. HTTP Digest (MD5, `qop=auth`, realm `vigil`) is taken too,
+against vigil's users and the system account whose passwords vigil keeps
+sealed ([security.md](security.md)): it is what ONVIF clients send for a
+snapshot URI. Digest nonces are vigild's own, good five minutes (then
+`stale=true`), and a request whose nonce count was used before is refused
+as a replay. Without credentials, or with wrong ones, the answer is
+`401` with `WWW-Authenticate: Basic realm="vigil"` and a second
+`WWW-Authenticate: Digest realm="vigil", qop="auth", nonce=…`; a user who logged in
 but lacks the permission an endpoint needs gets `403`
 `{"error": "permission denied", "needs": "storage"}`.
 
@@ -329,7 +343,7 @@ saved over it until it is fixed or removed.
 | `GET /config` | `system` |
 | `PUT /config` | every permission but `remote` |
 | `/config/cameras`, `discovery` | `cameras` |
-| `/config/record`, `schedule`, `quota`, `nas` | `storage` |
+| `/config/record`, `snapshot`, `schedule`, `quota`, `nas` | `storage` |
 | `/config/ddns`, `upnp`, `smtp`, `alarm`, `onvif_server`, `qos`, `netip_server` | `network` |
 | `/config/time`, `ui`, `display` | `system` |
 | `/config/live` | `live` |
@@ -337,7 +351,10 @@ saved over it until it is fixed or removed.
 | `/network/…` | `network` |
 | `/system/…` | `system` |
 | `/disks…`, `/storage/…` | `storage` |
-| `/discovery…`, `/channels/…` | `cameras` |
+| `/channels/<n>/snapshot.jpg`, `POST /channels/<n>/snapshot` | `live` |
+| `GET /snapshots…` | `playback` |
+| `DELETE /snapshots/…` | `storage` |
+| `/discovery…`, `/channels/…` (the rest) | `cameras` |
 | `/users…`, `/groups…` | `users` |
 | anything else | `system` |
 
@@ -559,6 +576,93 @@ with an empty one (`netip://admin:@…`), are shown as they are.
 There is no way to read a password back through the API. The log never
 shows them either; the file itself holds them, readable by root only.
 
+## Snapshots
+
+Still pictures of the cameras, in JPEG. A picture comes from:
+
+- **the camera**: its own encoder at its full size, none of the recorder's
+  CPU. In this order: `cameras[].snapshot_url` when set (an HTTP GET,
+  Digest or Basic with the camera URL's user and password); NETIP's
+  snapshot for a `netip://` camera (`NET_SNAP_REQ`, msgid 1560,
+  `{"Name": "OPSNAP", "OPSNAP": {"Channel": N}}` on a connection of its own;
+  the JPEG comes back as the body of `1561` messages, in one, split over
+  several, or framed as a `0x1FE` media frame); ONVIF's `GetSnapshotUri`
+  of the camera's first media profile (the device service as for the
+  camera's events: `onvif_url`, the address discovery heard, ports 80 and
+  8899), then that URI fetched as above. A NETIP camera that has no
+  snapshot is asked over ONVIF too. The URI is remembered per camera; a
+  camera found to have no snapshot is not asked again for ten minutes by
+  `auto` (`camera` asks every time). One request at a time goes to each
+  camera.
+- **the recorder** (`nvr`): the picture its decoder makes for the screen,
+  encoded by vigild itself at `snapshot.quality`, at the size it is
+  decoded at: a tile's in the grid (480x360 for a 4:3 camera in a 2x2 at
+  1280x720), the screen's full screen (960x720). Only a channel being
+  decoded has one, so only a channel on the screen: decoders are scarce
+  (four on the SSR621Q) and vigild does not take one from another channel
+  for a still. A channel off the screen gets `503` "not being decoded".
+  Platforms without a way to read the decoder's picture back (all but
+  SigmaStar so far) have none. The board's CPU pays for the encode (in
+  emulation of the SSR621Q's Cortex-A7: 50-80 ms for 480x360, 240-390 ms
+  for 960x720).
+- `auto`: the camera, else the recorder.
+
+### `GET /api/v1/channels/<n>/snapshot.jpg`
+
+`?source=auto|camera|nvr` (default `auto`). `200` with `image/jpeg` and
+`X-Vigil-Source: camera/netip`, `camera/onvif`, `camera/url` or `nvr`;
+`404` no camera on channel n (or a disabled one); `503` no picture to be
+had (`{"error": "the camera: ...; no picture: the channel is not being
+decoded ..."}`, both reasons); `502` the camera failed with `source=camera`;
+`400` another source. Needs `live`. It is what the ONVIF server's
+`GetSnapshotUri` points at, so ONVIF clients log in with HTTP Digest
+([Authentication](#authentication)).
+
+```sh
+curl -s --digest -u admin:PASSWORD -o cam1.jpg "$NVR/api/v1/channels/1/snapshot.jpg"
+```
+
+### `POST /api/v1/channels/<n>/snapshot`
+
+The same (`?source=`), kept: `201` `{"file": "ch01_20261128-101500-123_manual.jpg",
+"channel": 1, "source": "camera/netip"}`; `507` when there is nowhere to keep
+it (no disk: `snapshot.path` and `record.path` are judged like a recording
+directory, never the flash or a RAM disk). Needs `live`.
+
+### `GET /api/v1/snapshots`
+
+`?channel=N` (only that channel's), `?limit=M` (default 500).
+
+```json
+{ "dir": "/mnt/sda1/snapshots", "count": 3, "bytes": 469650, "max_bytes": 1073741824,
+  "snapshots": [ { "file": "ch01_20261128-153101-336_motion.jpg", "channel": 1,
+                   "time": "2026-11-28T15:31:01", "unix": 1795879861.336, "kind": "motion",
+                   "size": 156550 }, ... ] }
+```
+
+A file's name is its index: channel, local time to the millisecond, and
+why it was taken (`manual`: the screen or the API; else the camera event,
+`motion`, `human`, ... as in the status's `events`). Needs `playback`.
+`GET /api/v1/snapshots/<file>` is the JPEG (`playback`), `DELETE` removes
+it (`storage`); `404` for a name that is not a snapshot's.
+
+### On camera events
+
+A camera with `snapshot_on_event: on` gets `snapshot.event_count`
+pictures, `snapshot.event_interval` s apart, when an event starts (one
+burst for the types that start together: motion, then a person, is one),
+from `snapshot.source`, named after the event (`ch01_..._motion.jpg`).
+With `snapshot.mail` and `smtp.enabled` they are mailed together, as
+attachments, subject `vigil: CAM1 (Gate): motion`. Any event source counts:
+NETIP alarms, ONVIF events, `POST /api/v1/channels/<n>/events`.
+
+### Room
+
+The directory is trimmed after each picture: the oldest go while the
+snapshots there (files named as above; nothing else is touched) take more
+than `snapshot.max_mb`. Pictures are not written while the disk is held for
+unmounting or formatting.
+
 ## Endpoints
 
 All under `/api/v1`, JSON in and out (`Content-Type: application/json`).
@@ -576,7 +680,7 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `GET /api/v1/status` | Platform, uptime, configuration generation, one entry per camera. |
 | `GET /api/v1/config` | The configuration in force, passwords redacted. |
 | `PUT /api/v1/config` | Replace the whole configuration. Sections and keys it omits get their defaults. |
-| `GET /api/v1/config/<section>` | One section (`cameras`, `record`, `schedule`, `quota`, `nas`, `ddns`, `upnp`, `smtp`, `alarm`, `time`, `ui`, `display`, `live`, `api`, `discovery`, `qos`, `rtsp_server`, `onvif_server`, `netip_server`). |
+| `GET /api/v1/config/<section>` | One section (`cameras`, `record`, `snapshot`, `schedule`, `quota`, `nas`, `ddns`, `upnp`, `smtp`, `alarm`, `time`, `ui`, `display`, `live`, `api`, `discovery`, `qos`, `rtsp_server`, `onvif_server`, `netip_server`). |
 | `PUT /api/v1/config/<section>` | Replace one section; the others stay. |
 | `GET /api/v1/schema` | Every setting: type, default, limits, label, help. |
 | `GET /api/v1/ws` | WebSocket: pushed status, events and configuration changes. |
@@ -588,6 +692,10 @@ Errors are `{"error": "…"}`; validation errors add a list:
 | `POST /api/v1/discovery/ip` | Change devices' addresses, or (`dry_run`) show the plan. |
 | `POST /api/v1/channels/<n>/assign` | Add a device found to channel n. |
 | `POST /api/v1/channels/<n>/events` | Events of channel n's camera, reported from outside ([below](#post-apiv1channelsnevents)). |
+| `GET /api/v1/channels/<n>/snapshot.jpg` | A picture of channel n now, `image/jpeg` ([Snapshots](#snapshots)). |
+| `POST /api/v1/channels/<n>/snapshot` | A picture of channel n, kept in the snapshot directory. |
+| `GET /api/v1/snapshots` | The kept pictures, newest first. |
+| `GET`, `DELETE /api/v1/snapshots/<file>` | One of them. |
 | `POST /api/v1/discovery/autoadd` | Add every new device to the empty channels. |
 | `POST /api/v1/devices/test` | Connect to a camera described by hand: codec and size, or why not. |
 
