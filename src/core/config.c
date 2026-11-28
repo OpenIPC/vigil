@@ -14,6 +14,7 @@
 #include "cJSON.h"
 #include "config.h"
 #include "log.h"
+#include "logs.h"
 #include "schema_yaml.h"
 #include "secret.h"
 
@@ -746,6 +747,7 @@ config_rc_t config_put_json_at(const char *section, const char *body, size_t len
     ++g_gen;
     pthread_mutex_unlock(&g_lock);
     pthread_mutex_unlock(&g_write);
+    oplog_config_saved(section, &old, &nc);
     if (saved > 0) {
         vg_log("config: %s; it is in force, but may not survive a power cut", err);
         schema_error(errs, "", "%s; the configuration is in force, but may not survive a power cut", err);

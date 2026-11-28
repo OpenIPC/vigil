@@ -43,6 +43,7 @@
 #include "config.h"
 #include "events.h"
 #include "log.h"
+#include "logs.h"
 #include "md5.h"
 #include "qos.h"
 #include "rtsp_server.h"
@@ -742,6 +743,8 @@ static int login(rs_conn_t *c, const char *method, const char *auth, unsigned *p
     time_t now = mono();
     rs_fail_t *f = fail_entry(c->addr, 0);
     if (f && f->locked_until > now) return -2;
+    char who[USERS_NAME_MAX] = "";
+    oplog_actor("", "rtsp", c->addr);
     if (!auth || strncasecmp(auth, "Digest ", 7)) {
         if (!auth) return -1;
         /* Basic is not offered: the password would cross the network. */
@@ -760,6 +763,8 @@ static int login(rs_conn_t *c, const char *method, const char *auth, unsigned *p
                 if (auth_equal(want, resp)) {
                     if (f) memset(f, 0, sizeof *f);
                     snprintf(c->user, sizeof c->user, "%s", user);
+                    /* Every request of a session logs in again: once a half hour. */
+                    oplog_login(user, 1, 0, 1800);
                     return 1;
                 }
             } else if (known < 0) {
@@ -770,6 +775,7 @@ static int login(rs_conn_t *c, const char *method, const char *auth, unsigned *p
                 *perms = 0;
                 return 0;                       /* stale: a fresh challenge, not a failure */
             }
+            snprintf(who, sizeof who, "%s", user);
         }
         *perms = 0;
         f = fail_entry(c->addr, 1);
@@ -780,6 +786,8 @@ static int login(rs_conn_t *c, const char *method, const char *auth, unsigned *p
         f->locked_until = now + (s >= 8 ? LOCKOUT_MAX : 1 << s);
     }
     vg_log("rtsp: login failed from %s (%d in a row)", c->addr, f->fails);
+    oplog_login(who, 0, f->fails, 0);
+    if (f->fails >= FAIL_FREE) oplog_lockout(f->fails, (long)(f->locked_until - now));
     return 0;
 }
 

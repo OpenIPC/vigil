@@ -80,6 +80,7 @@ endif()
 
 # ---- core: hardware-agnostic, builds and tests on any host ------------------
 add_library(vigil_core STATIC
+  src/core/alarm_feed.c
   src/core/aspect.c
   src/core/au_norm.c
   src/core/channel.c
@@ -90,6 +91,8 @@ add_library(vigil_core STATIC
   src/core/discovery.c
   src/core/events.c
   src/core/gop_cache.c
+  src/core/logbook.c
+  src/core/logs.c
   src/core/md5.c
   src/core/net.c
   src/core/netip_proto.c

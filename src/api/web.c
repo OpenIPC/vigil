@@ -48,6 +48,7 @@
 #include "hal.h"
 #include "kvm.h"
 #include "log.h"
+#include "logs.h"
 #include "net.h"
 #include "users.h"
 #include "web.h"
@@ -293,6 +294,7 @@ static int do_login(struct mg_connection *conn)
     for (size_t i = 0; i < sizeof body; ++i) w[i] = 0;
     unsigned perms = 0;
     long retry = 0;
+    oplog_actor("", "web", ri->remote_addr);
     int rc = api_login(ri->remote_addr, user, pass, &perms, &retry);
     w = pass;
     for (size_t i = 0; i < sizeof pass; ++i) w[i] = 0;
@@ -348,6 +350,7 @@ static int request_handler(struct mg_connection *conn, void *cbdata)
         if (in) {
             sess_drop(tok);
             vg_log("web: %s logged out", user);
+            oplog_pushf(user, "web", "logout", "from %s", ri->remote_addr);
         }
         return redirect(conn, 303, "/login", COOKIE "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
     }

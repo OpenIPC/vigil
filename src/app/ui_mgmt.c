@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "logs.h"
 #include "mgmt.h"
 #include "sys.h"
 #include "sys_curl.h"
@@ -593,7 +594,10 @@ static int system_password(const char *current, const char *pass, char *field, s
 static int login_(const char *name, const char *pass, unsigned *perms, char *why, size_t cap)
 {
     users_reload();
-    return users_login(name, pass, perms, why, cap);
+    int rc = users_login(name, pass, perms, why, cap);
+    oplog_actor("", "screen", "");
+    oplog_login(name, rc == 1, 0, 0);
+    return rc;
 }
 #endif
 

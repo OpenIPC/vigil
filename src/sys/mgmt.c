@@ -15,6 +15,7 @@
 #include "config.h"
 #include "events.h"
 #include "log.h"
+#include "logs.h"
 #include "mgmt.h"
 #include "sys.h"
 #include "sys_curl.h"
@@ -474,6 +475,7 @@ static void *timer(void *arg)
             vg_log("mgmt: %s: no confirmation in time; previous settings restored%s%s", ifname,
                    rc ? ": " : "", rc ? err : "");
             events_push(0, "network: rolled back");
+            oplog_push("", "system", "network_rolled_back", ifname);
             free(old);
         }
 
@@ -620,6 +622,7 @@ int mgmt_net_apply(const net_cfg_t *cfg, int confirm, char *field, size_t fcap, 
         snprintf(err, cap, "too many changes under way");
         return MGMT_EBUSY;
     }
+    oplog_pushf(NULL, NULL, "network_changed", "%s%s", cfg->ifname, confirm ? ", to be confirmed" : "");
     return id;
 }
 
@@ -652,6 +655,7 @@ int mgmt_net_confirm(void)
     if (a) {
         vg_log("mgmt: network settings confirmed");
         events_push(0, "network: confirmed");
+        oplog_push(NULL, NULL, "network_confirmed", NULL);
     }
     return a ? 0 : -1;
 }
@@ -672,6 +676,7 @@ int mgmt_wifi_set(const char *ifname, const char *ssid, const char *password, co
 {
     if (!sys_managed()) return MGMT_EUNMANAGED;
     slot_t j = { .kind = J_WIFI };
+    oplog_pushf(NULL, NULL, "wifi_changed", "%s: network %s", ifname, ssid);
     snprintf(j.a, sizeof j.a, "%s", ifname);
     snprintf(j.c, sizeof j.c, "%s", profile ? profile : "");
     snprintf(j.b, sizeof j.b, "%s", ssid);
@@ -704,11 +709,13 @@ int mgmt_time_set(const char *zone, const char *tz, int set_clock, time_t t, cha
     if ((zone && *zone) || (tz && *tz)) {
         if (clock_set_zone(zone, tz, err, cap) < 0) return MGMT_EINVAL;
         vg_log("mgmt: time zone %s", zone && *zone ? zone : tz);
+        oplog_push(NULL, NULL, "time_zone_set", zone && *zone ? zone : tz);
     }
     if (set_clock) {
         if (clock_set(t, err, cap) < 0) return MGMT_EINVAL;
         vg_log("mgmt: clock set");
         events_push(0, "clock set");
+        oplog_pushf(NULL, NULL, "clock_set", "%lld", (long long)t);
     }
     return MGMT_OK;
 }
@@ -722,6 +729,7 @@ int mgmt_ntp_set(int enabled, char servers[][64], int n, int interval_min, char 
     int changed = n != now.n_servers;
     for (int i = 0; i < n && !changed; ++i) changed = strcmp(servers[i], now.servers[i]) != 0;
     if (n && changed && ntp_set_servers(servers, n, err, cap) < 0) return MGMT_EINVAL;
+    if (changed) oplog_pushf(NULL, NULL, "ntp_servers_set", "%d server(s)%s%s", n, n ? ": " : "", n ? servers[0] : "");
     cJSON *d = cJSON_CreateObject();
     cJSON_AddBoolToObject(d, "ntp", enabled);
     cJSON_AddNumberToObject(d, "ntp_interval", interval_min);
@@ -760,6 +768,7 @@ int mgmt_power_request(mgmt_power_t what)
     if (what != MGMT_POWER_REBOOT && what != MGMT_POWER_OFF) return MGMT_EINVAL;
     if (!sys_managed()) return MGMT_EUNMANAGED;
     vg_log("%s asked for", what == MGMT_POWER_REBOOT ? "reboot" : "shutdown");
+    oplog_push(NULL, NULL, what == MGMT_POWER_REBOOT ? "reboot" : "shutdown", NULL);
     events_push(0, "%s", what == MGMT_POWER_REBOOT ? "rebooting" : "shutting down");
     __atomic_store_n(&g_power, (int)what, __ATOMIC_SEQ_CST);
     return MGMT_OK;
@@ -783,6 +792,7 @@ int mgmt_hostname_set(const char *name, char *err, size_t cap)
     if (!sys_managed()) return MGMT_EUNMANAGED;
     if (host_set(name, err, cap) < 0) return MGMT_EINVAL;
     vg_log("mgmt: host name %s", name);
+    oplog_push(NULL, NULL, "hostname_set", name);
     return MGMT_OK;
 }
 
@@ -848,6 +858,8 @@ static int disk_job(jkind_t kind, const char *name, const char *fs, char *err, s
         snprintf(err, cap, "too many changes under way");
         return MGMT_EBUSY;
     }
+    if (kind == J_FORMAT) oplog_pushf(NULL, NULL, "disk_format", "%s as %s", name, fs);
+    else oplog_push(NULL, NULL, kind == J_MOUNT ? "disk_mount" : "disk_unmount", name);
     return id;
 }
 
@@ -950,8 +962,20 @@ static int whole_disk(const char *name, sys_disk_t *out, char *err, size_t cap)
     return rc;
 }
 
+/* SMART turning bad (warning, failing) starts an alarm; good again ends it. */
+static void smart_alarm(const char *name, int was, int now, const char *reason)
+{
+    int bad_was = was == SMART_WARN || was == SMART_FAIL, bad_now = now == SMART_WARN || now == SMART_FAIL;
+    if (bad_now && was != now)
+        alarmlog_pushf(0, ALARM_DISK_SMART, 1, "%s: %s%s%s", name, smart_verdict_name(now), reason[0] ? ": " : "",
+                       reason);
+    else if (bad_was && now == SMART_GOOD)
+        alarmlog_pushf(0, ALARM_DISK_SMART, 0, "%s: good", name);
+}
+
 static void smart_keep(const char *name, const smart_info_t *info)
 {
+    int was = -1;
     pthread_mutex_lock(&g_lock);
     int k = 0;
     for (int i = 0; i < SMART_CACHE; ++i) {
@@ -961,10 +985,12 @@ static void smart_keep(const char *name, const smart_info_t *info)
         }
         if (g_smart[i].when < g_smart[k].when) k = i;
     }
+    if (g_smart[k].when && !strcmp(g_smart[k].name, name) && g_smart[k].info.available) was = g_smart[k].info.verdict;
     snprintf(g_smart[k].name, sizeof g_smart[k].name, "%s", name);
     g_smart[k].info = *info;
     g_smart[k].when = time(NULL);
     pthread_mutex_unlock(&g_lock);
+    if (info->available) smart_alarm(name, was, info->verdict, info->reason);
 }
 
 int mgmt_smart_cached(const char *name, smart_info_t *out, time_t *when)
@@ -1027,6 +1053,7 @@ int mgmt_selftest(const char *name, int type, char *err, size_t cap)
     if (!sys_managed()) return MGMT_EUNMANAGED;
     if (whole_disk(name, NULL, err, cap) < 0) return MGMT_EINVAL;
     if (smart_selftest(name, type, err, cap) < 0) return MGMT_EFAIL;
+    oplog_pushf(NULL, NULL, "smart_selftest", "%s: %s", name, type == 0 ? "abort" : type == 1 ? "short" : "extended");
     vg_log("mgmt: %s self-test of %s", type == 0 ? "aborted the" : type == 1 ? "short" : "extended", name);
     if (type) events_push(0, "disk %s: %s self-test started", name, type == 1 ? "short" : "extended");
     return MGMT_OK;
@@ -1039,6 +1066,9 @@ static void scan_done(const scan_status_t *st)
     events_push(0, "disk %s: surface scan (%s) %s, %llu bad range%s", st->disk, scan_mode_name(st->mode),
                 st->state == SCAN_DONE ? "done" : st->state == SCAN_STOPPED ? "stopped" : "failed", ranges,
                 ranges == 1 ? "" : "s");
+    if (ranges)
+        alarmlog_pushf(0, ALARM_DISK_BAD, -1, "%s: %llu bad range%s (surface scan, %s)", st->disk, ranges,
+                       ranges == 1 ? "" : "s", scan_mode_name(st->mode));
 }
 
 /* Is the recording directory on `dev` (/mnt/<dev>, as automount.sh and
@@ -1136,11 +1166,22 @@ int mgmt_scan_start(const char *name, int mode, unsigned long long start, unsign
         free(st);
     }
     events_push(0, "disk %s: surface scan (%s) started", name, scan_mode_name(mode));
+    oplog_pushf(NULL, NULL, "scan_start", "%s: %s", name, scan_mode_name(mode));
     return MGMT_OK;
 }
 
 void mgmt_scan_status(scan_status_t *st) { scan_status(st); }
 
-int mgmt_scan_pause(int on) { return scan_pause(on) < 0 ? MGMT_EINVAL : MGMT_OK; }
+int mgmt_scan_pause(int on)
+{
+    if (scan_pause(on) < 0) return MGMT_EINVAL;
+    oplog_push(NULL, NULL, on ? "scan_pause" : "scan_resume", NULL);
+    return MGMT_OK;
+}
 
-int mgmt_scan_stop(void) { return scan_stop() < 0 ? MGMT_EINVAL : MGMT_OK; }
+int mgmt_scan_stop(void)
+{
+    if (scan_stop() < 0) return MGMT_EINVAL;
+    oplog_push(NULL, NULL, "scan_stop", NULL);
+    return MGMT_OK;
+}
