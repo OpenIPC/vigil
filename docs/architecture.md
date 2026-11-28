@@ -273,8 +273,9 @@ cam_events_unsubscribe(id);                     /* after it, on_event is not run
 A subscriber is called on the reporting thread, one edge at a time and in
 order; it must be quick (queue the work) and must not report events
 itself. `cam_events_held(ch, now)` is the current state, for one that
-starts late. The recorder's event log and motion recording, and the Alarm
-page, are meant to be such subscribers.
+starts late. The alarm log is one (`alarm_feed.c`, [management.md](management.md#logs));
+the recorder's event log and motion recording, and the Alarm page, are
+meant to be others.
 
 ## Management
 

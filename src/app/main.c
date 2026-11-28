@@ -559,6 +559,7 @@ int main(int argc, char **argv)
     apply_qos(&running);
     onvif_ev_set_self_port(running.onvif_server.enabled ? running.onvif_server.port : 0);
     if (cam_events_start() < 0) vg_log("camera events: cannot start the ticker; a pulse's stop comes late");
+    if (alarm_feed_start() < 0) vg_log("logs: no room to subscribe to the camera events; not in the alarm log");
     if (channels_start(&cc, caps->display ? tiles : NULL) == 0) {
         config_mark_applied(g_applied_gen);
         if (mgmt_start() < 0) vg_log("mgmt: cannot start its threads; the management pages will not act");
@@ -578,6 +579,7 @@ int main(int argc, char **argv)
         mgmt_stop();
         channels_stop();
     }
+    alarm_feed_stop();
     cam_events_stop();
     hal_shutdown();
     if (mgmt_power_pending() == MGMT_POWER_NONE) oplog_push("", "system", "stop", NULL);

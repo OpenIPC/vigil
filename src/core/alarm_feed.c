@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* alarm_feed.c — the alarm log from what the channels and the events ring
- * say (logs.h, alarm_feed_poll). */
+/* alarm_feed.c — the alarm log from the camera events (a subscriber of
+ * cam_events.h) and from what the events ring says (logs.h). */
 #include <stdio.h>
 #include <string.h>
 
+#include "cam_events.h"
 #include "channel.h"
 #include "events.h"
 #include "logs.h"
@@ -45,7 +46,6 @@ int alarm_feed_classify(int ch, const char *text, char *type, size_t cap, int *a
 
 static struct {
     uint64_t cursor;
-    unsigned bits[CHANNEL_MAX];     /* the events held at the last look */
     char     off[CHANNEL_MAX];      /* offline said */
     char     full[CHANNEL_MAX];     /* disk full said */
     char     rec_off[CHANNEL_MAX][24];  /* recording off said, why */
@@ -64,21 +64,44 @@ static void feed_push(int ch, const char *type, int active, const char *detail, 
     logbook_push(logs_alarms(), &r);
 }
 
+/* A camera event's edge, on the reporting thread: a push, which only
+ * takes the ring's lock. */
+static void on_cam_event(void *user, const cam_event_t *ev)
+{
+    (void)user;
+    int bit = 0;
+    while (bit < CH_EV_TYPES && !(ev->type & (1u << bit))) ++bit;
+    const char *name = ch_event_name(bit);
+    logrec_t r;
+    memset(&r, 0, sizeof r);
+    r.time = ev->time;
+    r.ch = ev->channel + 1;
+    r.active = ev->active ? 1 : 0;
+    snprintf(r.source, sizeof r.source, "%s", cam_ev_src_name(ev->source));
+    snprintf(r.type, sizeof r.type, "%s", name ? name : "other");
+    snprintf(r.detail, sizeof r.detail, "%s", ev->detail);
+    logbook_push(logs_alarms(), &r);
+}
+
+static int g_sub = -1;
+
+int alarm_feed_start(void)
+{
+    if (g_sub < 0) g_sub = cam_events_subscribe(on_cam_event, NULL);
+    return g_sub < 0 ? -1 : 0;
+}
+
+void alarm_feed_stop(void)
+{
+    cam_events_unsubscribe(g_sub);
+    g_sub = -1;
+}
+
 void alarm_feed_poll(time_t now)
 {
     (void)now;
-    /* The cameras' events: their edges, as the channels hold them. */
-    for (int i = 0; i < CHANNEL_MAX; ++i) {
-        channel_status_t st;
-        channels_status(i, &st);
-        unsigned bits = st.configured ? st.events : 0, was = F.bits[i];
-        for (int b = 0; b < CH_EV_TYPES; ++b) {
-            unsigned m = 1u << b;
-            if ((bits ^ was) & m) feed_push(i + 1, ch_event_name(b), (bits & m) != 0, NULL, 0);
-        }
-        F.bits[i] = bits;
-    }
-    /* What the events ring says: offline and back, recording, disks. */
+    /* What the events ring says: offline and back, recording, disks (the
+     * camera events in it come through the subscription). */
     event_t ev;
     while (events_next(&F.cursor, &ev)) {
         char type[LOG_TYPE];

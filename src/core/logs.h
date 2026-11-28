@@ -5,9 +5,10 @@
  *                   people, video loss, ...) as they start and stop, a
  *                   camera going offline and back, recording failing, the
  *                   disk full, missing or failing (SMART, a surface scan's
- *                   bad sectors). Fed by the channels' snapshots and the
- *                   events ring on the logs' thread (alarm_feed_*), and by
- *                   alarmlog_push from where it is known.
+ *                   bad sectors). Fed by a subscription to the camera
+ *                   events (cam_events.h), the events ring read on the
+ *                   logs' thread (alarm_feed_*), and alarmlog_push from
+ *                   where it is known.
  *   operation log   who did what (an audit): logins and failed ones,
  *                   lockouts, logouts, settings saved (the section and the
  *                   names of the fields changed, never a value), users and
@@ -128,11 +129,15 @@ void alarmlog_push(int ch, const char *type, int active, const char *detail);
 void alarmlog_pushf(int ch, const char *type, int active, const char *fmt, ...)
     __attribute__((format(printf, 4, 5)));
 
-/* The feed of the alarm log from what the core reports today: the
- * channels' event bits (their edges) and the events ring's texts. Called
- * by the logs' thread twice a second; the tests call it themselves. When
- * the camera events are subscribed to instead (cam_events.h), only the
- * events ring's part stays. */
+/* The alarm log's feed. The camera events' edges come from a
+ * subscription (cam_events.h; alarm_feed_start after cam_events_start,
+ * alarm_feed_stop before cam_events_stop): each start and stop with its
+ * origin (netip, onvif, api) as the source and the camera's own name for
+ * it as the detail. The rest (offline and back, recording, disks) is read
+ * from the events ring by alarm_feed_poll, which the logs' thread calls
+ * twice a second (the tests call it themselves). */
+int  alarm_feed_start(void);
+void alarm_feed_stop(void);
 void alarm_feed_poll(time_t now);
 /* What an event of the events ring means for the alarm log: 1 with the
  * type and state, 0 when it means nothing there. */

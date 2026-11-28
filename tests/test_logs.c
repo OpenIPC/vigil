@@ -17,6 +17,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include "cam_events.h"
 #include "channel.h"
 #include "config.h"
 #include "events.h"
@@ -419,6 +420,19 @@ static void test_alarm_feed(void)
               !strcmp(r[1].type, "rec_off") && r[1].active == 1 && !strcmp(r[1].detail, "waiting for disk") &&
               !strcmp(r[0].type, "rec_off") && r[0].active == 0,
           "in order: %s/%d %s/%d %s/%d", r[5].type, r[5].active, r[3].type, r[3].active, r[1].type, r[1].active);
+    /* The camera events: a subscriber's start and stop, with their origin. */
+    CHECK(alarm_feed_start() == 0, "subscribed");
+    cam_event_report_at(1, CH_EV_MOTION, CAM_EV_START, CAM_EV_SRC_NETIP, "VideoMotion", 5000);
+    cam_event_report_at(1, CH_EV_MOTION, CAM_EV_START, CAM_EV_SRC_NETIP, "VideoMotion", 5001);  /* held: no edge */
+    cam_event_report_at(1, CH_EV_MOTION, CAM_EV_STOP, CAM_EV_SRC_NETIP, NULL, 5004);
+    alarm_feed_stop();
+    cam_event_report_at(1, CH_EV_HUMAN, CAM_EV_START, CAM_EV_SRC_ONVIF, NULL, 5005);   /* not subscribed */
+    n = logbook_query(logs_alarms(), NULL, 0, 2, r, NULL);
+    CHECK(n == 2 && !strcmp(r[1].type, "motion") && r[1].active == 1 && r[1].ch == 2 &&
+              !strcmp(r[1].source, "netip") && !strcmp(r[1].detail, "VideoMotion") && r[1].time == 5000 &&
+              !strcmp(r[0].type, "motion") && r[0].active == 0 && r[0].time == 5004,
+          "motion start and stop from NETIP: %s/%d %s %s", r[1].type, r[1].active, r[1].source, r[1].detail);
+    cam_events_reset();
     alarmlog_push(0, ALARM_DISK_SMART, 1, "sda: failing");
     n = logbook_query(logs_alarms(), NULL, 0, 1, r, NULL);
     CHECK(n == 1 && !strcmp(r[0].type, "disk_smart") && r[0].ch == 0, "pushed directly");

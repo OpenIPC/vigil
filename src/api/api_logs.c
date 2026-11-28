@@ -114,6 +114,7 @@ static cJSON *rec_json(const logrec_t *r, int ops)
         if (r->ch > 0) cJSON_AddNumberToObject(o, "channel", r->ch);
         else cJSON_AddNullToObject(o, "channel");
         cJSON_AddStringToObject(o, "type", r->type);
+        cJSON_AddStringToObject(o, "source", r->source);
         if (r->active >= 0) cJSON_AddStringToObject(o, "state", r->active ? "start" : "stop");
         else cJSON_AddNullToObject(o, "state");
     }
