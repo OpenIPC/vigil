@@ -483,7 +483,10 @@ where it is kept: [management.md](management.md#logs)).
 The page needs the `system` permission, the Operation card's. The
 source behind it is `ui_logs_src_t` (`src/ui/ui_logs.h`), filled by
 `src/app/ui_logs_bridge.c`; it is not in `ui_model.h`, so the page stays
-one file and one line in the Operation page.
+one file and one line in the Operation page. Another settings screen can
+list the logs as one of its entries (`ui_logs_pane_open` /
+`ui_logs_pane_close`: the three logs with buttons to switch on top) or
+one log per entry (`ui_logs_page_open` / `ui_logs_close`).
 
 ## PTZ
 
