@@ -43,28 +43,33 @@ void test_sys_log(void)
     sys_logline_t out[8];
     int more = 0;
     char why[200];
-    int n = sys_log_read(SYS_LOG_SYSLOG, -1, NULL, 0, 8, out, &more, why, sizeof why);
+    int n = sys_log_read(SYS_LOG_SYSLOG, -1, NULL, 0, 0, 0, 8, out, &more, why, sizeof why);
     CHECK(n == 4 && !more && !strcmp(out[0].text, "four") && !strcmp(out[3].text, "one"), "newest first: %d", n);
-    n = sys_log_read(SYS_LOG_SYSLOG, 4, NULL, 0, 8, out, &more, why, sizeof why);
+    n = sys_log_read(SYS_LOG_SYSLOG, 4, NULL, 0, 0, 0, 8, out, &more, why, sizeof why);
     CHECK(n == 1 && !strcmp(out[0].text, "two FAILED"), "warning or worse: %d", n);
-    n = sys_log_read(SYS_LOG_SYSLOG, -1, "UDHCPC", 0, 8, out, &more, why, sizeof why);
+    n = sys_log_read(SYS_LOG_SYSLOG, -1, "UDHCPC", 0, 0, 0, 8, out, &more, why, sizeof why);
     CHECK(n == 1 && !strcmp(out[0].tag, "udhcpc"), "by tag, any case: %d", n);
-    n = sys_log_read(SYS_LOG_SYSLOG, -1, NULL, 1, 2, out, &more, why, sizeof why);
+    n = sys_log_read(SYS_LOG_SYSLOG, -1, NULL, 0, 0, 1, 2, out, &more, why, sizeof why);
+    CHECK(n == 2 && more && !strcmp(out[0].text, "three"), "paging: %d %d", n, more);
+    time_t t2 = now - 40 * 60 + 2;              /* 07:00:02 */
+    n = sys_log_read(SYS_LOG_SYSLOG, -1, NULL, t2, t2 + 1, 0, 8, out, &more, why, sizeof why);
+    CHECK(n == 2 && !strcmp(out[0].text, "three") && !strcmp(out[1].text, "two FAILED"), "from .. to: %d", n);
+    n = sys_log_read(SYS_LOG_SYSLOG, -1, NULL, 0, 0, 1, 2, out, &more, why, sizeof why);
     CHECK(n == 2 && more && !strcmp(out[0].text, "three"), "paging: %d %d", n, more);
     fake_file("/proc/uptime", "100.00 90.00\n");
     snprintf(fake_klog, sizeof fake_klog, "<6>[    1.000000] Booting Linux\n<4>[   50.000000] eth0: link down\n");
-    n = sys_log_read(SYS_LOG_KERNEL, -1, NULL, 0, 8, out, &more, why, sizeof why);
+    n = sys_log_read(SYS_LOG_KERNEL, -1, NULL, 0, 0, 0, 8, out, &more, why, sizeof why);
     CHECK(n == 2 && out[0].level == 4 && !strcmp(out[0].text, "eth0: link down") &&
               out[1].time && out[0].time - out[1].time == 49,
           "dmesg: %d", n);
     fake_have("logread", 0);
     fake_file("/var/log/messages", "Nov 28 07:00:09 host daemon.notice x: from the file\n");
-    n = sys_log_read(SYS_LOG_SYSLOG, -1, NULL, 0, 8, out, &more, why, sizeof why);
+    n = sys_log_read(SYS_LOG_SYSLOG, -1, NULL, 0, 0, 0, 8, out, &more, why, sizeof why);
     CHECK(n == 1 && !strcmp(out[0].text, "from the file"), "no logread: /var/log/messages (%d, %s)", n, why);
     fake_done();
     fake_init();
     fake_have("logread", 0);
-    CHECK(sys_log_read(SYS_LOG_SYSLOG, -1, NULL, 0, 8, out, &more, why, sizeof why) < 0 && why[0],
+    CHECK(sys_log_read(SYS_LOG_SYSLOG, -1, NULL, 0, 0, 0, 8, out, &more, why, sizeof why) < 0 && why[0],
           "neither: says why (%s)", why);
     fake_done();
 }

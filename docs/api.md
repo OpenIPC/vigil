@@ -818,7 +818,7 @@ Parameters, all optional:
 | `from`, `to` | Seconds since 1970, or local `YYYY-MM-DD`, `YYYY-MM-DDTHH:MM[:SS]` (a date alone in `to` is its end). With `range`, `from` wins. |
 | `type` (alarms), `action` (operations) | One, or several separated by commas: `type=motion,offline`. |
 | `channel` (alarms) | 1-based. |
-| `user` (operations) | Exactly. |
+| `user`, `source` (operations) | Exactly: `user=anna`, `source=web`. |
 | `q` | Text anywhere in the entry, any case. |
 | `limit`, `offset` | A page: default 100, at most 1000 entries, after `offset` matches; `more` says whether there are others. Past the newest ones (1000 alarms, 500 operations, in RAM) the disk's files are read. |
 | `source` (system) | `syslog` (the default; vigild's own lines are in it with `-s`) or `kernel` (dmesg). |

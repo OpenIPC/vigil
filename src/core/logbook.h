@@ -53,6 +53,7 @@ typedef struct {
     int         ch;             /* -1: any channel */
     const char *type;           /* NULL or "": any; else one type, or several separated by ',' */
     const char *who;            /* NULL or "": anyone; else exactly */
+    const char *source;         /* NULL or "": anywhere; else exactly */
     const char *text;           /* NULL or "": anything; else in who, source, type or detail
                                    (case-insensitive) */
     int         ram_only;       /* do not read the disk's files (the UI's first look) */
@@ -111,6 +112,9 @@ void logbook_disk(logbook_t *b, char *out, size_t cap);
  * a monotonic clock), or always with `final`. A disk that fails to write
  * is let go (logged); the next logbook_set_disk takes it back. */
 void logbook_sync(logbook_t *b, time_t now, int final);
+
+/* Forget every record in RAM (the tests; the files stay). */
+void logbook_clear(logbook_t *b);
 
 /* Records pushed since the start (for the tests and the status). */
 unsigned long logbook_count(logbook_t *b);

@@ -124,7 +124,7 @@ static cJSON *rec_json(const logrec_t *r, int ops)
 /* The filter of a request to the alarm (ops 0) or the operation log. */
 typedef struct {
     logfilter_t f;
-    char        type[200], who[40], text[100];
+    char        type[200], who[40], source[16], text[100];
 } req_filter_t;
 
 static int filter_of(struct mg_connection *conn, int ops, req_filter_t *rf, const char **bad)
@@ -136,11 +136,13 @@ static int filter_of(struct mg_connection *conn, int ops, req_filter_t *rf, cons
     qvar(conn, "q", rf->text, sizeof rf->text);
     if (ops) {
         qvar(conn, "user", rf->who, sizeof rf->who);
+        qvar(conn, "source", rf->source, sizeof rf->source);
     } else {
         rf->f.ch = (int)qint(conn, "channel", -1, -1, 64);
     }
     rf->f.type = rf->type;
     rf->f.who = rf->who;
+    rf->f.source = rf->source;
     rf->f.text = rf->text;
     return 0;
 }
@@ -172,9 +174,10 @@ static int send_page(struct mg_connection *conn, int ops)
 /* ---- the system log ------------------------------------------------------------------------- */
 
 static int system_filter(struct mg_connection *conn, sys_log_src_t *src, int *level, char *grep, size_t cap,
-                         const char **bad)
+                         time_t *from, time_t *to, const char **bad)
 {
     char v[24];
+    if (time_range(conn, from, to, bad) < 0) return -1;
     qvar(conn, "source", v, sizeof v);
     if (!v[0] || !strcmp(v, "syslog")) *src = SYS_LOG_SYSLOG;
     else if (!strcmp(v, "kernel") || !strcmp(v, "dmesg")) *src = SYS_LOG_KERNEL;
@@ -202,14 +205,15 @@ static int send_system(struct mg_connection *conn)
     sys_log_src_t src;
     int level;
     char grep[100];
+    time_t from, to;
     const char *bad = NULL;
-    if (system_filter(conn, &src, &level, grep, sizeof grep, &bad) < 0) return bad_param(conn, bad);
+    if (system_filter(conn, &src, &level, grep, sizeof grep, &from, &to, &bad) < 0) return bad_param(conn, bad);
     int lines = (int)qint(conn, "lines", LINES_DEF, 1, LINES_MAX), offset = (int)qint(conn, "offset", 0, 0, 1 << 30);
     sys_logline_t *l = malloc((size_t)lines * sizeof *l);
     if (!l) return send_error(conn, 500, "out of memory", NULL);
     int more = 0;
     char why[200];
-    int n = sys_log_read(src, level, grep, offset, lines, l, &more, why, sizeof why);
+    int n = sys_log_read(src, level, grep, from, to, offset, lines, l, &more, why, sizeof why);
     if (n < 0) {
         free(l);
         cJSON *doc = cJSON_CreateObject();
@@ -327,13 +331,14 @@ static int export_system(struct mg_connection *conn)
     sys_log_src_t src;
     int level, csv;
     char grep[100];
+    time_t from, to;
     const char *bad = NULL;
     if (format_of(conn, &csv) < 0) return bad_param(conn, "format");
-    if (system_filter(conn, &src, &level, grep, sizeof grep, &bad) < 0) return bad_param(conn, bad);
+    if (system_filter(conn, &src, &level, grep, sizeof grep, &from, &to, &bad) < 0) return bad_param(conn, bad);
     sys_logline_t *l = malloc(EXPORT_LINES * sizeof *l);
     if (!l) return send_error(conn, 500, "out of memory", NULL);
     char why[200];
-    int n = sys_log_read(src, level, grep, 0, EXPORT_LINES, l, NULL, why, sizeof why);
+    int n = sys_log_read(src, level, grep, from, to, 0, EXPORT_LINES, l, NULL, why, sizeof why);
     if (n < 0) {
         free(l);
         return send_error(conn, 503, why, NULL);

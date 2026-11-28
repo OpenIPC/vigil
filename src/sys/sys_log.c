@@ -15,6 +15,10 @@
 
 static const char *const LEVELS[8] = { "emerg", "alert", "crit", "err", "warning", "notice", "info", "debug" };
 
+static time_t (*g_now)(void);
+
+void sys_log_set_clock(time_t (*now)(void)) { g_now = now; }
+
 const char *sys_log_level_name(int level) { return level >= 0 && level < 8 ? LEVELS[level] : ""; }
 
 static int level_of(const char *name, size_t n)
@@ -173,8 +177,8 @@ static time_t boot_time(time_t now)
     return up > 0 ? now - (time_t)up : 0;
 }
 
-int sys_log_read(sys_log_src_t src, int max_level, const char *text, int offset, int max, sys_logline_t *out,
-                 int *more, char *why, size_t cap)
+int sys_log_read(sys_log_src_t src, int max_level, const char *text, time_t from, time_t to, int offset, int max,
+                 sys_logline_t *out, int *more, char *why, size_t cap)
 {
     if (more) *more = 0;
     why[0] = 0;
@@ -199,7 +203,7 @@ int sys_log_read(sys_log_src_t src, int max_level, const char *text, int offset,
             if (!buf) return -1;
         }
     }
-    time_t now = time(NULL), boot = src == SYS_LOG_KERNEL ? boot_time(now) : 0;
+    time_t now = g_now ? g_now() : time(NULL), boot = src == SYS_LOG_KERNEL ? boot_time(now) : 0;
     int n = 0, skip = offset < 0 ? 0 : offset;
     char *end = buf + strlen(buf);
     /* Newest first: the lines from the end. */
@@ -214,6 +218,7 @@ int sys_log_read(sys_log_src_t src, int max_level, const char *text, int offset,
                                        : sys_log_parse_syslog(s, (size_t)(e - s), now, &l);
         if (ok < 0) continue;
         if (max_level >= 0 && l.level > max_level) continue;
+        if (l.time && ((from && l.time < from) || (to && l.time > to))) continue;
         if (text && *text && !has_ci(l.text, text) && !has_ci(l.tag, text)) continue;
         if (skip > 0) {
             --skip;

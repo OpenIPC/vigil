@@ -199,6 +199,7 @@ int logbook_match(const logrec_t *r, const logfilter_t *f)
     if (f->ch >= 0 && r->ch != f->ch) return 0;
     if (f->type && f->type[0] && !type_in(r->type, f->type)) return 0;
     if (f->who && f->who[0] && strcmp(r->who, f->who)) return 0;
+    if (f->source && f->source[0] && strcmp(r->source, f->source)) return 0;
     if (f->text && f->text[0] && !has_ci(r->detail, f->text) && !has_ci(r->type, f->text) &&
         !has_ci(r->who, f->text) && !has_ci(r->source, f->text))
         return 0;
@@ -260,6 +261,13 @@ void logbook_push(logbook_t *b, const logrec_t *r)
     *at(b, b->total) = c;
     ++b->total;
     b->flash_dirty = 1;
+    pthread_mutex_unlock(&b->lock);
+}
+
+void logbook_clear(logbook_t *b)
+{
+    pthread_mutex_lock(&b->lock);
+    b->total = b->disk_upto = 0;
     pthread_mutex_unlock(&b->lock);
 }
 

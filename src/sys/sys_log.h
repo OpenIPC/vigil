@@ -26,11 +26,12 @@ typedef struct {
 
 /* The lines of `src`, newest first, that match: `max_level` >= 0 keeps
  * those at that level or more urgent (unknown ones too), `text` (NULL or
- * "": any) a substring of the tag or the text, any case. `offset` matches
+ * "": any) a substring of the tag or the text, any case, `from` and `to`
+ * (0: open) the time (lines without one are kept). `offset` matches
  * skipped, at most `max` into `out`; *more (may be NULL) when there are
  * more. Returns how many, or -1 with `why` when there is no such log. */
-int sys_log_read(sys_log_src_t src, int max_level, const char *text, int offset, int max, sys_logline_t *out,
-                 int *more, char *why, size_t cap);
+int sys_log_read(sys_log_src_t src, int max_level, const char *text, time_t from, time_t to, int offset, int max,
+                 sys_logline_t *out, int *more, char *why, size_t cap);
 
 /* One line of logread ("Nov 28 12:34:56 host daemon.info vigil[123]: ...",
  * or with -S "Nov 28 12:34:56 ...") at `now` (the year is now's, or the
@@ -39,6 +40,9 @@ int sys_log_read(sys_log_src_t src, int max_level, const char *text, int offset,
  * line. */
 int sys_log_parse_syslog(const char *line, size_t len, time_t now, sys_logline_t *out);
 int sys_log_parse_kernel(const char *line, size_t len, time_t boot, sys_logline_t *out);
+
+/* The clock the lines' year comes from (NULL: time(NULL)); the tests'. */
+void sys_log_set_clock(time_t (*now)(void));
 
 /* "emerg", "alert", "crit", "err", "warning", "notice", "info", "debug";
  * "" for -1. */
