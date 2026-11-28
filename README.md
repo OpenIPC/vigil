@@ -79,6 +79,7 @@ For a board, see its page under [docs/platforms](docs/platforms/).
 - [Configuration and HTTP API](docs/api.md): the configuration file, the
   endpoints, the WebSocket, authentication and password redaction.
 - [RTSP server](docs/rtsp.md): the cameras' streams to other clients.
+- [Recording](docs/recording.md): the design of how video is stored, indexed, played and exported.
 - [ONVIF server](docs/onvif.md): what VMS see, logins and permissions,
   WS-Discovery.
 - [Credentials](docs/security.md): where passwords are kept, the key that
