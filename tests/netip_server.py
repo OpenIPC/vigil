@@ -28,6 +28,14 @@ AlarmInfo (1504) messages, {"AlarmInfo": {"Channel", "Event", "StartTime",
                     after it does (a camera rebooting: the client reconnects and
                     must ask for them again)
 
+Snapshots: OPSNAP (1560, {"OPSNAP": {"Channel": N}}) is answered 1561 with
+a JPEG as the body (python-dvr's snapshot(), XM's NET_SNAP_RSP):
+  --snapshot FILE   the JPEG to answer with (default: tests/data/snapshot_640x360.jpg)
+  --snap-mode M     one (the JPEG in one message), split (8 KiB messages, the
+                    header's total/current packet bytes counting them), framed
+                    (a 0x1FE media frame header with the length, then the payload
+                    over messages), refuse (1561 {"Ret": 103}), silent (no answer)
+
 Fault modes for tests:
   --chatty          never answer the login; send unrelated messages instead
   --stall           after Start, send one media header and part of its body,
@@ -38,6 +46,7 @@ Fault modes for tests:
 import argparse
 import hashlib
 import json
+import os
 import socket
 import struct
 import sys
@@ -45,6 +54,7 @@ import threading
 import time
 
 HDR = struct.Struct("<BB2xII2xHI")
+SNAPSHOT = [b""]
 CHUNK = 8192
 
 
@@ -152,6 +162,29 @@ class Client(threading.Thread):
             buf += part
         return buf
 
+    def snapshot(self, req):
+        ch = (req.get("OPSNAP") or {}).get("Channel", 0)
+        mode = self.args.snap_mode
+        print("netip_server: snapshot of channel %s (%s)" % (ch, mode), flush=True)
+        if mode == "silent":
+            return
+        if mode == "refuse":
+            self.send(1561, {"Name": "OPSNAP", "Ret": 103, "SessionID": "0x%08X" % self.session})
+            return
+        jpeg = SNAPSHOT[0]
+        if mode == "one":
+            self.send(1561, jpeg, raw=True)
+            return
+        if mode == "framed":
+            w, h = self.args.width // 8, self.args.height // 8
+            jpeg = struct.pack(">I", 0x1FE) + struct.pack("<BBBBII", 0, 1, w & 255, h & 255, 0, len(jpeg)) + jpeg
+        parts = [jpeg[i:i + CHUNK] for i in range(0, len(jpeg), CHUNK)]
+        with self.lock:
+            for i, part in enumerate(parts):
+                total = len(parts) if mode == "split" else 0
+                hdr = struct.pack("<BB2xIIBBHI", 0xFF, 1, self.session, 0, total, i if total else 0, 1561, len(part))
+                self.s.sendall(hdr + part)
+
     def stream(self):
         fps = self.args.fps
         w, h = self.args.width // 8, self.args.height // 8
@@ -212,6 +245,8 @@ class Client(threading.Thread):
                 elif msgid == 1410 and not self.streaming:
                     self.streaming = True
                     threading.Thread(target=self.stream, daemon=True).start()
+                elif msgid == 1560:
+                    self.snapshot(req)
                 elif msgid == 1500:
                     print("netip_server: alarm subscription", flush=True)
                     if self.args.alarm_refuse:
@@ -270,7 +305,11 @@ def main():
     ap.add_argument("--alarm-ctl", type=int, default=0)
     ap.add_argument("--alarm-refuse", action="store_true")
     ap.add_argument("--drop-after", type=float, default=0)
+    ap.add_argument("--snapshot", default="")
+    ap.add_argument("--snap-mode", default="one", choices=["one", "split", "framed", "refuse", "silent"])
     args = ap.parse_args()
+    snap = args.snapshot or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "snapshot_640x360.jpg")
+    SNAPSHOT[0] = open(snap, "rb").read()
     h265 = args.file.endswith((".h265", ".hevc", ".265"))
     aus = access_units(open(args.file, "rb").read(), h265)
     if not aus:

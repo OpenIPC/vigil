@@ -106,6 +106,8 @@ add_library(vigil_core STATIC
   src/core/rec_place.c
   src/core/rec_sched.c
   src/core/seg_writer.c
+  src/core/snap_cam.c
+  src/core/snap_store.c
   src/core/stream_tap.c
   src/core/sps.c
   src/core/source/rtp_depay.c

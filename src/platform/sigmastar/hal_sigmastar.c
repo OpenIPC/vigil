@@ -1362,6 +1362,85 @@ int hal_display_grab(const hal_pic_t *pic)
     return 0;
 }
 
+/* A snapshot's picture: the decoder's output port, held a moment with a
+ * user queue of one as the zero channel holds it (left as the zero
+ * channel wants it afterwards), copied whole at the size the decoder
+ * scales to (the tile's on the output: decoders are scarce here, four on
+ * the SSR621Q, and a channel off the screen has none to read). */
+int hal_display_still(int ch, hal_pic_t *pic, int timeout_ms)
+{
+    if (ch < 0 || ch >= MAX_CH) return -1;
+    pthread_mutex_lock(&g_grab_lock);
+    pthread_mutex_lock(&g_lock);
+    int vdec = g_ch[ch].vdec, on = g_ch[ch].codec != VG_CODEC_NONE;
+    MI_SYS_ChnPort_t port = vdec_port(vdec);
+    if (on && !g_grab) MI_SYS_SetChnOutputPortDepth(&port, 1, 4);
+    pthread_mutex_unlock(&g_lock);
+    if (!on) {
+        pthread_mutex_unlock(&g_grab_lock);
+        return -1;
+    }
+    MI_SYS_BufInfo_t bi;
+    MI_SYS_BUF_HANDLE hb;
+    int have = 0, rc = -1;
+    struct timespec t0, t;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    /* A picture already queued is older than the asking (the zero channel
+     * leaves one there): the next one. */
+    if (g_grab) {
+        memset(&bi, 0, sizeof bi);
+        if (MI_SYS_ChnOutputPortGetBuf(&port, &bi, &hb) == MI_SUCCESS) MI_SYS_ChnOutputPortPutBuf(hb);
+    }
+    for (;;) {
+        memset(&bi, 0, sizeof bi);
+        if (MI_SYS_ChnOutputPortGetBuf(&port, &bi, &hb) == MI_SUCCESS) {
+            have = 1;
+            break;
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t);
+        if ((t.tv_sec - t0.tv_sec) * 1000 + (t.tv_nsec - t0.tv_nsec) / 1000000 >= timeout_ms) break;
+        struct timespec nap = { 0, 10 * 1000000 };
+        nanosleep(&nap, NULL);
+    }
+    if (have) {
+        const MI_SYS_FrameData_t *f = &bi.stFrameData;
+        unsigned w = f->u16Width & ~1u, h = f->u16Height & ~1u;
+        if (bi.eBufType == E_MI_SYS_BUFDATA_FRAME && f->ePixelFormat == E_MI_SYS_PIXEL_FRAME_YUV_SEMIPLANAR_420 &&
+            f->eTileMode == E_MI_SYS_FRAME_TILE_MODE_NONE && f->eCompressMode == E_MI_SYS_COMPRESS_MODE_NONE &&
+            f->pVirAddr[0] && f->pVirAddr[1] && w >= 2 && h >= 2) {
+            unsigned char *y = malloc((size_t)w * h * 3 / 2);
+            if (y) {
+                unsigned char *u = y + (size_t)w * h, *v = u + (size_t)(w / 2) * (h / 2);
+                MI_SYS_FlushInvCache(f->pVirAddr[0], f->u32Stride[0] * h);
+                MI_SYS_FlushInvCache(f->pVirAddr[1], f->u32Stride[1] * (h / 2));
+                for (unsigned r = 0; r < h; ++r)
+                    memcpy(y + (size_t)r * w, (unsigned char *)f->pVirAddr[0] + (size_t)r * f->u32Stride[0], w);
+                for (unsigned r = 0; r < h / 2; ++r) {
+                    const unsigned char *s = (unsigned char *)f->pVirAddr[1] + (size_t)r * f->u32Stride[1];
+                    unsigned char *du = u + (size_t)r * (w / 2), *dv = v + (size_t)r * (w / 2);
+                    for (unsigned x = 0; x < w / 2; ++x) {
+                        du[x] = s[2 * x];
+                        dv[x] = s[2 * x + 1];
+                    }
+                }
+                *pic = (hal_pic_t){ y, u, v, w, h, w, w / 2 };
+                rc = 0;
+            }
+        } else {
+            fprintf(stderr, "sigmastar: snapshot: decoder %d gives format %d tile %d compress %d, not linear NV12\n",
+                    ch, f->ePixelFormat, f->eTileMode, f->eCompressMode);
+        }
+        MI_SYS_ChnOutputPortPutBuf(hb);
+    }
+    pthread_mutex_lock(&g_lock);
+    /* Back as it was, unless the decoder went meanwhile (a new one starts
+     * with the zero channel's depth: grab_depth). */
+    if (!g_grab && g_ch[ch].codec != VG_CODEC_NONE && g_ch[ch].vdec == vdec) MI_SYS_SetChnOutputPortDepth(&port, 0, 4);
+    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(&g_grab_lock);
+    return rc;
+}
+
 /* ---- the output's adjustments: margins, picture, HDMI sound ---------------------------- */
 
 int hal_display_set_margins(const vg_margins_t *m)

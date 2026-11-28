@@ -250,6 +250,11 @@ static int check_onvif_url(const char *v, char *msg, size_t cap)
     return check_word(v, msg, cap);
 }
 
+/* As onvif_url: the camera URL's user and password log in. */
+static int check_snapshot_url(const char *v, char *msg, size_t cap) { return check_onvif_url(v, msg, cap); }
+
+static const char *const off_on[] = { "off", "on", NULL };
+static const char *const snapshot_sources[] = { "auto", "camera", "nvr", NULL };
 static const char *const events_modes[] = { "auto", "netip", "onvif", "off", NULL };
 static const char *const on_full_values[] = { "overwrite", "stop", NULL };
 static const char *const nas_types[] = { "none", "cifs", "nfs", NULL };
@@ -323,6 +328,36 @@ static const schema_field_t camera_fields[] = {
       .label = "ONVIF address",
       .help = "Its ONVIF device service for the events, http://host[:port]/onvif/device_service; "
               "the URL's user and password log in. Empty: found from its address." },
+    { .key = "snapshot_url", STR(config_camera_t, snapshot_url), .def_str = "", .live = 1,
+      .check = check_snapshot_url, .label = "Snapshot URL",
+      .help = "Where the camera gives a JPEG over HTTP (http://host/cgi-bin/snapshot.cgi), for a camera "
+              "with neither NETIP nor ONVIF; the URL's user and password log in. Empty: the camera's "
+              "NETIP or ONVIF snapshot, else the recorder's own picture of it." },
+    { .key = "snapshot_on_event", ENUM(config_camera_t, snapshot_on_event, off_on), .def_str = "off", .live = 1,
+      .label = "Snapshots on events",
+      .help = "on: when the camera reports an event (motion, people, a line crossed, ...), "
+              "snapshot.event_count pictures are taken and kept, named after it." },
+};
+
+static const schema_field_t snapshot_fields[] = {
+    { .key = "path", STR(config_snapshot_t, path), .def_str = "", .live = 1, .check = check_rec_path,
+      .label = "Snapshot directory",
+      .help = "Where snapshots are kept; on a disk or a USB stick, never the flash. Empty: next to "
+              "record.path (/mnt/sda1/rec: /mnt/sda1/snapshots)." },
+    { .key = "source", ENUM(config_snapshot_t, source, snapshot_sources), .def_str = "auto", .live = 1,
+      .label = "Source",
+      .help = "auto: the camera's own JPEG (NETIP, ONVIF, snapshot_url: full size), else the picture the "
+              "recorder decodes for the screen; camera; nvr (only a channel on screen has one)." },
+    { .key = "max_mb", INT(config_snapshot_t, max_mb), .def_int = 1024, .min = 0, .max = 1000000, .live = 1,
+      .label = "Space (MB)", .help = "The oldest snapshots go when they take more. 0: no limit." },
+    { .key = "quality", INT(config_snapshot_t, quality), .def_int = 85, .min = 10, .max = 95, .live = 1,
+      .label = "JPEG quality", .help = "Of the recorder's own pictures (a camera's JPEG is kept as it comes)." },
+    { .key = "event_count", INT(config_snapshot_t, event_count), .def_int = 3, .min = 1, .max = 10, .live = 1,
+      .label = "Pictures per event", .help = "Taken when a camera with snapshot_on_event reports an event." },
+    { .key = "event_interval", INT(config_snapshot_t, event_interval), .def_int = 1, .min = 1, .max = 60,
+      .live = 1, .label = "Interval (s)", .help = "Between an event's pictures." },
+    { .key = "mail", BOOL(config_snapshot_t, mail), .def_int = 0, .live = 1, .label = "Mail them",
+      .help = "An event's pictures go to smtp.to as attachments (smtp.enabled)." },
 };
 
 static const schema_field_t record_fields[] = {
@@ -739,6 +774,9 @@ static const schema_section_t sections[] = {
       .label = "Cameras", .help = "In tile order: the first is CAM1." },
     { .key = "record", .off = offsetof(vigil_config_t, record), .fields = record_fields,
       .n_fields = N(record_fields), .label = "Recording" },
+    { .key = "snapshot", .off = offsetof(vigil_config_t, snapshot), .fields = snapshot_fields,
+      .n_fields = N(snapshot_fields), .label = "Snapshots",
+      .help = "Still pictures of the cameras: taken from the live view, the API, and on camera events." },
 #define ARRAY(K, M, T, F, L, H) \
     { .key = K, .is_array = 1, .off = offsetof(vigil_config_t, M), \
       .count_off = offsetof(vigil_config_t, n_##M##s), .item_size = sizeof(T), \

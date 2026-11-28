@@ -470,6 +470,7 @@ int main(int argc, char **argv)
             memset(cam, 0, sizeof *cam);
             snprintf(cam->url, sizeof cam->url, "%s", urls[i]);
             snprintf(cam->events, sizeof cam->events, "auto");
+            snprintf(cam->snapshot_on_event, sizeof cam->snapshot_on_event, "off");
             cam->enabled = 1;
         }
     }

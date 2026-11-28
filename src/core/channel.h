@@ -199,6 +199,9 @@ void channels_set_aspect(vg_aspect_t how);
  * open (0: the directory is free). Any thread; one hold at a time. */
 int  channels_rec_hold(const char *dir, int timeout_ms);
 void channels_rec_release(void);
+/* 1 while `dir` is under the directory channels_rec_hold holds: nothing
+ * else (snapshots) writes there either. Any thread. */
+int  channels_rec_held(const char *dir);
 
 /* Snapshot of channel `idx` (0-based). Any thread, at any time. */
 void channels_status(int idx, channel_status_t *st);

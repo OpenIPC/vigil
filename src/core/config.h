@@ -53,6 +53,8 @@ typedef struct {
     int  enabled;
     char events[8];                 /* "auto" | "netip" | "onvif" | "off" (ch_events_mode) */
     char onvif_url[160];            /* "": found from the camera's address */
+    char snapshot_url[256];         /* "": the camera's own (NETIP, ONVIF), else the decoder's */
+    char snapshot_on_event[4];      /* "off" | "on" */
 } config_camera_t;
 
 typedef struct {
@@ -62,6 +64,17 @@ typedef struct {
     int  allow_rootfs;              /* the root filesystem counts as a disk (rec_place.h) */
     char on_full[12];               /* "overwrite" | "stop" (seg_writer.h) */
 } config_record_t;
+
+/* Still pictures (snapshot.h, snap_store.h). */
+typedef struct {
+    char path[192];                 /* "": next to record.path (snap_store.h) */
+    char source[8];                 /* "auto" | "camera" | "nvr" */
+    int  max_mb;                    /* the directory's cap; 0: no limit */
+    int  quality;                   /* the NVR's own JPEGs, 10..95 */
+    int  event_count;               /* pictures per camera event */
+    int  event_interval;            /* seconds between them */
+    int  mail;                      /* send them with smtp */
+} config_snapshot_t;
 
 /* A camera's week: one letter per half hour, 48 a day (rec_sched.h). */
 #define CONFIG_DAY_SLOTS 48
@@ -217,6 +230,7 @@ typedef struct {
     int             n_cameras;
     config_camera_t cameras[CHANNEL_MAX];
     config_record_t record;
+    config_snapshot_t snapshot;
     int             n_schedules;
     config_sched_t  schedule[CHANNEL_MAX];
     int             n_quotas;

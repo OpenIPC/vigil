@@ -676,6 +676,14 @@ int channels_rec_hold(const char *dir, int timeout_ms)
     return open;
 }
 
+int channels_rec_held(const char *dir)
+{
+    pthread_mutex_lock(&g_hold_lock);
+    int held = g_hold[0] && under(dir, g_hold);
+    pthread_mutex_unlock(&g_hold_lock);
+    return held;
+}
+
 void channels_rec_release(void)
 {
     pthread_mutex_lock(&g_hold_lock);
